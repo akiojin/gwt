@@ -80,33 +80,100 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
         "{}",
         String::from_utf8_lossy(&cli.stdout)
     );
-    let (spawner, close_tasks) = BlockingTaskSpawner::queued();
-    fixture.runtime.blocking_tasks = spawner;
-    let closed = fixture.runtime.handle_agent_frontend_event(
-        "operator".into(),
-        AgentSessionPrincipal::for_test(&fixture.project_root, "operator-session").unwrap(),
+    let owner = project_owner_fixture(&mut fixture.runtime, &window_id);
+    let source = owner_runtime_probe(&fixture.runtime, &window_id);
+    let mut owner_layout = fixture
+        .runtime
+        .tab("tab-1")
+        .unwrap()
+        .workspace
+        .persisted()
+        .clone();
+    let row = owner_layout
+        .windows
+        .iter_mut()
+        .find(|row| row.id == raw_id)
+        .unwrap();
+    row.id = source.id.split_once("::").unwrap().1.into();
+    // The retained historical Session is already stopped; this physical
+    // inspection shell has no Session authority of its own.
+    row.session_id = None;
+    owner_fixture_block_on(owner.command(
+        gwt::project_runtime::events::OwnerCommand::UpdateLayout {
+            layout: owner_layout,
+        },
+    ))
+    .unwrap();
+    seed_owner_fixture_roster(&fixture.project_root, 8);
+    configure_owner_fixture_tools(&fixture.project_root, &["codex", "pane-contract-fixture"]);
+    let mut operator_config = pane_control_tests::control_launch_config(&fixture.project_root, 42);
+    operator_config.linked_issue_number = None;
+    operator_config.explicit_follow_up = false;
+    let operator = pane_control_tests::control_owner_launch(&owner, "operator", operator_config);
+    let client = owner_fixture_block_on(owner.agent_client("operator")).unwrap();
+    let (accepted_tx, accepted_rx) = mpsc::sync_channel(1);
+    let (resume_tx, resume_rx) = mpsc::sync_channel(1);
+    let close_hook = gwt::project_runtime::agent_frontend::set_owner_agent_dispatch_test_hook(
+        operator.grant.as_ref().unwrap(),
+        gwt::project_runtime::agent_frontend::OwnerAgentDispatchTestStage::PeerCloseAccepted,
+        move || {
+            accepted_tx.send(()).unwrap();
+            gwt_core::test_support::recv_event(&resume_rx, "operator close acceptance released");
+        },
+    );
+    let mut owner_events = owner.subscribe();
+    client.enqueue(
+        operator.grant.as_ref().unwrap().clone(),
         AgentFrontendRequest::CloseWindow {
-            id: window_id.clone(),
+            id: source.id.clone(),
             request_id: None,
             responder: None,
         },
     );
-    assert!(!closed
+    gwt_core::test_support::recv_event(&accepted_rx, "actual operator close accepted");
+    assert!(!client
+        .drain()
+        .unwrap()
+        .events
         .iter()
-        .any(|event| matches!(event.event, BackendEvent::PaneCloseResult { .. })));
-    drain_queued_blocking_tasks(&close_tasks);
-    assert!(fixture.recorded_events.lock().unwrap().iter().any(|event| {
-        match recorded_project_payload(event) {
-            UserEvent::Dispatch(events) => events.iter().any(|event| {
-                event.target == DispatchTarget::Client("operator".into())
-                    && matches!(&event.event,
-                        BackendEvent::PaneCloseResult { window_id: closed, ok: true, reason: None, .. }
-                            if closed == &window_id)
-            }),
-            _ => false,
-        }
-    }));
+        .any(|event| event["kind"] == "pane_close_result"));
+    resume_tx.send(()).unwrap();
+    owner_fixture_block_on(owner.settled_self_closes()).unwrap();
+    drop(close_hook);
+    let closed = client.drain().unwrap();
+    assert_eq!(closed.close, None);
+    assert!(closed
+        .events
+        .iter()
+        .any(|event| event["kind"] == "pane_close_result"
+            && event["window_id"] == source.id
+            && event["ok"] == true
+            && event["reason"].is_null()));
+    assert!(source.pty.try_wait().unwrap().is_some());
+    assert!(owner_fixture_block_on(owner.probe(&source.id, source.incarnation)).is_err());
+    let context = fixture.runtime.test_context();
+    let identity = owner.client().identity().unwrap().clone();
+    let state = fixture.runtime.project_state_mut(&context).unwrap();
+    state.project_owner_connection_id = 1;
+    state.project_owner_identity = Some(identity.clone());
+    for event in std::iter::from_fn(|| owner_events.try_recv().ok()) {
+        fixture
+            .runtime
+            .handle_project_owner_event(&context, 1, &identity, event);
+    }
     assert!(!fixture.runtime.runtimes.contains_key(&window_id));
+    pane_control_tests::control_close(&owner, &operator);
+    assert!(operator.pty.try_wait().unwrap().is_some());
+    fixture
+        .runtime
+        .test_project_owners
+        .remove(&fixture.project_root);
+    owner_fixture_block_on(
+        Arc::try_unwrap(owner)
+            .ok()
+            .expect("drained source owner")
+            .shutdown(),
+    );
 
     // Reuse the production authenticated bridge. Its scan ACK and the Host
     // materializer are driven separately while sharing the real persisted prefs.
@@ -121,7 +188,6 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
             sent,
         },
         clients.clone(),
-        Arc::new(RwLock::new(HashMap::new())),
         AttachmentUploadStore::in_system_temp(),
     )
     .unwrap();
@@ -201,6 +267,12 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
     }
     let (requeued, requeue, launched, launch) = recovery.join().unwrap();
     server.shutdown();
+    // The CLI bridge's temporary locator is not a real worker sidecar. Drain
+    // it before the genuine owner's fail-closed machine census runs.
+    drop(_runtime);
+    drop(_token);
+    drop(_pane_url);
+    fs::remove_file(&runtime_path).unwrap();
     assert_eq!(requeued, 0, "{requeue}");
     assert_eq!(requeue["status"], "requeued");
     assert_eq!(launched, 0, "{launch}");
@@ -255,6 +327,11 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
         &fixture.project_root,
         &now,
     );
+    // Match the daemon's scan admission step: the real operator launch above
+    // initialized native members, so this queued claim needs their exact plan.
+    monitor
+        .synchronize_agent_issue_schedule(&fixture.project_root)
+        .unwrap();
     let client = FakeIssueClient::new();
     client.seed(sample_issue_snapshot(
         3165,
@@ -269,7 +346,10 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
             .iter()
             .map(|request| request.issue_number)
             .collect::<Vec<_>>(),
-        vec![3165]
+        vec![3165],
+        "claim exclusion={:?}, status={:?}",
+        monitor.agent_schedule_launch_exclusion(3165),
+        monitor.agent_status(),
     );
     let delivery_id = monitor
         .pending_launch_delivery_id(3165)
@@ -288,46 +368,31 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
     gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     fixture.runtime.blocking_tasks = spawner;
-    fixture
-        .runtime
-        .auto_launch_issue_monitor_delivery_events_for_project(
-            &fixture.project_root,
-            3165,
-            LinkedIssueKind::Issue,
-            Some(delivery_id),
-            strategy,
-        );
-    loop {
-        drain_queued_blocking_tasks(&tasks);
-        if !fixture
-            .recorded_events
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|event| matches!(event, UserEvent::IssueMonitorLaunchPrepared(_)))
-        {
-            break;
-        }
-        fixture
-            .runtime
-            .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
-                &fixture.recorded_events,
-            ));
-    }
-    let (fresh_window, result) =
-        take_monitor_launch_complete_event("operator recovery launch", &fixture.recorded_events);
-    let completion = result.expect("requeued owner launches without a Prepared fence");
-    let session_id = completion.1.clone();
-    let readiness_nonce = completion.0.env[gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV].clone();
-    fixture
-        .runtime
-        .handle_launch_complete_and_drain(fresh_window.clone(), Ok(completion));
-    let mut ready = runtime_hook_state_for_event("Working", "SessionStart", &session_id);
-    ready.continuation_readiness_nonce = Some(readiness_nonce);
-    ready.project_root = Some(fixture.project_root.display().to_string());
-    ready.branch = Some("work/issue-3165".into());
-    fixture.runtime.handle_runtime_hook_event(ready);
-    commit_pending_fresh_execution(&mut fixture.runtime);
+    fixture.delivery_id = Some(delivery_id);
+    let owner = start_monitor_relaunch_owner(&mut fixture, false);
+    owner_fixture_block_on(owner.command(gwt::project_runtime::events::OwnerCommand::Health))
+        .unwrap();
+    // Reconnect the GUI read model to the new authenticated owner after the
+    // closed inspection owner, as the real subscriber does on owner restart.
+    let context = fixture.runtime.test_context();
+    let state = fixture.runtime.project_state_mut(&context).unwrap();
+    state.project_owner_connection_id += 1;
+    state.project_owner_identity = owner.client().identity().cloned();
+    let launch_events = prepare_monitor_relaunch(&mut fixture, strategy);
+    assert_eq!(
+        fixture.runtime.pending_launch_completions.len(),
+        1,
+        "actual successor launch must be queued; events={launch_events:?}; delivery={:?}; queued={}; preparing={}; deferred={}; prefs={:?}",
+        fixture.delivery_id,
+        fixture.runtime.issue_monitor_launch_queue.len(),
+        fixture.runtime.issue_monitor_launch_preparations.len(),
+        fixture.runtime.deferred_issue_monitor_launches.is_some(),
+        gwt::load_issue_monitor_prefs(&prefs_path).unwrap().pending_launch_deliveries,
+    );
+    let (fresh_window, pane, _) = finish_monitor_relaunch_owner(&mut fixture, launch_events);
+    let pane = pane.expect("actual Monitor successor launch");
+    let session_id = pane.session.as_ref().unwrap().id.clone();
+    authenticate_monitor_owner_readiness(&owner, &pane);
     let candidate =
         gwt_agent::Session::load(&fixture.sessions_dir.join(format!("{session_id}.toml"))).unwrap();
     assert_ne!(session_id, fixture.source_session_id);
@@ -354,7 +419,7 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
         Some(gwt::cli::execution_state::ExecutionControlStatus::Active)
     );
     assert!(matches!(
-        fixture.runtime.runtimes[&fresh_window]
+        owner_runtime_probe(&fixture.runtime, &fresh_window)
             .pane
             .lock()
             .unwrap()
@@ -363,9 +428,11 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
         gwt_terminal::PaneStatus::Running
     ));
     let runtime = &fixture.runtime.runtimes[&fresh_window];
-    let child_pid = runtime.pty.process_id().expect("live PTY child");
+    let child_pid = pane.pty.process_id().expect("live PTY child");
     assert_ne!(child_pid, std::process::id());
     let incarnation = runtime.incarnation;
+    assert_eq!(incarnation, pane.incarnation);
+    assert_eq!(runtime.child_pid, Some(child_pid));
 
     // Keep the launch's queued scheduler: replacing it would strand its
     // independent observer and leave only a vacuous, empty-candidate test.
@@ -470,7 +537,8 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
         catalog_window.agent_name.as_deref(),
         Some(member.member.name.as_str())
     );
-    settle_test_pane_child(&fixture.runtime, &fresh_window);
+    close_test_owner_runtime(&mut fixture.runtime, &fresh_window);
+    assert!(pane.pty.try_wait().unwrap().is_some());
 }
 
 #[test]
@@ -502,6 +570,15 @@ fn app_runtime_monitor_fresh_completed_slice_handoff_stays_with_its_owner() {
             false,
             LinkedIssueKind::Spec,
             gwt::cli::execution_state::ExecutionSettlement::Completed,
+        );
+        let capture_path = temp.path().join(format!("{case}-native-launch.txt"));
+        pin_monitor_fixture_agents(
+            &fixture,
+            &temp.path().join(case),
+            &[(
+                "GWT_TEST_MONITOR_NATIVE_CAPTURE",
+                capture_path.to_str().unwrap(),
+            )],
         );
         if let Some(work_owner) = work_owner {
             let predecessor = ActiveAgentSession {
@@ -556,12 +633,81 @@ fn app_runtime_monitor_fresh_completed_slice_handoff_stays_with_its_owner() {
                 .unwrap();
             }
         }
-        prepare_monitor_relaunch(
+        let (owner, window_id, pane, _) = materialize_monitor_relaunch_at_owner(
             &mut fixture,
             gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
         );
-        let result = take_monitor_launch_complete(case, &fixture.recorded_events);
-        let prompt = launch_payload_fragments(&result.as_ref().unwrap().0).join("\n");
+        let captured = owner_fixture_block_on(async {
+            // test-hygiene: allow-wall-clock-deadline hang guard for the actual provider's atomic readback; captured SID/argv establishes completion
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    match fs::read_to_string(&capture_path) {
+                        Ok(captured) => return Ok(captured),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            return Err(format!("actual provider readback failed: {error}"))
+                        }
+                    }
+                    if let Some(status) = pane.pty.try_wait().map_err(|error| error.to_string())? {
+                        return Err(format!(
+                            "actual provider exited before recording its arguments: {status:?}"
+                        ));
+                    }
+                    owner
+                        .command(gwt::project_runtime::events::OwnerCommand::Health)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| Err("actual provider native argument readback timed out".into()))
+        });
+        let captured = match captured {
+            Ok(captured) => captured,
+            Err(error) => {
+                let screen = gwt_core::process_console::redact_line(
+                    &pane.pane.lock().unwrap().screen().contents(),
+                );
+                let close = owner_fixture_block_on(owner.command(
+                    gwt::project_runtime::events::OwnerCommand::Close {
+                        id: pane.id.clone(),
+                        incarnation: pane.incarnation,
+                    },
+                ));
+                fixture.runtime.runtimes.remove(&window_id);
+                fixture
+                    .runtime
+                    .test_project_owners
+                    .remove(&fixture.project_root);
+                owner_fixture_block_on(
+                    Arc::try_unwrap(owner)
+                        .ok()
+                        .expect("drained failed capture owner")
+                        .shutdown(),
+                );
+                panic!(
+                    "{case}: {error}; exact close: {close:?}; actual provider screen:\n{screen}"
+                );
+            }
+        };
+        let (session_id, captured) = captured.split_once('\n').unwrap();
+        let (prompt_path, captured) = captured.split_once('\n').unwrap();
+        let (native_args, prompt) = captured
+            .split_once("\n__GWT_MONITOR_PROMPT_CONTENT__\n")
+            .unwrap();
+        assert_eq!(session_id, pane.session.as_ref().unwrap().id);
+        if !prompt_path.is_empty() {
+            assert_eq!(fs::read_to_string(prompt_path).unwrap(), prompt);
+            assert_eq!(
+                dunce::canonicalize(Path::new(prompt_path).parent().unwrap()).unwrap(),
+                dunce::canonicalize(fixture.worktree.join(".gwt/tmp")).unwrap()
+            );
+        }
+        assert!(
+            !native_args.contains(&fixture.native_conversation_id),
+            "fresh native arguments must not resume the predecessor"
+        );
         let expected = work_owner == Some("SPEC-3165");
         assert_eq!(
             prompt.contains("Delivered queue repair"),
@@ -578,7 +724,9 @@ fn app_runtime_monitor_fresh_completed_slice_handoff_stays_with_its_owner() {
             assert!(prompt.contains("Re-read the current SPEC"), "{prompt}");
             assert!(prompt.contains(&fixture.predecessor_execution_binding.generation_id));
         }
-        assert_monitor_fresh_successor(result, &fixture);
+        assert_owner_monitor_fresh_successor(&pane, &fixture);
+        authenticate_monitor_owner_readiness(&owner, &pane);
+        close_test_owner_runtime(&mut fixture.runtime, &window_id);
     }
 }
 
@@ -609,18 +757,13 @@ fn app_runtime_monitor_resume_from_terminal_owner_retains_execution_authority() 
             missing_verification: Some("successor verification pending".to_string()),
         },
     );
-    prepare_monitor_relaunch(
+    let (owner, window_id, pane, _) = materialize_monitor_relaunch_at_owner(
         &mut fixture,
         gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
     );
-    let result =
-        take_monitor_launch_complete("resume-terminal-authority", &fixture.recorded_events);
-    let (.., session_mode, _, _) = result.as_ref().expect("monitor launch succeeds");
-    if *session_mode == gwt_agent::SessionMode::Resume {
-        let (_, session_id, ..) = result.as_ref().unwrap();
-        let resumed =
-            gwt_agent::Session::load(&fixture.sessions_dir.join(format!("{session_id}.toml")))
-                .unwrap();
+    let resumed = pane.session.as_ref().unwrap();
+    let session_id = &resumed.id;
+    if resumed.session_mode == gwt_agent::SessionMode::Resume {
         let binding = resumed
             .execution_binding
             .as_ref()
@@ -646,8 +789,10 @@ fn app_runtime_monitor_resume_from_terminal_owner_retains_execution_authority() 
             Some(gwt::cli::execution_state::ExecutionControlStatus::Active)
         );
     } else {
-        assert_monitor_fresh_successor(result, &fixture);
+        assert_owner_monitor_fresh_successor(&pane, &fixture);
+        authenticate_monitor_owner_readiness(&owner, &pane);
     }
+    close_test_owner_runtime(&mut fixture.runtime, &window_id);
 }
 
 // The binary harness links a non-test gwt library. Its caller-facing
@@ -970,7 +1115,16 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
             .find(|work| work.id == predecessor_id)
             .unwrap();
         predecessor.execution_containers[0].worktree_path =
-            Some(PathBuf::from(r"E:\gwt\work\issue-3165"));
+            Some(if case == "5096-active-foreign-container" {
+                let foreign = temp.path().join("foreign-host").join("issue-3165");
+                assert!(
+                    !foreign.exists(),
+                    "foreign historical path must stay isolated and absent"
+                );
+                foreign
+            } else {
+                PathBuf::from(r"E:\gwt\work\issue-3165")
+            });
     }
     if case == "4777-ownerless-root" {
         let root = history
@@ -1222,24 +1376,14 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
         "{case}: {before:?}"
     );
 
-    prepare_monitor_relaunch(&mut fixture, launch_strategy);
-    let (window_id, result) = take_monitor_launch_complete_event(case, &fixture.recorded_events);
-    let completion = result.expect("Monitor fresh launch preparation");
-    let session_id = completion.1.clone();
+    let (owner, window_id, pane, events) =
+        materialize_monitor_relaunch_at_owner(&mut fixture, launch_strategy);
+    let session_id = pane.session.as_ref().unwrap().id.clone();
     assert_ne!(session_id, fixture.source_session_id, "{case}");
-    let readiness_nonce = completion
-        .0
-        .env
-        .get(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV)
-        .cloned()
-        .expect("Monitor successor readiness nonce");
-    fixture
-        .runtime
-        .handle_launch_complete_and_drain(window_id.clone(), Ok(completion));
-    assert!(fixture
-        .runtime
-        .pending_fresh_execution_launches
-        .contains_key(&window_id));
+    assert!(
+        pane.pending_fresh_execution.is_some(),
+        "actual owner must retain its Prepared successor before readiness"
+    );
     if case == "completed-done" {
         let observations =
             super::super::terminal_convergence::observe_terminal_windows_in_background(
@@ -1261,28 +1405,23 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
             "the reopened owner's launch survives terminal grace before Ready"
         );
     }
-    let (spawner, _) = BlockingTaskSpawner::queued();
-    fixture.runtime.blocking_tasks = spawner;
-    let mut ready = runtime_hook_state_for_event("Working", "SessionStart", &session_id);
-    ready.continuation_readiness_nonce = Some(readiness_nonce);
-    ready.project_root = Some(fixture.project_root.display().to_string());
-    ready.branch = Some("work/issue-3165".to_string());
-    fixture.runtime.handle_runtime_hook_event(ready);
-    let events = commit_pending_fresh_execution(&mut fixture.runtime);
+    authenticate_monitor_owner_readiness(&owner, &pane);
     assert!(
         !events.iter().any(|event| matches!(
-            event.event,
+            &event.event,
             BackendEvent::TerminalStatus {
                 status: WindowProcessStatus::Error,
                 ..
             }
         )),
-        "{case}: fresh readiness must commit, not roll back: {events:?}",
+        "{case}: actual owner launch must not project a failure"
     );
-    assert!(!fixture
-        .runtime
-        .pending_fresh_execution_launches
-        .contains_key(&window_id));
+    assert!(
+        owner_fixture_block_on(owner.probe(&pane.id, pane.incarnation))
+            .unwrap()
+            .pending_fresh_execution
+            .is_none()
+    );
     let candidate =
         gwt_agent::Session::load(&fixture.sessions_dir.join(format!("{session_id}.toml")))
             .expect("committed successor Session");
@@ -1316,6 +1455,33 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
         .iter()
         .find(|work| work.id == successor_id)
         .expect("successor Work");
+    if case == "5096-active-foreign-container" {
+        let pending = pane.pending_fresh_execution.as_ref().unwrap();
+        let receipt = gwt::project_runtime::continuation::fresh_execution_readiness_receipt(
+            pending,
+            uuid::Uuid::new_v4().to_string(),
+        )
+        .expect("the exact current target yields the owner's readiness receipt");
+        assert_eq!(receipt.work_id.as_deref(), Some(successor_id.as_str()));
+        let mut foreign_target = pending.clone();
+        foreign_target.worktree_path = temp.path().join("foreign-host/issue-3165");
+        assert!(!foreign_target.worktree_path.exists());
+        assert!(
+            gwt::project_runtime::continuation::fresh_execution_readiness_receipt(
+                &foreign_target,
+                uuid::Uuid::new_v4().to_string(),
+            )
+            .is_err(),
+            "the same branch and owner cannot substitute a foreign historical target"
+        );
+        assert_eq!(
+            gwt_core::workspace_projection::load_workspace_work_items(&fixture.project_root)
+                .unwrap()
+                .unwrap(),
+            works,
+            "readiness observations must preserve all historical containers"
+        );
+    }
     if predecessor_terminal {
         assert_ne!(successor_id, predecessor_id, "{case}");
     }
@@ -1577,9 +1743,7 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
         "{case}: {}",
         String::from_utf8_lossy(&verify_env.stdout)
     );
-    fixture
-        .runtime
-        .stop_window_runtime_without_session_projection(&window_id);
+    close_test_owner_runtime(&mut fixture.runtime, &window_id);
 }
 
 #[test]
@@ -2244,6 +2408,7 @@ fn assert_monitor_resume_if_safe_provider_conversation(
         MonitorNativeHolderFixture::None,
         false,
     );
+    let owner = start_monitor_relaunch_owner(&mut fixture, false);
     let previous_spawner = fixture.runtime.blocking_tasks.clone();
     let (spawner, queued) = BlockingTaskSpawner::queued();
     fixture.runtime.blocking_tasks = spawner;
@@ -2265,11 +2430,13 @@ fn assert_monitor_resume_if_safe_provider_conversation(
         .handle_issue_monitor_launch_prepared(prepared);
     // Provider ownership is determined by the completed launch result, not
     // by how quickly a loaded runner returns from the preparation handler.
-    let result = take_monitor_launch_complete(case_name, &fixture.recorded_events);
+    let (window_id, pane, events) = finish_monitor_relaunch_owner(&mut fixture, events);
+    let pane = pane.expect("actual owner materialization");
     if exact_resume_expected {
-        assert_monitor_exact_resume(result, &fixture);
+        assert_owner_monitor_exact_resume(&owner, &pane, &fixture);
     } else {
-        assert_monitor_fresh_successor(result, &fixture);
+        assert_owner_monitor_fresh_successor(&pane, &fixture);
+        authenticate_monitor_owner_readiness(&owner, &pane);
     }
     let fresh_reason = events.iter().find_map(|event| match &event.event {
         BackendEvent::IssueMonitorToast { message, .. }
@@ -2297,6 +2464,7 @@ fn assert_monitor_resume_if_safe_provider_conversation(
     } else {
         assert!(fresh_reason.is_none());
     }
+    close_test_owner_runtime(&mut fixture.runtime, &window_id);
 }
 
 #[test]
@@ -2392,6 +2560,106 @@ fn app_runtime_monitor_resume_if_safe_uses_exact_native_writer_identity() {
             holder,
             false,
         );
+        let owner = start_monitor_relaunch_owner(&mut fixture, false);
+        let holder_window = fixture.holder_window_id.clone().unwrap();
+        let source = gwt_agent::Session::load(&fixture.sessions_dir.join(format!(
+                "{}.toml",
+                fixture
+                    .runtime
+                    .active_agent_sessions
+                    .get(&holder_window)
+                    .map(|active| active.session_id.as_str())
+                    .or_else(|| fixture
+                        .runtime
+                        .pending_auto_resume_sources
+                        .get(&holder_window)
+                        .map(String::as_str))
+                    .unwrap()
+            )))
+        .unwrap();
+        let config = super::super::launch_config_from_persisted_session(&source);
+        let previous_spawner = fixture.runtime.blocking_tasks.clone();
+        let mut held = None;
+        let mut holder_pane = None;
+        if holder == MonitorNativeHolderFixture::MaterializingSameConversation {
+            let pause = owner_fixture_block_on(owner.pause_next_agent_launch_at(
+                gwt::project_runtime::test_support::OwnerLaunchStage::MaterializedBeforeInstall,
+            ))
+            .unwrap();
+            let context = fixture.runtime.test_context();
+            let generation = fixture
+                .runtime
+                .window_lifecycle_generations
+                .lock()
+                .unwrap()
+                .get(&holder_window)
+                .copied();
+            fixture
+                .runtime
+                .queue_project_owner_launch(
+                    &context,
+                    holder_window.clone(),
+                    generation,
+                    Box::new(config),
+                    Box::default(),
+                )
+                .unwrap();
+            let evidence = owner_fixture_block_on(async {
+                // test-hygiene: allow-wall-clock-deadline Bounds the actual pending native holder checkpoint; it establishes no readiness by elapsed time.
+                tokio::time::timeout(Duration::from_secs(30), pause.wait())
+                    .await
+                    .unwrap()
+            });
+            assert!(evidence.pty.is_none());
+            held = Some((pause, evidence));
+        } else {
+            drive_owner_agent_fixture(
+                &mut fixture.runtime,
+                &holder_window,
+                config,
+                Default::default(),
+            );
+            fixture.runtime.blocking_tasks = previous_spawner.clone();
+            let pane = owner_runtime_probe(&fixture.runtime, &holder_window);
+            assert!(pane.pty.try_wait().unwrap().is_none());
+            let status = if holder == MonitorNativeHolderFixture::ActiveSameConversation {
+                "Running"
+            } else {
+                "Idle"
+            };
+            let mut hook = runtime_hook_state_for_event(
+                status,
+                if status == "Running" {
+                    "PreToolUse"
+                } else {
+                    "Stop"
+                },
+                &pane.session.as_ref().unwrap().id,
+            );
+            hook.project_root = Some(fixture.project_root.display().to_string());
+            let mut observed = owner.subscribe();
+            owner.transport_event(gwt::project_transport::TransportEvent::RuntimeHook(hook));
+            owner_fixture_block_on(
+                owner.command(gwt::project_runtime::events::OwnerCommand::Health),
+            )
+            .unwrap();
+            let changed = std::iter::from_fn(|| observed.try_recv().ok())
+                .find(|event| {
+                    matches!(event,
+                gwt::project_runtime::events::OwnerEvent::Status { id, incarnation, .. }
+                    if id == &pane.id && *incarnation == pane.incarnation)
+                })
+                .expect("actual holder hook status");
+            let context = fixture.runtime.test_context();
+            let identity = owner.client().identity().cloned().unwrap();
+            let state = fixture.runtime.project_state_mut(&context).unwrap();
+            state.project_owner_connection_id = 1;
+            state.project_owner_identity = Some(identity.clone());
+            fixture
+                .runtime
+                .handle_project_owner_event(&context, 1, &identity, changed);
+            holder_pane = Some(pane);
+        }
         let events = fixture.runtime.auto_launch_issue_monitor_delivery_events(
             &fixture.runtime.test_context(),
             3165,
@@ -2468,11 +2736,179 @@ fn app_runtime_monitor_resume_if_safe_uses_exact_native_writer_identity() {
                     )),
                 "{case_name}: a refused launch completes nothing",
             );
+            assert!(holder_pane
+                .as_ref()
+                .unwrap()
+                .pty
+                .try_wait()
+                .unwrap()
+                .is_none());
+            close_test_owner_runtime(&mut fixture.runtime, &holder_window);
             continue;
         }
-        let result = take_monitor_launch_complete(case_name, &fixture.recorded_events);
-        assert_monitor_fresh_successor(result, &fixture);
+        let (pause, evidence) = held.unwrap();
+        let client = owner.client();
+        let cancelled_id = evidence.id.clone();
+        let cancel = thread::spawn(move || {
+            owner_fixture_block_on(client.command(
+                gwt::project_runtime::events::OwnerCommand::PendingCancel {
+                    id: cancelled_id,
+                    operation_id: evidence.operation_id,
+                },
+            ))
+        });
+        owner_fixture_block_on(async {
+            // test-hygiene: allow-wall-clock-deadline Bounds delivery of the actual cancellation fence before releasing the held owner worker.
+            tokio::time::timeout(Duration::from_secs(30), async {
+                while evidence.current.load(Ordering::Acquire) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        });
+        pause.release();
+        let cancelled = cancel.join().unwrap();
+        assert!(cancelled.is_ok(), "actual materializing Resume cleanup must succeed: {cancelled:?}; source={} candidate={:?}",
+            source.id, evidence.session.as_ref().map(|session| &session.id));
+        let holder_completion = take_remote_owner_launch_completion_for_window(
+            &fixture.recorded_events,
+            Some(&holder_window),
+        );
+        fixture
+            .runtime
+            .handle_remote_owner_launch_complete(holder_completion);
+        let (window_id, pane, _) = finish_monitor_relaunch_owner(&mut fixture, events);
+        let pane = pane.unwrap();
+        assert_owner_monitor_fresh_successor(&pane, &fixture);
+        authenticate_monitor_owner_readiness(&owner, &pane);
+        close_test_owner_runtime(&mut fixture.runtime, &window_id);
     }
+}
+
+fn native_grok_answer_holder(
+    fixture: &mut MonitorRelaunchFixture,
+    grok_home: &Path,
+) -> (
+    Arc<gwt::project_runtime::test_support::ProjectOwnerHarness>,
+    String,
+    gwt::project_runtime::test_support::OwnerRuntimeProbe,
+) {
+    // This ordinary producing launch precedes the separately claimed answer.
+    // Metadata Default leaves its Some delivery entirely unconsumed.
+    let owner = start_monitor_relaunch_owner(fixture, false);
+    let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::GrokBuild)
+        .working_dir(&fixture.worktree)
+        .branch(git_stdout(&fixture.worktree, &["branch", "--show-current"]))
+        .base_branch(git_stdout(
+            &fixture.project_root,
+            &["branch", "--show-current"],
+        ))
+        .model("grok-4.20-beta")
+        .reasoning_level("high")
+        .skip_permissions(true)
+        .build();
+    config.linked_issue_number = Some(3165);
+    config.explicit_follow_up = true;
+    config.launch_route = gwt_agent::LaunchRoute::Autonomous;
+    let pane = pane_control_tests::control_owner_launch(&owner, "grok-answer-holder", config);
+    let session = pane.session.as_ref().unwrap();
+    let native_id = format!("native-grok-answer-{}", session.id);
+    let store = grok_home.join("sessions/fixture-answer").join(&native_id);
+    fs::create_dir_all(&store).unwrap();
+    fs::write(
+        store.join("summary.json"),
+        serde_json::json!({"info": {
+            "id":native_id, "cwd":session.worktree_path,
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        store.join("updates.jsonl"),
+        serde_json::json!({
+            "jsonrpc":"2.0", "method":"session/update", "params": {
+                "sessionId":native_id, "update":{"sessionUpdate":"agent_message_chunk"},
+            },
+        })
+        .to_string()
+            + "\n",
+    )
+    .unwrap();
+    let hook = serde_json::json!({
+        "hook_event_name":"SessionStart", "session_id":native_id,
+        "cwd":session.worktree_path,
+    })
+    .to_string();
+    pane.with_agent_environment(|| {
+        let _ready_nonce = pane.pending_fresh_execution.as_ref().map(|pending| {
+            ScopedEnvVar::set(
+                gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV,
+                &pending.readiness_nonce,
+            )
+        });
+        gwt::daemon_runtime::handle_runtime_state("SessionStart", &hook).unwrap();
+        gwt::daemon_runtime::handle_forward_for_event("SessionStart", &hook).unwrap();
+    });
+    if pane.pending_fresh_execution.is_some() {
+        authenticate_monitor_owner_readiness(&owner, &pane);
+    }
+    owner_fixture_block_on(owner.command(gwt::project_runtime::events::OwnerCommand::Health))
+        .unwrap();
+    let pane = owner_fixture_block_on(owner.probe(&pane.id, pane.incarnation)).unwrap();
+    let source =
+        gwt_agent::Session::load(&fixture.sessions_dir.join(format!("{}.toml", session.id)))
+            .unwrap();
+    assert_eq!(source.agent_id, gwt_agent::AgentId::GrokBuild);
+    assert_eq!(source.exact_resume_session_id(), Some(native_id.as_str()));
+    assert_eq!(
+        pane.session.as_ref().unwrap().exact_resume_session_id(),
+        Some(native_id.as_str())
+    );
+    let raw = pane.id.split_once("::").unwrap().1;
+    fixture.runtime.tab_mut("tab-1").unwrap().workspace = WindowRegistry::from_persisted(
+        gwt::persistence::load_workspace_state(&gwt::persistence::workspace_state_path(
+            &fixture.project_root,
+        ))
+        .unwrap(),
+    );
+    fixture.runtime.register_window("tab-1", raw);
+    let window_id = combined_window_id("tab-1", raw);
+    let context = fixture.runtime.test_context();
+    let snapshot = owner_fixture_block_on(owner.command(
+        gwt::project_runtime::events::OwnerCommand::Snapshot {
+            id: pane.id.clone(),
+            incarnation: pane.incarnation,
+        },
+    ))
+    .unwrap();
+    fixture.runtime.install_remote_owner_projection(
+        &context,
+        &window_id,
+        owner.client(),
+        serde_json::from_value(snapshot).unwrap(),
+        Some(source.clone()),
+    );
+    fixture
+        .runtime
+        .launch_wizard_cache
+        .record_session(source.clone());
+    fixture.source_session_id = source.id;
+    fixture.native_conversation_id = native_id;
+    fixture.holder_window_id = Some(window_id.clone());
+    let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+        &fixture.project_root,
+    ))
+    .unwrap();
+    let delivery = prefs
+        .pending_launch_deliveries
+        .iter()
+        .find(|delivery| Some(&delivery.delivery_id) == fixture.delivery_id.as_ref())
+        .expect("the real native baseline must retain the separate Some answer delivery");
+    assert!(delivery.materializer_window_id.is_none());
+    assert!(delivery.materialized_window_id.is_none());
+    assert!(delivery.workspace_durable_window_id.is_none());
+    (owner, window_id, pane)
 }
 
 /// Issue #3716 AC-2: when the exact native conversation is still held by its
@@ -2499,7 +2935,7 @@ fn app_runtime_answered_handoff_continues_the_exact_live_holder() {
         temp.path(),
         "answered-live-holder",
         MonitorProviderConversationFixture::Present,
-        MonitorNativeHolderFixture::ActiveSameConversation,
+        MonitorNativeHolderFixture::None,
         true,
     );
     convert_monitor_relaunch_fixture_to_grok(&mut fixture, &grok_home);
@@ -2508,23 +2944,23 @@ fn app_runtime_answered_handoff_continues_the_exact_live_holder() {
         temp.path(),
         &[("GROK_HOME", grok_home.to_str().expect("UTF-8 Grok home"))],
     );
+    let (owner, holder_window_id, holder) = native_grok_answer_holder(&mut fixture, &grok_home);
+    let holder_pid = holder.pty.process_id();
+    let holder_sid = holder.session.as_ref().unwrap().id.clone();
     seed_resumed_autonomous_handoff(&fixture, "Approved by PM");
-    let holder_window_id = fixture
-        .holder_window_id
-        .clone()
-        .expect("live holder window id");
-    insert_test_pane_runtime(&mut fixture.runtime, &holder_window_id);
     let (blocking_tasks, queued_tasks) = BlockingTaskSpawner::queued();
     fixture.runtime.blocking_tasks = blocking_tasks;
     let delivery_id = fixture.delivery_id.clone().expect("durable delivery id");
 
-    let events = fixture.runtime.auto_launch_issue_monitor_delivery_events(
-        &fixture.runtime.test_context(),
-        3165,
-        LinkedIssueKind::Spec,
-        Some(delivery_id.clone()),
-        gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
-    );
+    let events = fixture
+        .runtime
+        .auto_launch_issue_monitor_delivery_events_for_project(
+            &fixture.project_root,
+            3165,
+            LinkedIssueKind::Spec,
+            Some(delivery_id.clone()),
+            gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+        );
     let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
         &fixture.project_root,
     ))
@@ -2537,13 +2973,39 @@ fn app_runtime_answered_handoff_continues_the_exact_live_holder() {
         events.is_empty(),
         "completion is emitted by the worker callback: {events:#?}"
     );
-    run_queued_monitor_gui_diagnostics(&queued_tasks, &[1]);
+    drain_queued_blocking_tasks(&queued_tasks);
+    fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+            &fixture.recorded_events,
+        ));
+    // Both the outer facts callback and the nested answer adapter emit their
+    // own verified telemetry job; only the remaining task is the owner RPC.
+    run_queued_monitor_gui_diagnostics(&queued_tasks, &[2, 1]);
     assert_eq!(queued_tasks.lock().expect("queued tasks").len(), 1);
     assert!(matches!(
         fixture.runtime.issue_monitor_launch_deliveries.get(&delivery_id),
         Some(super::super::IssueMonitorLaunchDeliveryState::Materializing { window_id, .. })
             if window_id == &holder_window_id
     ));
+    let before_owner = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+        &fixture.project_root,
+    ))
+    .unwrap();
+    let pending = before_owner
+        .pending_launch_deliveries
+        .iter()
+        .find(|delivery| delivery.delivery_id == delivery_id)
+        .expect("pending before owner submit");
+    let expected_claim = pending.claim_id.clone();
+    assert!(before_owner.autonomous_handoffs[0].delivered_at.is_none());
+    // The owner commits write-ahead, physical submit and durable ACK before
+    // replying. The later GUI completion observes those committed effects.
+    queued_tasks
+        .lock()
+        .expect("queued tasks")
+        .pop()
+        .expect("answer delivery worker")();
     let claimed = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
         &fixture.project_root,
     ))
@@ -2552,25 +3014,29 @@ fn app_runtime_answered_handoff_continues_the_exact_live_holder() {
         claimed.autonomous_handoffs[0].delivery,
         gwt::autonomous_handoff::AutonomousHandoffDeliveryState::Attempting { attempt: 1, .. }
     ));
-    let delivery = claimed
+    assert!(claimed
         .pending_launch_deliveries
         .iter()
-        .find(|delivery| delivery.delivery_id == delivery_id)
-        .expect("pending live delivery");
+        .all(|delivery| delivery.delivery_id != delivery_id));
+    let canonical_ack = claimed
+        .launch_confirmations
+        .get(&3165)
+        .expect("owner's durable ACK")
+        .clone();
+    assert_eq!(canonical_ack.window_id, holder.id);
     assert_eq!(
-        delivery.materializer_window_id.as_deref(),
-        Some(holder_window_id.as_str()),
-        "the durable claim must be rebound from the proposed window to the exact holder",
+        canonical_ack.claim_id.as_deref(),
+        Some(expected_claim.as_str())
     );
-    assert_eq!(delivery.materialized_window_id, None);
-    assert_eq!(delivery.workspace_durable_window_id, None);
+    assert_eq!(
+        canonical_ack.delivery_id.as_deref(),
+        Some(delivery_id.as_str())
+    );
+    assert!(
+        claimed.autonomous_handoffs[0].delivered_at.is_none(),
+        "the physical submit ACK is separate from the provider's semantic receipt"
+    );
 
-    let task = queued_tasks
-        .lock()
-        .expect("queued tasks")
-        .pop()
-        .expect("answer delivery worker");
-    task();
     let completion = {
         let mut recorded = fixture.recorded_events.lock().expect("recorded events");
         let index = recorded
@@ -2599,7 +3065,7 @@ fn app_runtime_answered_handoff_continues_the_exact_live_holder() {
     assert!(awaiting_callback
         .pending_launch_deliveries
         .iter()
-        .any(|delivery| delivery.delivery_id == delivery_id));
+        .all(|delivery| delivery.delivery_id != delivery_id));
     let handoff = &awaiting_callback.autonomous_handoffs[0];
     let target = match &handoff.delivery {
         gwt::autonomous_handoff::AutonomousHandoffDeliveryState::Attempting {
@@ -2608,6 +3074,18 @@ fn app_runtime_answered_handoff_continues_the_exact_live_holder() {
         } => target,
         other => panic!("expected bound answer target, got {other:?}"),
     };
+    assert_eq!(target.window_id, holder.id);
+    assert_eq!(target.gwt_session_id, holder_sid);
+    assert_eq!(target.delivery_id.as_deref(), Some(delivery_id.as_str()));
+    assert_eq!(
+        target.materializer_id,
+        owner.client().identity().unwrap().host_instance_id
+    );
+    assert_eq!(target.materializer_pid, std::process::id());
+    assert_eq!(
+        Some(target.materializer_started_at),
+        gwt::process::host_process_start_time(std::process::id())
+    );
     let receipt_identity = gwt::autonomous_handoff::AutonomousHandoffReceiptIdentity {
         gwt_session_id: target.gwt_session_id.clone(),
         native_session_id: target.native_session_id.clone(),
@@ -2642,12 +3120,12 @@ fn app_runtime_answered_handoff_continues_the_exact_live_holder() {
     assert!(receipted
         .pending_launch_deliveries
         .iter()
-        .any(|delivery| delivery.delivery_id == delivery_id));
+        .all(|delivery| delivery.delivery_id != delivery_id));
     let restored = test_monitor_with_prefs(gwt::IssueMonitorConfig::default(), receipted.clone());
     assert_eq!(
-        restored.launched_window_issue(&holder_window_id),
-        None,
-        "the semantic receipt must not publish an undurable window before the physical callback"
+        restored.launched_window_issue(&holder.id),
+        Some(3165),
+        "the semantic receipt must retain the owner's already-durable exact holder ACK"
     );
 
     let mut completion_events = fixture
@@ -2667,11 +3145,16 @@ fn app_runtime_answered_handoff_continues_the_exact_live_holder() {
         .iter()
         .all(|delivery| delivery.delivery_id != delivery_id));
     let monitor = test_monitor_with_prefs(gwt::IssueMonitorConfig::default(), settled.clone());
-    assert_eq!(monitor.launched_window_issue(&holder_window_id), Some(3165));
-    assert!(!fixture
-        .runtime
-        .issue_monitor_launch_deliveries
-        .contains_key(&delivery_id));
+    assert_eq!(monitor.launched_window_issue(&holder.id), Some(3165));
+    assert_eq!(
+        settled.launch_confirmations.get(&3165),
+        Some(&canonical_ack)
+    );
+    assert!(
+        matches!(fixture.runtime.issue_monitor_launch_deliveries.get(&delivery_id),
+        Some(super::super::IssueMonitorLaunchDeliveryState::Launched { window_id })
+            if window_id == &holder_window_id)
+    );
     assert!(completion_events.iter().any(|event| matches!(
         &event.event,
         BackendEvent::IssueMonitorToast { message, .. }
@@ -2686,6 +3169,11 @@ fn app_runtime_answered_handoff_continues_the_exact_live_holder() {
             recorded_project_payload(event),
             UserEvent::LaunchComplete { .. }
         )));
+    let same = owner_fixture_block_on(owner.probe(&holder.id, holder.incarnation)).unwrap();
+    assert_eq!(same.session.as_ref().unwrap().id, holder_sid);
+    assert_eq!(same.pty.process_id(), holder_pid);
+    assert!(same.pty.try_wait().unwrap().is_none());
+    close_test_owner_runtime(&mut fixture.runtime, &holder_window_id);
 }
 
 /// Issue #3716 AC-2: once a worker may have written the prompt body, an error
@@ -2699,47 +3187,157 @@ fn app_runtime_failed_live_handoff_delivery_keeps_the_answer_pending() {
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+    let _session_runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+    let _ready_nonce = ScopedEnvVar::unset(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV);
+    let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+    let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+    let _pane_url = ScopedEnvVar::unset(gwt_agent::GWT_PANE_WS_URL_ENV);
     let grok_home = temp.path().join(".grok");
     let _grok_home = ScopedEnvVar::set("GROK_HOME", &grok_home);
     let mut fixture = monitor_relaunch_fixture(
         temp.path(),
         "failed-live-answer-delivery",
         MonitorProviderConversationFixture::Present,
-        MonitorNativeHolderFixture::ActiveSameConversation,
+        MonitorNativeHolderFixture::None,
         true,
     );
     convert_monitor_relaunch_fixture_to_grok(&mut fixture, &grok_home);
+    pin_monitor_fixture_agents(
+        &fixture,
+        temp.path(),
+        &[("GROK_HOME", grok_home.to_str().unwrap())],
+    );
+    let (owner, holder_window_id, holder) = native_grok_answer_holder(&mut fixture, &grok_home);
+    let holder_pid = holder.pty.process_id();
+    let holder_sid = holder.session.as_ref().unwrap().id.clone();
     seed_resumed_autonomous_handoff(&fixture, "Retry this answer");
-    let holder_window_id = fixture
-        .holder_window_id
-        .clone()
-        .expect("live holder window id");
-    insert_test_pane_runtime(&mut fixture.runtime, &holder_window_id);
     let (blocking_tasks, queued_tasks) = BlockingTaskSpawner::queued();
     fixture.runtime.blocking_tasks = blocking_tasks;
     let delivery_id = fixture.delivery_id.clone().expect("durable delivery id");
 
     assert!(fixture
         .runtime
-        .auto_launch_issue_monitor_delivery_events(
-            &fixture.runtime.test_context(),
+        .auto_launch_issue_monitor_delivery_events_for_project(
+            &fixture.project_root,
             3165,
             LinkedIssueKind::Spec,
             Some(delivery_id.clone()),
             gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
         )
         .is_empty());
+    drain_queued_blocking_tasks(&queued_tasks);
     fixture
         .runtime
-        .runtimes
-        .get(&holder_window_id)
-        .expect("holder runtime")
-        .pane
-        .lock()
-        .expect("holder pane")
-        .shared_pty()
-        .invalidate_input_generation();
-    run_queued_monitor_gui_diagnostics(&queued_tasks, &[1]);
+        .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+            &fixture.recorded_events,
+        ));
+    run_queued_monitor_gui_diagnostics(&queued_tasks, &[2, 1]);
+    // Apply the real GUI canvas before the held answer RPC. An unobserved
+    // canvas must not make a claim pass merely because it ran first.
+    let context = fixture.runtime.test_context();
+    let canvas = fixture
+        .runtime
+        .issue_monitor_window_snapshot_for_tab(&context.tab_id, &Utc::now().to_rfc3339())
+        .expect("the actual holder's GUI canvas");
+    assert_eq!(
+        fixture.runtime.runtimes[&holder_window_id].owner_pane_id,
+        holder.id
+    );
+    assert_ne!(
+        holder_window_id, holder.id,
+        "the actual GUI alias differs from its physical owner pane"
+    );
+    assert!(
+        canvas
+            .windows
+            .iter()
+            .any(|window| window.window_id == holder_window_id
+                && window.issue_number == Some(3165)
+                && window.monitor_owned
+                && window.session_id.as_deref() == Some(holder_sid.as_str())),
+        "the generated canvas must observe the real autonomous holder"
+    );
+    gwt::daemon_publisher::publish_issue_monitor_window_snapshot_with_timeout(
+        &fixture.project_root,
+        &canvas,
+        &std::collections::BTreeSet::from([context.tab_id.clone()]),
+        Duration::from_secs(5),
+    )
+    .expect("ACK the actual GUI canvas before answer delivery");
+    owner_fixture_block_on(owner.wait_monitor_idle()).unwrap();
+    let observed_canvas = owner
+        .monitor_snapshot()
+        .unwrap()
+        .expect("the daemon must observe the ACKed GUI canvas");
+    let canvas_ids = |snapshot: &gwt::IssueMonitorWindowSnapshot| {
+        let mut ids = snapshot
+            .windows
+            .iter()
+            .map(|window| {
+                (
+                    window.window_id.clone(),
+                    window.issue_number,
+                    window.monitor_owned,
+                )
+            })
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids
+    };
+    assert_eq!(observed_canvas.project_tab_id, canvas.project_tab_id);
+    assert_eq!(
+        canvas_ids(&observed_canvas),
+        canvas_ids(&canvas),
+        "the daemon watch must contain the same real GUI IDs/Issue/provenance before the RPC"
+    );
+    let source_status = gwt::daemon_publisher::read_issue_monitor_status(&fixture.project_root)
+        .expect("read the actual daemon's source readiness after canvas ACK")
+        .expect("the fixed owner has a live Monitor driver");
+    let source_row = source_status["inbox"]
+        .as_array()
+        .and_then(|items| items.iter().find(|item| item["issue_number"] == 3165));
+    assert!(source_row.is_some_and(|item| item["readiness"] == "ready_with_open_tasks"),
+        "source readiness is a separate precondition from alias admission: last_scan={:?}, row={:?}",
+        source_status["last_scan_at"], source_row.map(|item|
+            serde_json::json!({"state":item["state"],"readiness":item["readiness"],"exclusion":item["exclusion_reason"]})));
+    // Invalidate the actual owner's physical writer after routing facts but
+    // before the owner prepares and attempts the protected answer write.
+    let owner_identity = owner.client().identity().unwrap().clone();
+    let claim_probe = gwt::project_runtime::installation::IssueMonitorLaunchClaimInput {
+        project_root: fixture.project_root.clone(),
+        issue_number: 3165,
+        delivery_id: delivery_id.clone(),
+        materializer_window_id: holder.id.clone(),
+        materializer_id: owner_identity.host_instance_id.clone(),
+        materializer_pid: owner_identity.pid,
+        fallback_timeout:
+            gwt::project_runtime::installation::local_issue_monitor_fallback_projection_timeout(),
+        snapshot: None,
+        snapshot_tabs: Default::default(),
+    };
+    let claim_before = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+        &fixture.project_root,
+    ))
+    .unwrap();
+    let windows_before = owner.monitor_snapshot().unwrap().map(|snapshot| {
+        (
+            snapshot.project_tab_id,
+            snapshot
+                .windows
+                .into_iter()
+                .map(|window| {
+                    (
+                        window.window_id,
+                        window.issue_number,
+                        window.status,
+                        window.monitor_owned,
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+    });
+    holder.pty.invalidate_input_generation();
     queued_tasks
         .lock()
         .expect("queued tasks")
@@ -2765,6 +3363,7 @@ fn app_runtime_failed_live_handoff_delivery_keeps_the_answer_pending() {
         delivery.result.is_err(),
         "invalidated PTY must reject the delivery"
     );
+    let delivery_error = delivery.result.as_ref().err().cloned();
     let events = fixture
         .runtime
         .handle_issue_monitor_answer_delivery_complete(delivery);
@@ -2777,6 +3376,21 @@ fn app_runtime_failed_live_handoff_delivery_keeps_the_answer_pending() {
     assert_eq!(
         parked.autonomous_handoffs[0].state,
         gwt::autonomous_handoff::AutonomousHandoffState::AwaitingHuman,
+        "owner={delivery_error:?}; pure_preflight_from_before={}; expected_host={owner_identity:?}; expected_window={}; pd_before={:?}; pd_after={:?}; windows_before={windows_before:?}; post_error_windows={:?}; post_error_daemon={:?}",
+        claim_probe.test_preflight_claim(claim_before.clone(), Some(owner_identity.host_started_at)), holder.id,
+        claim_before.pending_launch_deliveries.iter().find(|delivery| delivery.delivery_id == delivery_id)
+            .map(|delivery| (&delivery.claim_id, &delivery.materializer_id, delivery.materializer_pid, &delivery.materializer_window_id)),
+        parked.pending_launch_deliveries.iter().find(|delivery| delivery.delivery_id == delivery_id)
+            .map(|delivery| (&delivery.claim_id, &delivery.materializer_id, delivery.materializer_pid, &delivery.materializer_window_id)),
+        owner.monitor_snapshot().map(|snapshot| snapshot.map(|snapshot| (snapshot.project_tab_id,
+            snapshot.windows.into_iter().map(|window|
+                (window.window_id, window.issue_number, window.status, window.monitor_owned)).collect::<Vec<_>>()))),
+        gwt::daemon_publisher::read_issue_monitor_status(&fixture.project_root).map(|status| status.map(|status|
+            serde_json::json!({"source":status["source"],"last_scan_at":status["last_scan_at"],
+                "occupied":status["occupied_slot_count"],"inbox":status["inbox"].as_array().map(|items|
+                    items.iter().filter(|item| item["issue_number"] == 3165).map(|item|
+                        serde_json::json!({"state":item["state"],"readiness":item["readiness"],
+                            "window_id":item["launched_window_id"],"exclusion":item["exclusion_reason"]})).collect::<Vec<_>>())}))),
     );
     assert!(matches!(
         parked.autonomous_handoffs[0].delivery,
@@ -2797,18 +3411,66 @@ fn app_runtime_failed_live_handoff_delivery_keeps_the_answer_pending() {
 
     let (retry_spawner, retry_tasks) = BlockingTaskSpawner::queued();
     fixture.runtime.blocking_tasks = retry_spawner;
-    fixture.runtime.auto_launch_issue_monitor_delivery_events(
-        &fixture.runtime.test_context(),
-        3165,
-        LinkedIssueKind::Spec,
-        Some(delivery_id.clone()),
-        gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+    fixture
+        .runtime
+        .auto_launch_issue_monitor_delivery_events_for_project(
+            &fixture.project_root,
+            3165,
+            LinkedIssueKind::Spec,
+            Some(delivery_id.clone()),
+            gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+        );
+    drain_queued_blocking_tasks(&retry_tasks);
+    fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+            &fixture.recorded_events,
+        ));
+    run_queued_monitor_gui_diagnostics(&retry_tasks, &[2, 1]);
+    assert_eq!(
+        retry_tasks.lock().unwrap().len(),
+        1,
+        "only the existing-holder ACK RPC remains, never a second answer delivery"
     );
-    run_queued_monitor_gui_diagnostics(&retry_tasks, &[0]);
+    fixture.runtime.finish_queued_delivery_acks(&retry_tasks);
     assert!(
         retry_tasks.lock().expect("retry tasks").is_empty(),
-        "an ambiguous submit must never enqueue a second physical write",
+        "all retry observations must be consumed before checking the real holder",
     );
+    let after_retry = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+        &fixture.project_root,
+    ))
+    .unwrap();
+    assert_eq!(
+        after_retry.autonomous_handoffs[0], parked.autonomous_handoffs[0],
+        "an ambiguous answer's exact attempt and target must never be replayed"
+    );
+    assert!(
+        fixture
+            .recorded_events
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|event| !matches!(
+                recorded_project_payload(event),
+                UserEvent::LaunchComplete { .. }
+            )),
+        "an ambiguous answer must never launch a second PTY"
+    );
+    let same = owner_fixture_block_on(owner.probe(&holder.id, holder.incarnation)).unwrap();
+    assert_eq!(same.session.as_ref().unwrap().id, holder_sid);
+    assert_eq!(same.pty.process_id(), holder_pid);
+    assert!(same.pty.try_wait().unwrap().is_none());
+    let inventory = owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes),
+    )
+    .unwrap();
+    assert_eq!(
+        inventory["panes"].as_array().unwrap().len(),
+        1,
+        "ambiguous delivery must retain only its real original holder: {inventory}"
+    );
+    close_test_owner_runtime(&mut fixture.runtime, &holder_window_id);
 }
 
 /// Issue #3716 AC-2: a materializing writer reservation is not yet a live
@@ -2914,16 +3576,12 @@ fn app_runtime_answered_handoff_ignores_a_newer_branch_session() {
         .runtime
         .apply_refreshed_launch_wizard_sessions(vec![source, newer]);
 
-    fixture.runtime.auto_launch_issue_monitor_delivery_events(
-        &fixture.runtime.test_context(),
-        3165,
-        LinkedIssueKind::Spec,
-        None,
+    let (owner, window_id, pane, _) = materialize_monitor_relaunch_at_owner(
+        &mut fixture,
         gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
     );
-    let result =
-        take_monitor_launch_complete("answered exact asking session", &fixture.recorded_events);
-    assert_monitor_exact_resume(result, &fixture);
+    assert_owner_monitor_exact_resume(&owner, &pane, &fixture);
+    close_test_owner_runtime(&mut fixture.runtime, &window_id);
 }
 
 /// Issue #3478 AC-1/AC-5 and Issue #3716 AC-2: a stopped holder still takes
@@ -2956,55 +3614,87 @@ fn app_runtime_answered_handoff_exact_resume_retains_autonomous_context() {
     convert_monitor_relaunch_fixture_to_grok(&mut fixture, &grok_home);
     seed_resumed_autonomous_handoff(&fixture, "Approved by PM");
 
-    fixture.runtime.auto_launch_issue_monitor_delivery_events(
-        &fixture.runtime.test_context(),
-        3165,
-        LinkedIssueKind::Spec,
-        None,
-        gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
-    );
-    let (window_id, mut result) =
-        take_monitor_launch_complete_event("answered-exact-resume", &fixture.recorded_events);
-
     let prepared = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
         &fixture.project_root,
     ))
-    .expect("load prepared exact Resume handoff");
+    .unwrap();
     assert!(
         prepared.autonomous_handoffs[0].delivered_at.is_none(),
-        "preparing exact Resume must not consume the answer before launch completion",
+        "preparing exact Resume cannot consume an unsubmitted answer"
     );
+    let (owner, window_id, pane, _) = materialize_monitor_relaunch_at_owner(
+        &mut fixture,
+        gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+    );
+    let session = pane.session.as_ref().unwrap();
+    assert_eq!(session.agent_id, gwt_agent::AgentId::GrokBuild);
+    assert_eq!(session.session_mode, gwt_agent::SessionMode::Resume);
     assert_eq!(
-        result.as_ref().expect("exact Resume result").5,
-        gwt_agent::AgentId::GrokBuild,
+        session.agent_session_id.as_deref(),
+        Some(fixture.native_conversation_id.as_str())
     );
-    assert_monitor_exact_resume(result.clone(), &fixture);
-    let process = &mut result.as_mut().expect("exact Resume result").0;
-    let provider_args = std::mem::take(&mut process.args);
-    assert!(provider_args
-        .iter()
-        .any(|argument| argument.contains("[gwt-autonomous-answer:v1:")));
-    if cfg!(windows) {
-        process.command = "cmd".to_string();
-        process.args = vec![
-            "/d".to_string(),
-            "/s".to_string(),
-            "/c".to_string(),
-            "ping -n 30 127.0.0.1 > nul".to_string(),
-        ];
-        process.args.extend(provider_args);
-    } else {
-        process.command = "/bin/sh".to_string();
-        process.args = vec![
-            "-lc".to_string(),
-            "sleep 30".to_string(),
-            "grok-test".to_string(),
-        ];
-        process.args.extend(provider_args);
-    }
-    fixture
-        .runtime
-        .handle_launch_complete_and_drain(window_id, result);
+    assert_eq!(session.model.as_deref(), Some("gpt-5.5"));
+    assert_eq!(session.reasoning_level.as_deref(), Some("low"));
+    let binding = session
+        .execution_binding
+        .as_ref()
+        .expect("actual Resume producing authority");
+    assert_eq!(binding.session_id, session.id);
+    assert_eq!(
+        gwt::cli::execution_state::current_execution_binding(
+            &fixture.worktree,
+            fixture.execution_owner
+        )
+        .unwrap(),
+        Some(binding.identity.clone())
+    );
+    assert!(
+        session
+            .launch_args
+            .iter()
+            .any(|arg| arg.contains(&fixture.native_conversation_id)),
+        "actual spawned provider must receive the exact conversation"
+    );
+    assert!(
+        session
+            .launch_args
+            .iter()
+            .any(|arg| arg.contains("[gwt-autonomous-answer:v1:")),
+        "actual immutable launch must contain the write-ahead answer marker"
+    );
+    assert!(
+        session
+            .launch_args
+            .iter()
+            .any(|arg| arg.contains("Approved by PM")),
+        "actual provider receives the one-shot human answer"
+    );
+    assert!(pane.pty.try_wait().unwrap().is_none());
+    // test-hygiene: allow-wall-clock-deadline Bounds actual provider output delivery; the observed non-secret environment marker proves autonomous context.
+    owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Bounds delivery of actual provider output proving its non-secret autonomous environment.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let snapshot = owner
+                    .command(gwt::project_runtime::events::OwnerCommand::Snapshot {
+                        id: pane.id.clone(),
+                        incarnation: pane.incarnation,
+                    })
+                    .await
+                    .unwrap();
+                if snapshot["screen"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("autonomous=1 issue=3165")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap()
+    });
     let awaiting_receipt = gwt::load_issue_monitor_prefs(
         &gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root),
     )
@@ -3019,6 +3709,15 @@ fn app_runtime_answered_handoff_exact_resume_retains_autonomous_context() {
         awaiting_receipt.autonomous_handoffs[0].delivery,
         gwt::autonomous_handoff::AutonomousHandoffDeliveryState::Attempting { .. }
     ));
+    let snapshot = owner_fixture_block_on(owner.command(
+        gwt::project_runtime::events::OwnerCommand::Snapshot {
+            id: pane.id.clone(),
+            incarnation: pane.incarnation,
+        },
+    ))
+    .unwrap();
+    assert_eq!(snapshot["session_id"], session.id);
+    close_test_owner_runtime(&mut fixture.runtime, &window_id);
 }
 
 /// SPEC-1921 L1a: a saved version cannot select a package runner on exact Resume.
@@ -3067,36 +3766,29 @@ fn monitor_legacy_version_resumes_installed_without_pinned_package_runners() {
     // The resume candidate is read from the launch wizard cache, not from disk.
     fixture.runtime.launch_wizard_cache.record_session(source);
 
-    fixture.runtime.auto_launch_issue_monitor_delivery_events(
-        &fixture.runtime.test_context(),
-        3165,
-        LinkedIssueKind::Spec,
-        None,
+    let (owner, window_id, pane, _) = materialize_monitor_relaunch_at_owner(
+        &mut fixture,
         gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
     );
-    let (_window_id, result) =
-        take_monitor_launch_complete_event("unpinned-package-runner", &fixture.recorded_events);
-
-    let prepared = result.expect("the saved version must not select a package runner");
+    let session = pane.session.as_ref().unwrap();
     let installed_cli = installed_cli.to_string_lossy();
     assert!(
-        prepared.0.command == installed_cli
-            || prepared
-                .0
-                .args
+        session.launch_command == installed_cli
+            || session
+                .launch_args
                 .iter()
                 .any(|arg| arg.contains(installed_cli.as_ref())),
         "exact Resume must use the installed fixture CLI"
     );
     assert!(
-        !prepared
-            .0
-            .args
+        !session
+            .launch_args
             .iter()
             .any(|arg| arg.contains("@openai/codex@")),
         "the ignored saved version must not reach the package runner"
     );
-    assert_monitor_exact_resume(Ok(prepared), &fixture);
+    assert_owner_monitor_exact_resume(&owner, &pane, &fixture);
+    close_test_owner_runtime(&mut fixture.runtime, &window_id);
 }
 
 /// Issue #3716 AC-2: an exact Resume preparation failure occurs before the
@@ -3128,22 +3820,34 @@ fn app_runtime_pre_spawn_exact_handoff_failure_uses_bounded_retry() {
         gwt::IssueMonitorLaunchSessionStrategy::FreshRequired;
     gwt::save_issue_monitor_prefs(&prefs_path, &stale).expect("save stale strategy");
 
-    fixture.runtime.auto_launch_issue_monitor_delivery_events(
-        &fixture.runtime.test_context(),
-        3165,
-        LinkedIssueKind::Spec,
-        Some(delivery_id.clone()),
+    let (owner, window_id, outcome, events) = materialize_monitor_relaunch_owner_outcome(
+        &mut fixture,
         gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+        true,
     );
-    let (window_id, mut result) =
-        take_monitor_launch_complete_event("failed exact answer Resume", &fixture.recorded_events);
-    let process = &mut result.as_mut().expect("prepared exact Resume").0;
-    process.command = "/definitely/missing/gwt-answered-resume".to_string();
-    process.cwd = Some(fixture.worktree.clone());
-    fixture
-        .runtime
-        .handle_launch_complete_and_drain(window_id.clone(), result);
-
+    assert!(
+        outcome.is_err(),
+        "the actual missing PTY gate must fail before provider spawn"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::IssueMonitorLaunchFailed {
+                issue_number: 3165,
+                ..
+            }
+        )),
+        "canonical failed launch must project its actionable failure"
+    );
+    let inventory = owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes),
+    )
+    .unwrap();
+    assert!(
+        inventory["panes"].as_array().unwrap().is_empty(),
+        "no replacement provider may survive a pre-submit failure"
+    );
+    assert!(inventory["pending"].as_array().unwrap().is_empty());
     let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
         &fixture.project_root,
     ))
@@ -3183,6 +3887,32 @@ fn app_runtime_pre_spawn_exact_handoff_failure_uses_bounded_retry() {
         .is_empty());
 }
 
+fn take_preflight_rejection_completion(
+    fixture: &mut MonitorRelaunchFixture,
+) -> super::super::IssueMonitorPreflightRejected {
+    let event = {
+        let mut events = fixture.recorded_events.lock().unwrap();
+        let index = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    recorded_project_payload(event),
+                    UserEvent::IssueMonitorPreflightRejected(_)
+                )
+            })
+            .expect("canonical owner rejection completion");
+        events.remove(index)
+    };
+    match fixture
+        .runtime
+        .accept_project_completion(event)
+        .expect("current rejection generation")
+    {
+        UserEvent::IssueMonitorPreflightRejected(completion) => *completion,
+        _ => unreachable!(),
+    }
+}
+
 /// Issue #3716 AC-2: an incomplete provider receipt is a retryable handoff
 /// preflight failure, not authority to launch a fresh successor.
 #[test]
@@ -3204,6 +3934,32 @@ fn app_runtime_incomplete_grok_handoff_store_stays_retryable() {
         true,
     );
     convert_monitor_relaunch_fixture_to_grok(&mut fixture, &grok_home);
+    pin_monitor_fixture_agents(
+        &fixture,
+        temp.path(),
+        &[("GROK_HOME", grok_home.to_str().unwrap())],
+    );
+    let owner = start_monitor_relaunch_owner(&mut fixture, false);
+    gwt::daemon_publisher::publish_durable_issue_monitor_control(
+        &fixture.project_root,
+        gwt::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({"scan_now":{}}),
+            std::process::id(),
+        ),
+    )
+    .expect("commit the actual Monitor's initial source scan request");
+    owner_fixture_block_on(owner.wait_monitor_idle()).unwrap();
+    let scanned = owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes),
+    )
+    .unwrap();
+    assert!(
+        scanned["panes"].as_array().unwrap().is_empty()
+            && scanned["pending"].as_array().unwrap().is_empty(),
+        "the source scan must not materialize a pane: {scanned}"
+    );
+    let _scan_pause = owner.pause_next_monitor_scan().unwrap();
     seed_resumed_autonomous_handoff(&fixture, "Wait for provider receipt");
     let updates = grok_home
         .join("sessions/%2Ffixture%2Fworktree")
@@ -3211,14 +3967,48 @@ fn app_runtime_incomplete_grok_handoff_store_stays_retryable() {
         .join("updates.jsonl");
     fs::remove_file(updates).expect("remove authoritative updates log");
     let delivery_id = fixture.delivery_id.clone().expect("delivery id");
-
-    fixture.runtime.auto_launch_issue_monitor_delivery_events(
-        &fixture.runtime.test_context(),
-        3165,
-        LinkedIssueKind::Spec,
-        Some(delivery_id.clone()),
-        gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+    let source_path = fixture
+        .sessions_dir
+        .join(format!("{}.toml", fixture.source_session_id));
+    let source_before = fs::read(&source_path).unwrap();
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    fixture
+        .runtime
+        .auto_launch_issue_monitor_delivery_events_for_project(
+            &fixture.project_root,
+            3165,
+            LinkedIssueKind::Spec,
+            Some(delivery_id.clone()),
+            gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+        );
+    drain_queued_blocking_tasks(&queued);
+    let prepared = take_issue4803_monitor_preparation(&fixture.recorded_events);
+    assert!(
+        prepared.rejection.is_some(),
+        "the first read-only refusal carries its exact source expectation: {prepared:?}"
     );
+    fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(prepared);
+    drain_queued_blocking_tasks(&queued);
+    let completion = take_preflight_rejection_completion(&mut fixture);
+    let receipt = completion
+        .result
+        .as_ref()
+        .expect("owner settles the exact incomplete-store rejection");
+    assert_eq!(receipt["claimed_delivery"]["delivery_id"], delivery_id);
+    assert_eq!(
+        receipt["claimed_delivery"]["materializer_id"],
+        owner.client().identity().unwrap().host_instance_id
+    );
+    assert_eq!(receipt["no_pty"], true);
+    assert_eq!(receipt["no_submit"], true);
+    assert_eq!(receipt["settled"], true);
+    assert_eq!(receipt["handoff_retry"], true);
+    fixture
+        .runtime
+        .handle_monitor_preflight_rejected(completion);
 
     let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
         &fixture.project_root,
@@ -3250,6 +4040,23 @@ fn app_runtime_incomplete_grok_handoff_store_stays_retryable() {
             recorded_project_payload(event),
             UserEvent::LaunchComplete { .. }
         )));
+    assert_eq!(
+        fs::read(source_path).unwrap(),
+        source_before,
+        "rejecting a missing native store cannot rewrite the asking Session"
+    );
+    let inventory = owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes),
+    )
+    .unwrap();
+    assert!(
+        inventory["panes"].as_array().unwrap().is_empty(),
+        "{inventory}"
+    );
+    assert!(
+        inventory["pending"].as_array().unwrap().is_empty(),
+        "{inventory}"
+    );
 }
 
 /// SPEC #3165 T-228 / FR-104: if another live gwt window wins the native
@@ -3483,15 +4290,12 @@ fn app_runtime_monitor_resume_if_safe_ignores_non_live_active_holder_entries() {
             expected_status,
             "fixture must expose the intended non-live window status",
         );
-        fixture.runtime.auto_launch_issue_monitor_delivery_events(
-            &fixture.runtime.test_context(),
-            3165,
-            LinkedIssueKind::Spec,
-            None,
+        let (owner, window_id, pane, _) = materialize_monitor_relaunch_at_owner(
+            &mut fixture,
             gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
         );
-        let result = take_monitor_launch_complete(case_name, &fixture.recorded_events);
-        assert_monitor_exact_resume(result, &fixture);
+        assert_owner_monitor_exact_resume(&owner, &pane, &fixture);
+        close_test_owner_runtime(&mut fixture.runtime, &window_id);
     }
 }
 
@@ -3533,15 +4337,12 @@ fn app_runtime_monitor_resume_if_safe_ignores_stale_pending_auto_resume_source()
         .values()
         .any(|(window_id, _)| window_id == holder_window_id));
 
-    fixture.runtime.auto_launch_issue_monitor_delivery_events(
-        &fixture.runtime.test_context(),
-        3165,
-        LinkedIssueKind::Spec,
-        None,
+    let (owner, window_id, pane, _) = materialize_monitor_relaunch_at_owner(
+        &mut fixture,
         gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
     );
-    let result = take_monitor_launch_complete(case_name, &fixture.recorded_events);
-    assert_monitor_exact_resume(result, &fixture);
+    assert_owner_monitor_exact_resume(&owner, &pane, &fixture);
+    close_test_owner_runtime(&mut fixture.runtime, &window_id);
 }
 
 /// SPEC #3165 T-226 / FR-103: failover/retry delivery policy bypasses the
@@ -3569,15 +4370,40 @@ fn app_runtime_monitor_fresh_required_delivery_skips_resumable_session() {
         MonitorNativeHolderFixture::None,
         true,
     );
-    fixture.runtime.auto_launch_issue_monitor_delivery_events(
-        &fixture.runtime.test_context(),
-        3165,
-        LinkedIssueKind::Spec,
-        fixture.delivery_id.clone(),
-        gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
-    );
+    let owner = start_monitor_relaunch_owner(&mut fixture, false);
+    let pause = owner_fixture_block_on(owner.pause_next_agent_launch_at(
+        gwt::project_runtime::test_support::OwnerLaunchStage::MaterializedBeforeInstall,
+    ))
+    .unwrap();
+    let previous_spawner = fixture.runtime.blocking_tasks.clone();
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    fixture
+        .runtime
+        .auto_launch_issue_monitor_delivery_events_for_project(
+            &fixture.project_root,
+            3165,
+            LinkedIssueKind::Spec,
+            fixture.delivery_id.clone(),
+            gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+        );
+    drain_queued_blocking_tasks(&queued);
+    let events =
+        fixture
+            .runtime
+            .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+                &fixture.recorded_events,
+            ));
+    fixture.runtime.blocking_tasks = previous_spawner;
+    let worker = thread::spawn(move || drain_queued_blocking_tasks(&queued));
+    let evidence = owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Bounds the actual owner materialization checkpoint; exact captured identity proves delivery ownership.
+        tokio::time::timeout(Duration::from_secs(30), pause.wait())
+            .await
+            .unwrap()
+    });
     let delivery_id = fixture.delivery_id.as_deref().expect("durable delivery id");
-    let materializer_id = fixture.runtime.issue_monitor_materializer_id.clone();
+    let materializer_id = owner.client().identity().unwrap().host_instance_id.clone();
     let persisted = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
         &fixture.project_root,
     ))
@@ -3603,10 +4429,18 @@ fn app_runtime_monitor_fresh_required_delivery_skips_resumable_session() {
     assert!(matches!(
         fixture.runtime.issue_monitor_launch_deliveries.get(delivery_id),
         Some(super::super::IssueMonitorLaunchDeliveryState::Materializing { window_id, .. })
-            if window_id == bound_window_id
+            if fixture.runtime.pending_launch_completions.get(window_id)
+                .is_some_and(|pending| pending.owner_pane_id == bound_window_id)
     ));
-    let result = take_monitor_launch_complete("FreshRequired delivery", &fixture.recorded_events);
-    assert_monitor_fresh_successor(result, &fixture);
+    assert_eq!(bound_window_id, evidence.id);
+    assert!(evidence.pty.is_none());
+    pause.release();
+    worker.join().unwrap();
+    let (window_id, pane, _) = finish_monitor_relaunch_owner(&mut fixture, events);
+    let pane = pane.unwrap();
+    assert_owner_monitor_fresh_successor(&pane, &fixture);
+    authenticate_monitor_owner_readiness(&owner, &pane);
+    close_test_owner_runtime(&mut fixture.runtime, &window_id);
 }
 
 /// SPEC #3165 T-226 / FR-103: FreshRequired selects the current Monitor
@@ -3640,33 +4474,23 @@ fn app_runtime_monitor_fresh_required_switches_to_current_provider_profile() {
     gwt::save_issue_monitor_prefs(&prefs_path, &prefs)
         .expect("save current Claude Monitor profile");
 
-    fixture.runtime.auto_launch_issue_monitor_delivery_events(
-        &fixture.runtime.test_context(),
-        3165,
-        LinkedIssueKind::Spec,
-        None,
+    let (owner, window_id, pane, _) = materialize_monitor_relaunch_at_owner(
+        &mut fixture,
         gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
     );
-    let result = take_monitor_launch_complete(
-        "FreshRequired provider profile switch",
-        &fixture.recorded_events,
-    );
-    let Ok((process, session_id, _, _, _, agent_id, _, _, _, session_mode, _, _)) = result else {
-        panic!("Issue Monitor provider-switch launch failed: {result:?}");
-    };
+    let successor = pane.session.as_ref().unwrap();
+    let agent_id = successor.agent_id.clone();
+    let session_mode = successor.session_mode;
     assert_eq!(agent_id, gwt_agent::AgentId::ClaudeCode);
     assert_eq!(session_mode, gwt_agent::SessionMode::Normal);
     assert!(
-        process
-            .args
+        successor
+            .launch_args
             .iter()
             .all(|argument| !argument.contains(&fixture.native_conversation_id)),
         "provider switch must not pass the old Codex conversation id: {:?}",
-        process.args,
+        successor.launch_args,
     );
-    let successor =
-        gwt_agent::Session::load(&fixture.sessions_dir.join(format!("{session_id}.toml")))
-            .expect("load Claude fresh successor Session");
     assert_eq!(successor.agent_id, gwt_agent::AgentId::ClaudeCode);
     assert_eq!(successor.session_mode, gwt_agent::SessionMode::Normal);
     assert!(successor.agent_session_id.is_none());
@@ -3677,6 +4501,8 @@ fn app_runtime_monitor_fresh_required_switches_to_current_provider_profile() {
     assert!(successor.skip_permissions);
     assert!(!successor.fast_mode);
     assert!(!successor.codex_fast_mode);
+    authenticate_monitor_owner_readiness(&owner, &pane);
+    close_test_owner_runtime(&mut fixture.runtime, &window_id);
 }
 
 /// Issue #3676 AC-1: `ResumeIfSafe` must not re-bind the launch to a stored
@@ -3712,18 +4538,13 @@ fn app_runtime_monitor_resume_if_safe_skips_provider_mismatched_session() {
     gwt::save_issue_monitor_prefs(&prefs_path, &prefs)
         .expect("save current Claude Monitor profile");
 
-    fixture.runtime.auto_launch_issue_monitor_delivery_events(
-        &fixture.runtime.test_context(),
-        3165,
-        LinkedIssueKind::Spec,
-        None,
+    let (owner, window_id, pane, _) = materialize_monitor_relaunch_at_owner(
+        &mut fixture,
         gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
     );
-    let result =
-        take_monitor_launch_complete("ResumeIfSafe provider mismatch", &fixture.recorded_events);
-    let Ok((process, session_id, _, _, _, agent_id, _, _, _, session_mode, _, _)) = result else {
-        panic!("Issue Monitor provider-mismatch launch failed: {result:?}");
-    };
+    let successor = pane.session.as_ref().unwrap();
+    let agent_id = successor.agent_id.clone();
+    let session_mode = successor.session_mode;
     assert_eq!(
         agent_id,
         gwt_agent::AgentId::ClaudeCode,
@@ -3731,20 +4552,19 @@ fn app_runtime_monitor_resume_if_safe_skips_provider_mismatched_session() {
     );
     assert_eq!(session_mode, gwt_agent::SessionMode::Normal);
     assert!(
-        process
-            .args
+        successor
+            .launch_args
             .iter()
             .all(|argument| !argument.contains(&fixture.native_conversation_id)),
         "provider mismatch must not pass the old Codex conversation id: {:?}",
-        process.args,
+        successor.launch_args,
     );
-    let successor =
-        gwt_agent::Session::load(&fixture.sessions_dir.join(format!("{session_id}.toml")))
-            .expect("load Claude fresh successor Session");
     assert_eq!(successor.agent_id, gwt_agent::AgentId::ClaudeCode);
     assert_eq!(successor.session_mode, gwt_agent::SessionMode::Normal);
     assert!(successor.agent_session_id.is_none());
     assert_eq!(successor.model.as_deref(), Some("sonnet"));
+    authenticate_monitor_owner_readiness(&owner, &pane);
+    close_test_owner_runtime(&mut fixture.runtime, &window_id);
 }
 
 /// Issue #3676 AC-2: a Monitor launch whose profile provider is definitively
@@ -3775,10 +4595,196 @@ fn app_runtime_monitor_launch_preflight_refuses_unauthenticated_provider() {
         MonitorNativeHolderFixture::None,
         true,
     );
+    // This saved predecessor has real Completed execution authority but has
+    // never emitted a runtime Work projection. Record its exact terminal row
+    // before asking the real owner to Continue it during the rejection race.
+    let predecessor = gwt_agent::Session::load(
+        &fixture
+            .sessions_dir
+            .join(format!("{}.toml", fixture.source_session_id)),
+    )
+    .unwrap();
+    let execution = gwt::cli::execution_state::load(&fixture.worktree)
+        .unwrap()
+        .unwrap();
+    assert_eq!(execution.primary_session_id, predecessor.id);
+    assert_eq!(
+        execution.owner_kind,
+        gwt::cli::execution_state::ExecutionOwnerKind::Spec
+    );
+    assert_eq!(execution.owner_number, 3165);
+    assert_eq!(
+        execution.status,
+        gwt::cli::execution_state::ExecutionControlStatus::Completed
+    );
+    let predecessor_work_id = gwt_core::workspace_projection::canonical_work_id(
+        &fixture.project_root,
+        Some(&predecessor.branch),
+        Some(&predecessor.worktree_path),
+    )
+    .expect("the canonical Work identity of the exact saved execution");
+    assert_eq!(
+        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&fixture.worktree),
+        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&fixture.project_root),
+        "the actual owning worktree and owner project must share the canonical Work projection"
+    );
+    assert_eq!(
+        gwt_core::workspace_projection::canonical_work_id(
+            &fixture.worktree,
+            Some(&predecessor.branch),
+            Some(&predecessor.worktree_path),
+        )
+        .as_deref(),
+        Some(predecessor_work_id.as_str())
+    );
+    let mut start = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        &predecessor_work_id,
+        predecessor.created_at,
+    );
+    start.owner = Some("SPEC-3165".into());
+    start.agent_session_id = Some(predecessor.id.clone());
+    start.agent_id = Some(predecessor.agent_id.to_string());
+    start.execution_container = Some(
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            branch: Some(predecessor.branch.clone()),
+            worktree_path: Some(predecessor.worktree_path.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        },
+    );
+    // Portable tracked shards belong to the real execution worktree; both
+    // views above resolve to the same home-scoped Work projection.
+    gwt_core::workspace_projection::record_workspace_work_event(&fixture.worktree, start).unwrap();
+    gwt_core::workspace_projection::record_workspace_work_event(
+        &fixture.worktree,
+        gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            &predecessor_work_id,
+            predecessor.updated_at,
+        ),
+    )
+    .unwrap();
     // The fixture writes rollouts but no auth.json: this CODEX_HOME is a
     // definitively unauthenticated Codex CLI for the real probe.
     let codex_home = PathBuf::from(std::env::var_os("CODEX_HOME").expect("CODEX_HOME is isolated"));
     assert!(!codex_home.join("auth.json").exists());
+    let owner = start_monitor_relaunch_owner(&mut fixture, false);
+    gwt::daemon_publisher::publish_durable_issue_monitor_control(
+        &fixture.project_root,
+        gwt::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({"scan_now":{}}),
+            std::process::id(),
+        ),
+    )
+    .expect("commit the actual Monitor's initial source scan request");
+    owner_fixture_block_on(owner.wait_monitor_idle()).unwrap();
+    let scanned = owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes),
+    )
+    .unwrap();
+    assert!(
+        scanned["panes"].as_array().unwrap().is_empty()
+            && scanned["pending"].as_array().unwrap().is_empty(),
+        "the source scan must not materialize a pane: {scanned}"
+    );
+    let _scan_pause = owner.pause_next_monitor_scan().unwrap();
+    // An unrelated real Work remains usable while this delivery is rejected.
+    // Establish its successful operation before the rejection is paused, so
+    // the same actor later has both a fresh Continue and an immutable replay.
+    let unrelated_worktree = fixture
+        .project_root
+        .parent()
+        .unwrap()
+        .join("unrelated-continue");
+    let unrelated_branch = "work/issue-3166";
+    run_git(
+        &fixture.project_root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            unrelated_branch,
+            unrelated_worktree.to_str().unwrap(),
+            "develop",
+        ],
+    );
+    let mut unrelated_config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(&unrelated_worktree)
+        .branch(unrelated_branch)
+        .base_branch("develop")
+        .model("gpt-5.5")
+        .reasoning_level("low")
+        .skip_permissions(true)
+        .build();
+    unrelated_config.linked_issue_number = Some(3166);
+    unrelated_config.explicit_follow_up = true;
+    let unrelated =
+        pane_control_tests::control_owner_launch(&owner, "unrelated-continue", unrelated_config);
+    if unrelated.pending_fresh_execution.is_some() {
+        authenticate_monitor_owner_readiness(&owner, &unrelated);
+    }
+    let unrelated =
+        owner_fixture_block_on(owner.probe(&unrelated.id, unrelated.incarnation)).unwrap();
+    let unrelated_session = unrelated.session.as_ref().unwrap();
+    let unrelated_work_id = gwt_core::workspace_projection::canonical_work_id(
+        &fixture.project_root,
+        Some(unrelated_branch),
+        Some(&unrelated_worktree),
+    )
+    .unwrap();
+    assert_ne!(unrelated_work_id, predecessor_work_id);
+    let mut unrelated_start = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        &unrelated_work_id,
+        unrelated_session.created_at,
+    );
+    unrelated_start.owner = Some("Issue #3166".into());
+    unrelated_start.agent_session_id = Some(unrelated_session.id.clone());
+    unrelated_start.agent_id = Some(unrelated_session.agent_id.to_string());
+    unrelated_start.execution_container = Some(
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            branch: Some(unrelated_branch.into()),
+            worktree_path: Some(unrelated_worktree.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        },
+    );
+    gwt_core::workspace_projection::record_workspace_work_event(
+        &unrelated_worktree,
+        unrelated_start,
+    )
+    .unwrap();
+    let mut continue_events = owner.subscribe();
+    let replay_operation_id = uuid::Uuid::new_v4().to_string();
+    let established = owner_fixture_block_on(owner.command(
+        gwt::project_runtime::events::OwnerCommand::ContinueWork {
+            client_id: "unrelated-established".into(),
+            operation_id: replay_operation_id.clone(),
+            work_id: unrelated_work_id.clone(),
+        },
+    ))
+    .expect("unrelated Work Continue succeeds before the rejection");
+    assert_eq!(established["id"], unrelated.id);
+    let established_outcome =
+        std::iter::from_fn(|| continue_events.try_recv().ok()).find_map(|event| match event {
+            gwt::project_runtime::events::OwnerEvent::ContinueWorkOutcome {
+                operation_id,
+                work_id,
+                outcome,
+                ..
+            } if operation_id == replay_operation_id && work_id == unrelated_work_id => {
+                Some(outcome)
+            }
+            _ => None,
+        });
+    assert_eq!(
+        established_outcome,
+        Some(gwt::ContinueWorkOutcomeKind::FocusedExisting)
+    );
     fixture.runtime.issue_monitor_provider_auth_probe =
         gwt::issue_monitor::provider_auth_state_from_env;
 
@@ -3793,32 +4799,369 @@ fn app_runtime_monitor_launch_preflight_refuses_unauthenticated_provider() {
             fixture.delivery_id.clone(),
             gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
         );
-    // This fixture has no daemon: claim/failure publication exercises the
-    // existing offline fallback, including its Git-backed cache validation.
-    // Keep this an authorization regression; request latency is tested separately.
     drain_queued_blocking_tasks(&queued);
-    let mut events =
+    let prepared = take_issue4803_monitor_preparation(&fixture.recorded_events);
+    let expected = prepared
+        .rejection
+        .as_ref()
+        .expect("first facts refusal captured its delivery");
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
+    let source_path = fixture
+        .sessions_dir
+        .join(format!("{}.toml", fixture.source_session_id));
+    let source_before = fs::read(&source_path).unwrap();
+    let prefs_before = fs::read(&prefs_path).unwrap();
+    let inventory_before = owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes),
+    )
+    .unwrap();
+    let mut stale = expected.clone();
+    stale.operation_id = uuid::Uuid::new_v4().to_string();
+    stale.expected_delivery.as_mut().unwrap().claim_id = "stale-foreign-claim".into();
+    assert!(
+        owner_fixture_block_on(owner.command(
+            gwt::project_runtime::events::OwnerCommand::RejectMonitorLaunch { rejection: stale }
+        ))
+        .is_err(),
+        "this new wire cannot settle another captured claim"
+    );
+    assert_eq!(fs::read(&prefs_path).unwrap(), prefs_before);
+    assert_eq!(fs::read(&source_path).unwrap(), source_before);
+    let unchanged = owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes),
+    )
+    .unwrap();
+    assert_eq!(unchanged["panes"], inventory_before["panes"]);
+    assert_eq!(unchanged["pending"], inventory_before["pending"]);
+    let expected_claim = expected
+        .expected_delivery
+        .as_ref()
+        .unwrap()
+        .claim_id
+        .clone();
+    // An actual profile edit makes the captured read-only expectation stale.
+    // The owner's refusal must leave the delivery pending and the GUI retryable.
+    let mut changed_prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+    let original_profiles = changed_prefs.launch_profile_pool();
+    let mut changed_profiles = original_profiles.clone();
+    changed_profiles[0].reasoning = Some("low".into());
+    assert_ne!(changed_profiles, original_profiles);
+    changed_prefs.set_launch_profile_pool(changed_profiles);
+    gwt::save_issue_monitor_prefs(&prefs_path, &changed_prefs).unwrap();
+    let changed_bytes = fs::read(&prefs_path).unwrap();
+    fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(prepared);
+    drain_queued_blocking_tasks(&queued);
+    let stale_completion = take_preflight_rejection_completion(&mut fixture);
+    assert!(
+        stale_completion
+            .result
+            .as_ref()
+            .is_err_and(|error| error.contains("profile changed")),
+        "the actual owner must reject the stale capture: {:?}",
+        stale_completion.result
+    );
+    fixture
+        .runtime
+        .handle_monitor_preflight_rejected(stale_completion.clone());
+    assert_eq!(fs::read(&prefs_path).unwrap(), changed_bytes);
+    assert_eq!(fs::read(&source_path).unwrap(), source_before);
+    let unchanged = owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes),
+    )
+    .unwrap();
+    assert_eq!(unchanged["panes"], inventory_before["panes"]);
+    assert_eq!(unchanged["pending"], inventory_before["pending"]);
+    let mut restored_prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+    restored_prefs.set_launch_profile_pool(original_profiles);
+    gwt::save_issue_monitor_prefs(&prefs_path, &restored_prefs).unwrap();
+    fixture
+        .runtime
+        .auto_launch_issue_monitor_delivery_events_for_project(
+            &fixture.project_root,
+            3165,
+            LinkedIssueKind::Spec,
+            fixture.delivery_id.clone(),
+            gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+        );
+    assert!(
+        !queued.lock().unwrap().is_empty(),
+        "an unconfirmed rejection must allow the same delivery to prepare fresh facts"
+    );
+    drain_queued_blocking_tasks(&queued);
+    let prepared = take_issue4803_monitor_preparation(&fixture.recorded_events);
+    assert_eq!(
+        prepared
+            .rejection
+            .as_ref()
+            .unwrap()
+            .expected_delivery
+            .as_ref()
+            .unwrap()
+            .claim_id,
+        expected_claim
+    );
+    let operation_id = prepared.rejection.as_ref().unwrap().operation_id.clone();
+    let pause = owner_fixture_block_on(owner.pause_next_agent_launch()).unwrap();
+    let mut events = fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(prepared);
+    let pending_observation = fixture.runtime.issue_monitor_launch_deliveries.clone();
+    assert!(fixture
+        .runtime
+        .handle_monitor_preflight_rejected(stale_completion)
+        .is_empty());
+    assert_eq!(
+        fixture.runtime.issue_monitor_launch_deliveries, pending_observation,
+        "an older operation's error cannot erase the newer rejection observation"
+    );
+    let rejection_tasks = queued.clone();
+    let rejection_home = gwt_core::test_support::gwt_home_override();
+    let rejection_worker = thread::spawn(move || {
+        let _home = rejection_home.as_ref().map(ScopedGwtHome::set);
+        drain_queued_blocking_tasks(&rejection_tasks);
+    });
+    let reached = owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Bounds the existing real-owner checkpoint, never orders competing writes by elapsed time.
+        tokio::time::timeout(Duration::from_secs(30), pause.wait()).await
+    });
+    let evidence = reached.unwrap_or_else(|error| {
+        let health = owner_fixture_block_on(owner.command(
+            gwt::project_runtime::events::OwnerCommand::Health,
+        ));
+        let recorded = fixture.recorded_events.lock().unwrap();
+        let completions = recorded.iter().filter_map(|event| match recorded_project_payload(event) {
+            UserEvent::IssueMonitorPreflightRejected(completion) => Some(completion),
+            _ => None,
+        }).collect::<Vec<_>>();
+        panic!("reject checkpoint was not reached: {error}; operation={operation_id}; worker_finished={}; health={health:?}; scans={}; completions={completions:?}; pending={:?}",
+            rejection_worker.is_finished(), _scan_pause.scans_started(),
+            gwt::load_issue_monitor_prefs(&prefs_path).map(|prefs| prefs.pending_launch_deliveries));
+    });
+    assert_eq!(evidence.operation_id, operation_id);
+    assert!(evidence.pty.is_none() && evidence.grant.is_none());
+    let claimed_before = fs::read(&prefs_path).unwrap();
+    let inventory_before = owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes),
+    )
+    .unwrap();
+    let works = gwt_core::workspace_projection::load_workspace_work_items(&fixture.project_root)
+        .unwrap()
+        .expect("the saved predecessor's canonical Work projection");
+    let work_id = gwt_core::workspace_projection::current_work_id_for_launch(
+        &works,
+        &fixture.project_root,
+        Some(&predecessor.branch),
+        Some(&fixture.worktree),
+        Some("SPEC-3165"),
+    )
+    .unwrap()
+    .expect("the real saved predecessor Work");
+    assert_eq!(work_id, predecessor_work_id);
+    let mut matching = works.work_items.iter().filter(|item| item.id == work_id);
+    let item = matching
+        .next()
+        .expect("the exact recorded predecessor Work");
+    assert!(matching.next().is_none() && item.is_terminal() && !item.discarded);
+    assert_eq!(item.owner.as_deref(), Some("SPEC-3165"));
+    let (worktree, branch) =
+        gwt::project_runtime::continuation::projection_only_continue_container(
+            item,
+            &fixture.project_root,
+        )
+        .expect("Continue must resolve the canonical source container");
+    assert!(gwt::launch_runtime::same_worktree_path(
+        &worktree,
+        &fixture.worktree
+    ));
+    assert_eq!(branch, predecessor.branch);
+    assert!(item
+        .agents
+        .iter()
+        .any(|agent| agent.session_id == predecessor.id));
+    let continue_result = owner_fixture_block_on(owner.command(
+        gwt::project_runtime::events::OwnerCommand::ContinueWork {
+            client_id: "preflight-race".into(),
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            work_id,
+        },
+    ));
+    let unrelated_operation_id = uuid::Uuid::new_v4().to_string();
+    let unrelated_continue_result = owner_fixture_block_on(owner.command(
+        gwt::project_runtime::events::OwnerCommand::ContinueWork {
+            client_id: "unrelated-during-rejection".into(),
+            operation_id: unrelated_operation_id.clone(),
+            work_id: unrelated_work_id.clone(),
+        },
+    ));
+    let replay_result = owner_fixture_block_on(owner.command(
+        gwt::project_runtime::events::OwnerCommand::ContinueWork {
+            client_id: "unrelated-established".into(),
+            operation_id: replay_operation_id.clone(),
+            work_id: unrelated_work_id.clone(),
+        },
+    ));
+    let unrelated_outcomes = std::iter::from_fn(|| continue_events.try_recv().ok())
+        .filter_map(|event| match event {
+            gwt::project_runtime::events::OwnerEvent::ContinueWorkOutcome {
+                operation_id,
+                work_id,
+                outcome,
+                ..
+            } => Some((operation_id, work_id, outcome)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let unrelated_after = owner_fixture_block_on(owner.probe(&unrelated.id, unrelated.incarnation));
+    let unrelated_was_live = unrelated_after
+        .as_ref()
+        .is_ok_and(|pane| pane.pty.try_wait().is_ok_and(|exit| exit.is_none()));
+    let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(&fixture.worktree)
+        .branch(git_stdout(&fixture.worktree, &["branch", "--show-current"]))
+        .base_branch(git_stdout(
+            &fixture.project_root,
+            &["branch", "--show-current"],
+        ))
+        .model("gpt-5.5")
+        .reasoning_level("high")
+        .skip_permissions(true)
+        .build();
+    config.linked_issue_number = Some(3165);
+    config.explicit_follow_up = true;
+    let competing_id = owner.pane_id("preflight-competing-launch");
+    assert_eq!(config.branch.as_deref(), Some(predecessor.branch.as_str()));
+    assert!(gwt::launch_runtime::same_worktree_path(
+        config.working_dir.as_deref().unwrap(),
+        &fixture.worktree
+    ));
+    assert_eq!(
+        gwt::cli::execution_state::detect_owner_kind_evidence(
+            config.working_dir.as_deref().unwrap(),
+            config.linked_issue_number.unwrap(),
+        ),
+        Some(gwt::cli::execution_state::ExecutionOwnerKind::Spec),
+        "the real competing launch must resolve the same SPEC owner, not a plain Issue generation"
+    );
+    let launch_result = owner_fixture_block_on(owner.command(
+        gwt::project_runtime::events::OwnerCommand::LaunchAgent {
+            id: competing_id.clone(),
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            tab_id: fixture.runtime.test_context().project_key.to_string(),
+            config: Box::new(config),
+            metadata: Box::default(),
+            cols: 80,
+            rows: 24,
+        },
+    ));
+    let claimed_after = fs::read(&prefs_path).unwrap();
+    let source_after = fs::read(&source_path).unwrap();
+    let inventory_after = owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes),
+    )
+    .unwrap();
+    pause.release();
+    rejection_worker.join().unwrap();
+    // Preserve exact cleanup if either producing request escaped the pre-fix
+    // guard, using the real inventory after the rejection worker has finished.
+    let cleanup = owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes),
+    )
+    .unwrap();
+    for pane in cleanup["panes"].as_array().unwrap().iter().filter(|pane| {
+        !inventory_before["panes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|before| {
+                before["id"] == pane["id"] && before["incarnation"] == pane["incarnation"]
+            })
+    }) {
+        owner_fixture_block_on(
+            owner.command(gwt::project_runtime::events::OwnerCommand::Close {
+                id: pane["id"].as_str().unwrap().to_string(),
+                incarnation: pane["incarnation"].as_u64().unwrap(),
+            }),
+        )
+        .unwrap();
+    }
+    pane_control_tests::control_close(&owner, &unrelated);
+    assert!(continue_result.as_ref().is_err_and(|error| error.contains("operation is in progress")),
+        "Continue must not prepare a second writer while the exact rejection is unfinished: {continue_result:?}");
+    assert!(
+        launch_result
+            .as_ref()
+            .is_err_and(|error| error.contains("operation is in progress")),
+        "same-Issue launch must not cross the rejection commit: {launch_result:?}"
+    );
+    assert_eq!(
+        claimed_after, claimed_before,
+        "competing requests cannot rewrite the exact claim"
+    );
+    assert_eq!(
+        source_after, source_before,
+        "competing requests cannot rewrite the exact source"
+    );
+    assert_eq!(inventory_after["panes"], inventory_before["panes"]);
+    assert_eq!(inventory_after["pending"], inventory_before["pending"]);
+    assert!(unrelated_continue_result.is_ok(),
+        "an unrelated Work must remain continuable during another Issue's rejection: new={unrelated_continue_result:?}; immutable_replay={replay_result:?}");
+    assert!(
+        replay_result.is_ok(),
+        "an established immutable operation must remain replayable: {replay_result:?}"
+    );
+    for operation_id in [&unrelated_operation_id, &replay_operation_id] {
+        assert!(
+            unrelated_outcomes.iter().any(|(operation, work, outcome)| {
+                operation == operation_id
+                    && work == &unrelated_work_id
+                    && *outcome == gwt::ContinueWorkOutcomeKind::FocusedExisting
+            }),
+            "each permitted Continue must focus the existing exact holder: {unrelated_outcomes:?}"
+        );
+    }
+    let unrelated_after = unrelated_after.expect("the unrelated physical holder remains installed");
+    assert!(unrelated_was_live);
+    assert_eq!(unrelated_after.id, unrelated.id);
+    assert_eq!(unrelated_after.incarnation, unrelated.incarnation);
+    assert_eq!(
+        unrelated_after.session.as_ref().unwrap().id,
+        unrelated_session.id
+    );
+    assert_eq!(unrelated_after.pty.process_id(), unrelated.pty.process_id());
+    assert!(Arc::ptr_eq(&unrelated_after.pty, &unrelated.pty));
+    assert!(unrelated.pty.tree_exit_confirmed());
+    let completion = take_preflight_rejection_completion(&mut fixture);
+    let receipt = completion
+        .result
+        .as_ref()
+        .expect("canonical owner rejects unauthenticated provider");
+    let claimed = &receipt["claimed_delivery"];
+    assert_eq!(
+        claimed["delivery_id"].as_str(),
+        fixture.delivery_id.as_deref()
+    );
+    assert_eq!(claimed["claim_id"], expected_claim);
+    assert_eq!(
+        claimed["materializer_id"],
+        owner.client().identity().unwrap().host_instance_id
+    );
+    assert_eq!(claimed["materializer_pid"], std::process::id());
+    assert!(claimed["materializer_window_id"].as_str().is_some());
+    assert!(claimed["materialized_window_id"].is_null());
+    assert!(claimed["workspace_durable_window_id"].is_null());
+    assert_eq!(receipt["no_pty"], true);
+    assert_eq!(receipt["no_submit"], true);
+    assert_eq!(
+        receipt["settled"], true,
+        "the actor's canonical claim readback must precede its no-PTY failure settlement"
+    );
+    events.extend(
         fixture
             .runtime
-            .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
-                &fixture.recorded_events,
-            ));
-    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
-    let claimed = gwt::load_issue_monitor_prefs(&prefs_path).expect("read claimed rejection");
-    assert!(
-        claimed.pending_launch_deliveries.iter().any(|delivery| {
-            Some(&delivery.delivery_id) == fixture.delivery_id.as_ref()
-                && delivery.materializer_id.as_deref()
-                    == Some(fixture.runtime.issue_monitor_materializer_id.as_str())
-                && delivery.materializer_window_id.is_some()
-        }),
-        "the rejected launch must own its exact delivery before failure settlement runs"
+            .handle_monitor_preflight_rejected(completion),
     );
-    // Rejection settlement now uses the same worker boundary as launch preparation.
-    drain_queued_blocking_tasks(&queued);
-    events.extend(fixture.runtime.handle_issue_monitor_launch_prepared(
-        take_issue4803_monitor_preparation(&fixture.recorded_events),
-    ));
     let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("read rejected delivery");
     assert!(
         prefs
@@ -3857,6 +5200,19 @@ fn app_runtime_monitor_launch_preflight_refuses_unauthenticated_provider() {
             UserEvent::LaunchComplete { .. }
         )),
         "refused launch must not spawn a PTY",
+    );
+    assert_eq!(fs::read(source_path).unwrap(), source_before);
+    let inventory = owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes),
+    )
+    .unwrap();
+    assert!(
+        inventory["panes"].as_array().unwrap().is_empty(),
+        "{inventory}"
+    );
+    assert!(
+        inventory["pending"].as_array().unwrap().is_empty(),
+        "{inventory}"
     );
 }
 
@@ -4862,15 +6218,14 @@ fn app_runtime_monitor_plain_issue_resume_receives_delivery_prompt() {
     run_git(&fixture.worktree, &["add", "fix.rs"]);
     run_git(&fixture.worktree, &["commit", "-qm", "undelivered fix"]);
 
-    prepare_monitor_relaunch(
+    let (owner, window_id, pane, _) = materialize_monitor_relaunch_at_owner(
         &mut fixture,
         gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
     );
-    let result = take_monitor_launch_complete("plain-issue-delivery", &fixture.recorded_events);
-    let (process, .., session_mode, _, _) = result.as_ref().expect("ordinary Issue Resume");
-    assert_eq!(*session_mode, gwt_agent::SessionMode::Resume);
-    let prompt = process
-        .args
+    let session = pane.session.as_ref().unwrap();
+    assert_eq!(session.session_mode, gwt_agent::SessionMode::Resume);
+    let prompt = session
+        .launch_args
         .iter()
         .find(|argument| {
             argument.contains("verify.run, a pull request, and its merge into develop")
@@ -4878,259 +6233,314 @@ fn app_runtime_monitor_plain_issue_resume_receives_delivery_prompt() {
         .unwrap_or_else(|| {
             panic!(
                 "Resume must receive the delivery prompt: {:?}",
-                process.args
+                session.launch_args
             )
         });
     assert!(prompt.contains("against origin/develop"), "{prompt}");
     assert!(!prompt.contains("close Issue #3165 and finish"), "{prompt}");
+    assert_owner_monitor_exact_resume(&owner, &pane, &fixture);
+    close_test_owner_runtime(&mut fixture.runtime, &window_id);
 }
 
 /// Issue #4222: retain the quota pane and its work, but release its native
 /// writer after the real child exits, including an Error hidden by Waiting.
 #[test]
 fn app_runtime_monitor_quota_hold_clear_resumes_the_same_conversation() {
+    use gwt::project_runtime::{events::OwnerCommand, launch_payload::OwnerLaunchMetadata};
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let temp = tempdir().unwrap();
-    let _home = ScopedEnvVar::set("HOME", temp.path());
-    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
-    let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
-    let _session_runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
-    let _ready_nonce = ScopedEnvVar::unset(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV);
-    let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
-    let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
-    let _pane_url = ScopedEnvVar::unset(gwt_agent::GWT_PANE_WS_URL_ENV);
-
-    for (case, exit_code, status) in [
-        ("quota-clean-exit", 0, WindowProcessStatus::Stopped),
-        ("quota-error-exit", 1, WindowProcessStatus::Error),
-    ] {
-        let mut fixture = monitor_relaunch_fixture(
-            temp.path(),
-            case,
-            MonitorProviderConversationFixture::Present,
-            MonitorNativeHolderFixture::ActiveSameConversation,
-            false,
-        );
-        let window_id = fixture.holder_window_id.clone().unwrap();
-        fixture
-            .runtime
-            .active_agent_sessions
-            .get_mut(&window_id)
-            .unwrap()
-            .session_id = fixture.source_session_id.clone();
-        fixture.runtime.tabs[0]
-            .workspace
-            .set_session_id("agent-holder", Some(fixture.source_session_id.clone()));
-        let unfinished = fixture.worktree.join("unfinished.txt");
-        fs::write(&unfinished, "uncommitted work").unwrap();
-        insert_exited_test_pane_runtime(&mut fixture.runtime, &window_id, exit_code);
-        fixture
-            .runtime
-            .handle_runtime_status_with_exit_confirmation(
-                window_id.clone(),
-                status,
-                Some(CODEX_USAGE_LIMIT_SCREEN.to_string()),
-                true,
-            );
-        assert_eq!(
-            fixture.runtime.window_status(&window_id),
-            Some(WindowProcessStatus::Waiting)
-        );
-        assert!(fixture
-            .runtime
-            .active_agent_sessions
-            .contains_key(&window_id));
-        let gwt::IssueMonitorFailure::ProviderUsageLimit {
-            provider,
-            resets_at,
-            evidence,
-            ..
-        } = fixture.runtime.provider_quota_holds[&window_id].clone()
-        else {
-            panic!("quota exit must form a typed hold")
-        };
-
-        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
-        let mut monitor = test_monitor_with_prefs(
-            gwt::IssueMonitorConfig::default(),
-            gwt::load_issue_monitor_prefs(&prefs_path).unwrap(),
-        );
-        monitor.complete_active_launch(3165, &window_id);
-        let now = Utc::now().to_rfc3339();
-        assert_eq!(
-            monitor.try_hold_provider_usage_limit(
-                3165,
-                &window_id,
-                &provider,
-                "provider usage limit",
-                resets_at.as_deref(),
-                evidence.map(|evidence| *evidence),
-                &now,
+    let _thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
+    for exit_code in [0, 1] {
+        let temp = tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let (root, owner, _) = owner_monitor_fixture(temp.path(), 3165, false, &["codex"]);
+        let runner = write_fake_codex(temp.path());
+        #[cfg(unix)]
+        fs::write(&runner, format!("#!/bin/sh\ncase \"$*\" in *--version*) printf '1.2.3\\n'; exit 0;; *'features list'*) exit 0;; esac\nprintf 'quota-fixture-ready\\n'\nread value\nprintf '%s\\n' \"{}\"\nexit {exit_code}\n", CODEX_USAGE_LIMIT_SCREEN)).unwrap();
+        #[cfg(windows)]
+        fs::write(
+            &runner,
+            format!(
+                concat!(
+                    "@echo off\r\n",
+                    "chcp 65001 >nul\r\n",
+                    "if \"%~1\"==\"--version\" (echo 1.2.3 & exit /b 0)\r\n",
+                    ":probe\r\n",
+                    "if \"%~1\"==\"\" goto launch\r\n",
+                    "if \"%~1\"==\"--sandbox\" goto launch\r\n",
+                    "if \"%~1 %~2\"==\"features list\" exit /b 0\r\n",
+                    "shift\r\n",
+                    "goto probe\r\n",
+                    ":launch\r\n",
+                    "echo quota-fixture-ready\r\nset /p value=\r\necho {}\r\nexit /b {}\r\n",
+                ),
+                CODEX_USAGE_LIMIT_SCREEN.replace('\n', "\r\necho "),
+                exit_code
             ),
-            gwt::IssueMonitorProviderUsageLimitOutcome::Held
+        )
+        .unwrap();
+        // Restore rebuilds Codex from the canonical profile, independently of
+        // the initial command override. Both launches must use this fixture.
+        let profile = gwt_core::paths::gwt_config_path();
+        let mut settings = if profile.exists() {
+            Settings::load_from_path(&profile).unwrap()
+        } else {
+            Settings::default()
+        };
+        pin_launch_agents(&mut settings, temp.path());
+        write_profile_config(&profile, &settings);
+        let mut selected = super::pane_control_tests::control_launch_config(&root, 3165);
+        run_git(
+            selected.working_dir.as_ref().unwrap(),
+            &["branch", "-m", "work/issue-3165"],
         );
+        selected.branch = Some("work/issue-3165".into());
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .working_dir(selected.working_dir.clone().unwrap())
+            .branch(selected.branch.clone().unwrap())
+            .base_branch(selected.base_branch.clone().unwrap())
+            .build();
+        config.command = runner.display().to_string();
+        config.linked_issue_number = Some(3165);
+        config.explicit_follow_up = true;
+        config.launch_route = gwt_agent::LaunchRoute::Autonomous;
+        let id = owner.pane_id("quota-holder");
+        let mut feedback = issue_monitor_feedback(3165);
+        feedback.issue_monitor_project_root = Some(root.clone());
+        feedback.issue_monitor_session_mode = Some(config.session_mode);
+        let receipt = owner_fixture_block_on(owner.command(OwnerCommand::LaunchAgent {
+            id: id.clone(),
+            operation_id: "quota-holder-launch".into(),
+            tab_id: id.split_once("::").unwrap().0.into(),
+            config: Box::new(config.clone()),
+            metadata: Box::new(OwnerLaunchMetadata {
+                launch_feedback_context: Some(feedback),
+                ..Default::default()
+            }),
+            cols: 80,
+            rows: 24,
+        }))
+        .unwrap();
+        let pane =
+            owner_fixture_block_on(owner.probe(&id, receipt["incarnation"].as_u64().unwrap()))
+                .unwrap();
+        owner_fixture_block_on(owner.command(OwnerCommand::AcknowledgeMonitorLaunch {
+            id: id.clone(),
+            incarnation: pane.incarnation,
+            issue_number: 3165,
+            delivery_id: None,
+        }))
+        .unwrap();
+        let source = pane.session.as_ref().unwrap();
+        let hook = serde_json::json!({
+            "hook_event_name": "SessionStart",
+            "session_id": "same-quota-conversation",
+            "cwd": source.worktree_path,
+        })
+        .to_string();
+        pane.with_agent_environment(|| {
+            gwt::daemon_runtime::handle_runtime_state("SessionStart", &hook).unwrap();
+            gwt::daemon_runtime::handle_forward_for_event("SessionStart", &hook).unwrap();
+        });
+        owner_fixture_block_on(owner.command(OwnerCommand::Health)).unwrap();
+        let unfinished = source.worktree_path.join("unfinished.txt");
+        fs::write(&unfinished, "uncommitted work").unwrap();
+        owner_fixture_block_on(async {
+            // test-hygiene: allow-wall-clock-deadline Bounds actual provider startup; its rendered Ready marker is the input barrier.
+            tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    let snapshot = owner
+                        .command(OwnerCommand::Snapshot {
+                            id: id.clone(),
+                            incarnation: pane.incarnation,
+                        })
+                        .await
+                        .unwrap();
+                    if snapshot["screen"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains("quota-fixture-ready")
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("actual quota provider must be ready before release input");
+        });
+        let mut close_events = owner.subscribe();
+        owner_fixture_block_on(
+            owner.command(OwnerCommand::Input {
+                id: id.clone(),
+                incarnation: pane.incarnation,
+                data: if cfg!(windows) {
+                    b"release\r"
+                } else {
+                    b"release\n"
+                }
+                .to_vec(),
+            }),
+        )
+        .unwrap();
+        // test-hygiene: allow-wall-clock-deadline Bounds actual provider exit/finalizer IPC; the Closed receipt and physical reap establish restart authority.
+        let saw_waiting = owner_fixture_block_on(async {
+            // test-hygiene: allow-wall-clock-deadline Bounds actual provider exit/finalizer or restart checkpoint; exact physical receipts establish authority.
+            tokio::time::timeout(Duration::from_secs(30), async {
+                let mut waiting = false;
+                loop {
+                    match close_events.recv().await.unwrap() {
+                        gwt::project_runtime::events::OwnerEvent::Status {
+                            id: event_id,
+                            incarnation,
+                            status: WindowProcessStatus::Waiting,
+                            ..
+                        } if event_id == id && incarnation == pane.incarnation => waiting = true,
+                        gwt::project_runtime::events::OwnerEvent::Closed {
+                            id: event_id,
+                            incarnation,
+                            error,
+                            ..
+                        } if event_id == id && incarnation == pane.incarnation => {
+                            assert!(error.is_none(), "{error:?}");
+                            break waiting;
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .unwrap()
+        });
+        assert!(
+            saw_waiting,
+            "confirmed provider quota exit {exit_code} must retain a Waiting diagnostic; physical exit={:?}; final screen={:?}",
+            pane.pty.try_wait(),
+            pane.pane.lock().unwrap().screen().contents()
+        );
+        assert!(pane.pty.try_wait().unwrap().is_some());
+        assert!(
+            owner_fixture_block_on(owner.probe(&id, pane.incarnation)).is_err(),
+            "the retained Waiting row cannot own a physical runtime after exact drain"
+        );
+        let monitor = owner_monitor_read(&root, 3165);
         assert!(!monitor.prefs().provider_quota_holds.is_empty());
-        monitor.clear_provider_quota_hold("codex", "quota reset", &now);
-        assert!(monitor.prefs().provider_quota_holds.is_empty());
-        gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
-
-        // Monitor admission is released independently of the retained screen.
+        let registry =
+            gwt::persistence::load_workspace_state(&gwt::persistence::workspace_state_path(&root))
+                .unwrap();
+        assert!(registry
+            .windows
+            .iter()
+            .any(|row| row.session_id.as_deref() == Some(source.id.as_str())
+                && row.status == WindowProcessStatus::Waiting));
+        gwt::daemon_publisher::publish_durable_issue_monitor_control(&root,
+            gwt::runtime_daemon_events::issue_monitor_payload("control", serde_json::json!({"quota_hold_clear":{"provider":"codex","reason":"quota reset","released_at":Utc::now().to_rfc3339()}}), std::process::id())).unwrap();
+        assert!(owner_monitor_read(&root, 3165)
+            .prefs()
+            .provider_quota_holds
+            .is_empty());
         assert_eq!(
-            fixture.runtime.window_status(&window_id),
-            Some(WindowProcessStatus::Waiting)
+            gwt::persistence::load_workspace_state(&gwt::persistence::workspace_state_path(&root))
+                .unwrap()
+                .windows,
+            registry.windows,
+            "Monitor admission release must preserve the retained quota screen"
         );
-        let candidate = fixture
-            .runtime
-            .issue_monitor_session_by_id(&fixture.source_session_id)
-            .unwrap();
+        let latest = gwt_agent::Session::load(
+            &gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", source.id)),
+        )
+        .unwrap();
         assert_eq!(
-            fixture
-                .runtime
-                .issue_monitor_native_conversation_holder_excluding(&candidate, None),
-            None
+            latest.agent_session_id.as_deref(),
+            Some("same-quota-conversation")
         );
-        let events = prepare_monitor_relaunch(
-            &mut fixture,
-            gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+        owner_fixture_block_on(
+            owner.set_pty_start_gate(temp.path().join("missing-restart-gate"), Vec::new()),
+        )
+        .unwrap();
+        let pause = owner_fixture_block_on(owner.pause_next_agent_launch_at(
+            gwt::project_runtime::test_support::OwnerLaunchStage::MaterializedBeforeInstall,
+        ))
+        .unwrap();
+        let client = owner.client();
+        let restart_id = id.clone();
+        let restart_source = latest.clone();
+        let restart = thread::spawn(move || {
+            owner_fixture_block_on(client.command(OwnerCommand::RestoreSavedSession {
+                id: restart_id,
+                operation_id: "quota-restart".into(),
+                source_session_id: restart_source.id.clone(),
+                expected_source: Box::new(restart_source),
+                origin: gwt_agent::SessionLaunchOrigin::UserRestart,
+                cols: 80,
+                rows: 24,
+            }))
+        });
+        // test-hygiene: allow-wall-clock-deadline Bounds the actual restart preparation checkpoint; the pending owner reservation supplies exclusion.
+        let prepared =
+            owner_fixture_block_on(async {
+                // test-hygiene: allow-wall-clock-deadline Bounds actual provider exit/finalizer or restart checkpoint; exact physical receipts establish authority.
+                tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                tokio::select! {
+                    evidence = pause.wait() => break Some(evidence),
+                    _ = tokio::task::yield_now() => if restart.is_finished() { break None; },
+                }
+            }
+        }).await.unwrap()
+            });
+        if prepared.is_none() {
+            let refused = restart.join().unwrap();
+            super::pane_control_tests::control_close(&owner, &pane);
+            panic!("a physically exited quota holder must permit same-conversation restart: {refused:?}");
+        }
+        let prepared = prepared.unwrap();
+        let inventory = owner_fixture_block_on(owner.command(OwnerCommand::ListPanes)).unwrap();
+        assert_eq!(inventory["pending"].as_array().unwrap().len(), 1);
+        assert!(
+            !restart.is_finished(),
+            "the exact pending restart retains its materialization reservation"
         );
-        let (prepared_window_id, mut completion) =
-            take_monitor_launch_complete_event(case, &fixture.recorded_events);
-        assert_monitor_exact_resume(completion.clone(), &fixture);
-        // This fixture routes the completion into an in-place restart below.
-        // Consume the original placeholder's worker as the GUI handler would.
-        fixture
-            .runtime
-            .initial_launch_workers
-            .remove(&prepared_window_id);
-        assert!(fixture.runtime.window_lookup.contains_key(&window_id));
-        assert!(fixture
-            .runtime
-            .active_agent_sessions
-            .contains_key(&window_id));
+        // This independent request captures its source after the first
+        // restore's preparation; the first request keeps its original snapshot.
+        let duplicate_source = gwt_agent::Session::load(
+            &gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", latest.id)),
+        )
+        .unwrap();
+        let duplicate = owner_fixture_block_on(owner.command(OwnerCommand::RestoreSavedSession {
+            id: owner.pane_id("duplicate"),
+            operation_id: "duplicate-restart".into(),
+            source_session_id: duplicate_source.id.clone(),
+            expected_source: Box::new(duplicate_source),
+            origin: gwt_agent::SessionLaunchOrigin::UserRestart,
+            cols: 80,
+            rows: 24,
+        }))
+        .unwrap();
+        assert_eq!(
+            duplicate["restore_refusal"]["code"],
+            "worktree_already_restoring"
+        );
         assert_eq!(fs::read_to_string(&unfinished).unwrap(), "uncommitted work");
-        assert!(!events.iter().any(|event| matches!(&event.event,
-            BackendEvent::IssueMonitorToast { message, .. } if message.contains("held by window")
-        )));
-
-        let (spawner, tasks) = BlockingTaskSpawner::queued();
-        fixture.runtime.blocking_tasks = spawner;
-        // Capture another delivery before restart begins, then apply its worker
-        // facts after the reservation appears to exercise GUI revalidation too.
-        fixture
-            .runtime
-            .auto_launch_issue_monitor_delivery_events_for_project(
-                &fixture.project_root,
-                3165,
-                LinkedIssueKind::Spec,
-                None,
-                gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
-            );
-        drain_queued_blocking_tasks(&tasks);
-        let delayed_delivery = take_issue4803_monitor_preparation(&fixture.recorded_events);
-
-        // An in-place restart reuses this ID before replacing the exited Pane.
-        // Its current launch, rather than the old exit receipt, owns the writer.
-        fixture
-            .runtime
-            .initial_launch_workers
-            .insert(window_id.clone(), None);
-        fixture
-            .runtime
-            .pending_auto_resume_sources
-            .insert(window_id.clone(), fixture.source_session_id.clone());
-        fixture.runtime.inflight_launches.insert(
-            "restart-reservation".into(),
-            (window_id.clone(), Instant::now()),
+        pause.release();
+        let failed = restart.join().unwrap();
+        assert!(
+            failed.is_err()
+                || failed
+                    .as_ref()
+                    .is_ok_and(|value| value.get("launch_failure").is_some()),
+            "the real missing gate must fail before replacement spawn: {failed:?}"
+        );
+        let after = owner_fixture_block_on(owner.command(OwnerCommand::ListPanes)).unwrap();
+        assert!(
+            after["pending"].as_array().unwrap().is_empty(),
+            "failed restart releases its exact reservation without a GUI tick"
         );
         assert_eq!(
-            fixture
-                .runtime
-                .live_issue_agent_window("tab-1", 3165, "work/issue-3165"),
-            Some(window_id.clone()),
+            prepared.session.as_ref().unwrap().agent_session_id,
+            latest.agent_session_id
         );
-        let windows_before_delivery = fixture.runtime.window_lookup.len();
-        fixture
-            .runtime
-            .handle_issue_monitor_launch_prepared(delayed_delivery);
-        assert_eq!(fixture.runtime.issue_monitor_launch_queue.len(), 1);
-        assert!(fixture.runtime.pending_launch_delivery_acks.is_empty());
-        fixture
-            .runtime
-            .auto_launch_issue_monitor_delivery_events_for_project(
-                &fixture.project_root,
-                3165,
-                LinkedIssueKind::Spec,
-                None,
-                gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
-            );
-        assert_eq!(
-            fixture.runtime.issue_monitor_launch_queue.len(),
-            1,
-            "a reserved restart cannot acknowledge or launch another delivery",
-        );
-        assert!(fixture.runtime.pending_launch_delivery_acks.is_empty());
-        fixture.runtime.advance_issue_monitor_launch_queue_events();
-        assert_eq!(fixture.runtime.issue_monitor_launch_queue.len(), 1);
-        assert_eq!(fixture.runtime.window_lookup.len(), windows_before_delivery);
-        // Fail before spawning a replacement child, so the test can also prove
-        // the failed attempt releases its reservation without closing the pane.
-        completion.as_mut().unwrap().0.command = temp
-            .path()
-            .join("missing-restart-agent")
-            .display()
-            .to_string();
-        fixture
-            .runtime
-            .handle_launch_complete(window_id.clone(), completion);
-        assert!(!fixture
-            .runtime
-            .initial_launch_workers
-            .contains_key(&window_id));
-        assert!(!fixture
-            .runtime
-            .pending_auto_resume_sources
-            .contains_key(&window_id));
-        assert!(fixture
-            .runtime
-            .pending_launch_completions
-            .contains_key(&window_id));
-        assert_eq!(
-            fixture
-                .runtime
-                .issue_monitor_native_conversation_holder_excluding(&candidate, None),
-            Some(window_id.clone()),
-            "the completion worker must retain the writer after consuming the pending source",
-        );
-        assert_eq!(
-            fixture
-                .runtime
-                .live_issue_agent_window("tab-1", 3165, "work/issue-3165"),
-            Some(window_id.clone()),
-        );
-        assert_eq!(fixture.runtime.issue_monitor_launch_queue.len(), 1);
-        assert!(fixture.runtime.pending_launch_delivery_acks.is_empty());
-        assert_eq!(fixture.runtime.window_lookup.len(), windows_before_delivery);
-        drain_queued_blocking_tasks(&tasks);
-        let prepared = take_prepared_agent_launch(&fixture.recorded_events);
-        fixture.runtime.handle_agent_launch_prepared(prepared);
-        assert!(!fixture
-            .runtime
-            .pending_launch_completions
-            .contains_key(&window_id));
-        assert_eq!(
-            fixture
-                .runtime
-                .issue_monitor_native_conversation_holder_excluding(&candidate, None),
-            None,
-            "a failed restart must release the writer reservation",
-        );
-        assert!(fixture.runtime.window_lookup.contains_key(&window_id));
-        assert!(fixture.runtime.issue_monitor_launch_queue.is_empty());
-        assert_eq!(fixture.runtime.issue_monitor_launch_preparations.len(), 1);
-        assert!(fixture.runtime.pending_launch_delivery_acks.is_empty());
         assert_eq!(fs::read_to_string(&unfinished).unwrap(), "uncommitted work");
     }
 }

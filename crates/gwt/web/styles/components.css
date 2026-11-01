@@ -935,6 +935,41 @@ body::after {
 }
 
 
+/* Issue #6476: keep every top-bar action reachable on phone-sized screens.
+   Let the chrome row grow when the existing controls wrap. */
+@media (max-width: 600px) {
+  #app {
+    grid-template-rows: auto auto minmax(0, 1fr) 28px;
+  }
+
+  .project-bar {
+    min-height: 44px;
+    padding: var(--space-1) var(--space-2);
+  }
+
+  .project-bar::before {
+    display: none;
+  }
+
+  .project-bar .project-actions {
+    flex: 1 1 auto;
+    min-width: 0;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+  }
+
+  .project-actions > .arrange-button,
+  .project-actions > .app-version,
+  .project-actions .op-theme-toggle__option {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .project-actions .op-theme-toggle {
+    height: auto;
+  }
+}
+
 @media (forced-colors: active) {
   .op-rail {
     border-right: 1px solid CanvasText;
@@ -4683,21 +4718,6 @@ button.workspace-board-ref:focus-visible {
   font-size: var(--type-sm);
 }
 
-:root[data-theme] .settings-issues-capacity {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-2);
-}
-
-:root[data-theme] .settings-issues-capacity .settings-help {
-  flex-basis: 100%;
-}
-
-:root[data-theme] .settings-issues-capacity .settings-input {
-  width: 6ch;
-}
-
 :root[data-theme] .settings-issues-description {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -5916,6 +5936,15 @@ button.workspace-board-ref:focus-visible {
   #app:has(> .workspace-state-notice) {
     grid-template-rows: 44px auto auto minmax(0, 1fr) 28px;
     grid-template-areas: "projectbar" "notice" "rail" "surface" "strip";
+  }
+}
+@media (max-width: 600px) {
+  #app:has(> .workspace-state-notice) {
+    grid-template-rows: auto auto auto minmax(0, 1fr) 28px;
+  }
+  .workspace-state-notice span {
+    max-height: 25vh;
+    overflow-y: auto;
   }
 }
 .terminal-text-preview { margin: 0; padding: var(--space-2); overflow: auto; height: 100%; white-space: pre; font-family: var(--font-mono); color: var(--color-text); background: var(--color-surface); }

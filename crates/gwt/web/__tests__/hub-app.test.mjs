@@ -368,3 +368,44 @@ test("unknown Hub actions retain the ordinary picker", () => {
   assert.deepEqual(sockets[0].sent, [{ kind: "frontend_ready" }]);
   assert.equal(document.querySelector('#clone-project-modal').getAttribute("aria-hidden"), "true");
 });
+
+// AC-5: one owner's failure must leave another project's row usable.
+test("project owner health updates only the matching Hub project", () => {
+  const { document, sockets } = fixture();
+  sockets[0].open();
+  sockets[0].deliver(hubState([
+    { ...projectA, owner_health: { project_key: projectA.project_key, state: "degraded", detail: "Project connection lost" } },
+    { ...projectB, owner_health: { project_key: projectB.project_key, state: "healthy", detail: null } },
+  ]));
+  const a = document.querySelector(`[data-project-health="${projectA.project_key}"]`);
+  const b = document.querySelector(`[data-project-health="${projectB.project_key}"]`);
+  assert.equal(a?.dataset.state, "degraded");
+  assert.match(a.textContent, /unavailable/i);
+  assert.equal(b?.dataset.state, "healthy");
+  assert.equal(document.querySelector(`a[data-project-key="${projectB.project_key}"]`)?.getAttribute("href"), `/p/${projectB.project_key}`);
+});
+
+test("Hub retries an observed draining project with an opaque single-use token while Beta remains usable", () => {
+  const { document, sockets } = fixture();
+  const socket = sockets[0];
+  socket.open();
+  const state = hubState([projectB]);
+  state.hub.orphan_daemons = [{ project_key: projectA.project_key, title: "Alpha", detail: "終了処理の再試行が必要です", observation_token: "observation-once" }];
+  socket.deliver(state);
+  const retry = document.querySelector('[data-orphan-retry]');
+  assert.ok(retry);
+  assert.equal(retry.textContent, "Retry shutdown");
+  retry.click();
+  assert.deepEqual(socket.sent.at(-1), { kind: "reap_orphan_daemon", observation_token: "observation-once" });
+  assert.equal(retry.disabled, true);
+  socket.deliver({ kind: "orphan_daemon_result", message: "観測が古くなりました。再確認してください。" });
+  assert.match(document.querySelector('[role="alert"]').textContent, /観測が古く/);
+  assert.equal(document.querySelector(`[data-project-key="${projectB.project_key}"]`).getAttribute("href"), `/p/${projectB.project_key}`);
+  assert.doesNotMatch(document.body.innerHTML, /auth_token|host_instance_id|started_at|\bpid\b/);
+  const css = readFileSync(new URL("../styles/app.css", import.meta.url), "utf8");
+  const detailStyle = css.match(/\.gwt-hub__orphan-detail\s*\{([^}]+)\}/)?.[1];
+  assert.match(detailStyle, /color:\s*var\(--color-text-muted\)/);
+  assert.match(detailStyle, /font-size:\s*var\(--type-sm\)/);
+  document.querySelector('[data-hub-action="refresh-orphans"]').click();
+  assert.deepEqual(socket.sent.at(-1), { kind: "refresh_orphan_daemons" });
+});

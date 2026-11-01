@@ -1,0 +1,401 @@
+//! Private project-owner wire data. Never contains capability or GUI authority.
+use serde::{Deserialize, Serialize};
+
+/// Read-only physical input facts; consumers cannot grant input with this snapshot.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct OwnerInputObservation {
+    pub revision: u64,
+    pub has_unsent_user_input: bool,
+    pub human_input_elapsed_ms: Option<u64>,
+}
+
+impl OwnerInputObservation {
+    pub(crate) fn capture(pty: &gwt_terminal::PtyHandle) -> Option<Self> {
+        let (revision, has_unsent_user_input, elapsed) = pty.ordinary_input_observation()?;
+        Some(Self {
+            revision,
+            has_unsent_user_input,
+            human_input_elapsed_ms: elapsed
+                .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)),
+        })
+    }
+}
+
+/// Immutable readback of an exact Genesis compensation. This receipt only
+/// invalidates caches; it never grants cleanup or input authority.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OwnerCompensatedLaunchFailure {
+    pub error: String,
+    pub removed_genesis_session: gwt_agent::SessionExecutionIdentity,
+}
+
+/// Private input identity, never a mobile credential or an authorization grant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerMobileInputIdentity {
+    pub operation_id: String,
+    pub host_instance_id: String,
+    pub id: String,
+    pub incarnation: u64,
+    pub session_id: Option<String>,
+    pub data_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerMobileInputReady {
+    pub identity: OwnerMobileInputIdentity,
+    pub nonce: String,
+    /// Relative to this native process's monotonic epoch, not Host wall time.
+    pub expires_at_mono_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnerMobileInputPhase {
+    Preparing,
+    Ready,
+    Committing,
+    Prevented,
+    Written,
+    WriteFailed,
+}
+
+impl OwnerMobileInputPhase {
+    pub fn is_finished(self) -> bool {
+        matches!(self, Self::Prevented | Self::Written | Self::WriteFailed)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OwnerMobileInputOutcome {
+    pub ready: OwnerMobileInputReady,
+    pub phase: OwnerMobileInputPhase,
+    pub observation: Option<OwnerInputObservation>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OwnerRequest {
+    pub project_key: String,
+    pub command: OwnerCommand,
+}
+
+/// A pre-row audit observation, never a Session, claim or physical launch grant.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerLaunchPermissionCheck {
+    pub operation_id: String,
+    pub project_key: String,
+    pub host_instance_id: String,
+    pub config_hash: String,
+    pub blocked: bool,
+    pub record: Option<crate::cli::permission_readiness::PermissionReadinessRecord>,
+}
+
+impl OwnerLaunchPermissionCheck {
+    pub fn config_hash(config: &gwt_agent::LaunchConfig) -> Result<String, String> {
+        let value = serde_json::to_value(config).map_err(|error| error.to_string())?;
+        Ok(gwt_core::index::view::canonical_json_sha256(&value))
+    }
+}
+
+/// An observation from the first read-only facts pass, never a claim or a
+/// cleanup permit. The fixed owner revalidates every expected source field.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerMonitorLaunchRejection {
+    pub operation_id: String,
+    pub expected_delivery: Option<Box<crate::issue_monitor::PendingIssueMonitorLaunchDelivery>>,
+    pub expected_profile: Option<crate::IssueMonitorLaunchProfile>,
+    /// Original saved head and pool; only a pre-command answer refusal uses this readset.
+    pub expected_profile_readset: Option<(
+        Option<crate::IssueMonitorLaunchProfile>,
+        Vec<crate::IssueMonitorLaunchProfile>,
+    )>,
+    pub expected_handoff: Option<Box<crate::autonomous_handoff::AutonomousQuestionHandoff>>,
+    pub expected_session: Option<Box<gwt_agent::Session>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum OwnerCommand {
+    CheckLaunchPermission {
+        operation_id: String,
+        config: Box<gwt_agent::LaunchConfig>,
+    },
+    PrepareMobileInput {
+        identity: OwnerMobileInputIdentity,
+        data: Vec<u8>,
+    },
+    CommitMobileInput {
+        ready: OwnerMobileInputReady,
+    },
+    CancelMobileInput {
+        identity: OwnerMobileInputIdentity,
+    },
+    MobileInputOutcome {
+        identity: OwnerMobileInputIdentity,
+    },
+    SettleMobileInput {
+        ready: OwnerMobileInputReady,
+    },
+    NotifyBoardDecision {
+        entry_id: String,
+        session_id: String,
+    },
+    CloseWork {
+        work_id: String,
+        close_kind: String,
+    },
+    UpdateLayout {
+        layout: crate::persistence::PersistedWindowRegistry,
+    },
+    CloseStoppedSession {
+        session_id: String,
+        expected: Box<gwt_agent::Session>,
+    },
+    ProviderUsageSnapshot {
+        accounts: Vec<gwt_core::usage::ProviderUsage>,
+    },
+    DeliverAutonomousAnswer {
+        id: String,
+        incarnation: u64,
+        issue_number: u64,
+        delivery_id: Option<String>,
+    },
+    RejectMonitorLaunch {
+        rejection: Box<OwnerMonitorLaunchRejection>,
+    },
+    AcknowledgeMonitorLaunch {
+        id: String,
+        incarnation: u64,
+        issue_number: u64,
+        delivery_id: Option<String>,
+    },
+    AdoptMonitorLaunch {
+        id: String,
+        incarnation: u64,
+        issue_number: u64,
+        delivery_id: Option<String>,
+    },
+    AgentSwitch {
+        action: Box<crate::issue_monitor::AgentSwitchAction>,
+    },
+    DriveAgentSwitch,
+    Health,
+    ListPanes,
+    ContinueWork {
+        client_id: String,
+        operation_id: String,
+        work_id: String,
+    },
+    PendingCancel {
+        id: String,
+        operation_id: String,
+    },
+    PendingCancelExact {
+        id: String,
+        operation_id: String,
+        expected_request: serde_json::Value,
+    },
+    PromoteStandalone,
+    LaunchShell {
+        id: String,
+        command: String,
+        args: Vec<String>,
+        cols: u16,
+        rows: u16,
+    },
+    LaunchConfiguredShell {
+        id: String,
+        operation_id: String,
+        config: Box<crate::launch_wizard::ShellLaunchConfig>,
+        cols: u16,
+        rows: u16,
+    },
+    RestoreSavedSession {
+        id: String,
+        operation_id: String,
+        source_session_id: String,
+        expected_source: Box<gwt_agent::Session>,
+        origin: gwt_agent::SessionLaunchOrigin,
+        cols: u16,
+        rows: u16,
+    },
+    LaunchAgent {
+        id: String,
+        operation_id: String,
+        tab_id: String,
+        config: Box<gwt_agent::LaunchConfig>,
+        #[serde(default)]
+        metadata: Box<super::launch_payload::OwnerLaunchMetadata>,
+        cols: u16,
+        rows: u16,
+    },
+    Input {
+        id: String,
+        incarnation: u64,
+        data: Vec<u8>,
+    },
+    SendInput {
+        id: String,
+        incarnation: u64,
+        text: String,
+    },
+    PmWakeInput {
+        id: String,
+        incarnation: u64,
+        host_instance_id: String,
+        delivery: super::pm_delivery::PmWakeInput,
+    },
+    CancelPmWake {
+        id: String,
+        incarnation: u64,
+        host_instance_id: String,
+        operation_id: String,
+    },
+    Resize {
+        id: String,
+        incarnation: u64,
+        cols: u16,
+        rows: u16,
+    },
+    Snapshot {
+        id: String,
+        incarnation: u64,
+    },
+    Close {
+        id: String,
+        incarnation: u64,
+    },
+}
+
+/// Read-only screen captured after the exact runtime's output reader joined.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OwnerFinalScreen {
+    pub screen: String,
+    pub screen_ansi: Vec<u8>,
+    pub screen_seq: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum OwnerEvent {
+    LaunchProgress {
+        operation_id: String,
+        id: String,
+        incarnation: u64,
+        message: String,
+    },
+    PreparationOutput {
+        operation_id: String,
+        id: String,
+        incarnation: u64,
+        data: Vec<u8>,
+    },
+    AgentStarted {
+        id: String,
+        incarnation: u64,
+        session_id: String,
+        awaiting_readiness: bool,
+    },
+    LaunchFailed {
+        id: String,
+        incarnation: u64,
+        detail: String,
+    },
+    FocusExisting {
+        id: String,
+        incarnation: u64,
+    },
+    ContinueWorkOutcome {
+        client_id: String,
+        operation_id: String,
+        work_id: String,
+        outcome: crate::ContinueWorkOutcomeKind,
+        message: Option<String>,
+        error_code: Option<String>,
+        retryable: bool,
+    },
+    Hook {
+        event: crate::RuntimeHookEvent,
+    },
+    Notice {
+        level: String,
+        message: String,
+        issue_number: Option<u64>,
+    },
+    Output {
+        id: String,
+        incarnation: u64,
+        data: Vec<u8>,
+        seq: u64,
+        screen: String,
+        screen_ansi: Vec<u8>,
+        screen_seq: u64,
+    },
+    Status {
+        id: String,
+        incarnation: u64,
+        status: crate::WindowProcessStatus,
+        detail: Option<String>,
+        exit_confirmed: bool,
+        raw_status: crate::WindowProcessStatus,
+        exit_code: Option<u32>,
+    },
+    WindowRemoved {
+        id: String,
+        incarnation: u64,
+        #[serde(default)]
+        session_id: Option<String>,
+    },
+    Closed {
+        id: String,
+        incarnation: u64,
+        error: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        final_screen: Option<OwnerFinalScreen>,
+    },
+    PmLifecycle {
+        id: String,
+        incarnation: u64,
+        outcome: super::pm_delivery::PmLifecycleOutcome,
+    },
+    Invalidated,
+}
+
+/// Wire projection of an exact, uncancelled manual operation that made no OS
+/// spawn attempt. The owner's cached raw Err remains the operation's result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OwnerRetainedManualLaunchFailure {
+    pub id: String,
+    pub operation_id: String,
+    pub incarnation: u64,
+    pub host_pid: u32,
+    pub host_instance_id: String,
+    pub detail: String,
+}
+
+/// A failed manual launch retained as an exact restartable diagnostic row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OwnerLaunchFailure {
+    pub id: String,
+    pub incarnation: u64,
+    pub host_pid: u32,
+    pub host_instance_id: String,
+    pub session_id: String,
+    pub session_fingerprint: String,
+    pub detail: String,
+    pub error_code: String,
+    pub retryable: bool,
+}
+
+/// Exact read-model anchor; it grants no mutation or process authority.
+pub fn launch_failure_session_fingerprint(session: &gwt_agent::Session) -> Result<String, String> {
+    use sha2::Digest as _;
+    let bytes = serde_json::to_vec(session).map_err(|error| error.to_string())?;
+    Ok(format!("{:x}", sha2::Sha256::digest(bytes)))
+}
+
+pub type OwnerReply = Result<serde_json::Value, String>;

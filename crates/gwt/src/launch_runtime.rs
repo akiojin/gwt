@@ -1,6 +1,19 @@
-use super::*;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
+
+use crate::docker_launch::{
+    docker_binary_for_launch, docker_compose_exec_env_args, ensure_docker_launch_service_ready,
+    resolve_docker_launch_plan, resolve_docker_shell_command, DOCKER_GWTD_BIN_PATH,
+};
+use crate::project_runtime::launch_payload::ProcessLaunch;
+use crate::worktree_form::{is_ephemeral_worktree_path, EPHEMERAL_WORKTREE_PREFIX};
+use crate::{detect_shell_program, ShellLaunchConfig};
 
 mod base_freshness;
+
+const DEFAULT_NEW_BRANCH_BASE_BRANCH: &str = "develop";
 
 fn normalize_child_process_path(path: &Path) -> PathBuf {
     gwt_core::paths::normalize_windows_child_process_path(path)
@@ -244,7 +257,7 @@ fn resolve_launch_worktree_request_locked(
             })?
         {
             if let Some(fallback_base_branch) =
-                gwt::start_work::refallback_start_work_base_branch_with(
+                crate::start_work::refallback_start_work_base_branch_with(
                     branch_name,
                     &effective_base_branch,
                     |candidate| {
@@ -507,13 +520,13 @@ fn session_runtime_host_is_alive(sessions_dir: &Path, session_id: &str) -> bool 
         };
         let alive = match runtime.child_pid.zip(runtime.child_started_at) {
             Some((child_pid, child_started_at)) if child_pid > 0 && child_started_at > 0 => {
-                gwt::process::exact_pty_process_tree_is_alive(child_pid, child_started_at)
+                crate::process::exact_pty_process_tree_is_alive(child_pid, child_started_at)
             }
             _ => {
                 !matches!(
                     runtime.status,
                     gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
-                ) && gwt::process::is_host_process_alive(host_pid)
+                ) && crate::process::is_host_process_alive(host_pid)
             }
         };
         if alive {
@@ -538,7 +551,7 @@ fn is_start_work_branch_name(branch_name: &str) -> bool {
 /// never destroyed). Bounded by `max_removals` so a pathological pile-up
 /// cannot stall startup. Returns the number removed. Never errors — best-effort
 /// recovery.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-gh-guard"))]
 pub fn prune_orphan_intake_worktrees(repo_path: &Path, max_removals: usize) -> usize {
     let Some(plan) = plan_orphan_intake_worktree_prune(repo_path) else {
         return 0;
@@ -557,7 +570,7 @@ pub struct OrphanIntakePrunePlan {
 }
 
 impl OrphanIntakePrunePlan {
-    pub(crate) fn detached_worktree_paths(&self) -> &[PathBuf] {
+    pub fn detached_worktree_paths(&self) -> &[PathBuf] {
         &self.worktree_paths
     }
 }
@@ -578,11 +591,11 @@ pub fn plan_orphan_intake_worktree_prune(repo_path: &Path) -> Option<OrphanIntak
 /// prunable entries; their directory is gone, so the prune always kept them.
 pub fn plan_orphan_intake_worktree_prune_from_inventory(
     repo_path: &Path,
-    inventory: &[gwt::worktree_inventory::WorktreeEntry],
+    inventory: &[crate::worktree_inventory::WorktreeEntry],
 ) -> Option<OrphanIntakePrunePlan> {
     let main_repo_path = inventory
         .iter()
-        .find(|entry| entry.kind == gwt::worktree_inventory::WorktreeEntryKind::BareMain)
+        .find(|entry| entry.kind == crate::worktree_inventory::WorktreeEntryKind::BareMain)
         .map(|entry| entry.path.clone())
         .or_else(|| gwt_git::worktree::main_worktree_root(repo_path).ok())?;
     Some(orphan_intake_prune_plan(
@@ -621,7 +634,7 @@ pub fn execute_orphan_intake_worktree_prune(
             intake_hook_config_is_disposable(&worktree_path, entry)
         }) {
             Ok(false) => {
-                let cleanup = gwt::managed_assets::cleanup_worktree_with_codex_project_trust(
+                let cleanup = crate::managed_assets::cleanup_worktree_with_codex_project_trust(
                     &worktree_path,
                     || {
                         manager
@@ -728,7 +741,7 @@ pub fn build_shell_process_launch(
         // detected interactive shell. `detect_shell_program()` is only called
         // when there is no override.
         let shell = if let Some(command) = config.command_override.clone() {
-            gwt::ShellProgram {
+            crate::ShellProgram {
                 command,
                 args: config.command_args_override.clone().unwrap_or_default(),
             }
@@ -739,7 +752,7 @@ pub fn build_shell_process_launch(
                 None
             };
             match windows_shell {
-                Some(windows_shell) => gwt::ShellProgram {
+                Some(windows_shell) => crate::ShellProgram {
                     command: windows_shell_process_command(windows_shell).to_string(),
                     args: interactive_windows_shell_args(windows_shell),
                 },
@@ -1138,7 +1151,7 @@ fn build_powershell_command_script(command: &str, args: &[String], cwd: Option<&
     script.join("; ")
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-gh-guard"))]
 pub fn command_matches_runner(command: &str, runner: &str) -> bool {
     let path = Path::new(command);
     path.file_stem()
@@ -1242,10 +1255,148 @@ pub fn install_launch_gwt_bin_env_with_lookup(
     Ok(())
 }
 
+pub fn usable_worktree_path_for_branch(
+    worktrees: &[gwt_git::WorktreeInfo],
+    branch_name: &str,
+) -> Option<PathBuf> {
+    worktrees
+        .iter()
+        .find(|worktree| {
+            worktree.branch.as_deref() == Some(branch_name) && usable_worktree_entry(worktree)
+        })
+        .map(|worktree| worktree.path.clone())
+}
+
+pub fn worktrees_have_stale_branch_entry(
+    worktrees: &[gwt_git::WorktreeInfo],
+    branch_name: &str,
+) -> bool {
+    worktrees.iter().any(|worktree| {
+        worktree.branch.as_deref() == Some(branch_name) && !usable_worktree_entry(worktree)
+    })
+}
+
+pub fn usable_worktree_entry(worktree: &gwt_git::WorktreeInfo) -> bool {
+    !worktree.prunable && worktree.path.exists()
+}
+
+/// SPEC-3214 (codex #3237): whether a worktree-relative status `entry` is a
+/// gwt MERGED hook config (`.claude/settings.local.json` / `.codex/hooks.json`)
+/// that currently holds ONLY gwt-generated content, and so is safe to reap
+/// along with an ephemeral intake worktree. A user edit (an extra key or a
+/// non-managed hook) makes it non-disposable. Bridges `gwt-git`'s teardown
+/// probe (which cannot depend on `gwt-skills`) to the managed-hook semantics.
+pub fn intake_hook_config_is_disposable(worktree: &Path, entry: &str) -> bool {
+    crate::managed_assets::managed_hook_config_is_disposable(worktree, entry)
+}
+
+pub fn first_available_worktree_path(
+    preferred_path: &Path,
+    worktrees: &[gwt_git::WorktreeInfo],
+) -> Option<PathBuf> {
+    if !worktree_path_is_occupied(preferred_path, worktrees) && !preferred_path.exists() {
+        return Some(preferred_path.to_path_buf());
+    }
+
+    for suffix in 2usize.. {
+        let candidate = suffixed_worktree_path(preferred_path, suffix)?;
+        if !worktree_path_is_occupied(&candidate, worktrees) && !candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+pub fn suffixed_worktree_path(path: &Path, suffix: usize) -> Option<PathBuf> {
+    let file_name = path.file_name()?.to_str()?;
+    let mut candidate = path.to_path_buf();
+    candidate.set_file_name(format!("{file_name}-{suffix}"));
+    Some(candidate)
+}
+
+pub fn worktree_path_is_occupied(path: &Path, worktrees: &[gwt_git::WorktreeInfo]) -> bool {
+    worktrees
+        .iter()
+        .any(|worktree| same_worktree_path(&worktree.path, path))
+}
+
+pub fn same_worktree_path(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
+pub fn origin_remote_ref(branch_name: &str) -> String {
+    if let Some(ref_name) = branch_name.strip_prefix("refs/remotes/") {
+        ref_name.to_string()
+    } else if branch_name.starts_with("origin/") {
+        branch_name.to_string()
+    } else {
+        format!("origin/{branch_name}")
+    }
+}
+
+pub fn local_branch_exists(repo_path: &Path, branch_name: &str) -> Result<bool, String> {
+    let output = gwt_core::process::hidden_command("git")
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch_name}"),
+        ])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|err| format!("git show-ref --verify refs/heads/{branch_name}: {err}"))?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(format!(
+            "git show-ref --verify refs/heads/{branch_name} in {} failed with status {}: {}",
+            repo_path.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+    }
+}
+
+pub fn normalize_recent_project_path(path: &Path) -> PathBuf {
+    let Ok(layout_root) = gwt_git::worktree::main_worktree_root(path) else {
+        return path.to_path_buf();
+    };
+    if is_bare_repo_dir(&layout_root) {
+        layout_root
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| path.to_path_buf())
+    } else {
+        layout_root
+    }
+}
+
+fn is_bare_repo_dir(path: &Path) -> bool {
+    path.join("HEAD").exists() && path.join("objects").exists() && path.join("refs").exists()
+}
+
+pub fn normalize_branch_name(branch_name: &str) -> String {
+    if let Some(name) = branch_name.strip_prefix("refs/remotes/") {
+        return name.strip_prefix("origin/").unwrap_or(name).to_string();
+    }
+    if let Some(name) = branch_name.strip_prefix("origin/") {
+        return name.to_string();
+    }
+    branch_name.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
+    use std::{fs, time::Duration};
     use tempfile::tempdir;
 
     fn test_path(entries: &[&str]) -> String {
@@ -1394,44 +1545,44 @@ mod tests {
         fs::write(&owner_event, "owner event\n").unwrap();
         let before = fs::read(&owner_event).unwrap();
         for phase in [
-            gwt::AutonomousPhase::Delivering,
-            gwt::AutonomousPhase::Merged,
+            crate::AutonomousPhase::Delivering,
+            crate::AutonomousPhase::Merged,
         ] {
-            let mut record = gwt::AutonomousIssueRecord::new(42);
+            let mut record = crate::AutonomousIssueRecord::new(42);
             record.phase = phase;
-            let mut monitor = gwt::IssueMonitorState::with_prefs(
-                gwt::IssueMonitorConfig::default(),
-                gwt::IssueMonitorPrefs {
+            let mut monitor = crate::IssueMonitorState::with_prefs(
+                crate::IssueMonitorConfig::default(),
+                crate::IssueMonitorPrefs {
                     autonomous_records: vec![record],
-                    launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                    launched_issues: vec![crate::IssueMonitorLaunchedIssue {
                         issue_number: 42,
                         window_id: "owner".to_string(),
                     }],
                     ..Default::default()
                 },
             );
-            if phase == gwt::AutonomousPhase::Delivering {
+            if phase == crate::AutonomousPhase::Delivering {
                 let now = chrono::Utc::now().to_rfc3339();
                 assert!(matches!(
                     monitor.declare_autonomous_wait(42, "CI", "PR merged", &now),
-                    gwt::AutonomousWaitOutcome::Declared { .. }
+                    crate::AutonomousWaitOutcome::Declared { .. }
                 ));
             }
-            let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
-            gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+            let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+            crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
             let prefs_before = fs::read(&prefs_path).unwrap();
             let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
                 .working_dir(&repo)
                 .branch("work/issue-42")
                 .build();
-            let mut request = gwt::LaunchWizardLaunchRequest::Agent(Box::new(config));
+            let mut request = crate::LaunchWizardLaunchRequest::Agent(Box::new(config));
             request.set_review_dispatch_context(&reviewed_sha);
-            let gwt::LaunchWizardLaunchRequest::Agent(mut config) = request else {
+            let crate::LaunchWizardLaunchRequest::Agent(mut config) = request else {
                 unreachable!()
             };
             resolve_launch_worktree(&repo, &mut config).expect("review never waits on the owner");
             let review_path = config.working_dir.as_ref().unwrap();
-            assert!(!crate::same_worktree_path(review_path, &repo));
+            assert!(!same_worktree_path(review_path, &repo));
             let review_repo = gwt_git::Repository::discover(review_path).unwrap();
             assert_eq!(review_repo.current_branch().unwrap(), None);
             assert_eq!(head_sha(review_path), reviewed_sha);
@@ -1538,7 +1689,7 @@ mod tests {
         result.expect("existing worktree is reusable");
         assert!(working_dir
             .as_deref()
-            .is_some_and(|path| { crate::same_worktree_path(path, &existing_worktree) }));
+            .is_some_and(|path| { same_worktree_path(path, &existing_worktree) }));
         handle.join().expect("resolver thread");
     }
 
@@ -1677,7 +1828,7 @@ mod tests {
 
         assert!(working_dir
             .as_deref()
-            .is_some_and(|path| crate::same_worktree_path(path, &worktree)));
+            .is_some_and(|path| same_worktree_path(path, &worktree)));
         assert_eq!(
             fs::read_to_string(worktree.join("unique.txt")).expect("preserved worktree"),
             "preserve me\n"
@@ -1691,7 +1842,7 @@ mod tests {
         let runtime_path =
             gwt_agent::runtime_state_path_for_pid(temp.path(), std::process::id(), "dead-child");
         let mut runtime = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running);
-        runtime.host_started_at = gwt::process::host_process_start_time(std::process::id());
+        runtime.host_started_at = crate::process::host_process_start_time(std::process::id());
         runtime.child_pid = Some(i32::MAX as u32);
         runtime.child_started_at = Some(1);
         runtime.save(&runtime_path).unwrap();
@@ -1704,7 +1855,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let process_id = std::process::id();
-        let process_started_at = gwt::process::host_process_start_time(process_id).unwrap();
+        let process_started_at = crate::process::host_process_start_time(process_id).unwrap();
         let runtime_path =
             gwt_agent::runtime_state_path_for_pid(temp.path(), process_id, "live-child");
         let mut runtime = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Stopped);
@@ -1772,10 +1923,7 @@ mod tests {
             .and_then(|(_, suffix)| suffix.split_once('`'))
             .map(|(path, _)| Path::new(path))
             .expect("diagnostic must identify the residual worktree");
-        assert!(
-            crate::same_worktree_path(reported_worktree, &worktree),
-            "{error}"
-        );
+        assert!(same_worktree_path(reported_worktree, &worktree), "{error}");
         assert!(working_dir.is_none());
         assert_eq!(
             fs::read_to_string(worktree.join("unique.txt")).expect("preserved worktree"),
@@ -1832,7 +1980,7 @@ mod tests {
 
         assert!(working_dir
             .as_deref()
-            .is_some_and(|path| crate::same_worktree_path(path, &worktree)));
+            .is_some_and(|path| same_worktree_path(path, &worktree)));
         assert_eq!(
             fs::read_to_string(worktree.join("unique.txt")).expect("preserved worktree"),
             "orphaned\n"
@@ -1955,22 +2103,6 @@ mod tests {
         assert_eq!(
             env_vars.get("GWT_PROJECT_ROOT").map(String::as_str),
             Some(worktree.to_str().expect("utf8 worktree")),
-        );
-    }
-
-    #[test]
-    fn windows_shell_process_command_maps_all_variants() {
-        assert_eq!(
-            windows_shell_process_command(gwt_agent::WindowsShellKind::CommandPrompt),
-            "cmd.exe"
-        );
-        assert_eq!(
-            windows_shell_process_command(gwt_agent::WindowsShellKind::WindowsPowerShell),
-            "powershell"
-        );
-        assert_eq!(
-            windows_shell_process_command(gwt_agent::WindowsShellKind::PowerShell7),
-            "pwsh"
         );
     }
 
@@ -2581,7 +2713,7 @@ $path = $Prompt.Split('`')[1]
     fn docker_shell_launch_pins_one_stateful_runtime_resolution() {
         use std::os::unix::fs::PermissionsExt;
 
-        let _env_lock = crate::env_test_lock()
+        let _env_lock = gwt_core::test_support::env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
@@ -2709,5 +2841,26 @@ exit 0
 
         let entries = posix_path_entries(env_vars.get("PATH").expect("PATH"));
         assert_eq!(entries, vec!["/usr/local/bin", "/usr/bin"],);
+    }
+}
+
+pub fn current_git_branch(repo_path: &Path) -> Result<String, String> {
+    let output = gwt_core::process::hidden_command("git")
+        .args(["branch", "--show-current"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|err| format!("git branch --show-current: {err}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git branch --show-current: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if branch.is_empty() {
+        Err("git branch --show-current returned an empty branch name".to_string())
+    } else {
+        Ok(branch)
     }
 }

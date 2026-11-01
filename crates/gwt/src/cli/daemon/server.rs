@@ -176,6 +176,7 @@ impl DaemonShutdown {
 pub(super) fn serve_blocking<W: std::io::Write + ?Sized>(
     scope: RuntimeScope,
     endpoint_path: PathBuf,
+    startup_intent: gwt_core::daemon::DaemonStartIntent,
     writer: &mut W,
 ) -> Result<i32, SpecOpsError> {
     // The daemon is a separate process from the GUI, so it needs its own
@@ -215,13 +216,14 @@ pub(super) fn serve_blocking<W: std::io::Write + ?Sized>(
     ensure_socket_not_served(&socket_path)?;
 
     let auth_token = uuid::Uuid::new_v4().to_string();
-    let endpoint = DaemonEndpoint::new(
+    let mut endpoint = DaemonEndpoint::new(
         scope,
         std::process::id(),
         socket_path.to_string_lossy().to_string(),
         auth_token,
         env!("CARGO_PKG_VERSION").to_string(),
     );
+    endpoint.startup_intent = startup_intent;
 
     let runtime = Builder::new_multi_thread()
         .enable_all()
@@ -275,6 +277,7 @@ pub(super) fn serve_blocking<W: std::io::Write + ?Sized>(
             crate::IssueMonitorConfig::default(),
             ISSUE_MONITOR_SCAN_TIMEOUT,
             bound,
+            IssueMonitorWorkerTestHooks::default(),
         )
         .await
     });
@@ -318,6 +321,7 @@ pub fn spawn_server(
         crate::IssueMonitorConfig::default(),
         ISSUE_MONITOR_SCAN_TIMEOUT,
         bound,
+        IssueMonitorWorkerTestHooks::default(),
     )))
 }
 
@@ -362,13 +366,228 @@ async fn run_server_with_shutdown_and_worker_config(
         monitor_config,
         operation_timeout,
         bound,
+        IssueMonitorWorkerTestHooks::default(),
     )
     .await
 }
 
 struct BoundDaemon {
+    endpoint: DaemonEndpoint,
+    project_transport: crate::project_runtime::transport::BoundProjectTransport,
     listener: IpcListener,
     authority_lease: crate::IssueMonitorAuthorityLease,
+}
+
+/// Own the production daemon listener, physical owner and sole Monitor driver
+/// together for fixtures that exercise owner-originated Monitor controls.
+#[cfg(any(test, feature = "test-gh-guard"))]
+pub(crate) struct OwnerDaemonFixture {
+    pub(crate) endpoint: DaemonEndpoint,
+    pub(crate) owner: crate::project_runtime::owner::OwnerHandle,
+    pub(crate) scan: Arc<OwnerMonitorScanGate>,
+    pub(crate) monitor_snapshot:
+        tokio::sync::watch::Receiver<Option<crate::IssueMonitorWindowSnapshot>>,
+    endpoint_path: PathBuf,
+    socket_path: PathBuf,
+    shutdown: Arc<DaemonShutdown>,
+    task: tokio::task::JoinHandle<Result<i32, SpecOpsError>>,
+}
+
+#[cfg(any(test, feature = "test-gh-guard"))]
+impl OwnerDaemonFixture {
+    pub(crate) fn bind(root: &Path, endpoint_path: &Path) -> Result<Self, String> {
+        let scope = RuntimeScope::from_project_root(root, gwt_core::daemon::RuntimeTarget::Host)
+            .map_err(|error| error.to_string())?;
+        let socket_path = resolve_daemon_socket_path(endpoint_path)
+            .map_err(|error| error.to_string())?
+            .path;
+        prepare_bind_parent(&socket_path).map_err(|error| error.to_string())?;
+        ensure_socket_not_served(&socket_path).map_err(|error| error.to_string())?;
+        let endpoint = DaemonEndpoint::new(
+            scope,
+            std::process::id(),
+            socket_path.display().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+            env!("CARGO_PKG_VERSION").into(),
+        );
+        let lease =
+            acquire_daemon_startup_lease(&endpoint.scope).map_err(|error| error.to_string())?;
+        let bound = bind_daemon(&endpoint, &socket_path, endpoint_path, lease)
+            .map_err(|error| error.to_string())?;
+        let owner = bound.project_transport.owner.clone();
+        let endpoint = bound.endpoint.clone();
+        let shutdown = Arc::new(DaemonShutdown::new());
+        let scan = Arc::new(OwnerMonitorScanGate::default());
+        let scan_hook = scan.clone();
+        let idle_hook = scan.clone();
+        let (snapshot_sender, monitor_snapshot) = tokio::sync::watch::channel(None);
+        let scan_root = root.to_path_buf();
+        let hooks = IssueMonitorWorkerTestHooks {
+            scan_override: Some(Arc::new(move |mut monitor| {
+                crate::issue_monitor_worker::bind_issue_monitor_source_repository(
+                    &mut monitor,
+                    &scan_root,
+                );
+                if let Some(cache) = crate::issue_cache::issue_cache_root_for_repo_path(&scan_root)
+                {
+                    for issue in
+                        crate::issue_monitor_worker::load_cached_issue_monitor_candidates(&cache)
+                            .map_err(|error| {
+                                crate::issue_monitor_worker::IssueMonitorScanFailure::new(
+                            crate::issue_monitor_worker::IssueMonitorScanStage::CandidateLoad,
+                            error,
+                        )
+                            })?
+                    {
+                        monitor.record_candidate(issue);
+                    }
+                }
+                scan_hook.observe();
+                if let Some(now) = scan_hook.expire_at.lock().unwrap().take() {
+                    monitor.expire_stale_unbound_launches(&now);
+                }
+                Ok(monitor)
+            })),
+            admission_override: Some(Arc::new(Ok)),
+            hold_effects: true,
+            scan_idle_observer: Some(Arc::new(move |idle| idle_hook.publish_idle(idle))),
+            state_observer: Some(Arc::new(move |monitor| {
+                snapshot_sender.send_replace(
+                    monitor
+                        .fresh_window_snapshot(&chrono::Utc::now().to_rfc3339())
+                        .cloned(),
+                );
+            })),
+            #[cfg(test)]
+            effect_override: None,
+            #[cfg(test)]
+            capacity_override: None,
+            #[cfg(all(test, unix))]
+            scan_concurrency_probe: None,
+            #[cfg(all(test, unix))]
+            startup_timeout: None,
+            #[cfg(all(test, unix))]
+            startup_retry_submitted: None,
+            #[cfg(all(test, unix))]
+            startup_retry_started: None,
+        };
+        let task = tokio::spawn(run_bound_server(
+            endpoint.clone(),
+            endpoint_path.into(),
+            BroadcastHub::new(),
+            shutdown.clone(),
+            crate::IssueMonitorConfig {
+                poll_interval_secs: 3600,
+                ..Default::default()
+            },
+            gwt_core::deadline_budget::HANG_GUARD,
+            bound,
+            hooks,
+        ));
+        Ok(Self {
+            endpoint,
+            owner,
+            scan,
+            monitor_snapshot,
+            endpoint_path: endpoint_path.into(),
+            socket_path,
+            shutdown,
+            task,
+        })
+    }
+
+    pub(crate) async fn shutdown(self) -> Result<(), String> {
+        self.scan.release();
+        self.shutdown.request();
+        let result = self
+            .task
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())
+            .map(|_| ());
+        if !bind_is_served(&self.socket_path.to_string_lossy()) {
+            cleanup_stale_bind(&self.socket_path);
+        }
+        if endpoint_descriptor_describes(&self.endpoint_path, &self.endpoint) {
+            let _ = fs::remove_file(&self.endpoint_path);
+        }
+        result
+    }
+}
+
+/// A barrier inside the existing full-scan hook; it never admits or owns scans.
+#[cfg(any(test, feature = "test-gh-guard"))]
+#[derive(Default)]
+pub(crate) struct OwnerMonitorScanGate {
+    pub(crate) expire_at: std::sync::Mutex<Option<String>>,
+    blocked: std::sync::Mutex<bool>,
+    released: std::sync::Condvar,
+    entered: AtomicUsize,
+    arrived: Notify,
+    idle: AtomicBool,
+    idle_changed: Notify,
+}
+
+#[cfg(any(test, feature = "test-gh-guard"))]
+impl OwnerMonitorScanGate {
+    fn observe(&self) {
+        let mut blocked = self
+            .blocked
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.entered.fetch_add(1, Ordering::AcqRel);
+        self.arrived.notify_waiters();
+        while *blocked {
+            blocked = self
+                .released
+                .wait(blocked)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+    pub(crate) fn pause(&self) -> usize {
+        let mut blocked = self
+            .blocked
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *blocked = true;
+        self.count()
+    }
+    pub(crate) fn count(&self) -> usize {
+        self.entered.load(Ordering::Acquire)
+    }
+    fn publish_idle(&self, idle: bool) {
+        self.idle.store(idle, Ordering::Release);
+        self.idle_changed.notify_waiters();
+    }
+    pub(crate) async fn wait_idle(&self) {
+        loop {
+            let changed = self.idle_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.idle.load(Ordering::Acquire) {
+                return;
+            }
+            changed.await;
+        }
+    }
+    pub(crate) async fn wait(&self, baseline: usize) {
+        loop {
+            let arrived = self.arrived.notified();
+            tokio::pin!(arrived);
+            arrived.as_mut().enable();
+            if self.count() > baseline {
+                return;
+            }
+            arrived.await;
+        }
+    }
+    pub(crate) fn release(&self) {
+        *self
+            .blocked
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = false;
+        self.released.notify_all();
+    }
 }
 
 fn acquire_daemon_startup_lease(
@@ -399,7 +618,13 @@ fn bind_daemon(
             socket_path.display()
         ))
     })?;
-    if let Err(err) = persist_endpoint(endpoint_path, endpoint) {
+    let project_transport =
+        crate::project_runtime::transport::BoundProjectTransport::bind(endpoint)
+            .map_err(|error| config_error(format!("failed to bind project transport: {error}")))?;
+    let mut endpoint = endpoint.clone();
+    endpoint.project_transport_url = Some(project_transport.private_url.clone());
+    if let Err(err) = persist_endpoint(endpoint_path, &endpoint) {
+        project_transport.owner.stop();
         // This unpublished bind belongs to us and the startup lease is still
         // held. Unlink before dropping it: a concurrent fork can briefly inherit
         // the descriptor and make a liveness probe succeed after our drop.
@@ -410,24 +635,34 @@ fn bind_daemon(
         )));
     }
     Ok(BoundDaemon {
+        endpoint,
+        project_transport,
         listener,
         authority_lease,
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_bound_server(
-    endpoint: DaemonEndpoint,
+    _endpoint: DaemonEndpoint,
     endpoint_path: PathBuf,
     hub: BroadcastHub,
     shutdown: Arc<DaemonShutdown>,
     monitor_config: crate::IssueMonitorConfig,
     operation_timeout: Duration,
     bound: BoundDaemon,
+    test_hooks: IssueMonitorWorkerTestHooks,
 ) -> Result<i32, SpecOpsError> {
     let BoundDaemon {
+        endpoint,
+        project_transport,
         mut listener,
         authority_lease,
     } = bound;
+    let project_transport = project_transport
+        .serve()
+        .map_err(|error| config_error(format!("project transport startup failed: {error}")))?;
+    let mut residency = project_transport.residency();
     let _runtime_namespace_gc =
         crate::runtime_gc::RuntimeNamespaceGcTask::start(gwt_core::paths::gwt_sessions_dir())
             .map_err(|error| tracing::warn!(%error, "runtime namespace GC worker could not start"))
@@ -441,7 +676,7 @@ async fn run_bound_server(
         Arc::clone(&shutdown),
         monitor_config,
         operation_timeout,
-        IssueMonitorWorkerTestHooks::default(),
+        test_hooks,
         Some(Arc::clone(&authority_lease)),
     );
 
@@ -458,10 +693,18 @@ async fn run_bound_server(
         endpoint_path,
         ENDPOINT_DESCRIPTOR_HEAL_INTERVAL,
         Arc::clone(&shutdown),
+        residency.clone(),
     ));
     loop {
+        if residency.borrow().exit_started {
+            shutdown.request();
+            break;
+        }
         tokio::select! {
             biased;
+            changed = residency.changed() => {
+                if changed.is_err() || residency.borrow().exit_started { shutdown.request(); break; }
+            }
             _ = shutdown.notified() => {
                 tracing::info!("gwtd daemon: shutdown signal received");
                 break;
@@ -495,6 +738,7 @@ async fn run_bound_server(
     // registered its waiter.
     shutdown.request();
     heal_task.abort();
+    project_transport.shutdown().await;
 
     // The worker owns authority revocation, durable compensations, and child
     // reaping. Do not let the server return (and drop the Tokio runtime) before
@@ -628,17 +872,24 @@ fn spawn_issue_monitor_worker_with_config(
     )
 }
 
+#[cfg(any(test, feature = "test-gh-guard"))]
+type IssueMonitorStateObserver = dyn Fn(&crate::IssueMonitorState) + Send + Sync;
+
 #[derive(Clone, Default)]
 struct IssueMonitorWorkerTestHooks {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-gh-guard"))]
+    state_observer: Option<Arc<IssueMonitorStateObserver>>,
+    #[cfg(any(test, feature = "test-gh-guard"))]
+    scan_idle_observer: Option<Arc<dyn Fn(bool) + Send + Sync>>,
+    #[cfg(any(test, feature = "test-gh-guard"))]
     scan_override: Option<Arc<IssueMonitorScanOverride>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-gh-guard"))]
     admission_override: Option<Arc<IssueMonitorScanOverride>>,
     #[cfg(test)]
     effect_override: Option<Arc<IssueMonitorEffectOverride>>,
     #[cfg(test)]
     capacity_override: Option<Arc<IssueMonitorCapacityOverride>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-gh-guard"))]
     hold_effects: bool,
     #[cfg(all(test, unix))]
     scan_concurrency_probe: Option<Arc<IssueMonitorScanConcurrencyProbe>>,
@@ -650,7 +901,7 @@ struct IssueMonitorWorkerTestHooks {
     startup_retry_started: Option<Arc<tokio::sync::Notify>>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-gh-guard"))]
 type IssueMonitorScanOverride = dyn Fn(
         crate::IssueMonitorState,
     )
@@ -1079,6 +1330,8 @@ fn spawn_issue_monitor_worker_with_lease(
                     break;
                 },
                 control = control_rx.recv(), if control_open && pending_authority_controls.is_none() => {
+                    #[cfg(any(test, feature = "test-gh-guard"))]
+                    if let Some(observe) = &test_hooks.scan_idle_observer { observe(false); }
                     match control {
                         Some(request) => {
                             let (frame, completion) = request.into_parts();
@@ -1087,11 +1340,11 @@ fn spawn_issue_monitor_worker_with_lease(
                                 continue;
                             };
                             if let Some(control) = decode_issue_monitor_control_in_repo(payload, Some(&scope.project_root)) {
-                                let immediate_admission = matches!(&control, IssueMonitorControl::ScanNow);
-                                let review_deferred = matches!(&control, IssueMonitorControl::ReviewDispatchDeferred(_));
-                                let launch_ack = matches!(&control, IssueMonitorControl::Launched { .. });
-                                let window_snapshot = matches!(&control, IssueMonitorControl::WindowSnapshot { .. });
-                                let observation_kind = control.observation_kind();
+                                let strict_scan = matches!(&control, IssueMonitorControl::ScanNowIfIdle);
+                                if strict_scan && (scan_requested || in_flight_scan.is_some()) {
+                                    completion.reject(IssueMonitorControlQueueError::ScanAlreadyInFlight);
+                                    continue;
+                                }
                                 let Some(next_revision) = revision.checked_add(1) else {
                                     tracing::error!("issue monitor revision exhausted; stopping worker");
                                     completion.reject(IssueMonitorControlQueueError::Closed);
@@ -1103,104 +1356,119 @@ fn spawn_issue_monitor_worker_with_lease(
                                     );
                                     break;
                                 };
-                                let previous_policy = monitor.max_active_agents_policy();
-                                monitor.refresh_agent_capacity(&scope.project_root);
-                                #[cfg(test)]
-                                if let Some(refresh) = &test_hooks.capacity_override {
-                                    refresh(&mut monitor);
-                                }
-                                let capacity_policy_changed = previous_policy != monitor.max_active_agents_policy();
-                                let observation_baseline = observation_kind.map(|_| monitor.clone());
-                                let completed_delivery_stage = match &control {
-                                    IssueMonitorControl::LaunchDeliveryMaterialized {
-                                        issue_number, delivery_id, materializer_id, materializer_window_id,
-                                    }
-                                    | IssueMonitorControl::LaunchDeliveryWorkspaceDurable {
-                                        issue_number, delivery_id, materializer_id, materializer_window_id,
-                                    } => monitor.prefs().pending_launch_deliveries.into_iter().find(|delivery| {
-                                        delivery.issue_number == *issue_number
-                                            && delivery.delivery_id == *delivery_id
-                                            && delivery.materializer_id.as_ref() == Some(materializer_id)
-                                            && delivery.materializer_window_id.as_ref() == Some(materializer_window_id)
-                                            && delivery.materialized_window_id.as_ref() == Some(materializer_window_id)
-                                            && (!matches!(&control, IssueMonitorControl::LaunchDeliveryWorkspaceDurable { .. })
-                                                || delivery.workspace_durable_window_id.as_ref() == Some(materializer_window_id))
-                                    }),
-                                    _ => None,
-                                };
-                                let outcome = apply_or_queue_issue_monitor_control(
-                                    &hub,
-                                    &prefs_path,
-                                    &mut monitor,
-                                    control,
-                                    &mut effect_permit,
-                                    &mut pending_authority_controls,
-                                    Some(completion),
-                                );
-                                if window_snapshot {
-                                    if let Some(snapshot) = monitor.fresh_window_snapshot(&chrono::Utc::now().to_rfc3339()) {
-                                        let observed_at = snapshot.observed_at.clone();
-                                        let owners = crate::issue_monitor_worker::verified_live_launch_owners(
-                                            &scope.project_root, snapshot, &chrono::Utc::now().to_rfc3339(),
-                                        );
-                                        monitor.record_verified_live_launch_owners(&owners, &observed_at);
-                                    }
-                                }
-                                // Replayed delivery stages and refused launch ACKs
-                                // change no launch authority (Issue #5783).
-                                // Invalidating its captured scan would let one
-                                // retained delivery starve every other candidate.
-                                let refused_launch_ack = launch_ack && outcome == IssueMonitorControlCommit::Rejected;
-                                let unchanged_delivery_stage = matches!(outcome, IssueMonitorControlCommit::Committed { authority_changed: false, .. })
-                                    && completed_delivery_stage.as_ref().is_some_and(|before| {
-                                        monitor.prefs().pending_launch_deliveries.contains(before)
-                                    });
-                                let coalesced_observation = matches!(outcome, IssueMonitorControlCommit::Committed { authority_changed: false, .. })
-                                    && observation_baseline.as_ref().is_some_and(|before| {
-                                        monitor.scan_observations_compatible_with(before, &chrono::Utc::now().to_rfc3339())
-                                    });
-                                let launch_authority_unchanged = refused_launch_ack || unchanged_delivery_stage || coalesced_observation;
-                                tracing::info!(
-                                    target: "gwt.issue_monitor.scan",
-                                    project_root = %scope.project_root.display(),
-                                    control = observation_kind.unwrap_or("state-control"),
-                                    captured_revision = revision,
-                                    invalidates_scan = !launch_authority_unchanged || capacity_policy_changed,
-                                    capacity_policy_changed,
-                                    "Issue Monitor control scan fence"
-                                );
-                                if !launch_authority_unchanged || capacity_policy_changed {
+                                if strict_scan {
+                                    // The caller already holds the authenticated Session lease.
+                                    // Reserve the canonical scan slot without reacquiring prefs/ECR/Session locks.
+                                    scan_requested = true;
+                                    admission_requested = true;
                                     revision = next_revision;
-                                }
-                                if pending_authority_controls
-                                    .as_ref()
-                                    .is_some_and(PendingIssueMonitorAuthorityControls::is_terminal)
-                                {
-                                    close_issue_monitor_control_lane(
-                                        &hub,
-                                        &mut control_rx,
-                                        &mut pending_authority_controls,
-                                        IssueMonitorControlQueueError::RecoveryBlocked,
-                                    );
-                                    control_open = false;
-                                }
-                                if review_deferred || launch_authority_unchanged {
-                                    // Publish the row diagnostic without immediately
-                                    // redelivering an unchanged launch notification.
-                                    publish_issue_monitor_read_only_payloads(&hub, &monitor, &project_store);
+                                    completion.commit();
+                                    // Fall through to the ordinary scan start below in this same driver pass.
                                 } else {
-                                    publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
+                                    let immediate_admission = matches!(&control, IssueMonitorControl::ScanNow);
+                                    let review_deferred = matches!(&control, IssueMonitorControl::ReviewDispatchDeferred(_));
+                                    let launch_ack = matches!(&control, IssueMonitorControl::Launched { .. });
+                                    let window_snapshot = matches!(&control, IssueMonitorControl::WindowSnapshot { .. });
+                                    let observation_kind = control.observation_kind();
+                                    let previous_policy = monitor.max_active_agents_policy();
+                                    monitor.refresh_agent_capacity(&scope.project_root);
+                                    #[cfg(test)]
+                                    if let Some(refresh) = &test_hooks.capacity_override {
+                                        refresh(&mut monitor);
+                                    }
+                                    let capacity_policy_changed = previous_policy != monitor.max_active_agents_policy();
+                                    let observation_baseline = observation_kind.map(|_| monitor.clone());
+                                    let completed_delivery_stage = match &control {
+                                        IssueMonitorControl::LaunchDeliveryMaterialized {
+                                            issue_number, delivery_id, materializer_id, materializer_window_id,
+                                        }
+                                        | IssueMonitorControl::LaunchDeliveryWorkspaceDurable {
+                                            issue_number, delivery_id, materializer_id, materializer_window_id,
+                                        } => monitor.prefs().pending_launch_deliveries.into_iter().find(|delivery| {
+                                            delivery.issue_number == *issue_number
+                                                && delivery.delivery_id == *delivery_id
+                                                && delivery.materializer_id.as_ref() == Some(materializer_id)
+                                                && delivery.materializer_window_id.as_ref() == Some(materializer_window_id)
+                                                && delivery.materialized_window_id.as_ref() == Some(materializer_window_id)
+                                                && (!matches!(&control, IssueMonitorControl::LaunchDeliveryWorkspaceDurable { .. })
+                                                    || delivery.workspace_durable_window_id.as_ref() == Some(materializer_window_id))
+                                        }),
+                                        _ => None,
+                                    };
+                                    let outcome = apply_or_queue_issue_monitor_control(
+                                        &hub,
+                                        &prefs_path,
+                                        &mut monitor,
+                                        control,
+                                        &mut effect_permit,
+                                        &mut pending_authority_controls,
+                                        Some(completion),
+                                    );
+                                    if window_snapshot {
+                                        if let Some(snapshot) = monitor.fresh_window_snapshot(&chrono::Utc::now().to_rfc3339()) {
+                                            let observed_at = snapshot.observed_at.clone();
+                                            let owners = crate::issue_monitor_worker::verified_live_launch_owners(
+                                                &scope.project_root, snapshot, &chrono::Utc::now().to_rfc3339(),
+                                            );
+                                            monitor.record_verified_live_launch_owners(&owners, &observed_at);
+                                        }
+                                    }
+                                    // Replayed delivery stages and refused launch ACKs
+                                    // change no launch authority (Issue #5783).
+                                    // Invalidating its captured scan would let one
+                                    // retained delivery starve every other candidate.
+                                    let refused_launch_ack = launch_ack && outcome == IssueMonitorControlCommit::Rejected;
+                                    let unchanged_delivery_stage = matches!(outcome, IssueMonitorControlCommit::Committed { authority_changed: false, .. })
+                                        && completed_delivery_stage.as_ref().is_some_and(|before| {
+                                            monitor.prefs().pending_launch_deliveries.contains(before)
+                                        });
+                                    let coalesced_observation = matches!(outcome, IssueMonitorControlCommit::Committed { authority_changed: false, .. })
+                                        && observation_baseline.as_ref().is_some_and(|before| {
+                                            monitor.scan_observations_compatible_with(before, &chrono::Utc::now().to_rfc3339())
+                                        });
+                                    let launch_authority_unchanged = refused_launch_ack || unchanged_delivery_stage || coalesced_observation;
+                                    tracing::info!(
+                                        target: "gwt.issue_monitor.scan",
+                                        project_root = %scope.project_root.display(),
+                                        control = observation_kind.unwrap_or("state-control"),
+                                        captured_revision = revision,
+                                        invalidates_scan = !launch_authority_unchanged || capacity_policy_changed,
+                                        capacity_policy_changed,
+                                        "Issue Monitor control scan fence"
+                                    );
+                                    if !launch_authority_unchanged || capacity_policy_changed {
+                                        revision = next_revision;
+                                    }
+                                    if pending_authority_controls
+                                        .as_ref()
+                                        .is_some_and(PendingIssueMonitorAuthorityControls::is_terminal)
+                                    {
+                                        close_issue_monitor_control_lane(
+                                            &hub,
+                                            &mut control_rx,
+                                            &mut pending_authority_controls,
+                                            IssueMonitorControlQueueError::RecoveryBlocked,
+                                        );
+                                        control_open = false;
+                                    }
+                                    if review_deferred || launch_authority_unchanged {
+                                        // Publish the row diagnostic without immediately
+                                        // redelivering an unchanged launch notification.
+                                        publish_issue_monitor_read_only_payloads(&hub, &monitor, &project_store);
+                                    } else {
+                                        publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
+                                    }
+                                    effect_execution_requested =
+                                        !monitor.pending_effects().is_empty();
+                                    // Preserve committed scan intent while the
+                                    // authority barrier is active. The launch gate
+                                    // below suppresses only the start, not the
+                                    // request itself, so it runs after the barrier
+                                    // drains.
+                                    let should_scan = outcome.should_scan();
+                                    scan_requested |= should_scan;
+                                    admission_requested |= should_scan && immediate_admission;
                                 }
-                                effect_execution_requested =
-                                    !monitor.pending_effects().is_empty();
-                                // Preserve committed scan intent while the
-                                // authority barrier is active. The launch gate
-                                // below suppresses only the start, not the
-                                // request itself, so it runs after the barrier
-                                // drains.
-                                let should_scan = outcome.should_scan();
-                                scan_requested |= should_scan;
-                                admission_requested |= should_scan && immediate_admission;
                             } else {
                                 completion.reject(IssueMonitorControlQueueError::Rejected);
                             }
@@ -1760,7 +2028,7 @@ fn spawn_issue_monitor_worker_with_lease(
             }
 
             let execute_effects = effect_execution_requested;
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-gh-guard"))]
             let execute_effects = execute_effects && !test_hooks.hold_effects;
             if execute_effects && in_flight_effect.is_none() {
                 effect_execution_requested = false;
@@ -1837,6 +2105,19 @@ fn spawn_issue_monitor_worker_with_lease(
                         test_hooks.effect_override.clone(),
                     ));
                 }
+            }
+            #[cfg(any(test, feature = "test-gh-guard"))]
+            if let Some(observe) = &test_hooks.state_observer {
+                observe(&monitor);
+            }
+            #[cfg(any(test, feature = "test-gh-guard"))]
+            if let Some(observe) = &test_hooks.scan_idle_observer {
+                observe(
+                    !scan_requested
+                        && in_flight_scan.is_none()
+                        && !admission_requested
+                        && in_flight_admission.is_none(),
+                );
             }
         }
         close_issue_monitor_control_lane(
@@ -2326,6 +2607,8 @@ enum IssueMonitorControl {
     /// order takes effect now instead of at the next interval tick. The
     /// launch itself still goes through the ordinary claim/slot path.
     ScanNow,
+    /// Internal receipt for a registered PM: only the sole driver can admit it.
+    ScanNowIfIdle,
     /// Issue #3961 AC-4: release one provider's quota hold on the operator's
     /// authority. Applied to the authoritative in-memory state under the
     /// prefs lock, so the daemon's own rebase cannot restore the hold the way
@@ -2406,6 +2689,11 @@ enum IssueMonitorControl {
         // decode a captured source before it can construct this control.
         source: Option<crate::runtime_daemon_events::IssueMonitorAgentFailureSource>,
     },
+    WindowClosedFromLaunch {
+        window_id: String,
+        source: crate::runtime_daemon_events::IssueMonitorAgentFailureSource,
+        classification: crate::IssueMonitorFailureClass,
+    },
     WindowClosed {
         window_id: String,
         target: Option<crate::IssueMonitorStopTarget>,
@@ -2449,7 +2737,7 @@ impl IssueMonitorControl {
             Self::WindowSnapshot { .. } => Some("window-snapshot"),
             Self::Heartbeat { .. } => Some("heartbeat"),
             Self::ChildProgress { .. } => Some("child-progress"),
-            Self::ScanNow => Some("scan-request"),
+            Self::ScanNow | Self::ScanNowIfIdle => Some("scan-request"),
             _ => None,
         }
     }
@@ -2801,6 +3089,9 @@ fn issue_monitor_agent_failure_source_matches(
             window_id,
             source: Some(source),
             ..
+        }
+        | IssueMonitorControl::WindowClosedFromLaunch {
+            window_id, source, ..
         } => source.matches(monitor, window_id),
         _ => true,
     }
@@ -3091,7 +3382,7 @@ fn apply_routine_issue_monitor_control(
         | IssueMonitorControl::TierSet { .. }
         | IssueMonitorControl::WaitDeclared { .. } => false,
         // SPEC-3431 FR-006: scan-only; mutating nothing is the contract.
-        IssueMonitorControl::ScanNow => true,
+        IssueMonitorControl::ScanNow | IssueMonitorControl::ScanNowIfIdle => true,
         IssueMonitorControl::IssueState {
             issue_number,
             state,
@@ -3433,6 +3724,14 @@ fn apply_routine_issue_monitor_control(
                 crate::IssueMonitorProviderQuotaHoldClearOutcome::Cleared { .. }
             )
         }
+        IssueMonitorControl::WindowClosedFromLaunch { window_id, source, classification } => {
+            let crate::runtime_daemon_events::IssueMonitorAgentFailureSource::Bound { issue_number, .. } = source else { return false; };
+            let target = crate::IssueMonitorStopTarget {
+                issue_number, claim_id: monitor.live_claim_id(issue_number),
+                delivery_id: monitor.pending_launch_delivery_id(issue_number), window_id: Some(window_id),
+            };
+            monitor.requeue_exact_window_classified(&target, classification).is_some()
+        }
         IssueMonitorControl::WindowClosed {
             target,
             classification,
@@ -3505,6 +3804,13 @@ fn rebase_issue_monitor_control_candidate(
                     issue_number,
                     ..
                 }),
+            ..
+        }
+        | IssueMonitorControl::WindowClosedFromLaunch {
+            source:
+                crate::runtime_daemon_events::IssueMonitorAgentFailureSource::Bound {
+                    issue_number, ..
+                },
             ..
         } => monitor.rebase_daemon_driver_prefs_for_exact_window_close(disk, *issue_number),
         _ => monitor.rebase_daemon_driver_prefs(disk),
@@ -3704,7 +4010,29 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                                 "invalid replayed Max active change",
                             ));
                         }
-                        intent.persist_machine_max_active_change(&accepted.control_id)?;
+                        let change = intent.prefs().max_active_last_change.ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                "Max active change provenance is missing",
+                            )
+                        })?;
+                        crate::machine_agent_settings::checked_update(
+                            disk,
+                            None,
+                            Some(&change),
+                            &accepted.control_id,
+                        )
+                        .inspect_err(|error| {
+                            if error.to_string()
+                                == crate::issue_monitor::ISSUE_MONITOR_CONFIG_CONFLICT_ERROR
+                            {
+                                config_conflict = true;
+                                candidate.rebase_daemon_driver_prefs(disk);
+                                if let Ok(Some(policy)) = crate::machine_agent_settings::load() {
+                                    candidate.apply_machine_policy(&policy);
+                                }
+                            }
+                        })?;
                     }
                     let policy = crate::machine_agent_settings::load()?.ok_or_else(|| {
                         io::Error::new(
@@ -3833,7 +4161,7 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                         let requested = candidate
                             .prefs()
                             .max_active_last_change
-                            .filter(|_| explicit_max_active && disk.agent_roster.is_none());
+                            .filter(|_| explicit_max_active);
                         let policy = crate::machine_agent_settings::checked_update(
                             disk,
                             expected_config_token.as_deref(),
@@ -4487,7 +4815,7 @@ fn decode_issue_monitor_control_in_repo(
         .and_then(serde_json::Value::as_u64)
         .and_then(|pid| u32::try_from(pid).ok());
     match crate::runtime_daemon_events::decode_runtime_daemon_event(
-        crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL,
+        crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL,
         payload,
         std::process::id(),
     )? {
@@ -4496,6 +4824,10 @@ fn decode_issue_monitor_control_in_repo(
                 return None;
             }
             let payload = event.get("payload")?;
+            if let Some(strict) = payload.get("scan_now_if_idle") {
+                return (payload.as_object()?.len() == 1 && strict.as_object()?.is_empty())
+                    .then_some(IssueMonitorControl::ScanNowIfIdle);
+            }
             if let Some(state) = payload.get("issue_state") {
                 let issue_number = state.get("number")?.as_u64()?;
                 if issue_number == 0 {
@@ -5016,6 +5348,32 @@ fn decode_issue_monitor_control_in_repo(
                     delivery_id,
                 });
             }
+            if let Some(closed) = payload.get("window_closed_from_launch") {
+                let source: crate::runtime_daemon_events::IssueMonitorAgentFailureSource =
+                    serde_json::from_value(closed.get("source")?.clone()).ok()?;
+                if !matches!(
+                    source,
+                    crate::runtime_daemon_events::IssueMonitorAgentFailureSource::Bound { .. }
+                ) {
+                    return None;
+                }
+                let window_id = closed.get("window_id")?.as_str()?.trim();
+                if window_id.is_empty() {
+                    return None;
+                }
+                let classification = closed
+                    .get("classification")
+                    .filter(|value| !value.is_null())
+                    .map(|value| serde_json::from_value(value.clone()))
+                    .transpose()
+                    .ok()?
+                    .unwrap_or_default();
+                return Some(IssueMonitorControl::WindowClosedFromLaunch {
+                    window_id: window_id.into(),
+                    source,
+                    classification,
+                });
+            }
             if let Some(window_closed) = payload.get("window_closed") {
                 let window_id = window_closed.get("window_id")?.as_str()?.to_string();
                 let target = window_closed
@@ -5233,7 +5591,7 @@ fn spawn_issue_monitor_scan_with_deadline(
     Result<crate::IssueMonitorState, crate::issue_monitor_worker::IssueMonitorScanFailure>,
 > {
     tokio::task::spawn_blocking(move || {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-gh-guard"))]
         if let Some(scan) = &test_hooks.scan_override {
             return scan(monitor);
         }
@@ -7710,7 +8068,9 @@ fn heal_endpoint_descriptor(
             Ok(existing)
                 if existing.pid == endpoint.pid
                     && existing.auth_token == endpoint.auth_token
-                    && existing.bind == endpoint.bind =>
+                    && existing.bind == endpoint.bind
+                    && existing.project_transport_url == endpoint.project_transport_url
+                    && existing.startup_intent == endpoint.startup_intent =>
             {
                 return EndpointDescriptorHeal::Intact;
             }
@@ -7737,13 +8097,15 @@ fn heal_endpoint_descriptor(
             );
         }
     }
-    let refreshed = DaemonEndpoint::new(
+    let mut refreshed = DaemonEndpoint::new(
         endpoint.scope.clone(),
         endpoint.pid,
         endpoint.bind.clone(),
         endpoint.auth_token.clone(),
         endpoint.daemon_version.clone(),
     );
+    refreshed.project_transport_url = endpoint.project_transport_url.clone();
+    refreshed.startup_intent = endpoint.startup_intent;
     match persist_endpoint(endpoint_path, &refreshed) {
         Ok(()) => {
             tracing::warn!(
@@ -7769,30 +8131,26 @@ async fn heal_endpoint_descriptor_loop(
     endpoint_path: PathBuf,
     interval: Duration,
     shutdown: Arc<DaemonShutdown>,
+    mut residency: tokio::sync::watch::Receiver<
+        crate::project_runtime::presence::ResidencySnapshot,
+    >,
 ) {
     loop {
         tokio::select! {
             biased;
             _ = shutdown.notified() => return,
-            _ = tokio::time::sleep(interval) => {
-                // The heal check is synchronous file I/O; keep it off the
-                // 2-worker runtime's async threads.
-                let endpoint = Arc::clone(&endpoint);
-                let endpoint_path = endpoint_path.clone();
-                let heal = tokio::task::spawn_blocking(move || {
-                    heal_endpoint_descriptor(
-                        &endpoint,
-                        &endpoint_path,
-                        &crate::process::is_process_alive,
-                    );
-                })
-                .await;
-                if let Err(error) = heal {
-                    tracing::warn!(
-                        "gwtd daemon: endpoint descriptor heal task failed: {error}"
-                    );
-                }
-            }
+            changed = residency.changed() => if changed.is_err() { return; },
+            _ = tokio::time::sleep(interval) => {},
+        }
+        let mut expected = endpoint.as_ref().clone();
+        expected.startup_intent = residency.borrow().startup_intent;
+        let endpoint_path = endpoint_path.clone();
+        if let Err(error) = tokio::task::spawn_blocking(move || {
+            heal_endpoint_descriptor(&expected, &endpoint_path, &crate::process::is_process_alive);
+        })
+        .await
+        {
+            tracing::warn!("gwtd daemon: endpoint descriptor heal task failed: {error}");
         }
     }
 }
@@ -8761,7 +9119,15 @@ mod tests {
         let serve_endpoint_path = endpoint_path.clone();
         thread::spawn(move || {
             let mut sink = Vec::new();
-            let _ = tx.send(super::serve_blocking(scope, serve_endpoint_path, &mut sink).is_err());
+            let _ = tx.send(
+                super::serve_blocking(
+                    scope,
+                    serve_endpoint_path,
+                    gwt_core::daemon::DaemonStartIntent::Standalone,
+                    &mut sink,
+                )
+                .is_err(),
+            );
         });
 
         assert_eq!(
@@ -8800,11 +9166,15 @@ mod tests {
         gwt_core::daemon::persist_endpoint(&endpoint_path, &endpoint)
             .expect("persist initial descriptor");
         let shutdown = Arc::new(DaemonShutdown::new());
+        let (_residency, projection) = tokio::sync::watch::channel(
+            crate::project_runtime::presence::ResidencySnapshot::default(),
+        );
         let task = tokio::spawn(super::heal_endpoint_descriptor_loop(
             Arc::new(endpoint.clone()),
             endpoint_path.clone(),
             Duration::from_millis(20),
             Arc::clone(&shutdown),
+            projection,
         ));
 
         fs::remove_file(&endpoint_path).expect("simulate descriptor loss");
@@ -8846,7 +9216,10 @@ mod tests {
         )
         .expect("scope");
         let endpoint_path = temp.path().join("intact.json");
-        let endpoint = sample_endpoint(scope, &temp.path().join("intact.sock"), "intact-secret");
+        let mut endpoint =
+            sample_endpoint(scope, &temp.path().join("intact.sock"), "intact-secret");
+        endpoint.project_transport_url = Some("http://127.0.0.1:43210".into());
+        endpoint.startup_intent = gwt_core::daemon::DaemonStartIntent::GuiManaged;
         gwt_core::daemon::persist_endpoint(&endpoint_path, &endpoint).expect("persist descriptor");
         let payload_before = fs::read(&endpoint_path).expect("descriptor before");
 
@@ -8859,6 +9232,19 @@ mod tests {
             payload_before,
             "an intact descriptor must not be rewritten"
         );
+        let mut legacy = endpoint.clone();
+        legacy.project_transport_url = None;
+        legacy.startup_intent = gwt_core::daemon::DaemonStartIntent::Standalone;
+        gwt_core::daemon::persist_endpoint(&endpoint_path, &legacy)
+            .expect("simulate stale discovery capability");
+        assert_eq!(
+            super::heal_endpoint_descriptor(&endpoint, &endpoint_path, &|_| true),
+            super::EndpointDescriptorHeal::Rewritten
+        );
+        let healed: DaemonEndpoint =
+            serde_json::from_slice(&fs::read(&endpoint_path).unwrap()).unwrap();
+        assert_eq!(healed.project_transport_url, endpoint.project_transport_url);
+        assert_eq!(healed.startup_intent, endpoint.startup_intent);
     }
 
     #[test]
@@ -11367,6 +11753,7 @@ exit 0
 
     #[test]
     fn machine_max_active_receipt_replay_preserves_a_later_project_change() {
+        let _prefs_budget = pin_prefs_hang_guard();
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -11377,15 +11764,41 @@ exit 0
         for path in [&a, &b] {
             crate::save_issue_monitor_prefs(path, &crate::IssueMonitorPrefs::default()).unwrap();
         }
+        let mut roster_prefs = crate::load_issue_monitor_prefs(&a).unwrap();
+        roster_prefs.max_active_agents = 10;
+        roster_prefs.agent_roster = Some(
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1, "revision": 1,
+                "members": [{
+                    "agent_member_id": "00000000-0000-4000-8000-000000000001",
+                    "name": "Ada", "enabled": true, "agent_id": "codex",
+                    "created_at": "2026-10-22T00:00:00Z"
+                }]
+            }))
+            .unwrap(),
+        );
+        crate::save_issue_monitor_prefs(&a, &roster_prefs).unwrap();
+        let initial_policy = crate::machine_agent_settings::set(
+            Some(4),
+            crate::issue_monitor::IssueMonitorMaxActiveChangeSource::Gui,
+            "2026-10-22T00:00:00Z",
+        )
+        .unwrap();
         let mut monitor = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::load_issue_monitor_prefs(&a).unwrap(),
         );
+        monitor.apply_machine_policy(&initial_policy);
+        monitor.set_agent_capacity(crate::agent_capacity::AgentCapacity {
+            other_live_agents: 4,
+            ..Default::default()
+        });
+        assert_eq!(monitor.effective_max_active_agents(), 0);
         let mut stale = monitor.clone();
         let payload = crate::runtime_daemon_events::issue_monitor_payload(
             "control",
             serde_json::json!({
-                "max_active_agents": 5,
+                "max_active_agents": 10,
                 "control_id": uuid::Uuid::new_v4().to_string(),
                 "changed_at": "2026-10-22T00:00:00Z",
             }),
@@ -11402,6 +11815,15 @@ exit 0
             apply_accepted_control_for_test(&a, &mut monitor, first.clone()),
             super::IssueMonitorControlCommit::Committed { .. }
         ));
+        assert_eq!(
+            crate::machine_agent_settings::load()
+                .unwrap()
+                .unwrap()
+                .manual_limit,
+            Some(10)
+        );
+        assert_eq!(monitor.effective_max_active_agents(), 6);
+        assert_eq!(monitor.prefs().agent_roster.unwrap().enabled_count(), 10);
         let mut other = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::load_issue_monitor_prefs(&b).unwrap(),
@@ -11422,7 +11844,8 @@ exit 0
             apply_accepted_control_for_test(&a, &mut stale, replay.clone()),
             super::IssueMonitorControlCommit::Committed { .. }
         ));
-        assert_eq!(stale.max_active_agents_override(), Some(3));
+        assert_eq!(stale.max_active_agents_override(), Some(10));
+        assert_eq!(stale.effective_max_active_agents(), 0);
         assert_eq!(
             crate::machine_agent_settings::load()
                 .unwrap()
@@ -11433,15 +11856,91 @@ exit 0
         assert_eq!(
             crate::load_issue_monitor_prefs(&a)
                 .unwrap()
-                .max_active_last_change,
+                .max_active_agents,
+            10
+        );
+        assert_eq!(
             crate::load_issue_monitor_prefs(&b)
                 .unwrap()
-                .max_active_last_change
+                .max_active_agents,
+            3
         );
+        // The old roster writer committed this project receipt without a
+        // machine journal entry. Recreate only that legacy on-disk shape.
+        let machine_path = crate::machine_agent_settings::path();
+        let mut legacy: serde_json::Value =
+            serde_json::from_slice(&fs::read(&machine_path).unwrap()).unwrap();
+        legacy["applied_controls"]
+            .as_object_mut()
+            .unwrap()
+            .remove(&replay.control_id);
+        fs::write(&machine_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let machine_before = fs::read(&machine_path).unwrap();
+        let project_before = fs::read(&a).unwrap();
+        let hub = BroadcastHub::new();
+        let mut permit = super::IssueMonitorEffectPermit::new();
+        let mut pending = None;
+        let old_control = super::IssueMonitorControl::IdentifiedMaxActiveAgents {
+            max_active_agents: Some(10),
+            control_id: replay.control_id.clone(),
+            changed_at: replay.processed_at.clone(),
+        };
+        stale = monitor.clone();
+        assert_eq!(stale.effective_max_active_agents(), 6);
+        assert_eq!(
+            super::apply_or_queue_issue_monitor_control(
+                &hub,
+                &a,
+                &mut stale,
+                old_control,
+                &mut permit,
+                &mut pending,
+                None,
+            ),
+            super::IssueMonitorControlCommit::ConfigConflict
+        );
+        assert!(
+            pending.is_none(),
+            "unproven legacy receipt must not trap the control lane"
+        );
+        assert_eq!(
+            stale.effective_max_active_agents(),
+            0,
+            "conflict adopts today's machine policy"
+        );
+        assert_eq!(fs::read(&machine_path).unwrap(), machine_before);
+        assert_eq!(fs::read(&a).unwrap(), project_before);
+        let fresh_control = super::IssueMonitorControl::IdentifiedMaxActiveAgents {
+            max_active_agents: Some(10),
+            control_id: uuid::Uuid::new_v4().to_string(),
+            changed_at: "2026-10-22T00:02:00Z".into(),
+        };
+        let fresh = super::AcceptedIssueMonitorControl::new(fresh_control.clone());
+        assert!(matches!(
+            super::apply_or_queue_issue_monitor_control(
+                &hub,
+                &a,
+                &mut stale,
+                fresh_control,
+                &mut permit,
+                &mut pending,
+                None,
+            ),
+            super::IssueMonitorControlCommit::Committed { .. }
+        ));
+        assert!(pending.is_none());
+        assert_eq!(
+            crate::machine_agent_settings::load()
+                .unwrap()
+                .unwrap()
+                .manual_limit,
+            Some(10)
+        );
+        assert_eq!(stale.effective_max_active_agents(), 6);
         fs::remove_file(crate::machine_agent_settings::path()).unwrap();
         assert_eq!(
             super::try_apply_accepted_issue_monitor_control_with_disk_migration(
-                &a, &mut stale, replay
+                &a, &mut stale, fresh
             ),
             super::IssueMonitorControlCommit::RetryableFailure,
             "a durable project receipt cannot ACK a missing machine policy"
@@ -11450,6 +11949,7 @@ exit 0
 
     #[test]
     fn machine_guarded_config_retry_preserves_a_later_project_change() {
+        let _prefs_budget = pin_prefs_hang_guard();
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -11460,13 +11960,33 @@ exit 0
         for path in [&a, &b] {
             crate::save_issue_monitor_prefs(path, &crate::IssueMonitorPrefs::default()).unwrap();
         }
+        let mut roster_prefs = crate::load_issue_monitor_prefs(&a).unwrap();
+        roster_prefs.max_active_agents = 10;
+        roster_prefs.agent_roster = Some(
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1, "revision": 1,
+                "members": [{
+                    "agent_member_id": "00000000-0000-4000-8000-000000000001",
+                    "name": "Ada", "enabled": true, "agent_id": "codex",
+                    "created_at": "2026-10-22T00:00:00Z"
+                }]
+            }))
+            .unwrap(),
+        );
+        crate::save_issue_monitor_prefs(&a, &roster_prefs).unwrap();
+        crate::machine_agent_settings::set(
+            Some(4),
+            crate::issue_monitor::IssueMonitorMaxActiveChangeSource::Gui,
+            "2026-10-22T00:00:00Z",
+        )
+        .unwrap();
         let initial = crate::load_issue_monitor_prefs(&a).unwrap();
         let control = decode_issue_monitor_control_for_test(
             crate::runtime_daemon_events::issue_monitor_payload(
                 "control",
                 serde_json::json!({"config_set_if_matches": {
                     "expected_config_token": initial.config_token(),
-                    "max_active_agents": 5,
+                    "max_active_agents": 10,
                     "allowed_labels": ["guarded-a"],
                 }}),
                 std::process::id() + 1,
@@ -11496,6 +12016,13 @@ exit 0
             .unwrap()
             .last_control_receipt
             .is_none());
+        assert_eq!(
+            crate::machine_agent_settings::load()
+                .unwrap()
+                .unwrap()
+                .manual_limit,
+            Some(10)
+        );
         let mut other = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::load_issue_monitor_prefs(&b).unwrap(),
@@ -11514,7 +12041,14 @@ exit 0
             apply_accepted_control_for_test(&a, &mut monitor, first.clone()),
             super::IssueMonitorControlCommit::Committed { .. }
         ));
-        assert_eq!(monitor.max_active_agents_override(), Some(3));
+        assert_eq!(monitor.max_active_agents_override(), Some(10));
+        assert_eq!(
+            crate::machine_agent_settings::load()
+                .unwrap()
+                .unwrap()
+                .manual_limit,
+            Some(3)
+        );
         assert_eq!(
             crate::load_issue_monitor_prefs(&a).unwrap().allowed_labels,
             vec!["guarded-a"]
@@ -14217,6 +14751,131 @@ exit 0
             monitor.status_view_at("2026-08-04T00:00:00Z"),
             before,
             "scan_now must not mutate monitor state"
+        );
+    }
+
+    #[test]
+    fn strict_scan_receipt_rejects_the_canonical_in_flight_worker() {
+        let _env = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _prefs_budget = pin_prefs_hang_guard();
+        let temp = TempDir::new().expect("fixture");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("isolated home");
+        let _home = ScopedGwtHome::set(&home);
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("repo");
+        init_git_repo(&repo);
+        commit_initial_branch(&repo);
+        git_remote_add_origin(&repo, "https://github.com/example/repo.git");
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                ..Default::default()
+            },
+        )
+        .expect("prefs");
+        let probe = Arc::new(IssueMonitorScanConcurrencyProbe::default());
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let scan_probe = probe.clone();
+        let scan_entered = entered.clone();
+        let scan_release = release.clone();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let (started, active, receipt, joined) = runtime.block_on(async {
+            let hub = BroadcastHub::new();
+            let shutdown = Arc::new(DaemonShutdown::new());
+            let worker = super::spawn_issue_monitor_worker_with_config_timeout_and_hooks(
+                scope,
+                hub.clone(),
+                shutdown.clone(),
+                crate::IssueMonitorConfig {
+                    poll_interval_secs: 30,
+                    ..Default::default()
+                },
+                HANG_GUARD,
+                super::IssueMonitorWorkerTestHooks {
+                    scan_override: Some(Arc::new(move |monitor| {
+                        let _active = scan_probe.enter();
+                        scan_entered.notify_one();
+                        let (lock, released) = &*scan_release;
+                        let mut ready = lock
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        while !*ready {
+                            ready = released
+                                .wait(ready)
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        }
+                        Ok(monitor)
+                    })),
+                    admission_override: Some(Arc::new(Ok)),
+                    ..Default::default()
+                },
+            );
+            // test-hygiene: allow-wall-clock-deadline Bound arrival of the actual blocked full-scan worker before testing canonical overlap admission.
+            let started = tokio::time::timeout(HANG_GUARD, entered.notified())
+                .await
+                .is_ok();
+            let active = probe.active.load(std::sync::atomic::Ordering::Acquire);
+            // test-hygiene: allow-wall-clock-deadline Bound the real serialized control receipt while the canonical scan worker remains blocked.
+            let receipt = tokio::time::timeout(
+                HANG_GUARD,
+                hub.publish_issue_monitor_control(DaemonFrame::Event {
+                    channel: crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL.into(),
+                    payload: crate::runtime_daemon_events::issue_monitor_payload(
+                        "control",
+                        serde_json::json!({"scan_now_if_idle":{}}),
+                        std::process::id(),
+                    ),
+                }),
+            )
+            .await;
+            // Release/join before any contract assertion, including the expected RED.
+            let (lock, released) = &*release;
+            *lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+            released.notify_all();
+            shutdown.request();
+            // test-hygiene: allow-wall-clock-deadline Join the actual canonical worker after releasing its blocking scan hook before any assertion.
+            let joined = tokio::time::timeout(HANG_GUARD, worker).await;
+            (started, active, receipt, joined)
+        });
+        drop(runtime);
+        drop(_home);
+        drop(_prefs_budget);
+        drop(_env);
+        assert!(
+            joined.is_ok_and(|joined| joined.is_ok()),
+            "the canonical worker must drain"
+        );
+        assert!(
+            started && active == 1,
+            "the real driver must own one physically blocked scan"
+        );
+        assert_eq!(
+            receipt
+                .expect("bounded receipt")
+                .err()
+                .map(|error| error.message()),
+            Some("issue monitor control rejected: scan_already_in_flight")
+        );
+        assert!(
+            !probe.overlap_observed(),
+            "strict refusal must not create another scan"
         );
     }
 

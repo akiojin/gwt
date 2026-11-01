@@ -168,7 +168,9 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
     const fixture = await startExactRelaunchFixture(info);
     const errors = capture(page);
     const theme = info.project.name.includes("light") ? "light" : "dark";
-    await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+    await page.addInitScript(theme => {
+      if (location.protocol === "http:" || location.protocol === "https:") localStorage.setItem("gwt:ui:theme", theme);
+    }, theme);
     const surface = page.locator(".agents-surface:not(.agents-surface--preview)");
     const name = surface.getByRole("textbox", { name: "Name for new member", exact: true });
     const register = surface.locator('.roster-capacity [data-action="add"]');
@@ -213,8 +215,21 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       await surface.locator(`.roster-row[data-member-id="${member.agent_member_id}"]`).click();
       const displayName = surface.getByRole("textbox", { name: "Display name", exact: true });
       const renameSequence = await cursor(page);
-      await displayName.fill("  Maple renamed  ");
-      const renamed = await rosterAfter(page, renameSequence, retried.revision);
+      await displayName.fill("Maple ");
+      const firstWord = await rosterAfter(page, renameSequence, retried.revision);
+      expect(firstWord.members.find(value => value.agent_member_id === member.agent_member_id)?.name).toBe("Maple");
+      await expect(surface.locator(".roster-name-status")).toHaveText("Saved");
+      await displayName.screenshot({ path: info.outputPath(`name-word-boundary-${theme}.png`) });
+      await expect(displayName).toHaveValue("Maple ");
+      await expect(displayName).toBeFocused();
+      const nextWordSequence = await cursor(page);
+      await displayName.pressSequentially("renamed");
+      const renamed: AgentRoster = await page.waitForFunction(({ after, id }) =>
+        (window as any).__gwtPlaywrightMessages?.findLast((entry: any) => entry.sequence > after
+          && entry.payload.kind === "agent_roster"
+          && entry.payload.roster.members.some((value: any) => value.agent_member_id === id && value.name === "Maple renamed"))?.payload.roster,
+      { after: nextWordSequence, id: member.agent_member_id }).then(handle => handle.jsonValue());
+      await expect(surface.locator(".roster-name-status")).toHaveText("Saved");
       expect(renamed.error).toBeNull();
       const updated = renamed.members.find(value => value.agent_member_id === member.agent_member_id)!;
       expect(updated).toEqual({ ...member, name: "Maple renamed" });
@@ -234,6 +249,9 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       await page.reload();
       await page.locator('.op-rail__surface[data-surface="agents"]').click();
       expect((await readRoster(page)).members.find(value => value.agent_member_id === member.agent_member_id)).toEqual(member);
+      // Leave the old page before intentionally stopping its server so its
+      // reconnect loop does not create unrelated connection-refused errors.
+      await page.goto("about:blank");
       const restarted = await fixture.restart();
       await gotoLiveGwt(page, restarted, { enableTestBridge: true });
       await page.locator('.op-rail__surface[data-surface="agents"]').click();

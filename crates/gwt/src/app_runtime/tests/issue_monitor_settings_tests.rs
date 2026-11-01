@@ -1805,15 +1805,16 @@ fn app_runtime_issue_monitor_auto_tier_change_starts_fresh() {
     let prefs = serde_json::from_value(value).expect("tier prefs");
     gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("save tier prefs");
 
-    prepare_monitor_relaunch(
+    let (owner, window_id, pane, _) = materialize_monitor_relaunch_at_owner(
         &mut fixture,
         gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
     );
-    let result = take_monitor_launch_complete("fresh tier launch", &fixture.recorded_events);
-    assert_monitor_fresh_successor(result, &fixture);
+    assert_owner_monitor_fresh_successor(&pane, &fixture);
     let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload tier prefs");
     let value = serde_json::to_value(prefs).expect("serialize tier result");
     assert_eq!(value["issue_tiers"]["3165"]["launch_tier"], 2);
+    authenticate_monitor_owner_readiness(&owner, &pane);
+    close_test_owner_runtime(&mut fixture.runtime, &window_id);
 }
 
 #[test]
@@ -1848,19 +1849,17 @@ fn app_runtime_issue_monitor_auto_same_tier_override_starts_fresh() {
     prefs.launch_tiers = vec![vec![profile.clone()], vec![profile]];
     prefs.record_tier_launch(3165, 1);
     gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("save updated tier");
-    prepare_monitor_relaunch(
+    let (owner, window_id, pane, _) = materialize_monitor_relaunch_at_owner(
         &mut fixture,
         gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
     );
-    let result = take_monitor_launch_complete("same tier override", &fixture.recorded_events);
-    let result = result.expect("launch result");
-    assert_eq!(result.9, gwt_agent::SessionMode::Normal);
-    let session =
-        gwt_agent::Session::load(&fixture.sessions_dir.join(format!("{}.toml", result.1)))
-            .expect("fresh session");
+    let session = pane.session.as_ref().unwrap();
+    assert_eq!(session.session_mode, gwt_agent::SessionMode::Normal);
     assert_eq!(session.model.as_deref(), Some("gpt-6-astra"));
     assert_eq!(session.reasoning_level.as_deref(), Some("high"));
     assert!(session.agent_session_id.is_none());
+    authenticate_monitor_owner_readiness(&owner, &pane);
+    close_test_owner_runtime(&mut fixture.runtime, &window_id);
 }
 
 #[test]
@@ -1895,7 +1894,7 @@ fn app_runtime_issue_monitor_auto_answered_handoff_defers_tier_selection() {
     prefs.record_tier_launch(3165, 0);
     let history = prefs.issue_tiers.clone();
     gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("save changed auto tiers");
-    let events = prepare_monitor_relaunch(
+    let (owner, window_id, pane, events) = materialize_monitor_relaunch_at_owner(
         &mut fixture,
         gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
     );
@@ -1905,13 +1904,13 @@ fn app_runtime_issue_monitor_auto_answered_handoff_defers_tier_selection() {
         )),
         "answer delivery must bypass changed auto candidates"
     );
-    let result = take_monitor_launch_complete("auto answer delivery", &fixture.recorded_events);
-    assert_monitor_exact_resume(result, &fixture);
+    assert_owner_monitor_exact_resume(&owner, &pane, &fixture);
     let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
     assert_eq!(
         persisted.issue_tiers, history,
         "answer delivery does not select a new tier"
     );
+    close_test_owner_runtime(&mut fixture.runtime, &window_id);
 }
 
 /// SPEC #3914 FR-007 (PR #3968 review): a non-head selection is reported on
@@ -1939,8 +1938,8 @@ fn app_runtime_issue_monitor_resume_waits_for_selected_fixed_tool() {
         MonitorNativeHolderFixture::None,
         false,
     );
-    // Pool [claude, codex] with claude held: codex is the non-head selection
-    // and owns the stored resumable conversation.
+    // The selected fixed tool is held; preserving the native conversation
+    // must not allocate a different person or fall through to another tool.
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
     let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("load Monitor prefs");
     prefs.set_launch_profile_pool(vec![
@@ -1952,25 +1951,22 @@ fn app_runtime_issue_monitor_resume_waits_for_selected_fixed_tool() {
         .insert("claude".to_string(), "2999-01-01T04:00:00Z".to_string());
     gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("save pooled Monitor prefs");
 
-    let events = fixture.runtime.auto_launch_issue_monitor_delivery_events(
-        &fixture.runtime.test_context(),
-        3165,
-        LinkedIssueKind::Spec,
-        None,
+    let owner = start_monitor_relaunch_owner(&mut fixture, false);
+    let events = prepare_monitor_relaunch(
+        &mut fixture,
         gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
     );
     assert!(
-        fixture
-            .recorded_events
-            .lock()
-            .unwrap()
-            .iter()
-            .all(|event| !matches!(
-                recorded_project_payload(event),
-                UserEvent::LaunchComplete { .. }
-            )),
-        "waiting must not replace the exact resumable Session"
+        fixture.runtime.pending_launch_completions.is_empty(),
+        "a held fixed tool cannot queue a physical launch"
     );
+    assert!(owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes)
+    )
+    .unwrap()["panes"]
+        .as_array()
+        .unwrap()
+        .is_empty());
     let saved = gwt_agent::Session::load(
         &fixture
             .sessions_dir
@@ -1982,6 +1978,13 @@ fn app_runtime_issue_monitor_resume_waits_for_selected_fixed_tool() {
         Some(fixture.native_conversation_id.as_str())
     );
     assert!(events.iter().any(|event| matches!(&event.event, BackendEvent::IssueMonitorToast { message, .. } if message.contains("held") || message.contains("Held"))), "the fixed-tool wait is visible");
+    fixture.runtime.test_project_owners.clear();
+    owner_fixture_block_on(
+        Arc::try_unwrap(owner)
+            .ok()
+            .expect("only the fixture owner remains")
+            .shutdown(),
+    );
 }
 
 #[test]
@@ -2619,7 +2622,7 @@ fn app_runtime_selected_member_keeps_its_model_when_pool_order_changes() {
     let mut b = pool_profile("codex");
     b.agent_member_id = Some(second.agent_member_id.clone());
     b.model = Some("gpt-6-astra".into());
-    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+    let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
         .working_dir(&repo)
         .model(b.model.as_ref().unwrap())
         .build();
@@ -2633,30 +2636,98 @@ fn app_runtime_selected_member_keeps_its_model_when_pool_order_changes() {
     )
     .unwrap();
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, _recorded) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     runtime.sessions_dir = sessions.clone();
+    pin_runtime_agents(&runtime, temp.path(), &[("codex", "1.2.3")]);
+    pin_config_fixture_runners(&mut config, temp.path(), &["codex"]);
+    let runner = temp
+        .path()
+        .join("fixture-runner-bin")
+        .join(if cfg!(windows) { "codex.cmd" } else { "codex" });
+    #[cfg(not(windows))]
+    fs::write(&runner, "#!/bin/sh\ncase \"$*\" in *--version*) printf '1.2.3\\n'; exit 0;; *'features list'*) exit 0;; esac\nprintf '%s ' \"$@\"; printf '\\n'; exec /bin/cat\n").unwrap();
+    #[cfg(windows)]
+    fs::write(
+        &runner,
+        concat!(
+            "@echo off\r\n",
+            "if \"%~1\"==\"--version\" (echo 1.2.3& exit /b 0)\r\n",
+            ":probe\r\n",
+            "if \"%~1\"==\"\" goto launch\r\n",
+            "if \"%~1\"==\"--sandbox\" goto launch\r\n",
+            "if \"%~1 %~2\"==\"features list\" exit /b 0\r\n",
+            "shift\r\n",
+            "goto probe\r\n",
+            ":launch\r\n",
+            "echo %*\r\nset /p value=\r\n",
+        ),
+    )
+    .unwrap();
+    config.command = runner.display().to_string();
+    let canonical_profile = gwt_core::paths::gwt_config_path();
+    fs::create_dir_all(canonical_profile.parent().unwrap()).unwrap();
+    fs::copy(
+        runtime.profile_config_path.as_ref().unwrap(),
+        &canonical_profile,
+    )
+    .unwrap();
+    let owner = Arc::new(
+        owner_fixture_block_on(
+            gwt::project_runtime::test_support::ProjectOwnerHarness::start(&repo),
+        )
+        .unwrap(),
+    );
+    configure_owner_fixture_start_gate(&owner);
+    runtime
+        .test_project_owners
+        .insert(repo.clone(), owner.clone());
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+
     let mut feedback = issue_monitor_feedback(42);
     feedback.issue_monitor_issue_number = None;
     runtime
-        .spawn_agent_window_for_selected_monitor_member(
+        .spawn_agent_window_with_monitor_intent(
             "tab-1",
             config,
             None,
             feedback,
             None,
+            None,
+            false,
             b.agent_member_id.clone(),
         )
         .unwrap();
-    let result = take_monitor_launch_complete("selected member/model pair", &recorded);
-    let Ok((process, id, ..)) = result else {
-        panic!("selected member launch failed: {result:?}")
-    };
-    let session = gwt_agent::Session::load(&sessions.join(format!("{id}.toml"))).unwrap();
+    drain_owner_launch_fixtures(&mut runtime, &tasks);
+    let remote = runtime
+        .runtimes
+        .values()
+        .next()
+        .expect("real selected-member owner launch");
+    let probe =
+        owner_fixture_block_on(owner.probe(&remote.owner_pane_id, remote.incarnation)).unwrap();
+    let session = probe.session.as_ref().unwrap();
     assert_eq!(session.agent_member_id, b.agent_member_id);
     assert_eq!(session.model, b.model);
-    assert!(process
-        .args
-        .contains(&format!("--model={}", b.model.as_ref().unwrap())));
+    // test-hygiene: allow-wall-clock-deadline Bound actual child argument output; the captured output proves which model was passed.
+    owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Bound the actual child/owner completion; output or the exact owner receipt establishes progress.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !probe
+                .pane
+                .lock()
+                .unwrap()
+                .screen()
+                .contents()
+                .contains(&format!("--model={}", b.model.as_ref().unwrap()))
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the physical selected-member child must receive its own model");
+    });
     let roster = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
         .unwrap()
         .agent_roster
@@ -2675,6 +2746,8 @@ fn app_runtime_selected_member_keeps_its_model_when_pool_order_changes() {
         .unwrap()
         .assignment
         .is_some());
+
+    pane_control_tests::control_close(&owner, &probe);
 }
 
 #[test]
@@ -2815,9 +2888,12 @@ fn app_runtime_agent_window_initial_title_uses_branch_issue_link_title() {
         .branch("work/20260506-1257")
         .build();
 
-    runtime
-        .spawn_agent_window("tab-1", config, None)
-        .expect("spawn agent window");
+    spawn_owner_codex_fixture(
+        &mut runtime,
+        "tab-1",
+        config,
+        Some("SPEC: Branch linked purpose"),
+    );
 
     let tab = runtime.tab("tab-1").expect("tab");
     let agent_window = tab
@@ -2867,9 +2943,7 @@ fn app_runtime_agent_window_initial_title_falls_back_to_projection_owner() {
         .branch("work/20260506-1257")
         .build();
 
-    runtime
-        .spawn_agent_window("tab-1", config, None)
-        .expect("spawn agent window");
+    spawn_owner_codex_fixture(&mut runtime, "tab-1", config, Some("SPEC-2008"));
 
     let tab = runtime.tab("tab-1").expect("tab");
     let agent_window = tab

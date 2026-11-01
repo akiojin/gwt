@@ -655,3 +655,100 @@ fn terminalized_genesis_compensation_does_not_synthesize_state_for_unrelated_wor
     assert_eq!(work_items.work_items[0].id, "unrelated-work");
     assert!(!work_items.work_items[0].discarded);
 }
+
+#[test]
+fn windows_shell_process_command_maps_all_variants() {
+    assert_eq!(
+        gwt::launch_runtime::windows_shell_process_command(
+            gwt_agent::WindowsShellKind::CommandPrompt
+        ),
+        "cmd.exe"
+    );
+    assert_eq!(
+        gwt::launch_runtime::windows_shell_process_command(
+            gwt_agent::WindowsShellKind::WindowsPowerShell
+        ),
+        "powershell"
+    );
+    assert_eq!(
+        gwt::launch_runtime::windows_shell_process_command(
+            gwt_agent::WindowsShellKind::PowerShell7
+        ),
+        "pwsh"
+    );
+}
+
+// #3426: the genesis Start Work projection must let the canonical execution
+// owner override a presentation-derived Issue-kind resume context, mirroring
+// the Blocked-successor path.
+#[test]
+fn start_work_projection_prefers_canonical_execution_owner_over_resume_context() {
+    let _env_guard = gwt_core::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let project_root = temp.path().join("repo");
+    std::fs::create_dir_all(&project_root).expect("create repo");
+    init_execution_repo(&project_root, "develop");
+    let mut session = gwt::project_runtime::launch_payload::ActiveAgentSession {
+        window_id: "window-1921".to_string(),
+        session_id: String::new(),
+        agent_id: "codex".to_string(),
+        branch_name: String::new(),
+        display_name: "Codex".to_string(),
+        worktree_path: project_root.clone(),
+        agent_project_root: String::new(),
+        runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+        tab_id: "tab-1".to_string(),
+    };
+    session.session_id = "session-launch-1921".to_string();
+    session.branch_name = "work/issue-1921".to_string();
+    session.worktree_path = project_root.clone();
+    session.agent_project_root = project_root.display().to_string();
+    let context = gwt::project_runtime::launch_payload::WorkspaceResumeContext {
+        title: Some("SPEC-1921: agent management".to_string()),
+        owner: Some("Issue #1921".to_string()),
+        summary: None,
+        next_action: None,
+    };
+
+    gwt::project_runtime::workspace::save_start_work_workspace_projection(
+        &project_root,
+        &session,
+        "develop",
+        Some(1921),
+        Some(gwt::cli::execution_state::ExecutionOwnerKey {
+            kind: gwt::cli::execution_state::ExecutionOwnerKind::Spec,
+            number: 1921,
+        }),
+        Some(&context),
+        Some(&std::collections::HashSet::from([session
+            .session_id
+            .clone()])),
+    )
+    .expect("Start Work launch publication");
+
+    let work_items = gwt_core::workspace_projection::load_workspace_work_items(&project_root)
+        .expect("load WorkItems")
+        .expect("WorkItems");
+    let work = work_items
+        .work_items
+        .iter()
+        .find(|item| {
+            item.agents
+                .iter()
+                .any(|agent| agent.session_id == session.session_id)
+        })
+        .expect("materialized Work");
+    assert_eq!(
+        work.owner.as_deref(),
+        Some("SPEC-1921"),
+        "trusted execution owner must override the mis-kinded resume context"
+    );
+    assert_eq!(
+        work.title, "SPEC-1921: agent management",
+        "non-owner resume context fields stay presentation-owned"
+    );
+}

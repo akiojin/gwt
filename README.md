@@ -431,31 +431,28 @@ Response cost is roughly the entry count times serialized entry size, plus
 metadata: 20 entries averaging 2 KiB are about 40 KiB. There is no fixed byte cap;
 long posts increase the size, and `all: true` can return hundreds of KiB or more.
 
-Managed hooks and runtime delegation use `gwtd`. On macOS and Linux,
-running JSON operation `daemon.start` brings up a per-project runtime daemon
-(Unix-domain socket IPC) that multi-instance event fan-out depends on
-— for example, with the daemon running, Board posts you make in one
-`gwt` window appear in another instance opened on the same repo
-without a polling delay. The daemon keeps running in the background
-until you stop it (Ctrl-C or SIGTERM). JSON operation `daemon.status` prints
-the live endpoint for diagnostics. Without JSON operation `daemon.start`,
-multi-instance fan-out is inactive but local file-based state and
-the file watcher continue to work as before.
+Managed hooks and project runtime delegation use `gwtd`. Opening a project
+starts or reconnects to its shared daemon, which owns agent panes and the Issue
+Monitor. A connection failure affects that project; the Hub and other projects
+remain available. GUI-managed daemons drain after the last GUI disconnects and
+a reconnect grace period expires. Closing one GUI does not kill a shared daemon.
+An explicit JSON `daemon.start` keeps the daemon resident until it is stopped;
+it also makes an already GUI-managed daemon resident. `daemon.status` reports
+the current endpoint for diagnostics.
 
-On Windows the daemon runs the same way: the GUI's Issue Monitor starts
-and supervises it as a user-session child process, and JSON operation
-`daemon.start` starts one by hand. The transport is a named pipe
-(`\\.\pipe\gwtd-<scope>-<hash>`, local clients only; the endpoint file
-under `~/.gwt` carries the auth token). `daemon.status`,
-`daemon.subscribe`, Issue Monitor controls, and multi-instance fan-out
-behave as on macOS / Linux. A hand-started daemon stops on Ctrl-C,
-Ctrl-Break, or console close; logoff and shutdown run the same cleanup,
-and a daemon terminated by the GUI is reclaimed by the liveness checks on
-the next start. gwt does not install a Windows Service: the daemon only
-scans and claims — agent panes are still created by the GUI — so a
-service would not enable headless autonomous runs and would fight the
-per-user `~/.gwt` state. Headless autonomous execution is not a goal of
-the daemon.
+The Hub's **終了待ちプロジェクト** section observes daemons for known projects.
+Choose **再確認** to refresh their status. **終了を再試行** retries an exact failed
+shutdown only after verifying that the GUI-managed owner is draining and no GUI
+is connected. A changed owner or reopened project invalidates the observation;
+refresh before retrying. Resident daemons, connected projects, and owners whose
+identity cannot be verified cannot be terminated through this action. Failures
+are recorded against the affected project as `DaemonFault`.
+
+On macOS and Linux, daemon control uses Unix-domain sockets; on Windows it uses
+local named pipes. Private runtime connections are authenticated, and daemon
+credentials remain in Rust and the endpoint file under `~/.gwt`. gwt does not
+install a Windows Service. A hand-started daemon stops on Ctrl-C, SIGTERM, or the
+platform's console shutdown signal.
 
 ## Agent Workflow
 
@@ -504,7 +501,7 @@ Common windows include:
   or unavailable. The setting is global and persisted under `[ai].language`
   in `~/.gwt/config.toml`. UI labels stay English (see SPEC-1933 NFR-005).
   Application settings and project settings are labeled separately. Open
-  `Issues execution settings` for Autonomous, Max active, queue refill, allowed
+  `Issues execution settings` for Autonomous, Monitoring, queue refill, allowed
   labels, launch profiles, and candidate order/preferences.
   Candidate edits save automatically when committed; text fields save when focus
   leaves the field. Rejected values stay visible with an inline error.
@@ -578,16 +575,14 @@ a linked capacity notice, Auto-refill beside Autonomous, Start / Stop, and
 **Issues settings**. The switches show the server-confirmed On / Off state.
 Only current failures appear red; error details and history stay in the notification center.
 Use **Issues settings** to open **Settings → Project → Issues execution settings**.
-It contains **Launch control** (Autonomous, Max active, Monitoring), **Refill**
+It contains **Launch control** (Autonomous, Monitoring), **Refill**
 (Auto-refill and its limit), and **Target** (Allowed labels), followed by candidate
 profiles. Issues and Settings have independent views and can appear side by side
 in Split view, preserving Issue search/selection and unfinished settings edits.
-Auto-apply updates is in **System**. For projects with an Agents roster, **Max active**
-edits the enabled member count; **Apply** resizes the roster and **Auto** is unavailable.
-Legacy projects without a roster retain **Manual** to edit Max active. **Auto** disables editing
-and shows the effective limit, with **Measuring capacity…** while measurement is pending.
-Lowering the limit below the active count keeps existing agents running; new launches
-wait until the active count falls below the limit. Auto-refill is
+Auto-apply updates is in **System**. Register or rest members in **Agents**;
+Project settings does not edit member counts or machine capacity.
+Machine safety limits still govern new launches, and changing registration does
+not stop existing agents. Auto-refill is
 **off by default**; enabling it adds eligible open Issues up to the configured
 queue limit. An empty queue starts no new work; already-running work continues.
 
@@ -621,11 +616,9 @@ expired, Auto retains its last accepted limit or the saved limit (one for new
 settings). Missing or still-scanning `target` directories do not stop launches.
 A complete measurement can still reduce the limit to zero; status and the error
 ledger explain which resource or live-agent consumption reduced capacity.
-Before a roster is created, the legacy **Max active** control can select a **Manual**
-override or **Auto** to follow the recommendation. This machine policy is shared
-by all projects on this machine. Manual is a total worker limit; each project receives
-the remaining capacity after other projects' workers, while PM windows stay separate.
-Settings shows this project's allocation and other projects' worker consumption.
+The Auto/Manual machine policy is shared by all projects on this machine.
+Manual is a total worker limit; each project receives the remaining capacity
+after other projects' workers, while PM windows stay separate.
 See [SPEC #3200](https://github.com/akiojin/gwt/issues/3200) for the shared capacity policy. Values above
 the recommendation are allowed, with a warning that verification may not finish and
 timing-dependent test failures may block unrelated PRs. In roster projects, automation uses
@@ -1342,7 +1335,21 @@ entrypoints are:
 - `gwt-agent` — running agent-pane inspection and control
 - `gwt-feedback` — report a gwt problem from any project
 
-For a gwt bug or workflow problem, PM and implementation agents can use
+With **Autonomous ON** in Project Settings, `feedback.create` returns immediately
+and a hidden worker sends safe structured feedback to `akiojin/gwt` without
+consent, preview, authentication or failure dialogs, browsers or a worker console.
+This uses the existing setting, requires no extra opt-in and is separate from
+Auto capacity. Only fixed schema/template, known operation/error enums, bounded
+numeric package versions and OS/architecture are stored and sent. Free text,
+source, credentials, URLs/paths, project identifiers and agent counts are excluded
+before storage, fingerprinting and logging. Unknown operations are `withheld`.
+Missing authentication or revoked/unreadable policy yields a static failed/withheld
+receipt and never opens a consent fallback. Auto uses only existing
+process-provided `GH_TOKEN` / `GITHUB_TOKEN`; it never unlocks a credential store. A GitHub CLI login alone leaves Auto feedback
+unsent. Agent JSON/env/repository flags cannot
+grant Auto authority. Existing raw receipts never become Auto reports.
+
+With missing/false preferences (Manual mode), PM and implementation agents can use
 `gwt-feedback` to collect the affected operation, original refusal,
 reproduction steps, and workaround. The `feedback.create` JSON operation always
 targets `akiojin/gwt` and collects local diagnostic context.
@@ -1352,7 +1359,7 @@ feedback** action in a native dialog. Cancellation or an unavailable desktop
 keeps the report locally. The actual gwt repository sends synchronously without
 that prompt and returns the Issue number and URL.
 
-The local receipt keeps the complete original. Public reports automatically mask
+The Manual local receipt keeps the complete original. Public reports automatically mask
 known credentials, environment assignment values, source identifiers, paths
 (including URLs), and source code. Public metadata includes only gwt/gwtd
 versions and OS/architecture; source-project metadata and arbitrary context are
@@ -1363,8 +1370,12 @@ Unmasked refusal text is preserved without truncation. Masks are conservative
 and cannot detect every arbitrary secret; do not publish the raw receipt.
 
 Use `feedback.status` with the returned request id to obtain the Issue number
-and URL; a similar existing Issue may receive a comment. `feedback.retry`
-accepts declined or failed receipts and asks for fresh external-project consent.
+and URL; a similar existing Issue may receive a comment. Auto status changes an
+orphaned `sending` receipt to `uncertain` under the sender lock and never resends it. `feedback.retry`
+accepts declined or failed Manual receipts and asks for fresh external-project consent.
+Auto retry accepts failed/withheld safe snapshots and rechecks the canonical
+setting. Restore policy or report a recognized operation to recover a withheld
+report; never add raw details to bypass the safe schema.
 An uncertain delivery is retained for inspection and is not automatically resent.
 
 Reports are evidence for PM triage. A confirmed bug is linked to a separate,

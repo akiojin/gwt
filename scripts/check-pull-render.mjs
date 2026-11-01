@@ -12,7 +12,7 @@ import { readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs"
 import { dirname, join, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const rootPattern = /^(receive|apply.*ReceiveEvent|applyIssueMonitorStatus|applyIssueMonitorInbox|applyProviderUsageUi)$/;
+export const rootPattern = /^(receive|apply.*ReceiveEvent|applyIssueMonitorStatus|applyIssueMonitorInbox|applyProviderUsageUi)$/;
 const functionPattern = /^(FunctionDeclaration|FunctionExpression|ArrowFunctionExpression)$/;
 const domWrites = new Set(["innerHTML", "outerHTML", "textContent", "innerText", "className", "value", "checked", "disabled", "hidden", "scrollTop", "scrollLeft"]);
 const domCalls = new Set(["append", "appendChild", "prepend", "replaceChildren", "replaceChild", "remove", "removeChild", "insertBefore", "insertAdjacentHTML", "setAttribute", "removeAttribute", "createElement", "createTextNode", "focus", "blur"]);

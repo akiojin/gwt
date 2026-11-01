@@ -38,6 +38,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use tracing::Instrument;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -679,16 +680,31 @@ pub enum DrainStep {
 /// bounded mpsc channel whose overflow disconnected the client — under an
 /// agent-startup output flood that evicted the very client that initiated
 /// the launch and lost its lossless replies.
-#[derive(Default)]
 pub struct ClientQueue {
     state: Mutex<ClientQueueState>,
     notify: tokio::sync::Notify,
+    input_liveness: std::sync::RwLock<bool>,
+    input_close_requested: std::sync::atomic::AtomicBool,
+}
+
+impl Default for ClientQueue {
+    fn default() -> Self {
+        Self {
+            state: Mutex::default(),
+            notify: tokio::sync::Notify::new(),
+            input_liveness: std::sync::RwLock::new(true),
+            input_close_requested: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
 }
 
 impl ClientQueue {
     /// Enqueue one prepared event. Returns `true` when the client crossed
     /// the lossless hard cap and must be unregistered by the caller.
     pub fn enqueue(&self, message: &PreparedOutbound) -> bool {
+        if self.input_close_requested.load(Ordering::Acquire) {
+            return true;
+        }
         let mut state = self
             .state
             .lock()
@@ -732,9 +748,8 @@ impl ClientQueue {
                     entry.stream_seq = message.stream_seq;
                 } else {
                     if state.entries.len() >= LOSSLESS_HARD_CAP {
-                        state.dead = true;
                         drop(state);
-                        self.notify.notify_one();
+                        self.close();
                         return true;
                     }
                     state.entries.push_back(Self::queued(message));
@@ -756,9 +771,8 @@ impl ClientQueue {
             }
             QueueClass::Lossless => {
                 if state.entries.len() >= LOSSLESS_HARD_CAP {
-                    state.dead = true;
                     drop(state);
-                    self.notify.notify_one();
+                    self.close();
                     return true;
                 }
                 state.entries.push_back(Self::queued(message));
@@ -894,13 +908,33 @@ impl ClientQueue {
     }
 
     fn close_with_frame(&self, close_frame: Option<ClientCloseFrame>) {
+        self.input_close_requested.store(true, Ordering::Release);
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.dead = true;
         state.close_frame = close_frame;
         drop(state);
+        self.finish_input_close();
+    }
+
+    fn finish_input_close(&self) {
+        if !self.input_close_requested.load(Ordering::Acquire) {
+            return;
+        }
+        // The GUI's outbound dispatch must never wait for a native input ACK.
+        // Its existing queue publishes Closed after the last accepted lease
+        // ends; closing immediately refuses every new input lease.
+        let mut live = match self.input_liveness.try_write() {
+            Ok(live) => live,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return,
+        };
+        *live = false;
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .dead = true;
         self.notify.notify_one();
     }
 
@@ -981,6 +1015,47 @@ struct ClientRegistration {
     scope: ClientScope,
 }
 
+/// An immutable registration snapshot, sharing the existing queue lifetime.
+/// It cannot authorize mobile input; the Host authority still owns that check.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct ClientProjectBinding {
+    queue: Arc<ClientQueue>,
+    scope: ClientScope,
+}
+
+impl ClientProjectBinding {
+    pub fn while_current<T>(
+        &self,
+        project: &gwt_core::repo_hash::ProjectKey,
+        effect: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let live = self.queue.input_liveness.read().ok()?;
+        let is_live = *live;
+        struct Lease<'a> {
+            queue: &'a ClientQueue,
+            live: Option<std::sync::RwLockReadGuard<'a, bool>>,
+        }
+        impl Drop for Lease<'_> {
+            fn drop(&mut self) {
+                self.live.take();
+                self.queue.finish_input_close();
+            }
+        }
+        let _lease = Lease {
+            queue: &self.queue,
+            live: Some(live),
+        };
+        if !is_live
+            || self.queue.input_close_requested.load(Ordering::Acquire)
+            || !matches!(&self.scope, ClientScope::Project(key) if key == project)
+        {
+            return None;
+        }
+        Some(effect())
+    }
+}
+
 fn target_selects(
     target: &DispatchTarget,
     client_id: &str,
@@ -999,6 +1074,15 @@ fn target_selects(
 }
 
 impl ClientHub {
+    #[doc(hidden)]
+    pub fn capture_project_binding(&self, client_id: &str) -> Option<ClientProjectBinding> {
+        let clients = self.clients.lock().ok()?;
+        let registration = clients.get(client_id)?;
+        Some(ClientProjectBinding {
+            queue: registration.queue.clone(),
+            scope: registration.scope.clone(),
+        })
+    }
     #[cfg(test)]
     fn set_before_dispatch_enqueue_hook(&self, hook: ClientHubDispatchHook) {
         *self
@@ -1063,7 +1147,8 @@ impl ClientHub {
         if receives_broadcasts {
             self.browser_generation.fetch_add(1, Ordering::Relaxed);
         }
-        self.clients
+        let previous = self
+            .clients
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(
@@ -1074,6 +1159,9 @@ impl ClientHub {
                     scope,
                 },
             );
+        if let Some(previous) = previous {
+            previous.queue.close();
+        }
         queue
     }
 
@@ -1244,14 +1332,18 @@ impl ClientHub {
                 dead_clients = ?dead_clients,
                 "disconnecting websocket clients stuck past the lossless hard cap; reconnect will replay latest state"
             );
-            let mut clients = self
-                .clients
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for client_id in dead_clients {
-                if let Some(registration) = clients.remove(&client_id) {
-                    registration.queue.close();
-                }
+            let removed: Vec<_> = {
+                let mut clients = self
+                    .clients
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                dead_clients
+                    .into_iter()
+                    .filter_map(|id| clients.remove(&id))
+                    .collect()
+            };
+            for registration in removed {
+                registration.queue.close();
             }
         }
     }
@@ -1296,14 +1388,18 @@ impl ClientHub {
             }
         }
         if !dead_clients.is_empty() {
-            let mut clients = self
-                .clients
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for client_id in dead_clients {
-                if let Some(registration) = clients.remove(&client_id) {
-                    registration.queue.close();
-                }
+            let removed: Vec<_> = {
+                let mut clients = self
+                    .clients
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                dead_clients
+                    .into_iter()
+                    .filter_map(|id| clients.remove(&id))
+                    .collect()
+            };
+            for registration in removed {
+                registration.queue.close();
             }
         }
     }
@@ -1386,7 +1482,30 @@ pub async fn access_log_middleware(
     let user_agent = user_agent.flatten();
 
     let started = Instant::now();
-    let response = next.run(request).await;
+    let response = if path == "/internal/work-materialization-probe" {
+        // The access record below exists only after a reply. Keep entry and
+        // progress observable even when a probe never produces that reply.
+        let span = tracing::info_span!(
+            target: "gwt.work_materialization_probe",
+            "work_materialization_probe",
+            request_id = %Uuid::new_v4()
+        );
+        async {
+            tracing::info!(target: "gwt.work_materialization_probe", stage = "request");
+            let response = next.run(request).await;
+            tracing::info!(
+                target: "gwt.work_materialization_probe",
+                stage = "reply",
+                status = response.status().as_u16(),
+                elapsed_ms = started.elapsed().as_millis() as u64,
+            );
+            response
+        }
+        .instrument(span)
+        .await
+    } else {
+        next.run(request).await
+    };
     let elapsed_ms = started.elapsed().as_millis() as u64;
     let status = response.status().as_u16();
 
@@ -1684,6 +1803,7 @@ async fn work_materialization_probe_handler(
     State(state): State<TransportState>,
     Json(request): Json<AgentWorkMaterializationProbeRequest>,
 ) -> Response {
+    tracing::info!(target: "gwt.work_materialization_probe", stage = "authentication");
     let Some(principal) = agent_capability_principal(&headers, &state) else {
         return workspace_update_error_response(
             StatusCode::UNAUTHORIZED,
@@ -1699,15 +1819,35 @@ async fn work_materialization_probe_handler(
             "work_materialization_probe_requires_active_execution_authority",
         );
     };
+    tracing::info!(
+        target: "gwt.work_materialization_probe",
+        stage = "authenticated",
+        gwt_session_id = principal.session_id(),
+        owner_number = execution_binding.owner_number,
+    );
     let project_root = principal.canonical_project_root().to_path_buf();
     let session_id = principal.session_id().to_string();
+    let span = tracing::Span::current();
+    let dispatcher = tracing::dispatcher::get_default(Clone::clone);
+    tracing::info!(target: "gwt.work_materialization_probe", stage = "dispatch");
     let result = tokio::task::spawn_blocking(move || {
-        crate::probe_bound_authenticated_work_materialization(
-            &project_root,
-            &session_id,
-            &execution_binding,
-            request,
-        )
+        tracing::dispatcher::with_default(&dispatcher, || {
+            span.in_scope(|| {
+                tracing::info!(target: "gwt.work_materialization_probe", stage = "worker");
+                let result = crate::probe_bound_authenticated_work_materialization(
+                    &project_root,
+                    &session_id,
+                    &execution_binding,
+                    request,
+                );
+                tracing::info!(
+                    target: "gwt.work_materialization_probe",
+                    stage = "worker_complete",
+                    success = result.is_ok(),
+                );
+                result
+            })
+        })
     })
     .await;
 
@@ -2056,6 +2196,9 @@ impl AgentPaneSessionScope {
                     request_id,
                 })
             }
+            FrontendEvent::PaneName { request_id, .. } => {
+                Some(AgentFrontendRequest::ReadName { request_id })
+            }
             // Issue #3629 AC-9: closing a scoped peer pane is a window
             // lifecycle operation, not a producing Work mutation — the PM
             // holds only an observation grant and pane.close is its everyday
@@ -2403,7 +2546,7 @@ async fn send_agent_self_close_response<S>(
     match response {
         Ok(acceptance) => send_agent_self_close_acceptance(sender, acceptance, deadline).await,
         Err(refusal) => {
-            send_agent_pm_terminal_result(
+            send_agent_terminal_result(
                 sender,
                 BackendEvent::PaneCloseResult {
                     ok: false,
@@ -2417,7 +2560,7 @@ async fn send_agent_self_close_response<S>(
     }
 }
 
-async fn send_agent_pm_terminal_result<S>(
+async fn send_agent_terminal_result<S>(
     sender: &mut S,
     event: BackendEvent,
     deadline_after: Duration,
@@ -2431,7 +2574,7 @@ async fn send_agent_pm_terminal_result<S>(
                     .await;
         }
         Err(error) => {
-            tracing::error!(%error, "failed to serialize direct PM message result");
+            tracing::error!(%error, "failed to serialize direct agent result");
         }
     }
 }
@@ -2477,10 +2620,47 @@ fn opaque_agent_pm_target_refusal(operation_id: String, window_id: String) -> Ba
     }
 }
 
-async fn send_agent_fence_close<S>(sender: &mut S, close_frame: ClientCloseFrame)
-where
+fn pane_name_correlation(payload: &str, kind: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(payload).ok()?;
+    (value.get("kind")?.as_str()? == kind)
+        .then(|| value.get("request_id")?.as_str().map(str::to_owned))?
+}
+
+async fn refuse_pending_agent_names<S>(
+    sender: &mut S,
+    pending_names: &mut HashSet<String>,
+    error: &str,
+) where
     S: futures_util::Sink<Message> + Unpin,
 {
+    for request_id in pending_names.drain() {
+        send_agent_terminal_result(
+            sender,
+            BackendEvent::PaneNameResult {
+                request_id,
+                ok: false,
+                agent_name: None,
+                error: Some(error.to_string()),
+            },
+            Duration::from_secs(1),
+        )
+        .await;
+    }
+}
+
+async fn send_agent_fence_close<S>(
+    sender: &mut S,
+    close_frame: ClientCloseFrame,
+    pending_names: &mut HashSet<String>,
+) where
+    S: futures_util::Sink<Message> + Unpin,
+{
+    refuse_pending_agent_names(
+        sender,
+        pending_names,
+        "Agent capability is missing, stale, or unavailable",
+    )
+    .await;
     let _ = tokio::time::timeout(
         Duration::from_secs(1),
         sender.send(Message::Close(Some(axum::extract::ws::CloseFrame {
@@ -2504,6 +2684,10 @@ async fn client_session_with_scope(
         ClientSessionScope::Agent(_) => state.clients.register_pane(client_id.clone()),
     };
     let (mut sender, mut receiver) = socket.split();
+    // A fence can fire on an unrelated outbound message before the name
+    // result reaches the front of the queue. Retain each accepted correlation
+    // until its reply is sent so revocation never becomes a silent timeout.
+    let mut pending_names = HashSet::new();
 
     let input_seq = Arc::new(AtomicU64::new(0));
 
@@ -2516,6 +2700,7 @@ async fn client_session_with_scope(
                             send_agent_fence_close(
                                 &mut sender,
                                 AGENT_STALE_BINDING_CLOSE,
+                                &mut pending_names,
                             )
                             .await;
                             break;
@@ -2523,8 +2708,14 @@ async fn client_session_with_scope(
                         let Some(payload) = scope.filter_outbound(payload) else {
                             continue;
                         };
+                        let name_result = if pending_names.is_empty() { None } else {
+                            pane_name_correlation(&payload, "pane_name_result")
+                        };
                         if sender.send(Message::Text(payload.into())).await.is_err() {
                             break;
+                        }
+                        if let Some(request_id) = name_result {
+                            pending_names.remove(&request_id);
                         }
                         let repair_panes = scope.filter_repair_panes(repair_panes);
                         if !repair_panes.is_empty() {
@@ -2540,12 +2731,10 @@ async fn client_session_with_scope(
                     }
                     DrainStep::Closed(close_frame) => {
                         if let Some(close_frame) = close_frame {
-                            let _ = sender
-                                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
-                                    code: close_frame.code,
-                                    reason: close_frame.reason.into(),
-                                })))
-                                .await;
+                            send_agent_fence_close(&mut sender, close_frame, &mut pending_names).await;
+                        } else {
+                            refuse_pending_agent_names(&mut sender, &mut pending_names,
+                                "Agent connection closed before name lookup completed").await;
                         }
                         break;
                     }
@@ -2555,10 +2744,18 @@ async fn client_session_with_scope(
                 match maybe_message {
                     Some(Ok(Message::Text(text))) => {
                         let received_at = Instant::now();
+                        let name_request_id = match &scope {
+                            ClientSessionScope::Agent(_) => pane_name_correlation(text.as_ref(), "pane_name"),
+                            ClientSessionScope::Browser(_) => None,
+                        };
+                        if let Some(request_id) = &name_request_id {
+                            pending_names.insert(request_id.clone());
+                        }
                         if !scope.refresh_agent_grant(&state.agent_capabilities) {
                             send_agent_fence_close(
                                 &mut sender,
                                 AGENT_STALE_BINDING_CLOSE,
+                                &mut pending_names,
                             )
                             .await;
                             break;
@@ -2575,7 +2772,7 @@ async fn client_session_with_scope(
                                         operation_id,
                                         window_id,
                                     }) => {
-                                        send_agent_pm_terminal_result(
+                                        send_agent_terminal_result(
                                             &mut sender,
                                             opaque_agent_pm_target_refusal(operation_id, window_id),
                                             AGENT_PM_TERMINAL_SEND_DEADLINE,
@@ -2612,6 +2809,7 @@ async fn client_session_with_scope(
                                                     send_agent_fence_close(
                                                         &mut sender,
                                                         AGENT_STALE_BINDING_CLOSE,
+                                                        &mut pending_names,
                                                     )
                                                     .await;
                                                     break;
@@ -2624,6 +2822,7 @@ async fn client_session_with_scope(
                                                     send_agent_fence_close(
                                                         &mut sender,
                                                         AGENT_AUTHORITY_UNAVAILABLE_CLOSE,
+                                                        &mut pending_names,
                                                     )
                                                     .await;
                                                     break;
@@ -2632,6 +2831,7 @@ async fn client_session_with_scope(
                                                     send_agent_fence_close(
                                                         &mut sender,
                                                         AGENT_STALE_BINDING_CLOSE,
+                                                        &mut pending_names,
                                                     )
                                                     .await;
                                                     break;
@@ -2693,7 +2893,7 @@ async fn client_session_with_scope(
                                             )) = direct_pm_result.take()
                                             {
                                                 let _ = cancellation.cancel();
-                                                send_agent_pm_terminal_result(
+                                                send_agent_terminal_result(
                                                     &mut sender,
                                                     BackendEvent::PmMessageSendResult {
                                                         operation_id,
@@ -2711,6 +2911,7 @@ async fn client_session_with_scope(
                                                 send_agent_fence_close(
                                                     &mut sender,
                                                     AGENT_STALE_BINDING_CLOSE,
+                                                    &mut pending_names,
                                                 )
                                                 .await;
                                             }
@@ -2781,7 +2982,7 @@ async fn client_session_with_scope(
                                                 }
                                             };
                                             if connected {
-                                                send_agent_pm_terminal_result(
+                                                send_agent_terminal_result(
                                                     &mut sender,
                                                     event,
                                                     AGENT_PM_TERMINAL_SEND_DEADLINE,
@@ -2832,6 +3033,13 @@ async fn client_session_with_scope(
                                 }
                             }
                             Err(error) => {
+                                if let Some(request_id) = name_request_id {
+                                    pending_names.remove(&request_id);
+                                    send_agent_terminal_result(&mut sender, BackendEvent::PaneNameResult {
+                                        request_id, ok: false, agent_name: None,
+                                        error: Some(format!("Invalid pane.name request: {error}")),
+                                    }, Duration::from_secs(1)).await;
+                                }
                                 eprintln!("invalid frontend message: {error}");
                             }
                         }
@@ -3243,7 +3451,7 @@ mod tests {
     }
 
     #[test]
-    fn pane_name_requires_producing_agent_authority_and_refuses_browser_dispatch() {
+    fn pane_name_separates_metadata_read_from_producing_assignment_and_refuses_browser() {
         let project = tempfile::tempdir().expect("project");
         let request = || {
             serde_json::from_value::<FrontendEvent>(serde_json::json!({
@@ -3277,7 +3485,11 @@ mod tests {
                 "observation-capability".to_string(),
                 principal,
             ));
-            assert!(scope.filter_inbound(request()).is_none());
+            let read = scope
+                .filter_inbound(request())
+                .expect("own-name metadata read");
+            assert!(!read.mutates_host_state());
+            assert!(!read.requires_producing_authority());
         }
         let scope = AgentPaneSessionScope::new(AgentCapabilityGrant::new(
             "producing-capability".to_string(),
