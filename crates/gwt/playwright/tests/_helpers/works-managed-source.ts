@@ -59,6 +59,7 @@ export async function startWorksManagedSource(browser: Browser, info: TestInfo) 
   let stopped: Promise<void> | undefined;
   const sockets: WebSocket[] = [];
   const errors: string[] = [];
+  let observationSequence = 0;
 
   const stop = () => stopped ??= (async () => {
     const failures: unknown[] = [];
@@ -75,8 +76,9 @@ export async function startWorksManagedSource(browser: Browser, info: TestInfo) 
             await expect.poll(stillOwned, { timeout: 10_000 }).toBe(false);
           }
         }
-        await info.attach("works-target-cleanup", { body: JSON.stringify({ pid: owned.pid, birth: targetBirth,
-          exited: !owned.pid || !stillOwned() }), contentType: "application/json" });
+        const evidence = JSON.stringify({ pid: owned.pid, birth: targetBirth, exited: !owned.pid || !stillOwned() });
+        await writeFile(info.outputPath("works-target-cleanup.json"), evidence);
+        await info.attach("works-target-cleanup", { body: evidence, contentType: "application/json" });
       } catch (error) { failures.push(error); }
     }
     for (const socket of sockets) {
@@ -89,8 +91,10 @@ export async function startWorksManagedSource(browser: Browser, info: TestInfo) 
       const guiActual = sourceGuiPid ? processBirth(sourceGuiPid) : null;
       const sourceGone = sourceActual === null || sourceActual !== sourceBirth;
       const guiGone = guiActual === null || guiActual !== sourceGuiBirth;
-      await info.attach("works-source-cleanup", { body: JSON.stringify({ source_pid: sourcePid,
-        source_birth: sourceBirth, source_exited: sourceGone, gui_exited: guiGone }), contentType: "application/json" });
+      const evidence = JSON.stringify({ source_pid: sourcePid, source_birth: sourceBirth,
+        source_exited: sourceGone, gui_exited: guiGone });
+      await writeFile(info.outputPath("works-source-cleanup.json"), evidence);
+      await info.attach("works-source-cleanup", { body: evidence, contentType: "application/json" });
       expect(sourceGone).toBe(true);
       expect(guiGone).toBe(true);
       expect(errors, "source console/page errors including cleanup").toEqual([]);
@@ -255,8 +259,12 @@ export async function startWorksManagedSource(browser: Browser, info: TestInfo) 
         catch { return null; } // A partial observation is not evidence.
       }, { timeout: WAIT }).toBeTruthy();
       const birthAfter = { source: processBirth(sourcePid), gui: processBirth(sourceGuiPid) };
-      await info.attach(`works-source-${phase}`, { body: JSON.stringify({ ...receipt,
-        birth_before: birthBefore, birth_after: birthAfter, pane_binding: paneBinding!, tree_binding: treeBinding }), contentType: "application/json" });
+      const evidence = JSON.stringify({ ...receipt, birth_before: birthBefore, birth_after: birthAfter,
+        pane_binding: paneBinding!, tree_binding: treeBinding });
+      // beforeAll's TestInfo can outlive its first trace; retain every safe
+      // observation independently before the private fixture is removed.
+      await writeFile(info.outputPath(`works-source-${++observationSequence}-${phase}.json`), evidence);
+      await info.attach(`works-source-${phase}`, { body: evidence, contentType: "application/json" });
       expect(receipt.failed, `source ${phase} native protocol`).toBeUndefined();
       expect(receipt.source_pid).toBe(sourcePid);
       expect(receipt.source_session_id).toBe(source.gwt_session_id);

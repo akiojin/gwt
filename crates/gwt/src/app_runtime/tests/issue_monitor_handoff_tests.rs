@@ -2863,7 +2863,10 @@ fn native_grok_answer_holder(
                     assert_eq!(current.pty.process_id(), pane.pty.process_id());
                     assert!(current.pty.try_wait().unwrap().is_none());
                     assert_eq!(current.session.as_ref().unwrap().id, session.id);
-                    if current.pending_fresh_execution.is_none() {
+                    if current.readiness_watch.is_none()
+                        && !current.readiness_inflight
+                        && current.pending_fresh_execution.is_none()
+                    {
                         let grant = current.grant.as_ref().unwrap();
                         assert!(current.issuer.grant_is_current(grant));
                         assert_eq!(
@@ -2886,6 +2889,8 @@ fn native_grok_answer_holder(
             .unwrap(),
             Some(pending.binding.identity.clone())
         );
+        // The original job has settled; exercise the separate positive HTTP resend.
+        authenticate_monitor_owner_readiness(&owner, &pane);
     }
     owner_fixture_block_on(owner.command(gwt::project_runtime::events::OwnerCommand::Health))
         .unwrap();

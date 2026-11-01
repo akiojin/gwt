@@ -657,15 +657,20 @@ pub(crate) fn run_collect<E: CliEnv>(
             let managed_hook_bin =
                 crate::managed_assets::managed_hook_bin().map_err(io_as_api_error)?;
             let _hook_bin = gwt_skills::settings_local::ScopedHookBin::set(&managed_hook_bin);
+            let worktree = if purpose == Some(hook::health::HookDoctorPurpose::ManagedBrowser) {
+                gwt_core::paths::resolve_current_worktree_root(env.repo_path())
+            } else {
+                env.repo_path().to_path_buf()
+            };
             let repair = if repair {
                 Some(
-                    hook::health::repair_managed_hook_configs(env.repo_path())
+                    hook::health::repair_managed_hook_configs(&worktree)
                         .map_err(io_as_api_error)?,
                 )
             } else {
                 None
             };
-            let mut input = hook::health::ManagedHookHealthInput::new(env.repo_path());
+            let mut input = hook::health::ManagedHookHealthInput::new(&worktree);
             if let Some(path) = runtime_state_path {
                 input = input.with_runtime_state_path(path);
             }
