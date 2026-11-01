@@ -6,12 +6,12 @@
  *   (b) after a window restart and an app restart the relaunched window is
  *       rebound to that same exact session.
  */
-import { chmod, readdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import { startExactRelaunchFixture, type ExactRelaunchInvocation } from "./_helpers/exact-relaunch";
-import { gotoLiveGwt, sendLiveGwtEvent } from "./_helpers/live-gwt";
+import { gotoLiveGwt, liveGwtProjectUrl, sendLiveGwtEvent } from "./_helpers/live-gwt";
 
 type AgentWindow = { id: string; session_id: string; status: string; agent_id: string };
 type RosterMember = { agent_member_id: string; agent_id: string; name: string; enabled: boolean;
@@ -261,20 +261,65 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
         .toBe(retried.members.find(value => value.name === "Retry contributor")?.agent_member_id);
       expect(errors, "actual registration/rename/reload/restart console and page errors").toEqual([]);
     } finally {
-      await fixture.stop();
+      try { await page.goto("about:blank"); }
+      finally { await fixture.stop(); }
     }
+    expect(errors, "registration cleanup console and page errors").toEqual([]);
   });
 
   test("saved manual settings and recorded assignment facts stay separate through rename, reload and native restart", async ({ page }, info) => {
-    const fixture = await startExactRelaunchFixture(info);
+    let firstProjectKey = "";
+    let secondProjectKey = "";
+    let secondPreferencesPath = "";
+    const secondDefaults = { agent_id: "codex", runtime_target: "Host", skip_permissions: true,
+      prefer_for: ["label:project-b"] };
+    const fixture = await startExactRelaunchFixture(info, {
+      async beforeStart({ home, project, env, preferences: primaryPreferences }) {
+        firstProjectKey = basename(dirname(primaryPreferences));
+        expect(firstProjectKey).toMatch(/^[a-f0-9]{16}$/);
+        const second = join(home, "project-b");
+        await mkdir(second);
+        for (const args of [["init", "-q", "-b", "main"], ["-c", "user.name=gwt", "-c", "user.email=gwt@example.invalid",
+          "commit", "-q", "--allow-empty", "-m", "common Agent project fixture"]]) {
+          execFileSync("git", args, { cwd: second, env, encoding: "utf8" });
+        }
+        const checkout = process.env.GWT_PLAYWRIGHT_CHECKOUT_ROOT!;
+        const status = JSON.parse(execFileSync(join(checkout, "target/debug/gwtd"), [], {
+          cwd: second, env: { ...env, GWT_PROJECT_ROOT: second }, encoding: "utf8", timeout: 30_000,
+          input: JSON.stringify({ schema_version: 1, operation: "issue.monitor.status", params: { project_root: second } }),
+        }));
+        expect(status.ok).toBe(true);
+        secondProjectKey = status.project_store?.hash;
+        expect(secondProjectKey).toMatch(/^[a-f0-9]{16}$/);
+        const preferences = join(home, ".gwt/projects", secondProjectKey, "project-state");
+        expect(preferences).not.toBe(primaryPreferences);
+        secondPreferencesPath = join(preferences, "issue-monitor.json");
+        await mkdir(preferences, { recursive: true });
+        await writeFile(join(preferences, "pm.json"), JSON.stringify({ settings: { auto_start: false } }));
+        await writeFile(secondPreferencesPath, JSON.stringify({ enabled: false,
+          max_active_agents: 1, priority_order: [], launch_profile: secondDefaults }));
+        await writeFile(join(home, ".gwt/session.json"), JSON.stringify({ tabs: [
+          { id: "exact-relaunch", title: "Project A", project_root: project, kind: "git" },
+          { id: "common-project-b", title: "Project B", project_root: second, kind: "git" },
+        ], active_tab_id: "exact-relaunch", recent_projects: [] }));
+      },
+    });
+    const secondPage = await page.context().newPage().catch(async error => {
+      await fixture.stop();
+      throw error;
+    });
     const errors = capture(page);
+    const secondErrors = capture(secondPage);
     const theme = info.project.name.includes("light") ? "light" : "dark";
-    await page.addInitScript(theme => {
-      if (location.protocol === "http:" || location.protocol === "https:") localStorage.setItem("gwt:ui:theme", theme);
-    }, theme);
-    const surface = page.locator(".agents-surface:not(.agents-surface--preview)");
     try {
-      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+      await page.addInitScript(theme => {
+        if (location.protocol === "http:" || location.protocol === "https:") localStorage.setItem("gwt:ui:theme", theme);
+      }, theme);
+      await secondPage.addInitScript(theme => {
+        if (location.protocol === "http:" || location.protocol === "https:") localStorage.setItem("gwt:ui:theme", theme);
+      }, theme);
+      const surface = page.locator(".agents-surface:not(.agents-surface--preview)");
+      await gotoLiveGwt(page, liveGwtProjectUrl(fixture.url, firstProjectKey), { enableTestBridge: true });
       await launchCodex(page, fixture.branch);
       await expect.poll(async () => (await fixture.launches()).length).toBe(1);
       const launch = (await fixture.launches())[0];
@@ -288,7 +333,30 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       await readRoster(page);
       await surface.locator(`.roster-row[data-member-id="${memberId}"]`).click();
       await expect(surface.locator(".roster-current-config")).toHaveText(expected);
-      const savedCandidate = { agent_id: "codex", agent_member_id: memberId, model: "gpt-6-sol", reasoning: "medium", runtime_target: "Host", skip_permissions: false };
+      await gotoLiveGwt(secondPage, liveGwtProjectUrl(fixture.url, secondProjectKey), { enableTestBridge: true });
+      await secondPage.locator('.op-rail__surface[data-surface="agents"]').click();
+      const secondSurface = secondPage.locator(".agents-surface:not(.agents-surface--preview)");
+      const secondBefore = await readRoster(secondPage);
+      expect(secondBefore.project_key).toBe(secondProjectKey);
+      expect(secondBefore.members.some(member => member.agent_member_id === memberId)).toBe(true);
+      await secondSurface.getByRole("textbox", { name: "Name for new member", exact: true }).fill("Project B selected member");
+      await secondSurface.getByRole("combobox", { name: "Tool for new member", exact: true }).selectOption("codex");
+      const beforeSpare = await cursor(secondPage);
+      await secondSurface.locator('.roster-capacity [data-action="add"]').click();
+      const spareRoster = await rosterAfter(secondPage, beforeSpare, secondBefore.revision);
+      const spare = spareRoster.members.find(member => member.name === "Project B selected member")!;
+      expect(spare.agent_member_id).not.toBe(memberId);
+      const beforeSecondSave = await cursor(secondPage);
+      await sendLiveGwtEvent(secondPage, { kind: "issue_monitor_profiles_set", request_id: 477753,
+        profiles: [{ ...secondDefaults, agent_member_id: spare.agent_member_id,
+          model: "gpt-6.1-sol", reasoning: "low", fast_mode: false }] });
+      const secondSave = await secondPage.waitForFunction(after => ((window as any).__gwtPlaywrightMessages || []).find((entry: any) =>
+        entry.sequence > after && entry.payload.request_id === 477753
+        && ["issue_monitor_profiles", "issue_monitor_profiles_write_failed"].includes(entry.payload.kind))?.payload,
+      beforeSecondSave).then(handle => handle.jsonValue());
+      expect(secondSave.kind, secondSave.message).toBe("issue_monitor_profiles");
+      const savedCandidate = { agent_id: "codex", agent_member_id: memberId, model: "gpt-6-sol", reasoning: "medium",
+        fast_mode: true, runtime_target: "Host", skip_permissions: false, prefer_for: ["kind:issue"] };
       expect(savedCandidate.model).not.toBe(facts.model);
       const beforeSave = await cursor(page);
       await sendLiveGwtEvent(page, { kind: "issue_monitor_profiles_set", request_id: 477752, profiles: [savedCandidate] });
@@ -315,7 +383,42 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
         await expect(revisionInput).toHaveAttribute("readonly", "");
         expect(await revisionInput.evaluate((node: HTMLInputElement) => node.readOnly)).toBe(true);
       };
+      const secondCandidatesBefore = await (async () => {
+        const after = await cursor(secondPage);
+        await sendLiveGwtEvent(secondPage, { kind: "get_issue_monitor_profiles" });
+        return secondPage.waitForFunction(after => ((window as any).__gwtPlaywrightMessages || []).findLast((entry: any) =>
+          entry.sequence > after && entry.payload.kind === "issue_monitor_profiles")?.payload.profiles,
+        after).then(handle => handle.jsonValue());
+      })();
+      const assertSharedSaved = async () => {
+        const sourceSnapshot = await readRoster(page);
+        const sharedSnapshot = await readRoster(secondPage);
+        expect(sourceSnapshot.project_key).toBe(firstProjectKey);
+        expect(sharedSnapshot.project_key).toBe(secondProjectKey);
+        const source = sourceSnapshot.members.find(value => value.agent_member_id === memberId)!;
+        const shared = sharedSnapshot.members.find(value => value.agent_member_id === memberId)!;
+        expect(shared).toMatchObject({ agent_member_id: memberId, agent_id: source.agent_id, name: source.name,
+          enabled: source.enabled, assignment: source.assignment });
+        expect({ prefer_for: [], ...shared.saved_manual_profile })
+          .toMatchObject({ ...savedCandidate, ...secondDefaults, prefer_for: [] });
+        // Candidate selection/order and execution permissions remain project-owned.
+        const after = await cursor(secondPage);
+        await sendLiveGwtEvent(secondPage, { kind: "get_issue_monitor_profiles" });
+        const candidates = await secondPage.waitForFunction(after => ((window as any).__gwtPlaywrightMessages || []).findLast((entry: any) =>
+          entry.sequence > after && entry.payload.kind === "issue_monitor_profiles")?.payload.profiles,
+        after).then(handle => handle.jsonValue());
+        expect(candidates.map((candidate: any) => candidate.agent_member_id || candidate.agent_id))
+          .toEqual(secondCandidatesBefore.map((candidate: any) => candidate.agent_member_id || candidate.agent_id));
+        expect(candidates).toHaveLength(1);
+        expect(candidates).toEqual(secondCandidatesBefore);
+        expect(candidates[0]).toMatchObject(secondDefaults);
+        await secondSurface.locator(`.roster-row[data-member-id="${memberId}"]`).click();
+        await expect(secondSurface.locator(".roster-saved-settings")).toContainText("Permissions: Skip prompts");
+        await expect(secondSurface.locator(".roster-saved-settings")).toContainText("Model: gpt-6-sol");
+        await expect(secondSurface.locator(".roster-saved-settings")).toContainText(`Reasoning: ${savedCandidate.reasoning}`);
+      };
       await assertSaved();
+      await assertSharedSaved();
       await revisionInput.focus();
       await page.keyboard.press("End");
       expect(await revisionInput.evaluate((node: HTMLInputElement) => node.selectionStart)).toBe(savedRevision!.length);
@@ -349,13 +452,51 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       await expect(surface.locator(".roster-current-config")).toHaveText(expected);
       expect(await surface.evaluate(node => node === (window as any).__savedCandidateRoster)).toBe(true);
       savedCandidate.reasoning = "high";
+      await assertSharedSaved();
+      const beforeSettings = await cursor(secondPage);
+      await sendLiveGwtEvent(secondPage, { kind: "issue_monitor_configure_profile" });
+      const openedSettings = await latestWizard(secondPage, beforeSettings, true);
+      expect(openedSettings.wizard.selected_agent_member_id).toBe(spare.agent_member_id);
+      expect(openedSettings.wizard.selected_model).toBe("gpt-6.1-sol");
+      const registryPath = join(fixture.home, ".gwt/machine-state/agent-registry.json");
+      const savedSettings = async () => {
+        const registry = JSON.parse(await readFile(registryPath, "utf8"));
+        const preferences = JSON.parse(await readFile(secondPreferencesPath, "utf8"));
+        // Live runtime transactions advance the durable commit revision; only
+        // the saved settings and selected project candidates must stay fixed.
+        return { settings_revision: registry.roster?.revision, profiles: registry.profiles,
+          project_head: preferences.launch_profile, project_candidates: preferences.launch_profiles };
+      };
+      const beforeSelection = await savedSettings();
+      const settingsWizard = secondPage.locator("#wizard-modal");
+      const beforeMemberSelection = await cursor(secondPage);
+      await settingsWizard.getByLabel("Agent", { exact: true }).selectOption(memberId);
+      const selectedSettings = await latestWizard(secondPage, beforeMemberSelection, true);
+      expect(selectedSettings.wizard).toMatchObject({ selected_agent_member_id: memberId,
+        selected_model: savedCandidate.model, selected_reasoning: savedCandidate.reasoning,
+        fast_mode: savedCandidate.fast_mode, skip_permissions: secondDefaults.skip_permissions });
+      await expect(settingsWizard.getByLabel("Model", { exact: true })).toHaveValue(savedCandidate.model);
+      await expect(settingsWizard.locator('.launch-range__tick[data-active="true"]')).toHaveAttribute("data-value", savedCandidate.reasoning);
+      await secondPage.locator("#wizard-cancel-button").click();
+      await expect(settingsWizard).not.toHaveClass(/open/);
+      await secondPage.locator('.op-rail__surface[data-surface="agents"]').click();
+      await assertSharedSaved();
+      expect(await savedSettings()).toEqual(beforeSelection);
       await page.getByRole("button", { name: "Close split", exact: true }).click();
       await page.locator('.op-rail__surface[data-surface="agents"]').click();
       const afterSaveRecord = await sessionRecord(fixture.home, launch.gwt_session_id);
       expect(tomlString(afterSaveRecord, "model")).toBe(facts.model);
       expect(tomlString(afterSaveRecord, "reasoning_level")).toBe(tomlString(record, "reasoning_level"));
       await page.reload(); await page.locator('.op-rail__surface[data-surface="agents"]').click();
-      await assertSaved(); await expect(surface.locator(".roster-current-config")).toHaveText(expected);
+      await assertSaved(); await assertSharedSaved();
+      await expect(surface.locator(".roster-current-config")).toHaveText(expected);
+      await secondPage.reload();
+      await secondPage.locator('.op-rail__surface[data-surface="agents"]').click();
+      await assertSharedSaved();
+      await secondPage.setViewportSize({ width: 400, height: 1000 });
+      await secondSurface.locator(".roster-saved-settings").scrollIntoViewIfNeeded();
+      expect(await secondSurface.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+      await secondPage.screenshot({ path: info.outputPath(`common-saved-project-b-${theme}.png`) });
       await page.setViewportSize({ width: 400, height: 1000 });
       await surface.locator(".roster-saved-settings").scrollIntoViewIfNeeded();
       expect(await surface.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
@@ -385,13 +526,22 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
         await expect(surface.locator(".roster-history-config")).toContainText([expected]);
       };
       await assertHistory();
+      await assertSharedSaved();
       await page.reload(); await page.locator('.op-rail__surface[data-surface="agents"]').click();
       await assertHistory();
       await page.goto("about:blank");
+      await secondPage.goto("about:blank");
       const restarted = await fixture.restart();
-      await gotoLiveGwt(page, restarted, { enableTestBridge: true });
+      await gotoLiveGwt(page, liveGwtProjectUrl(restarted, firstProjectKey), { enableTestBridge: true });
       await page.locator('.op-rail__surface[data-surface="agents"]').click();
+      await gotoLiveGwt(secondPage, liveGwtProjectUrl(restarted, secondProjectKey), { enableTestBridge: true });
+      await secondPage.locator('.op-rail__surface[data-surface="agents"]').click();
       await assertHistory();
+      await assertSharedSaved();
+      await expect(secondPage.locator("html")).toHaveAttribute("data-theme", theme);
+      await secondSurface.locator(".roster-saved-settings").scrollIntoViewIfNeeded();
+      expect(await secondSurface.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+      await secondPage.screenshot({ path: info.outputPath(`common-restored-project-b-${theme}.png`) });
       await page.setViewportSize({ width: 400, height: 1000 });
       await surface.locator(".roster-history-config").first().scrollIntoViewIfNeeded();
       expect(await surface.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
@@ -410,7 +560,16 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       await expect(revisionInput).toHaveValue(savedRevision!);
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       expect(errors, "actual recorded-history/rename/reload/restart console and page errors").toEqual([]);
-    } finally { await fixture.stop(); }
+      expect(secondErrors, "project B shared settings/reload/restart console and page errors").toEqual([]);
+    } finally {
+      try {
+        await page.goto("about:blank");
+        await secondPage.close();
+      }
+      finally { await fixture.stop(); }
+    }
+    expect(errors, "saved settings cleanup console and page errors").toEqual([]);
+    expect(secondErrors, "project B cleanup console and page errors").toEqual([]);
   });
 
   test("Works output lines survive saved settings, reload and owned native restart", async ({ page }, info) => {

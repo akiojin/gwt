@@ -1566,8 +1566,10 @@ fn app_runtime_issue_monitor_start_without_saved_profile_opens_global_settings_b
     );
     let mut expected = before_start;
     expected.agent_roster = after_start.agent_roster.clone();
+    expected.schema_version = 2;
     assert_eq!(
-        after_start, expected,
+        serde_json::to_value(&after_start).unwrap(),
+        serde_json::to_value(&expected).unwrap(),
         "settings-open only registers people; queue, profiles, claims and deliveries are unchanged"
     );
 }

@@ -3959,7 +3959,6 @@ fn agent_roster_view(
         .agent_roster
         .as_ref()
         .expect("initialized roster snapshot");
-    let saved_profiles = prefs.launch_profile_pool();
     let normalized_root =
         dunce::canonicalize(&context.project_root).unwrap_or_else(|_| context.project_root.clone());
     let repo_hash = gwt_core::repo_hash::detect_repo_hash(&context.project_root);
@@ -3981,6 +3980,18 @@ fn agent_roster_view(
                         .clone()
                         .unwrap_or_else(|| session.worktree_path.clone())
                 }) == normalized_root
+        })
+        .collect();
+    let member_snapshot = gwt::agent_registry::SessionMemberSnapshot::load().ok();
+    let member_ids: BTreeMap<_, _> = sessions
+        .iter()
+        .map(|session| {
+            (
+                session.id.clone(),
+                member_snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.resolve_session(session).ok().flatten()),
+            )
         })
         .collect();
     let posts_for = |session_id: &str| {
@@ -4017,7 +4028,8 @@ fn agent_roster_view(
                 .iter()
                 .copied()
                 .filter(|session| {
-                    session.agent_member_id.as_deref() == Some(member.agent_member_id.as_str())
+                    member_ids.get(&session.id).and_then(|id| id.as_deref())
+                        == Some(member.agent_member_id.as_str())
                 })
                 .collect();
             assigned.sort_by_key(|session| std::cmp::Reverse(session.created_at));
@@ -4026,13 +4038,8 @@ fn agent_roster_view(
                 .iter()
                 .filter_map(|session| session.linked_issue_number)
                 .collect();
-            let saved_manual_profile = saved_profiles
-                .iter()
-                .find(|profile| {
-                    profile.agent_member_id.as_deref() == Some(member.agent_member_id.as_str())
-                        && member.agent_id.as_deref() == Some(profile.agent_id.as_str())
-                })
-                .cloned();
+            let saved_manual_profile =
+                gwt::agent_registry::member_profile(prefs, &member.agent_member_id);
             gwt::AgentRosterMemberView {
                 member: member.clone(),
                 provider: member.agent_id.clone(),
@@ -4067,7 +4074,7 @@ fn agent_roster_view(
             continue;
         }
         let key = session
-            .and_then(|session| session.agent_member_id.clone())
+            .and_then(|session| member_ids.get(&session.id).cloned().flatten())
             .unwrap_or_else(|| session_id.clone());
         let kind = session
             .map(|session| {
@@ -4132,9 +4139,10 @@ fn agent_roster_view(
         ) {
             continue;
         }
-        let key = session
-            .agent_member_id
-            .clone()
+        let key = member_ids
+            .get(&session.id)
+            .cloned()
+            .flatten()
             .unwrap_or_else(|| session.id.clone());
         let contributor = past
             .entry(key)

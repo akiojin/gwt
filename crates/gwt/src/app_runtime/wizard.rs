@@ -1675,19 +1675,20 @@ impl AppRuntime {
             });
         let open_other_set = match action {
             gwt::LaunchWizardAction::SetAgentMember { agent_member_id } => {
-                let Some(member) =
+                let Some(prefs) =
                     gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
                         &session.wizard.context.quick_start_root,
                     ))
                     .ok()
-                    .and_then(|prefs| prefs.agent_roster)
-                    .and_then(|roster| {
-                        roster
-                            .members
-                            .into_iter()
-                            .find(|member| member.agent_member_id == *agent_member_id)
-                    })
                 else {
+                    return Some(Err("Registered Agent is unavailable; reload Agents".into()));
+                };
+                let Some(member) = prefs.agent_roster.as_ref().and_then(|roster| {
+                    roster
+                        .members
+                        .iter()
+                        .find(|member| member.agent_member_id == *agent_member_id)
+                }) else {
                     return Some(Err("Registered Agent is unavailable; reload Agents".into()));
                 };
                 if let Some(taken) =
@@ -1707,6 +1708,11 @@ impl AppRuntime {
                 let Some(tool) = member.agent_id.as_deref() else {
                     return Some(Err("Registered Agent tool is unavailable".into()));
                 };
+                let Some(saved) = gwt::agent_registry::member_profile(&prefs, agent_member_id)
+                    .or_else(|| new_agent_settings_profile(&[], tool))
+                else {
+                    return Some(Err("Registered Agent tool is unavailable".into()));
+                };
                 let open = match open_agent_settings_profile(&sets, &session.wizard) {
                     Ok(open) => open,
                     Err(error) => return Some(Err(error)),
@@ -1715,27 +1721,12 @@ impl AppRuntime {
                 let Some(slot) = sets.profiles.get_mut(sets.active) else {
                     return Some(Err("Agent Settings is unavailable".into()));
                 };
-                if agent_settings_provider_key(&slot.agent_id) != agent_settings_provider_key(tool)
-                {
-                    let Some(replacement) = new_agent_settings_profile(&[], tool) else {
-                        return Some(Err("Registered Agent tool is unavailable".into()));
-                    };
-                    let shared = (
-                        slot.skip_permissions,
-                        slot.runtime_target,
-                        slot.docker_lifecycle_intent,
-                        slot.windows_shell,
-                    );
-                    *slot = replacement;
-                    (
-                        slot.skip_permissions,
-                        slot.runtime_target,
-                        slot.docker_lifecycle_intent,
-                        slot.windows_shell,
-                    ) = shared;
-                }
                 slot.agent_id = tool.into();
                 slot.agent_member_id = Some(agent_member_id.clone());
+                slot.model = saved.model;
+                slot.reasoning = saved.reasoning;
+                slot.version = saved.version;
+                slot.fast_mode = saved.fast_mode;
                 true
             }
             gwt::LaunchWizardAction::SetAgent { agent_id } => {
@@ -4198,7 +4189,17 @@ impl AppRuntime {
                 Some(super::IssueMonitorLaunchDeliveryState::Materializing {
                     window_id,
                     started_at,
+                    accepted_owner,
                 }) => {
+                    // A missing GUI row does not retire the owner's immutable operation.
+                    // Unknown health is not evidence of a replacement owner either.
+                    if accepted_owner.as_ref().is_some_and(|accepted| {
+                        self.project_state(&context)
+                            .and_then(|state| state.project_owner_identity.as_ref())
+                            .is_none_or(|current| current == accepted)
+                    }) {
+                        return Vec::new();
+                    }
                     let live_runtime = self.runtimes.contains_key(&window_id)
                         && self.window_status(&window_id).is_some_and(|status| {
                             !matches!(
@@ -5000,7 +5001,15 @@ impl AppRuntime {
                 Some(super::IssueMonitorLaunchDeliveryState::Materializing {
                     window_id,
                     started_at,
+                    accepted_owner,
                 }) => {
+                    if accepted_owner.as_ref().is_some_and(|accepted| {
+                        self.project_state(&context)
+                            .and_then(|state| state.project_owner_identity.as_ref())
+                            .is_none_or(|current| current == accepted)
+                    }) {
+                        return Vec::new();
+                    }
                     let window_exists = self.tracked_window_exists(&window_id);
                     // A live preparation or its queued completion still owns
                     // this window. The TTL only recovers abandoned placeholders.
@@ -6097,6 +6106,7 @@ impl AppRuntime {
                 super::IssueMonitorLaunchDeliveryState::Materializing {
                     window_id: holder_window_id.clone(),
                     started_at: std::time::Instant::now(),
+                    accepted_owner: None,
                 },
             );
             let proxy = self.proxy.clone();

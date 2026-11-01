@@ -140,6 +140,12 @@ pub(super) fn control_init_repo(project: &Path) {
 
 pub(super) fn control_seed_foreign_roster(project: &Path) {
     control_init_repo(project);
+    if gwt::agent_registry::is_active().unwrap() {
+        // Another project's live owner already established the shared people.
+        // Enroll this source without replacing their identities or names.
+        gwt::agent_registry::ensure_active_for_project(project).unwrap();
+        return;
+    }
     seed_owner_fixture_roster(project, 8);
     gwt::mutate_issue_monitor_prefs(
         &gwt::issue_monitor_prefs_path_for_repo_path(project),
@@ -160,6 +166,7 @@ pub(super) fn control_seed_foreign_roster(project: &Path) {
         },
     )
     .unwrap();
+    configure_owner_fixture_tools(project, &["pane-contract-fixture"]);
 }
 
 pub(super) fn control_owner_agent(
@@ -177,6 +184,7 @@ pub(super) fn control_owner_agent(
         .is_none()
     {
         seed_owner_fixture_roster(project, 8);
+        configure_owner_fixture_tools(project, &["pane-contract-fixture"]);
     }
     let owner = Arc::new(
         owner_fixture_block_on(
@@ -1221,11 +1229,25 @@ fn fleet_pane_close_protects_authority_acquired_after_inventory() {
         gwt::cli::execution_state::ExecutionSettlement::Completed,
     )
     .unwrap();
-    let closed = control_request_settled(&owner, &pm, control_fleet_request(&target));
-    assert!(closed
-        .events
-        .iter()
-        .any(|event| event["kind"] == "fleet_pane_close_result" && event["ok"] == true));
+    let expected_claims =
+        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&project))
+            .unwrap()
+            .launched_issues;
+    let closed = control_fleet_request_after_prefs_contention(
+        &owner,
+        &pm,
+        &target,
+        control_fleet_request(&target),
+        &expected_claims,
+    );
+    assert!(
+        closed
+            .events
+            .iter()
+            .any(|event| event["kind"] == "fleet_pane_close_result" && event["ok"] == true),
+        "the exact target must close after its producing authority settles: {:?}",
+        closed.events
+    );
     assert!(target.pty.try_wait().unwrap().is_some());
     control_close(&owner, &pm);
 }
@@ -1247,20 +1269,25 @@ fn fleet_pane_close_protects_claim_acquired_after_inventory() {
         .unwrap()
         .iter()
         .any(|row| row["window_id"] == target.id));
-    gwt::mutate_issue_monitor_prefs(
-        &gwt::issue_monitor_prefs_path_for_repo_path(&project),
-        |prefs| {
-            prefs.launched_issues.push(gwt::IssueMonitorLaunchedIssue {
-                issue_number: 4179,
-                window_id: target.id.clone(),
-            });
-        },
-    )
+    // Retain the exact action observed before the claim; never refresh inventory.
+    let observed_request = control_fleet_request(&target);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project);
+    let (claimed, ()) = gwt::mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        prefs.launched_issues.push(gwt::IssueMonitorLaunchedIssue {
+            issue_number: 4179,
+            window_id: target.id.clone(),
+        });
+    })
     .unwrap();
-    assert_fleet_refused(
-        &control_request_settled(&owner, &pm, control_fleet_request(&target)),
-        "claim holder",
+    let expected_claims = claimed.launched_issues;
+    let refused = control_fleet_request_after_prefs_contention(
+        &owner,
+        &pm,
+        &target,
+        observed_request,
+        &expected_claims,
     );
+    assert_fleet_refused(&refused, "claim holder");
     assert!(owner_fixture_block_on(owner.probe(&target.id, target.incarnation)).is_ok());
     control_close(&owner, &target);
     control_close(&owner, &pm);
@@ -1288,11 +1315,25 @@ fn fleet_pane_close_refuses_busy_lifecycle_fence_and_recovers() {
         },
     )
     .unwrap();
-    let closed = control_request_settled(&owner, &pm, control_fleet_request(&target));
-    assert!(closed
-        .events
-        .iter()
-        .any(|event| event["kind"] == "fleet_pane_close_result" && event["ok"] == true));
+    let expected_claims =
+        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&project))
+            .unwrap()
+            .launched_issues;
+    let closed = control_fleet_request_after_prefs_contention(
+        &owner,
+        &pm,
+        &target,
+        control_fleet_request(&target),
+        &expected_claims,
+    );
+    assert!(
+        closed
+            .events
+            .iter()
+            .any(|event| event["kind"] == "fleet_pane_close_result" && event["ok"] == true),
+        "the exact target must close after its lifecycle fence releases: {:?}",
+        closed.events
+    );
     assert!(target.pty.try_wait().unwrap().is_some());
     control_close(&owner, &pm);
 }
@@ -3784,6 +3825,7 @@ fn agent_name_real_transport_preserves_inspection_metadata_and_active_assignment
     control_init_repo(&project);
     control_init_repo(&foreign);
     seed_owner_fixture_roster(&project, 8);
+    configure_owner_fixture_tools(&project, &["pane-contract-fixture"]);
     // Retained rows are metadata owned by the same native registry. Leave the
     // Sessions absent during startup so its ordinary backfill cannot name them.
     let rows = [
@@ -4468,6 +4510,7 @@ fn agent_name_keeps_bound_session_independent_of_roster_readback() {
     let root = temp.path().join("project");
     control_init_repo(&root);
     seed_owner_fixture_roster(&root, 1);
+    configure_owner_fixture_tools(&root, &["pane-contract-fixture"]);
     gwt::mutate_issue_monitor_prefs(
         &gwt::issue_monitor_prefs_path_for_repo_path(&root),
         |prefs| prefs.agent_roster.as_mut().unwrap().members[0].name = "Falcon".into(),
@@ -4738,6 +4781,7 @@ fn switch_source_retirement_fixture(
     let project = root.join("project");
     control_init_repo(&project);
     seed_owner_fixture_roster(&project, 8);
+    configure_owner_fixture_tools(&project, &["pane-contract-fixture"]);
     let tab = sample_project_tab_with_window_at(
         "source",
         "agent",

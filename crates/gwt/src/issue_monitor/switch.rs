@@ -365,6 +365,10 @@ impl IssueMonitorPrefs {
             .filter(|number| *number > 0)
             .ok_or_else(unavailable)?;
         if host.is_empty()
+            || assignment
+                .project_key
+                .as_deref()
+                .is_some_and(|key| self.agent_registry_project_key.as_deref() != Some(key))
             || assignment.host_id != host
             || assignment.host_pid == 0
             || assignment.host_started_at.is_none()
@@ -379,7 +383,10 @@ impl IssueMonitorPrefs {
                 .filter(|member| {
                     member.assignment.as_ref().is_some_and(|other| {
                         other.session_id.as_deref() == Some(session)
-                            || other.issue_number == Some(issue)
+                            || (other.issue_number == Some(issue)
+                                && other.project_key.as_deref().is_none_or(|key| {
+                                    self.agent_registry_project_key.as_deref() == Some(key)
+                                }))
                     })
                 })
                 .count()
@@ -492,7 +499,7 @@ impl IssueMonitorPrefs {
     pub fn agent_switch_target_available(&self, intent: &AgentSwitchIntent, host: &str) -> bool {
         let target = intent.request.target_issue_number;
         target > 0 && intent.source.assignment.issue_number != Some(target)
-            && self.agent_roster.as_ref().is_some_and(|roster| roster.members.iter().any(|member| member.agent_member_id == intent.request.member_id && member.enabled && member.assignment.as_ref().is_some_and(|assignment| assignment.host_id == host)))
+            && self.agent_roster.as_ref().is_some_and(|roster| roster.members.iter().any(|member| member.agent_member_id == intent.request.member_id && member.enabled && member.assignment.as_ref().is_some_and(|assignment| assignment.host_id == host && assignment.project_key.as_deref().is_none_or(|key| self.agent_registry_project_key.as_deref() == Some(key)))))
             && self.agent_issue_schedule.validate().is_ok()
             && self.agent_issue_schedule.reservations.iter().any(|reservation| reservation.host_id == host && reservation.agent_member_id == intent.request.member_id && reservation.issue_number == target)
             && self.terminal_queues.get(host).is_some_and(|queue| queue.entries.iter().filter(|entry| entry.number == target).count() == 1)
@@ -501,7 +508,7 @@ impl IssueMonitorPrefs {
             && !self.pending_launch_deliveries.iter().any(|entry| entry.issue_number == target)
             && !self.launched_issues.iter().any(|entry| entry.issue_number == target)
             && !self.launch_bindings.values().any(|number| *number == target)
-            && !self.agent_roster.iter().flat_map(|roster| &roster.members).any(|member| member.assignment.as_ref().is_some_and(|assignment| assignment.issue_number == Some(target)))
+            && !self.agent_roster.iter().flat_map(|roster| &roster.members).any(|member| member.assignment.as_ref().is_some_and(|assignment| assignment.issue_number == Some(target) && assignment.project_key.as_deref().is_none_or(|key| self.agent_registry_project_key.as_deref() == Some(key))))
     }
 
     fn can_resume_agent_switch_source(&self, intent: &AgentSwitchIntent, host: &str) -> bool {
@@ -780,6 +787,7 @@ mod tests {
                 origin_session_id: None,
                 last_issue_number: Some(41),
                 last_spec_number: None,
+                last_owner_project_key: None,
                 assignment: Some(intent.source.assignment.clone()),
             }],
         });
@@ -824,6 +832,74 @@ mod tests {
                 "execution_binding":{"schema_version":1, "session_id":"session", "repo_hash":"repo",
                     "owner_kind":"issue", "owner_number":41, "identity":{"generation_id":"generation", "binding_id":"binding", "ledger_head_hash":"ledger"}, "capability_generation":1}}
         })).unwrap()
+    }
+
+    #[test]
+    fn foreign_project_owner_numbers_do_not_block_local_switch() {
+        let (mut prefs, request, mut intent) = fixture();
+        prefs.agent_registry_project_key = Some("bbbbbbbbbbbbbbbb".into());
+        let roster = prefs.agent_roster.as_mut().unwrap();
+        roster.schema_version = 2;
+        roster.members[0].assignment.as_mut().unwrap().project_key =
+            Some("bbbbbbbbbbbbbbbb".into());
+        intent.source.assignment.project_key = Some("bbbbbbbbbbbbbbbb".into());
+        let mut foreign = roster.members[0].clone();
+        foreign.agent_member_id = "foreign-member".into();
+        foreign.name = "Foreign member".into();
+        let assignment = foreign.assignment.as_mut().unwrap();
+        assignment.project_key = Some("aaaaaaaaaaaaaaaa".into());
+        assignment.reservation_id = "foreign-reservation".into();
+        assignment.session_id = Some("foreign-session".into());
+        assignment.delivery_id = Some("foreign-delivery".into());
+        roster.members.push(foreign);
+        assert!(
+            prefs.agent_switch_source_unchanged(&intent, "host"),
+            "the same source number in another project is not an ambiguous local source"
+        );
+
+        prefs.agent_roster.as_mut().unwrap().members[1]
+            .assignment
+            .as_mut()
+            .unwrap()
+            .issue_number = Some(42);
+        let foreign_assignment = prefs.agent_roster.as_ref().unwrap().members[1]
+            .assignment
+            .clone();
+        assert!(
+            prefs.agent_switch_target_available(&intent, "host"),
+            "another project's Issue 42 does not occupy the local switch target"
+        );
+        assert!(prefs
+            .clone()
+            .request_agent_switch(request.clone(), "host")
+            .is_ok());
+        assert_eq!(
+            prefs.agent_roster.as_ref().unwrap().members[1].assignment,
+            foreign_assignment
+        );
+
+        let mut local_target_busy = prefs.clone();
+        local_target_busy.agent_roster.as_mut().unwrap().members[1]
+            .assignment
+            .as_mut()
+            .unwrap()
+            .project_key = Some("bbbbbbbbbbbbbbbb".into());
+        assert!(
+            !local_target_busy.agent_switch_target_available(&intent, "host"),
+            "a true local Issue 42 assignment still blocks the target"
+        );
+        let mut foreign_source = prefs;
+        foreign_source.agent_roster.as_mut().unwrap().members[0]
+            .assignment
+            .as_mut()
+            .unwrap()
+            .project_key = Some("aaaaaaaaaaaaaaaa".into());
+        assert!(
+            foreign_source
+                .request_agent_switch(request, "host")
+                .is_err(),
+            "the current project cannot switch a member assigned to another project"
+        );
     }
 
     #[test]

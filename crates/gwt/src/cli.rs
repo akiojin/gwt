@@ -129,6 +129,7 @@ pub enum CliCommand {
     Issue(IssueCommand),
     Pr(PrCommand),
     Actions(ActionsCommand),
+    AgentRegistry(AgentRegistryCommand),
     Board(BoardCommand),
     /// Issue #3970: `branch.prune_merged` merged remote-branch sweep.
     Branch(branch::BranchCommand),
@@ -170,6 +171,13 @@ pub enum CliCommand {
     GithubBudget(github_budget::GithubBudgetCommand),
     /// Issue #3516: `release.*` interrupted-release standing check.
     Release(release::ReleaseCommand),
+}
+
+/// Common Agent registry diagnosis and explicitly observed recovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentRegistryCommand {
+    Status { source_key: Option<String> },
+    Reconcile(Box<crate::agent_registry::RegistryReconcileRequest>),
 }
 
 /// SPEC-2077 command model for `daemon.*` JSON operations.
@@ -562,6 +570,20 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Issue(inner) => issue::run(env, inner, &mut out)?,
         CliCommand::Pr(inner) => pr::run(env, inner, &mut out)?,
         CliCommand::Actions(inner) => actions::run(env, inner, &mut out)?,
+        CliCommand::AgentRegistry(command) => {
+            let status = match command {
+                AgentRegistryCommand::Status { source_key } => {
+                    crate::agent_registry::status(source_key.as_deref())
+                }
+                AgentRegistryCommand::Reconcile(request) => {
+                    crate::agent_registry::reconcile(&request)
+                }
+            }
+            .map_err(io_as_api_error)?;
+            out.push_str(&serde_json::to_string_pretty(&status).map_err(serde_as_api_error)?);
+            out.push('\n');
+            0
+        }
         CliCommand::Board(inner) => board::run(env, inner, &mut out)?,
         CliCommand::Branch(inner) => branch::run(env, inner, &mut out)?,
         CliCommand::Worktree(inner) => worktree_gc::run(env, inner, &mut out)?,

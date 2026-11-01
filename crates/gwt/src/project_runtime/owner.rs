@@ -972,6 +972,7 @@ pub(crate) struct OwnerState {
     #[cfg(any(test, feature = "test-gh-guard"))]
     test_pty_start_gate: Option<super::test_support::OwnerTestGate>,
     agent_registry: Result<super::agent_dispatch::OwnerWindowRegistry, String>,
+    shared_registry_initialization: Option<Result<(), String>>,
     registry_projection: crate::persistence::PersistedWindowRegistry,
     pty_writers: super::agent_dispatch::PtyWriterRegistry,
     agent_dispatch_jobs: usize,
@@ -1047,6 +1048,7 @@ impl OwnerState {
             policy_usage_accounts: Vec::new(),
             policy_capacity_resumes: HashMap::new(),
             agent_registry,
+            shared_registry_initialization: None,
             registry_projection,
             pty_writers: Arc::new(std::sync::RwLock::new(HashMap::new())),
             agent_dispatch_jobs: 0,
@@ -1091,20 +1093,9 @@ impl OwnerState {
             #[cfg(windows)]
             let _verification_cap_relief =
                 crate::verification_cap_relief::spawn(state.pty_writers.clone());
-            super::startup::reconcile_durable_launches(
-                &state.root,
-                &gwt_core::paths::gwt_sessions_dir(),
-            );
             let mut state = state;
-            if let Ok(registry) = &state.agent_registry {
-                match super::agent_dispatch::backfill_owner_pane_names(
-                    &state.root,
-                    &gwt_core::paths::gwt_sessions_dir(),
-                    registry,
-                ) {
-                    Ok(snapshot) => state.registry_projection = snapshot,
-                    Err(error) => tracing::warn!(%error, "owner Agent name backfill failed"),
-                }
+            if let Err(error) = state.initialize_shared_registry() {
+                tracing::warn!(%error, "owner startup waits for shared Agent registry recovery");
             }
             let writers = state.pty_writers.clone();
             let _monitor_reconciler = crate::monitor_duplicate_runtime::spawn(
@@ -1126,6 +1117,40 @@ impl OwnerState {
         });
         handle
     }
+
+    /// Initial activation takes Session leases before prefs/registry locks.
+    /// Run before any startup or request-specific Session lease, and retain a
+    /// failed attempt so Health can diagnose and retry after explicit recovery.
+    fn initialize_shared_registry(&mut self) -> Result<(), String> {
+        if matches!(self.shared_registry_initialization, Some(Ok(()))) {
+            return Ok(());
+        }
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            gwt_core::operation_deadline::now() + std::time::Duration::from_secs(5),
+        );
+        if let Err(error) = crate::agent_registry::ensure_active_for_project(&self.root) {
+            let error = format!("Shared Agent registry initialization failed: {error}");
+            self.shared_registry_initialization = Some(Err(error.clone()));
+            return Err(error);
+        }
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        super::startup::reconcile_durable_launches(&self.root, &sessions);
+        if let Ok(registry) = &self.agent_registry {
+            match super::agent_dispatch::backfill_owner_pane_names(&self.root, &sessions, registry)
+            {
+                Ok(snapshot) => {
+                    if self.registry_projection != snapshot {
+                        self.registry_projection = snapshot;
+                        let _ = self.events.send(OwnerEvent::Invalidated);
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "owner Agent name backfill failed"),
+            }
+        }
+        self.shared_registry_initialization = Some(Ok(()));
+        Ok(())
+    }
+
     fn run(mut self, receiver: mpsc::Receiver<OwnerMessage>) -> Vec<oneshot::Sender<()>> {
         loop {
             if !self.stopping && self.gui_presence.expired(std::time::Instant::now()) {
@@ -2238,6 +2263,27 @@ impl OwnerState {
             let _ = reply.send(Err("project key mismatch".into()));
             return;
         }
+        if !self.stopping {
+            if matches!(request.command, OwnerCommand::Health) {
+                // GUI clients verify Health before sending a launch command.
+                // Retrying here makes external registry recovery reachable on
+                // the same owner rather than leaving discovery permanently degraded.
+                let _ = self.initialize_shared_registry();
+            } else if matches!(
+                request.command,
+                OwnerCommand::LaunchAgent { .. }
+                    | OwnerCommand::RestoreSavedSession { .. }
+                    | OwnerCommand::ContinueWork { .. }
+                    | OwnerCommand::AgentSwitch { .. }
+                    | OwnerCommand::DriveAgentSwitch
+                    | OwnerCommand::UpdateLayout { .. }
+            ) {
+                if let Err(error) = self.initialize_shared_registry() {
+                    let _ = reply.send(Err(error));
+                    return;
+                }
+            }
+        }
         if matches!(
             request.command,
             OwnerCommand::PrepareMobileInput { .. }
@@ -2663,7 +2709,11 @@ impl OwnerState {
                 Ok(json!({"startup_intent":self.gui_presence.intent()}))
             }
             OwnerCommand::Health => {
-                let health = json!({"startup_intent":self.gui_presence.intent(),"gui_presence_count":self.gui_presence.count(),"pid":std::process::id(),"host_started_at":crate::process::host_process_start_time(std::process::id()),"host_instance_id":self.host_instance_id,"project_key":self.project_key,"panes":self.runtimes.len(),"pending_transport":self.pending_transport.len(),"draining":self.stopping,"reconciliation_required":self.retirements.values().any(Option::is_some)||self.agent_registry.is_err(),"reconciliation":self.retirements.iter().filter_map(|((id,incarnation),captured)| captured.as_ref().map(|_| json!({"id":id,"incarnation":incarnation}))).collect::<Vec<_>>()});
+                let initialization_error = self
+                    .shared_registry_initialization
+                    .as_ref()
+                    .and_then(|result| result.as_ref().err());
+                let health = json!({"startup_intent":self.gui_presence.intent(),"gui_presence_count":self.gui_presence.count(),"pid":std::process::id(),"host_started_at":crate::process::host_process_start_time(std::process::id()),"host_instance_id":self.host_instance_id,"project_key":self.project_key,"panes":self.runtimes.len(),"pending_transport":self.pending_transport.len(),"draining":self.stopping,"reconciliation_required":self.retirements.values().any(Option::is_some)||self.agent_registry.is_err()||initialization_error.is_some(),"agent_registry_initialization_error":initialization_error,"reconciliation":self.retirements.iter().filter_map(|((id,incarnation),captured)| captured.as_ref().map(|_| json!({"id":id,"incarnation":incarnation}))).collect::<Vec<_>>()});
                 #[cfg(any(test, feature = "test-gh-guard"))]
                 let health = {
                     let mut health = health;
@@ -7427,6 +7477,21 @@ impl OwnerState {
             );
             return;
         }
+        if let AgentFrontendRequest::Name { request_id, .. } = &request {
+            if let Err(error) = self.initialize_shared_registry() {
+                self.clients
+                    .dispatch(vec![crate::project_transport::OutboundEvent::reply(
+                        client_id,
+                        crate::BackendEvent::PaneNameResult {
+                            request_id: request_id.clone(),
+                            ok: false,
+                            agent_name: None,
+                            error: Some(error),
+                        },
+                    )]);
+                return;
+            }
+        }
         let target = match &request {
             AgentFrontendRequest::CloseWindow { id, .. }
             | AgentFrontendRequest::CloseFleetPane { id, .. }
@@ -10710,6 +10775,7 @@ mod tests {
             policy_usage_accounts: Vec::new(),
             policy_capacity_resumes: HashMap::new(),
             agent_registry: super::super::agent_dispatch::load_owner_registry(root),
+            shared_registry_initialization: None,
             registry_projection: crate::persistence::empty_workspace_state(),
             pty_writers: Arc::new(std::sync::RwLock::new(HashMap::new())),
             agent_dispatch_jobs: 0,
@@ -10807,6 +10873,125 @@ mod tests {
         OwnerRequest {
             project_key: "0123456789abcdef".into(),
             command,
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_registry_initialization_recovers_on_the_same_owner_before_admission() {
+        use futures_util::FutureExt as _;
+
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let root = home.path().join("repo");
+        std::fs::create_dir(&root).unwrap();
+        let project_key = gwt_core::paths::project_scope_hash(&root).to_string();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let mut session = gwt_agent::Session::new(&root, "main", gwt_agent::AgentId::Codex);
+        session.agent_name = Some("Retained Cedar".into());
+        session.update_status(gwt_agent::AgentStatus::Stopped);
+        session.save(&sessions).unwrap();
+        let session_path = sessions.join(format!("{}.toml", session.id));
+        let original_session = std::fs::read(&session_path).unwrap();
+        let mut registry =
+            crate::WindowRegistry::from_persisted(crate::persistence::empty_workspace_state());
+        let row = registry.add_window(crate::preset::WindowPreset::Agent);
+        registry.set_session_id(&row.id, Some(session.id.clone()));
+        let workspace_path = crate::persistence::workspace_state_path(&root);
+        crate::persistence::save_workspace_state_durable(
+            &workspace_path,
+            &registry.persistable_state(),
+        )
+        .unwrap();
+        let original_workspace = std::fs::read(&workspace_path).unwrap();
+        let registry_path = crate::agent_registry::path();
+        std::fs::create_dir_all(registry_path.parent().unwrap()).unwrap();
+        std::fs::write(&registry_path, b"{").unwrap();
+        let owner = OwnerState::start(
+            root.clone(),
+            project_key.clone(),
+            ClientHub::default(),
+            AgentCapabilityIssuer::new(
+                "http://127.0.0.1/hook".into(),
+                "ws://127.0.0.1/pane".into(),
+                "ws://127.0.0.1/pane".into(),
+                AgentCapabilityRegistry::default(),
+            ),
+            "shared-registry-preflight".into(),
+            gwt_core::daemon::DaemonStartIntent::Standalone,
+        );
+        let request = |command| OwnerRequest {
+            project_key: project_key.clone(),
+            command,
+        };
+        let verified =
+            std::panic::AssertUnwindSafe(async {
+                let health = owner.request(request(OwnerCommand::Health)).await.unwrap();
+                assert_eq!(health["reconciliation_required"], true);
+                assert!(health["agent_registry_initialization_error"]
+                    .as_str()
+                    .is_some_and(
+                        |error| error.contains("Shared Agent registry initialization failed")
+                    ));
+                assert_eq!(std::fs::read(&session_path).unwrap(), original_session);
+                assert_eq!(std::fs::read(&workspace_path).unwrap(), original_workspace);
+                let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex).build();
+                let refused = owner
+                    .request(request(OwnerCommand::LaunchAgent {
+                        id: format!("{project_key}::not-admitted"),
+                        operation_id: "registry-not-admitted".into(),
+                        tab_id: project_key.clone(),
+                        config: Box::new(config),
+                        metadata: Box::default(),
+                        cols: 80,
+                        rows: 24,
+                    }))
+                    .await;
+                assert!(refused.is_err_and(|error| {
+                    error.contains("Shared Agent registry initialization failed")
+                }));
+                let panes = owner
+                    .request(request(OwnerCommand::ListPanes))
+                    .await
+                    .unwrap();
+                assert_eq!(panes["panes"], json!([]));
+                assert_eq!(panes["pending"], json!([]));
+                assert_eq!(std::fs::read(&registry_path).unwrap(), b"{");
+
+                // External correction makes the original owner retryable; no actor
+                // or daemon replacement is needed to resume its skipped startup.
+                std::fs::remove_file(&registry_path).unwrap();
+                let ready = owner.request(request(OwnerCommand::Health)).await.unwrap();
+                assert_eq!(ready["reconciliation_required"], false);
+                assert!(ready["agent_registry_initialization_error"].is_null());
+                assert_eq!(
+                    crate::agent_registry::status(None).unwrap().phase,
+                    crate::agent_registry::RegistryPhase::Active
+                );
+                let panes = owner
+                    .request(request(OwnerCommand::ListPanes))
+                    .await
+                    .unwrap();
+                let retained = panes["canonical_rows"]["windows"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|window| window["id"] == row.id)
+                    .unwrap();
+                assert_eq!(retained["agent_name"], "Retained Cedar");
+
+                // A ready owner must not rerun startup backfill on later health reads.
+                let ready_workspace = std::fs::read(&workspace_path).unwrap();
+                session.agent_name = Some("External later name".into());
+                session.save(&sessions).unwrap();
+                let ready = owner.request(request(OwnerCommand::Health)).await.unwrap();
+                assert_eq!(ready["reconciliation_required"], false);
+                assert_eq!(std::fs::read(&workspace_path).unwrap(), ready_workspace);
+            })
+            .catch_unwind()
+            .await;
+        owner.shutdown().await;
+        if let Err(panic) = verified {
+            std::panic::resume_unwind(panic);
         }
     }
 
@@ -11570,6 +11755,7 @@ mod tests {
             policy_usage_accounts: Vec::new(),
             policy_capacity_resumes: HashMap::new(),
             agent_registry: super::super::agent_dispatch::load_owner_registry(root.path()),
+            shared_registry_initialization: None,
             registry_projection: crate::persistence::empty_workspace_state(),
             pty_writers: Arc::new(std::sync::RwLock::new(HashMap::new())),
             agent_dispatch_jobs: 0,

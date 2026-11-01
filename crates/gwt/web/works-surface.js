@@ -69,7 +69,7 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
       <button type="button" data-action="previous" aria-label="Previous work">↑</button><button type="button" data-action="next" aria-label="Next work">↓</button></header><div class="works-terminal-host"></div></section>`;
   const overview = element.querySelector(".works-overview"), list = element.querySelector(".works-list"), full = element.querySelector(".works-full");
   const entries = new Map();
-  let selected = null, previewElement = null, previewCleanups = [], disposed = false;
+  let selected = null, previewElement = null, previewEntries = [], disposed = false;
   let renderedCatalog, renderedActivity, renderedRoster;
   const previewLines = () => systemSettingsModel?.read().worksPreviewLines ?? 3;
   const isPresented = () => element.isConnected && !element.hidden;
@@ -182,32 +182,46 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
   function syncPreview() {
     if (!previewElement) return;
     previewElement.style.setProperty("--works-preview-lines", String(previewLines()));
-    for (const cleanup of previewCleanups) cleanup?.(); previewCleanups = [];
-    previewElement.replaceChildren();
-    const note = document.createElement("p"); note.className = "surface-readonly-note"; note.textContent = "Read-only preview · Select this pane to interact"; previewElement.append(note);
+    const previous = previewEntries; previewEntries = [];
+    const contents = document.createDocumentFragment();
+    const retainOutput = (work, container, options) => {
+      const key = JSON.stringify([activityModel.read().snapshot?.project_key ?? "", work.assignment.window_id,
+        work.assignment.session_id, work.assignment.runtime_incarnation, selected ? "full" : "list", options?.tailLines ?? null]);
+      // An unavailable terminal returns a no-op mount; retry it when its
+      // actual output container becomes available, even for the same identity.
+      const entry = previous.find(entry => entry.key === key && entry.container.firstElementChild)
+        || { key, container, cleanup: mountPreview(work.assignment.window_id, container, options) };
+      previewEntries.push(entry);
+      return entry.container;
+    };
+    const note = document.createElement("p"); note.className = "surface-readonly-note"; note.textContent = "Read-only preview · Select this pane to interact"; contents.append(note);
     if (selected) {
-      if (!exactWork(selected)) return;
-      const heading = full.querySelector(".works-full-header").cloneNode(true);
-      for (const button of heading.querySelectorAll("button")) { button.disabled = true; button.tabIndex = -1; }
-      const output = document.createElement("div"); output.className = "works-preview-output";
-      previewElement.append(heading, output);
-      previewCleanups.push(mountPreview(selected.window_id, output));
+      const work = exactWork(selected);
+      if (work) {
+        const heading = full.querySelector(".works-full-header").cloneNode(true);
+        for (const button of heading.querySelectorAll("button")) { button.disabled = true; button.tabIndex = -1; }
+        const output = document.createElement("div"); output.className = "works-preview-output";
+        contents.append(heading, retainOutput(work, output));
+      }
     } else {
       const clone = overview.cloneNode(true);
       for (const cache of clone.querySelectorAll(".work-runtime-cache")) cache.remove();
       for (const button of clone.querySelectorAll("button")) { button.disabled = true; button.tabIndex = -1; }
       for (const row of clone.querySelectorAll(".work-row")) {
         row.tabIndex = -1; const tail = row.querySelector(".work-tail"); tail.replaceChildren();
-        if (!exactWork(entries.get(row.dataset.windowId)?.work.assignment)) continue;
-        previewCleanups.push(mountPreview(row.dataset.windowId, tail, { tailLines: previewLines() }));
+        const work = exactWork(entries.get(row.dataset.windowId)?.work.assignment);
+        if (!work) continue;
+        tail.replaceWith(retainOutput(work, tail, { tailLines: previewLines() }));
       }
-      previewElement.append(clone);
+      contents.append(clone);
     }
+    previewElement.replaceChildren(contents);
+    for (const entry of previous) if (!previewEntries.includes(entry)) entry.cleanup?.();
     previewElement.dataset.catalogVersion = element.dataset.catalogVersion;
   }
   function setPreviewHost(host) {
     if (previewElement?.parentElement === host) return;
-    for (const cleanup of previewCleanups) cleanup?.(); previewCleanups = [];
+    for (const entry of previewEntries) entry.cleanup?.(); previewEntries = [];
     previewElement?.remove(); previewElement = null;
     if (!host || disposed) return;
     previewElement = document.createElement("section"); previewElement.className = "works-surface works-surface--preview";

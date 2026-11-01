@@ -1120,6 +1120,7 @@ fn terminal_agent_error_invalidates_input_even_when_pane_is_kept_for_diagnostics
         ],
     );
     seed_owner_fixture_roster(&repo, 1);
+    configure_owner_fixture_tools(&repo, &["pane-contract-fixture"]);
     let owner = owner_fixture_block_on(ProjectOwnerHarness::start(&repo)).unwrap();
     let mut config = super::pane_control_tests::control_launch_config(&repo, 42);
     config.pending_initial_prompt =

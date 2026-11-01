@@ -15,6 +15,7 @@ fn registry_monitor_pane(
     let root = runtime.tab(tab_id).unwrap().project_root.clone();
     pane_control_tests::control_init_repo(&root);
     seed_owner_fixture_roster(&root, 8);
+    configure_owner_fixture_tools(&root, &["pane-contract-fixture"]);
     let owner = Arc::new(
         owner_fixture_block_on(
             gwt::project_runtime::test_support::ProjectOwnerHarness::start_with_monitor(&root),

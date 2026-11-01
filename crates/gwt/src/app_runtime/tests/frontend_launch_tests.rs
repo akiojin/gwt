@@ -2182,22 +2182,7 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_with_sgr_attributes() {
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let window_id = combined_window_id("tab-1", "shell-1");
-    let (command, args) = if cfg!(windows) {
-        (
-            "cmd".to_string(),
-            vec![
-                "/d".to_string(),
-                "/s".to_string(),
-                "/c".to_string(),
-                "exit /b 0".to_string(),
-            ],
-        )
-    } else {
-        (
-            "/bin/sh".to_string(),
-            vec!["-lc".to_string(), "exit 0".to_string()],
-        )
-    };
+    let (command, args) = long_running_test_command();
     insert_test_pane_runtime_with_command(&mut runtime, &window_id, command, args, 80, 24);
     // Write red foreground + bold "ALERT" then reset, then default-color text.
     process_test_owner_output(&mut runtime, &window_id, b"\x1b[31;1mALERT\x1b[0m normal\n");

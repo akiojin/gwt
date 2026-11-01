@@ -543,6 +543,34 @@ fn issue5596_durable_facts_prefetch_is_bounded_and_keeps_claims_fifo() {
         gwt::cli::execution_state::ExecutionSettlement::Completed,
     );
     let owner = start_monitor_relaunch_owner(&mut fixture, false);
+    gwt::try_mutate_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root),
+        |prefs| {
+            let base = prefs.launch_profile_pool()[0].clone();
+            let profiles = prefs
+                .agent_roster
+                .as_ref()
+                .unwrap()
+                .members
+                .iter()
+                .filter(|member| member.enabled && member.agent_id.as_deref() == Some("codex"))
+                .take(3)
+                .map(|member| {
+                    let mut profile = base.clone();
+                    profile.agent_member_id = Some(member.agent_member_id.clone());
+                    profile
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                profiles.len(),
+                3,
+                "registered people selected by this scenario"
+            );
+            prefs.set_launch_profile_pool(profiles);
+            Ok(())
+        },
+    )
+    .expect("select the actual registered people before facts capture");
     gwt::machine_agent_settings::set(
         Some(3),
         gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
@@ -586,15 +614,25 @@ fn issue5596_durable_facts_prefetch_is_bounded_and_keeps_claims_fifo() {
         ));
     }
     let mut scheduled = monitor.prefs();
+    let members = &scheduled
+        .agent_roster
+        .as_ref()
+        .expect("registered FIFO people")
+        .members;
     for delivery in &mut scheduled.pending_launch_deliveries {
+        let name = match delivery.issue_number {
+            3165 => "Alpha",
+            3166 => "Bravo",
+            3167 => "Charlie",
+            _ => unreachable!("the three actual FIFO deliveries"),
+        };
         delivery.agent_member_id = Some(
-            match delivery.issue_number {
-                3165 => "member-Alpha",
-                3166 => "member-Bravo",
-                3167 => "member-Charlie",
-                _ => unreachable!("the three actual FIFO deliveries"),
-            }
-            .into(),
+            members
+                .iter()
+                .find(|member| member.name == name)
+                .expect("the selected registered FIFO person")
+                .agent_member_id
+                .clone(),
         );
     }
     gwt::save_issue_monitor_prefs(&prefs_path, &scheduled).expect("save durable deliveries");
@@ -1052,8 +1090,7 @@ fn issue5596_prepared_fresh_launch_does_not_run_git_on_gui_thread() {
         gwt::agent_names::read_project_roster(&fixture.project_root, &fixture.runtime.sessions_dir)
             .expect("initialize the persistent roster before GUI capture");
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
-    let history_path = gwt_core::paths::gwt_project_dir_for_repo_path(&fixture.project_root)
-        .join("agent-names.jsonl");
+    let history_path = gwt::agent_registry::history_path();
     gwt::agent_names::remember(
         &history_path,
         &roster
@@ -1201,8 +1238,11 @@ fn issue5596_prepared_roster_revision_revalidates_before_publishing_a_pane() {
     })
     .expect("select all three registered people with their saved tuning");
     let owner = start_monitor_relaunch_owner(&mut fixture, false);
-    let history_path = gwt_core::paths::gwt_project_dir_for_repo_path(&fixture.project_root)
-        .join("agent-names.jsonl");
+    let roster = gwt::load_issue_monitor_prefs(&prefs_path)
+        .unwrap()
+        .agent_roster
+        .unwrap();
+    let history_path = gwt::agent_registry::history_path();
     let member_names = fs::read(&history_path).expect("pre-existing member names");
     let tab = fixture.runtime.tab_mut("tab-1").unwrap();
     let other = tab.workspace.add_window(WindowPreset::Agent);
@@ -1383,6 +1423,34 @@ fn issue5596_preclaim_reused_by_another_owner_reprepares_a_new_window() {
         ))
         .unwrap();
     let owner = start_monitor_relaunch_owner(&mut fixture, false);
+    gwt::try_mutate_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root),
+        |prefs| {
+            let base = prefs.launch_profile_pool()[0].clone();
+            let profiles = prefs
+                .agent_roster
+                .as_ref()
+                .unwrap()
+                .members
+                .iter()
+                .filter(|member| member.enabled && member.agent_id.as_deref() == Some("codex"))
+                .take(2)
+                .map(|member| {
+                    let mut profile = base.clone();
+                    profile.agent_member_id = Some(member.agent_member_id.clone());
+                    profile
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                profiles.len(),
+                2,
+                "registered people selected by this scenario"
+            );
+            prefs.set_launch_profile_pool(profiles);
+            Ok(())
+        },
+    )
+    .expect("select the actual registered people before facts capture");
     gwt::machine_agent_settings::set(
         Some(2),
         gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
@@ -1399,7 +1467,71 @@ fn issue5596_preclaim_reused_by_another_owner_reprepares_a_new_window() {
         .build();
     config.linked_issue_number = Some(3166);
     config.explicit_follow_up = true;
-    let foreign = pane_control_tests::control_owner_launch(&owner, "agent-1", config);
+    let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+        &fixture.project_root,
+    ))
+    .unwrap();
+    let profiles = prefs.launch_profile_pool();
+    let pending_member_id = prefs
+        .pending_launch_deliveries
+        .iter()
+        .find(|delivery| Some(&delivery.delivery_id) == fixture.delivery_id.as_ref())
+        .and_then(|delivery| delivery.agent_member_id.as_deref())
+        .or_else(|| {
+            profiles
+                .first()
+                .and_then(|profile| profile.agent_member_id.as_deref())
+        })
+        .expect("the pending launch has its scheduled or primary person");
+    let foreign_member_id = profiles
+        .iter()
+        .find(|profile| {
+            profile.agent_id == "codex"
+                && profile.agent_member_id.as_deref() != Some(pending_member_id)
+                && prefs
+                    .agent_roster
+                    .as_ref()
+                    .unwrap()
+                    .members
+                    .iter()
+                    .any(|member| {
+                        Some(&member.agent_member_id) == profile.agent_member_id.as_ref()
+                            && member.enabled
+                            && member.assignment.is_none()
+                    })
+        })
+        .and_then(|profile| profile.agent_member_id.clone())
+        .expect("a distinct registered idle foreign person");
+    let foreign_id = owner.pane_id("agent-1");
+    let receipt = owner_fixture_block_on(owner.command(
+        gwt::project_runtime::events::OwnerCommand::LaunchAgent {
+            id: foreign_id.clone(),
+            operation_id: "unrelated-preclaim-person".into(),
+            tab_id: foreign_id.split_once("::").unwrap().0.into(),
+            config: Box::new(config),
+            metadata: Box::new(gwt::project_runtime::launch_payload::OwnerLaunchMetadata {
+                selected_agent_member_id: Some(foreign_member_id),
+                ..Default::default()
+            }),
+            cols: 80,
+            rows: 24,
+        },
+    ))
+    .unwrap();
+    let foreign =
+        owner_fixture_block_on(owner.probe(&foreign_id, receipt["incarnation"].as_u64().unwrap()))
+            .unwrap();
+    assert_eq!(foreign.session.as_ref().unwrap().id, receipt["session_id"]);
+    assert!(foreign
+        .session
+        .as_ref()
+        .unwrap()
+        .execution_binding
+        .is_some());
+    assert!(
+        foreign.grant.is_some(),
+        "the production owner must issue the request capability"
+    );
     issue5596_project_owner_pane(&mut fixture, &owner, &foreign);
     let foreign_window_id = foreign.id.clone();
     let tab = fixture.runtime.tab_mut("tab-1").unwrap();
@@ -1441,6 +1573,14 @@ fn issue5596_preclaim_reused_by_another_owner_reprepares_a_new_window() {
         .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
             &fixture.recorded_events,
         ));
+    while !fixture.runtime.issue_monitor_launch_preparations.is_empty() {
+        drain_queued_blocking_tasks(&queued);
+        fixture
+            .runtime
+            .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+                &fixture.recorded_events,
+            ));
+    }
     drain_queued_blocking_tasks(&queued);
     let (window_id, launched, _) = finish_monitor_relaunch_owner(&mut fixture, Vec::new());
     let launched = launched.expect("the exact owner must reprepare a separate physical pane");
@@ -1543,8 +1683,7 @@ fn issue6096_capacity_renewal_keeps_admission_without_repeating_launch_facts() {
     )
     .expect("retain this acceptance's explicit capacity after native owner setup");
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
-    let history = gwt_core::paths::gwt_project_dir_for_repo_path(&fixture.project_root)
-        .join("agent-names.jsonl");
+    let history = gwt::agent_registry::history_path();
     let member_names = fs::read(&history).expect("pre-existing member names");
     let (spawner, queued) = BlockingTaskSpawner::queued();
     fixture.runtime.blocking_tasks = spawner;
@@ -1762,6 +1901,34 @@ fn issue5596_unrelated_prefs_and_window_change_reuses_fresh_launch_facts() {
         ))
         .unwrap();
     let owner = start_monitor_relaunch_owner(&mut fixture, false);
+    gwt::try_mutate_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root),
+        |prefs| {
+            let base = prefs.launch_profile_pool()[0].clone();
+            let profiles = prefs
+                .agent_roster
+                .as_ref()
+                .unwrap()
+                .members
+                .iter()
+                .filter(|member| member.enabled && member.agent_id.as_deref() == Some("codex"))
+                .take(2)
+                .map(|member| {
+                    let mut profile = base.clone();
+                    profile.agent_member_id = Some(member.agent_member_id.clone());
+                    profile
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                profiles.len(),
+                2,
+                "registered people selected by this scenario"
+            );
+            prefs.set_launch_profile_pool(profiles);
+            Ok(())
+        },
+    )
+    .expect("select the actual registered people before facts capture");
     let (spawner, queued) = BlockingTaskSpawner::queued();
     fixture.runtime.blocking_tasks = spawner;
     fixture
@@ -1787,6 +1954,17 @@ fn issue5596_unrelated_prefs_and_window_change_reuses_fresh_launch_facts() {
     // Keep the pending launch's registered person idle. An unrelated pane
     // must not silently change the source profile this test is revalidating.
     let unrelated_id = owner.pane_id("agent-1");
+    let unrelated_member_id = gwt::load_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root),
+    )
+    .unwrap()
+    .agent_roster
+    .unwrap()
+    .members
+    .into_iter()
+    .find(|member| member.name == "Bravo")
+    .expect("registered unrelated person")
+    .agent_member_id;
     let unrelated_receipt = owner_fixture_block_on(owner.command(
         gwt::project_runtime::events::OwnerCommand::LaunchAgent {
             id: unrelated_id.clone(),
@@ -1794,7 +1972,7 @@ fn issue5596_unrelated_prefs_and_window_change_reuses_fresh_launch_facts() {
             tab_id: unrelated_id.split_once("::").unwrap().0.into(),
             config: Box::new(config),
             metadata: Box::new(gwt::project_runtime::launch_payload::OwnerLaunchMetadata {
-                selected_agent_member_id: Some("member-Bravo".into()),
+                selected_agent_member_id: Some(unrelated_member_id),
                 ..Default::default()
             }),
             cols: 80,
@@ -2042,8 +2220,9 @@ fn assert_issue5596_unsubmitted_answer_packet_retries(
         }),
     )
     .expect("close and reap the actual asking provider before exact Resume");
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
     owner_fixture_block_on(async {
-        // test-hygiene: allow-wall-clock-deadline Bounds the exact Close/Closed IPC, not a guessed process delay.
+        // test-hygiene: allow-wall-clock-deadline Bounds exact Close/Closed and its physical census publication, not a guessed process delay.
         tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 let event = owner_events.recv().await.unwrap();
@@ -2052,6 +2231,28 @@ fn assert_issue5596_unsubmitted_answer_packet_retries(
                     if id == &source_pane.id && *incarnation == source_pane.incarnation);
                 fixture.runtime.handle_project_owner_event(&context, 1, &identity, event);
                 if closed { break; }
+            }
+            assert!(source_pane.pty.tree_exit_confirmed());
+            assert!(source_pane.pty.try_wait().unwrap().is_some());
+            loop {
+                owner.wait_monitor_idle().await.unwrap();
+                let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+                if prefs.monitor_runtime_counts
+                    .get(&format!("{}:{}", identity.pid, identity.host_started_at))
+                    .is_some_and(|census| !census.counts.contains_key(&3165)
+                        && !census.windows.contains_key(&source_pane.id))
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            let inventory = owner.command(
+                gwt::project_runtime::events::OwnerCommand::ListPanes,
+            ).await.unwrap();
+            for phase in ["panes", "pending", "closing", "reconciliation"] {
+                assert!(inventory[phase].as_array().unwrap().iter()
+                    .all(|row| row["id"] != source_pane.id),
+                    "closed asking pane remains owned in {phase}");
             }
         }).await.unwrap();
     });
@@ -2092,7 +2293,6 @@ fn assert_issue5596_unsubmitted_answer_packet_retries(
         );
     drain_queued_blocking_tasks(&queued);
     let prepared = take_issue4803_monitor_preparation(&fixture.recorded_events);
-    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
     if close_project {
         // A legal unrelated roster edit asks the GUI to revalidate these facts
         // before it can submit the immutable owner launch command.
@@ -2151,18 +2351,21 @@ fn assert_issue5596_unsubmitted_answer_packet_retries(
         let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
         let session_bytes =
             fs::read(fixture.sessions_dir.join(format!("{}.toml", source.id))).unwrap();
-        gwt::try_mutate_issue_monitor_prefs(&prefs_path, |current| {
+        let (changed, ()) = gwt::try_mutate_issue_monitor_prefs(&prefs_path, |current| {
             assert_eq!(current.launch_profile, prefs.launch_profile);
             assert_eq!(current.launch_profiles, prefs.launch_profiles);
-            current
-                .launch_profile
-                .as_mut()
-                .expect("saved profile")
-                .model = Some("changed-while-answer-worker-returned".to_string());
+            let mut pool = current.launch_profile_pool();
+            pool.first_mut().expect("saved profile").model =
+                Some("changed-while-answer-worker-returned".to_string());
+            current.set_launch_profile_pool(pool);
             Ok(())
         })
-        .expect("change the raw profile after facts capture, before owner submit");
-        (prefs, session_bytes)
+        .expect("change the canonical profile after facts capture, before owner submit");
+        assert_ne!(
+            changed.launch_profile, prefs.launch_profile,
+            "the stale trigger must change the saved core"
+        );
+        (changed, session_bytes)
     });
     let mut preparation_events = fixture
         .runtime
@@ -2292,19 +2495,21 @@ fn assert_issue5596_unsubmitted_answer_packet_retries(
             }
         };
         assert!(evidence.pty.is_none());
-        assert!(
-            matches!(
-                gwt::load_issue_monitor_prefs(&prefs_path)
-                    .unwrap()
-                    .autonomous_handoffs[0]
-                    .delivery,
-                gwt::autonomous_handoff::AutonomousHandoffDeliveryState::Attempting {
-                    attempt: 1,
-                    ..
-                }
-            ),
-            "the actual owner must persist an unsubmitted write-ahead token"
-        );
+        let checkpoint_delivery = gwt::load_issue_monitor_prefs(&prefs_path)
+            .unwrap()
+            .autonomous_handoffs[0]
+            .delivery
+            .clone();
+        let preparation_materialized = evidence.session.is_some();
+        let mut launch_worker = Some(launch_worker);
+        // A failed preparation also reaches this checkpoint. Let its original
+        // error return before ProjectClose can replace it with cancellation.
+        let unmaterialized_join = if !preparation_materialized {
+            pause.release();
+            Some(launch_worker.take().unwrap().join())
+        } else {
+            None
+        };
         fixture.runtime.close_project_tab_events("tab-1");
         let close_tasks = queued.clone();
         let close_worker = thread::spawn(move || drain_queued_blocking_tasks(&close_tasks));
@@ -2319,8 +2524,12 @@ fn assert_issue5596_unsubmitted_answer_packet_retries(
             .unwrap();
         });
         pause.release();
-        launch_worker.join().unwrap();
+        let launch_join = match launch_worker {
+            Some(worker) => worker.join(),
+            None => unmaterialized_join.expect("the unmaterialized worker was joined before close"),
+        };
         close_worker.join().unwrap();
+        launch_join.unwrap();
         let completion = take_remote_owner_launch_completion(&fixture.recorded_events);
         outcome = format!("{:?}", completion.result.as_ref().err());
         completed_window_id = Some(completion.window_id.clone());
@@ -2328,6 +2537,9 @@ fn assert_issue5596_unsubmitted_answer_packet_retries(
             .runtime
             .handle_remote_owner_launch_complete(completion);
         drain_queued_blocking_tasks(&queued);
+        assert!(matches!(&checkpoint_delivery,
+            gwt::autonomous_handoff::AutonomousHandoffDeliveryState::Attempting { attempt: 1, .. }),
+            "the actual owner must persist an unsubmitted write-ahead token before ProjectClose: delivery={checkpoint_delivery:?}; preparation_materialized={preparation_materialized}; owner={outcome}");
     } else {
         // A pre-submit refusal need not produce a launch RPC completion. Drive
         // only real queued GUI/owner callbacks, then inspect canonical retry.
@@ -2674,8 +2886,7 @@ fn issue5596_answer_packet_keeps_the_exact_holder_when_another_issue_pane_is_fir
     fixture.runtime.blocking_tasks = spawner;
     // Facts preparation and the physical answer must reuse the canonical
     // existing person while history is locked, without allocating a name.
-    let history_path = gwt_core::paths::gwt_project_dir_for_repo_path(&fixture.project_root)
-        .join("agent-names.jsonl");
+    let history_path = gwt::agent_registry::history_path();
     fs::create_dir_all(history_path.parent().unwrap()).expect("name history directory");
     let history = fs::OpenOptions::new()
         .create(true)

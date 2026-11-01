@@ -35,7 +35,13 @@ test("initial navigation honors pending choices and containment owners", () => {
   const flags = app.match(/      let initialSurfaceTabId = null;\n      let initialSurfaceSelected = false;\n/)?.[0];
   const start = app.indexOf("      windowCatalogModel.subscribe(model => model.catalog, catalog => {");
   const end = app.indexOf("      // SPEC-2356 — keyboard equivalent", start);
-  assert.ok(flags && start >= 0 && end > start, "expected the initial catalog subscription and flags");
+  const openStart = app.indexOf("      function openSurface(surface) {");
+  const openEnd = app.indexOf("      // Every window entry point", openStart);
+  const renderStart = app.indexOf("      function mergeProjectCatalog(state) {");
+  const renderEnd = app.indexOf("      let initialSurfaceTabId = null;", renderStart);
+  assert.ok(flags && start >= 0 && end > start && openStart >= 0 && openEnd > openStart
+    && renderStart >= 0 && renderEnd > renderStart,
+    "expected surface selection, real workspace rendering and the initial catalog subscription");
   const model = createUiStateStore({
     catalog: { appState: { active_tab_id: null, tabs: [] }, focusedId: null, version: 0 },
     pendingSurface: null,
@@ -49,27 +55,73 @@ test("initial navigation honors pending choices and containment owners", () => {
   }));
   const activeWindows = catalog => catalog.appState.tabs
     .find(tab => tab.id === catalog.appState.active_tab_id)?.workspace.windows || [];
-  new Function("windowCatalogModel", "catalogActiveWindows", "windowMap", "requestWindowFrame", "frameWindow",
-    flags + app.slice(start, end))(model, activeWindows,
-    new Map([["requested-log", {}], ["restored-pm", {}], ["issues-2", {}], ["preview-2", {}]]), frame, frame);
+  let selected = null;
+  let closes = 0;
+  const { openSurface, renderAppState, receiveHubState } = new Function("environment", `
+    const { windowCatalogModel, catalogActiveWindows, windowMap, requestWindowFrame, frameWindow,
+      splitSurfaces } = environment;
+    let appState = { active_tab_id: null, tabs: [] };
+    let hubCatalog = null;
+    const routeProjectKey = "project-A";
+    let pendingFrameWindowId = null, pendingPmFrame = false, reconcilingWindowCatalog = false;
+    const dismissOperatorBriefing = () => {}, connectSocket = () => {}, applyStatus = () => {};
+    const traceMeasure = (_event, _detail, render) => render();
+    const UI_TRACE_EVENT = {}, versionState = {}, detailMap = new Map();
+    const setVersionState = () => {}, renderProjectPicker = () => {}, renderProjectOnboarding = () => {};
+    const document = { getElementById: () => ({}) };
+    const activeProjectTab = () => appState.tabs.find(tab => tab.id === appState.active_tab_id);
+    const emptyWorkspace = () => ({ windows: [] }), renderWorkspace = () => {};
+    const deriveCurrentProjectWorkspaceIds = () => [], syncCurrentProjectWorkspaceIds = () => {};
+    const publishWindowCatalog = () => windowCatalogModel.update(state => ({ ...state, catalog: {
+      appState, focusedId: null, version: state.catalog.version + 1,
+    } }));
+    ${flags}${app.slice(openStart, openEnd)}${app.slice(renderStart, renderEnd)}${app.slice(start, end)}
+    return { openSurface, renderAppState, receiveHubState };
+  `)({ windowCatalogModel: model, catalogActiveWindows: activeWindows,
+    windowMap: new Map([["restored-board", {}], ["requested-log", {}], ["restored-pm", {}], ["issues-2", {}], ["preview-2", {}]]),
+    requestWindowFrame: frame, frameWindow: frame,
+    splitSurfaces: {
+      show: surface => { selected = surface; return true; },
+      close: () => { closes += 1; selected = null; },
+    } });
+  const firstProject = { id: "A", project_key: "project-A", workspace: { windows: [
+    { id: "restored-board", preset: "board", z_index: 10 },
+  ] } };
 
-  model.update(state => ({ ...state,
-    pendingSurface: { tabId: "A", preset: "logs", surfaceOwner: null },
-    catalog: { appState: { active_tab_id: "A", tabs: [{ id: "A", workspace: { windows: [
-      { id: "requested-log", preset: "logs", z_index: 1 },
-      { id: "restored-pm", preset: "claude", is_pm: true, z_index: 10 },
-    ] } }] }, focusedId: null, version: 1 },
-  }));
-  assert.deepEqual(routed, ["requested-log"], "the requested target must survive synchronous restore notifications");
-  model.update(state => ({ ...state, catalog: { ...state.catalog, version: 2 } }));
-  assert.deepEqual(routed, ["requested-log"], "later metadata must not replay initial restoration");
-  model.update(state => ({ ...state, catalog: {
-    appState: { active_tab_id: "B", tabs: [{ id: "B", workspace: { windows: [
-      { id: "issues-2", preset: "settings", z_index: 10 },
-      { id: "preview-2", preset: "agent", z_index: 200,
-        placement: { kind: "issue_preview", issue_window_id: "issues-2", issue_number: 4777 } },
-    ] } }] }, focusedId: null, version: 3,
-  } }));
-  assert.deepEqual(routed, ["requested-log", "issues-2"],
+  openSurface("agents");
+  renderAppState({ active_tab_id: "A", tabs: [firstProject] });
+  assert.equal(selected, "agents", "the real first workspace render must retain the explicit rail choice");
+  assert.equal(closes, 0, "first hydration must not close the already selected surface");
+  assert.deepEqual(routed, [], "the explicit rail choice must survive the first hydrated project");
+  renderAppState({ active_tab_id: "A", tabs: [firstProject], app_version: "metadata" });
+  assert.equal(selected, "agents");
+  assert.deepEqual(routed, [], "later metadata must preserve the explicit first-project rail choice");
+
+  renderAppState({ active_tab_id: null, tabs: [] });
+  assert.equal(closes, 1, "leaving a hydrated project closes its surface");
+  renderAppState({ active_tab_id: "A", tabs: [firstProject] });
+  assert.equal(closes, 1, "hydration without an explicit choice needs no close");
+  assert.deepEqual(routed, ["restored-board"], "without a rail choice, first hydration restores its saved surface");
+
+  model.update(state => ({ ...state, pendingSurface: { tabId: "A", preset: "logs", surfaceOwner: null } }));
+  const requestedProject = { ...firstProject, workspace: { windows: [
+    { id: "requested-log", preset: "logs", z_index: 1 },
+    { id: "restored-pm", preset: "claude", is_pm: true, z_index: 10 },
+  ] } };
+  renderAppState({ active_tab_id: "A", tabs: [requestedProject] });
+  assert.deepEqual(routed, ["restored-board", "requested-log"], "the requested target must survive synchronous restore notifications");
+  renderAppState({ active_tab_id: "A", tabs: [requestedProject], app_version: "later" });
+  assert.deepEqual(routed, ["restored-board", "requested-log"], "later metadata must not replay initial restoration");
+  const secondProject = { id: "B", project_key: "project-B", workspace: { windows: [
+    { id: "issues-2", preset: "settings", z_index: 10 },
+    { id: "preview-2", preset: "agent", z_index: 200,
+      placement: { kind: "issue_preview", issue_window_id: "issues-2", issue_number: 4777 } },
+  ] } };
+  renderAppState({ active_tab_id: "B", tabs: [firstProject, secondProject] });
+  assert.equal(closes, 2, "a real project switch must close the previous surface");
+  assert.deepEqual(routed, ["restored-board", "requested-log", "issues-2"],
     "restoring an inline agent must select its owning surface without opening an Agent tab");
+  receiveHubState({ projects: [firstProject], recent_projects: [] });
+  assert.equal(closes, 3, "a project switch produced by the merged Hub catalog must also close the previous surface");
+  assert.deepEqual(routed, ["restored-board", "requested-log", "issues-2", "restored-board"]);
 });

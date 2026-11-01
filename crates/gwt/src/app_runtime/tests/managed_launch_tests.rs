@@ -379,6 +379,7 @@ pub(super) fn managed_owner_fixture(
         ],
     );
     seed_owner_fixture_roster(&repo, 8);
+    configure_owner_fixture_tools(&repo, &["pane-contract-fixture"]);
     let owner = Arc::new(
         owner_fixture_block_on(async {
             if with_monitor {
@@ -775,6 +776,7 @@ fn managed_owner_session_at(
     gwt::project_runtime::test_support::OwnerRuntimeProbe,
 ) {
     seed_owner_fixture_roster(repo, 8);
+    configure_owner_fixture_tools(repo, &["pane-contract-fixture"]);
     let owner = owner_fixture_block_on(
         gwt::project_runtime::test_support::ProjectOwnerHarness::start(repo),
     )
@@ -857,6 +859,7 @@ pub(super) fn managed_exit_fixture(
         fs::create_dir_all(&repo).unwrap();
         init_repo_with_initial_commit(&repo);
         seed_owner_fixture_roster(&repo, 4);
+        configure_owner_fixture_tools(&repo, &["pane-contract-fixture"]);
         let owner = owner_fixture_block_on(production_owner_fixture(&repo));
         let config = managed_owner_config_at(&repo, &repo, "main");
         (repo, owner, config)
@@ -1528,6 +1531,7 @@ fn app_runtime_close_work_blocks_when_owning_agent_is_live() {
         .create_from_base("HEAD", "work/live", &worktree_path)
         .unwrap();
     seed_owner_fixture_roster(&repo, 4);
+    configure_owner_fixture_tools(&repo, &["pane-contract-fixture"]);
     let owner = owner_fixture_block_on(production_owner_fixture(&repo));
     let id = owner.pane_id("live-work");
     let launched = owner_fixture_block_on(owner.command(
@@ -4545,8 +4549,21 @@ fn agent_clean_exit_frees_the_monitor_slot_like_an_error_does() {
             probe.pane.lock().unwrap().last_exit().unwrap().exit_code,
             u32::from(exit_code)
         );
-        owner_fixture_block_on(owner.wait_monitor_idle()).unwrap();
-        let monitor = owner_monitor_read(&repo, 42);
+        let monitor = owner_fixture_block_on(async {
+            // test-hygiene: allow-wall-clock-deadline Bounds the authoritative census after exact child reap, using the existing retained-error observation barrier.
+            tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+                loop {
+                    owner.wait_monitor_idle().await.unwrap();
+                    let monitor = owner_monitor_read(&repo, 42);
+                    if monitor.active_count() == 0 && !monitor.prefs().failed_issues.is_empty() {
+                        break monitor;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the confirmed exit must be reflected in the authoritative Monitor census")
+        });
         assert_eq!(
             monitor.active_count(),
             0,
@@ -4590,9 +4607,27 @@ fn agent_error_frees_the_monitor_slot_even_when_the_pane_is_kept_for_diagnosis()
             7,
             "You've hit your usage limit.",
         );
+        let wait_for_notification = || {
+            owner_fixture_block_on(async {
+                // test-hygiene: allow-wall-clock-deadline Bounds the canonical Monitor completion for either actual provider exit.
+                tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+                    loop {
+                        owner.wait_monitor_idle().await.unwrap();
+                        let monitor = owner_monitor_read(&repo, 42);
+                        if monitor.active_count() == 0 && !monitor.prefs().failed_issues.is_empty()
+                        {
+                            break monitor;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("the actual exit must release and notify its Monitor slot")
+            })
+        };
         if !live_hook {
             let _ = finish_managed_exit(&owner, &probe, &mut runtime, &mut observed);
-            return owner_monitor_read(&repo, 42);
+            return wait_for_notification();
         }
         let mut hook =
             runtime_hook_state_for_event("Idle", "Stop", &probe.session.as_ref().unwrap().id);
@@ -4639,21 +4674,7 @@ fn agent_error_frees_the_monitor_slot_even_when_the_pane_is_kept_for_diagnosis()
         assert_eq!(retained.pty.process_id(), probe.pty.process_id());
         assert_eq!(probe.pane.lock().unwrap().last_exit().unwrap().exit_code, 7);
         assert!(runtime.window_lookup.contains_key("tab-1::monitor-agent"));
-        let notified = owner_fixture_block_on(async {
-            // test-hygiene: allow-wall-clock-deadline Bounds the actual Monitor commit while the exact diagnostic runtime remains installed.
-            tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
-                loop {
-                    owner.wait_monitor_idle().await.unwrap();
-                    let monitor = owner_monitor_read(&repo, 42);
-                    if monitor.active_count() == 0 && !monitor.prefs().failed_issues.is_empty() {
-                        break monitor;
-                    }
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .expect("the retained pane must still release and notify its Monitor slot")
-        });
+        let notified = wait_for_notification();
         assert!(
             owner_fixture_block_on(owner.probe(&probe.id, probe.incarnation)).is_ok(),
             "Monitor notification cannot depend on removing the diagnostic pane"

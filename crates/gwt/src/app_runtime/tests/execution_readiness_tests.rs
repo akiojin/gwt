@@ -45,15 +45,62 @@ fn restarted_host_finalizes_six_fresh_sessions_after_shared_work_lock_contention
                 "HEAD",
             ],
         );
-        let fixture = owner_fresh_launch_fixture_in_worktree(
-            worktree,
-            &format!("restart-six-{index}"),
+        let operation_id = format!("restart-six-{index}");
+        let (authority, choice) = owner_fresh_launch_seed(
+            &worktree,
+            &operation_id,
             gwt::cli::execution_state::ExecutionOwnerKind::Issue,
             number,
             index % 2 != 0,
-            None,
-            Some(owner.clone()),
         );
+        let predecessor_binding = choice.expected_binding.clone();
+        let fixture_executor = TokioRuntime::new().unwrap();
+        let (fixture_owner, captured, pending) = fixture_executor.block_on(async {
+            let owner = owner.clone();
+            let checkpoint = owner.pause_next_agent_launch().await.unwrap();
+            let mut command = owner_fresh_agent_command(&owner, &worktree, choice, None);
+            let gwt::project_runtime::events::OwnerCommand::LaunchAgent { config, .. } =
+                &mut command
+            else {
+                unreachable!("fresh successor launch")
+            };
+            // These six real children must remain live through all Work transactions;
+            // the common fixture's timed provider can exit before the final readback.
+            let provider = pane_control_tests::control_custom_agent();
+            config.command = provider.command;
+            config.args = provider.default_args;
+            let client = owner.client();
+            let launch = tokio::spawn(async move { client.command(command).await });
+            // test-hygiene: allow-wall-clock-deadline Bounds the actual prepared successor checkpoint; no elapsed time establishes readiness.
+            let captured = tokio::time::timeout(Duration::from_secs(30), checkpoint.wait())
+                .await
+                .expect("actual fresh preparation checkpoint");
+            let pending = match captured.pending_fresh_execution.clone() {
+                Some(pending) => pending,
+                None => {
+                    checkpoint.release();
+                    let result = launch.await.expect("actual owner launch result");
+                    if let Ok(owner) = Arc::try_unwrap(owner) {
+                        owner.shutdown().await;
+                    }
+                    panic!(
+                        "actual owner did not prepare the requested fresh successor: {result:?}"
+                    );
+                }
+            };
+            checkpoint.release();
+            launch.await.unwrap().expect("physical fresh launch ACK");
+            (owner, captured, pending)
+        });
+        let fixture = OwnerFreshLaunchFixture {
+            executor: fixture_executor,
+            owner: fixture_owner,
+            captured,
+            pending,
+            repo: worktree,
+            authority,
+            predecessor_binding,
+        };
         let predecessor_path = gwt_core::paths::gwt_sessions_dir()
             .join(format!("predecessor-restart-six-{index}.toml"));
         let predecessor_bytes = fs::read(&predecessor_path).unwrap();
@@ -138,10 +185,16 @@ fn restarted_host_finalizes_six_fresh_sessions_after_shared_work_lock_contention
         assert!(status.is_success(), "{status}: {body}");
         assert_eq!(body["validated"], true);
     }
+    let mut physical = Vec::new();
     for (fixture, predecessor_path, predecessor_bytes, generation) in &launches {
         let probe = executor
             .block_on(owner.probe(&fixture.captured.id, fixture.captured.incarnation))
             .unwrap();
+        assert!(
+            probe.pty.try_wait().unwrap().is_none(),
+            "the exact successor must remain physically live through readiness"
+        );
+        physical.push((probe.id.clone(), probe.pty.clone()));
         assert!(probe.issuer.grant_is_current(probe.grant.as_ref().unwrap()));
         assert!(probe.has_capability_bearer(fixture.captured.grant.as_ref().unwrap()));
         assert!(probe.readiness_watch.is_none());
@@ -219,6 +272,13 @@ fn restarted_host_finalizes_six_fresh_sessions_after_shared_work_lock_contention
             .expect("all fixture handles drained")
             .shutdown(),
     );
+    assert_eq!(physical.len(), 6);
+    for (id, pty) in physical {
+        assert!(
+            pty.tree_exit_confirmed(),
+            "owner shutdown must reap the exact successor {id}"
+        );
+    }
 }
 #[test]
 fn fresh_execution_session_start_queues_io_and_deduplicates_readiness() {
@@ -1053,6 +1113,13 @@ fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
     let _env_guard = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // State outcomes use the existing SPEC #4740 worker budget seam.
+    let _prefs_budget = ScopedEnvVar::set(
+        "GWT_TEST_BUDGET_ISSUE_MONITOR_PREFS_MS",
+        gwt_core::deadline_budget::HANG_GUARD
+            .as_millis()
+            .to_string(),
+    );
     for &failure in failures {
         let temp = tempdir().unwrap();
         let _home = ScopedGwtHome::set(temp.path());
@@ -1161,6 +1228,10 @@ fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
             failure,
             "replay" | "readiness-replay" | "replacement" | "startup-timeout-replay"
         );
+        // New/retried held-phase transactions use 250ms; started transactions
+        // retain the budget captured before the holder was acquired.
+        let held_prefs_budget =
+            deferred.then(|| ScopedEnvVar::set("GWT_TEST_BUDGET_ISSUE_MONITOR_PREFS_MS", "250"));
         let holder = deferred.then(|| {
             gwt_core::operation_deadline::NamedFileLock::acquire_quiet(
                 &prefs_path.with_extension("lock"),
@@ -1265,6 +1336,7 @@ fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
             }
         }
         drop(holder);
+        drop(held_prefs_budget);
         if deferred {
             fixture
                 .executor
@@ -1335,6 +1407,27 @@ fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
                 gwt::MonitorInboxState::AgentFailed
             );
         }
+        let identity = fixture.owner.client().identity().unwrap().clone();
+        let census_key = format!("{}:{}", identity.pid, identity.host_started_at);
+        fixture.executor.block_on(async {
+            // test-hygiene: allow-wall-clock-deadline Bounds the actual independent empty-host census publication before a raw prefs no-op assertion, not a guessed delay.
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    fixture.owner.wait_monitor_idle().await.unwrap();
+                    let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+                    if prefs
+                        .monitor_runtime_counts
+                        .get(&census_key)
+                        .is_some_and(|census| census.counts.is_empty() && census.windows.is_empty())
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the exact empty host census must be durable before the stale ACK baseline");
+        });
         let before = fs::read(&prefs_path).unwrap();
         assert!(
             fixture
@@ -1355,7 +1448,7 @@ fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
         assert_eq!(
             fs::read(&prefs_path).unwrap(),
             before,
-            "failure replay cannot spend another attempt or erase its reason"
+            "{failure}: failure replay cannot spend another attempt or erase its reason"
         );
         if failure == "replacement" {
             let root = fixture
@@ -1639,6 +1732,13 @@ fn issue_monitor_scan_reconciles_activated_launch_but_preserves_unready_candidat
     let _env_guard = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Both setup and ScanNow assert state outcomes under the existing worker seam.
+    let _prefs_budget = ScopedEnvVar::set(
+        "GWT_TEST_BUDGET_ISSUE_MONITOR_PREFS_MS",
+        gwt_core::deadline_budget::HANG_GUARD
+            .as_millis()
+            .to_string(),
+    );
     for activated in [false, true] {
         let temp = tempdir().unwrap();
         let _home = ScopedGwtHome::set(temp.path());

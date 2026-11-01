@@ -570,21 +570,25 @@ fn completed_restore_reaches_exact_close(bookkeeping_warning: bool) {
         .get(&window_id)
         .copied()
         .expect("actual GUI window generation");
-    let observations = observe_terminal_windows_in_background(
-        &runtime.sessions_dir,
-        vec![TerminalWindowSnapshot {
-            window_id: window_id.clone(),
-            session_id: session_id.to_string(),
-            project_root: repo.clone(),
-            worktree_path: repo.clone(),
-            window_status: WindowProcessStatus::Idle,
-            lifecycle_generation: Some(generation),
-        }],
-        Duration::from_secs(5),
-    );
+    let mut observations = Vec::new();
+    let settlement_trace = capture_tracing_events(|| {
+        observations = observe_terminal_windows_in_background(
+            &runtime.sessions_dir,
+            vec![TerminalWindowSnapshot {
+                window_id: window_id.clone(),
+                session_id: session_id.to_string(),
+                project_root: repo.clone(),
+                worktree_path: repo.clone(),
+                window_status: WindowProcessStatus::Idle,
+                lifecycle_generation: Some(generation),
+            }],
+            Duration::from_secs(5),
+        );
+    });
     assert_eq!(
         observations[0].eligibility,
-        TerminalCloseEligibility::Eligible(reason)
+        TerminalCloseEligibility::Eligible(reason),
+        "terminal delivery settlement trace: {settlement_trace:?}"
     );
     assert_eq!(
         runtime.restore_work_terminality(&session, &repo, Some(&window_id)),

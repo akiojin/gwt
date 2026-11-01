@@ -344,14 +344,18 @@ test.describe("Issue queue real backend launch", () => {
       target.on("pageerror", error => errors.push(error.message));
       target.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
     };
+    let rosterRequestSequence = 0;
     const request = async (event: unknown, kind: string) => {
+      const requestId = kind === "agent_roster" ? `t20a-roster-${++rosterRequestSequence}` : null;
       const after = await current.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
-      await sendLiveGwtEvent(current, event);
-      return (await current.waitForFunction(({ after, kind }) => {
+      await sendLiveGwtEvent(current, requestId
+        ? { ...(event as Record<string, unknown>), request_id: requestId } : event);
+      return (await current.waitForFunction(({ after, kind, requestId }) => {
         const entry = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) =>
-          entry.sequence > after && [kind, `${kind}_error`].includes(entry.payload.kind));
+          entry.sequence > after && [kind, `${kind}_error`].includes(entry.payload.kind)
+          && (requestId === null || entry.payload.request_id === requestId));
         return entry?.payload || null;
-      }, { after, kind }, { timeout: 30_000 })).jsonValue();
+      }, { after, kind, requestId }, { timeout: 30_000 })).jsonValue();
     };
     const schedule = () => {
       const reply = fixture.scheduleOperation("issue.monitor.schedule.read");
@@ -390,7 +394,8 @@ test.describe("Issue queue real backend launch", () => {
       expect(baseProfile.agent_member_id).toBe(initial.members[0].agent_member_id);
       const selectedProfiles = roster.members.filter((member: any) => member.enabled).map((member: any) => {
         expect(member.agent_id).toBe("codex");
-        return { ...baseProfile, agent_member_id: member.agent_member_id, agent_id: member.agent_id };
+        return { ...baseProfile, agent_member_id: member.agent_member_id, agent_id: member.agent_id,
+          skip_permissions: true, prefer_for: ["kind:issue"] };
       });
       const beforeProfiles = await current.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
       await sendLiveGwtEvent(current, { kind: "issue_monitor_profiles_set", request_id: 477727, profiles: selectedProfiles });
@@ -405,12 +410,29 @@ test.describe("Issue queue real backend launch", () => {
         "issue_monitor_queue_result");
       expect(queued.error).toBeNull();
       expect(await fixture.launches()).toEqual([]);
-      const observed = schedule();
+      let observed = schedule();
       const source = owner(observed);
       expect(source).toBeTruthy();
       const target = roster.members.find((member: any) => member.enabled
         && member.agent_member_id !== source.agent_member_id);
       expect(target).toBeTruthy();
+      // A separate project changes only this person's common saved core. The
+      // primary Monitor still owns its candidate order, permissions and routing.
+      const profileSourceRoot = join(fixture.home, "shared-profile-source");
+      await mkdir(profileSourceRoot);
+      const primaryScope = fixture.fixtureOperation("issue.monitor.status");
+      expect(primaryScope.ok, JSON.stringify(primaryScope)).toBe(true);
+      const sourceProfile = { agent_id: "codex", agent_member_id: target.agent_member_id,
+        model: "gpt-6-sol", reasoning: "high", fast_mode: true, runtime_target: "Host",
+        skip_permissions: false, prefer_for: ["label:source-only"] };
+      const sourceSave = fixture.fixtureOperation("issue.monitor.profiles.set", { profiles: [sourceProfile] }, profileSourceRoot);
+      expect(sourceSave.ok, JSON.stringify(sourceSave)).toBe(true);
+      expect(sourceSave.project_store.hash).not.toBe(primaryScope.project_store.hash);
+      expect(JSON.parse(sourceSave.output).launch_profiles).toContainEqual(expect.objectContaining(sourceProfile));
+      // The core save advances the shared settings CAS, so obtain a fresh plan
+      // before exercising the existing UI reassignment transaction.
+      observed = schedule();
+      expect(owner(observed).agent_member_id).toBe(source.agent_member_id);
       const reassignment = {
         issue_number: fixture.issueNumber,
         source_member_id: source.agent_member_id,
@@ -516,14 +538,40 @@ test.describe("Issue queue real backend launch", () => {
       expect(field(record, "id")).toBe(launch.gwt_session_id);
       expect(field(record, "agent_member_id")).toBe(target.agent_member_id);
       expect(field(record, "agent_name")).toBe(target.name);
+      expect(field(record, "session_mode")).toBe("Normal");
+      expect(field(record, "model")).toBe(sourceProfile.model);
+      expect(field(record, "reasoning_level")).toBe(sourceProfile.reasoning);
+      expect(record).toMatch(/^fast_mode\s*=\s*true$/m);
+      expect(record).toMatch(/^codex_fast_mode\s*=\s*true$/m);
+      expect(record).toMatch(/^skip_permissions\s*=\s*true$/m);
+      expect(launch.argv).toContain(`--model=${sourceProfile.model}`);
+      expect(launch.argv).toContain(`model_reasoning_effort=${sourceProfile.reasoning}`);
+      expect(launch.argv).toContain("--yolo");
+      expect(launch.argv).not.toContain("resume");
+      const primaryTarget = JSON.parse((await fixture.monitorPreferencesBytes()).toString()).launch_profiles
+        .find((profile: any) => profile.agent_member_id === target.agent_member_id);
+      expect(primaryTarget).toMatchObject({ skip_permissions: true, prefer_for: ["kind:issue"] });
       expect(record).toMatch(new RegExp(`^linked_issue_number\\s*=\\s*${fixture.issueNumber}$`, "m"));
       const firstObservation = await assertObservedWork(launch.gwt_session_id!, target.agent_member_id);
       fixture.auditHooks(launch.cwd);
+      // Join the GUI input alias and Monitor's physical pane through the exact
+      // Session, rather than comparing IDs from different namespaces.
+      const primaryProjectKey = primaryScope.project_store.hash;
+      expect(firstObservation.activity.project_key).toBe(primaryProjectKey);
+      const physicalWorkspace = JSON.parse(await readFile(join(fixture.home, ".gwt", "projects",
+        primaryProjectKey, "workspace.json"), "utf8"));
+      const physicalRows = physicalWorkspace.windows.filter((row: any) => row.session_id === launch.gwt_session_id);
+      expect(physicalRows, "exact launched Session has one durable owner pane").toHaveLength(1);
+      expect(physicalRows[0]).toMatchObject({ preset: "agent", linked_issue_number: fixture.issueNumber });
+      const firstPhysicalWindowId = `${primaryProjectKey}::${physicalRows[0].id}`;
+      const beforeExit = JSON.parse((await fixture.monitorPreferencesBytes()).toString());
+      expect(beforeExit.launched_issues.filter((entry: any) => entry.issue_number === fixture.issueNumber),
+        "Monitor owns the same Session's exact physical pane before exit").toEqual([
+        { issue_number: fixture.issueNumber, window_id: firstPhysicalWindowId },
+      ]);
 
       // Stop only the owned provider, then recover through the real authenticated
       // Monitor path. No incoming census or roster frame is manufactured here.
-      await sendLiveGwtEvent(current, { kind: "set_issue_monitor_enabled", enabled: false });
-      await expect.poll(async () => JSON.parse((await fixture.monitorPreferencesBytes()).toString()).enabled).toBe(false);
       await sendLiveGwtEvent(current, { kind: "terminal_input", id: firstObservation.agent.window_id, data: "GWT_FIXTURE_EXIT\r" });
       await expect.poll(() => {
         try { process.kill(launch.pid, 0); return false; } catch { return true; }
@@ -536,8 +584,11 @@ test.describe("Issue queue real backend launch", () => {
         return !prefs.launched_issues?.some(ownsIssue)
           && !prefs.pending_launch_deliveries?.some(ownsIssue)
           && prefs.failed_issues?.some((entry: any) => ownsIssue(entry)
-            && entry.window_id === firstObservation.agent.window_id);
+            && entry.window_id === firstPhysicalWindowId);
       }, { timeout: 60_000, message: "the Host records the exact predecessor exit and releases its launch" }).toBe(true);
+      // OFF revokes the launch identity, so record its exact failure first.
+      await sendLiveGwtEvent(current, { kind: "set_issue_monitor_enabled", enabled: false });
+      await expect.poll(async () => JSON.parse((await fixture.monitorPreferencesBytes()).toString()).enabled).toBe(false);
       const after = await current.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
       const requeued = fixture.fixtureOperation("issue.monitor.requeue", {
         number: fixture.issueNumber, reason: "Issue #6362 real observer force-requeue regression", force: true,
@@ -562,7 +613,9 @@ test.describe("Issue queue real backend launch", () => {
       fixture.auditHooks(successor.cwd);
       await info.attach(`agent-schedule-${theme}`, { body: await current.screenshot(), contentType: "image/png" });
       await info.attach("agent-schedule-launch", { body: JSON.stringify({ observed, saved, stale,
-        target: { agent_member_id: target.agent_member_id, name: target.name }, launch, firstObservation,
+        target: { agent_member_id: target.agent_member_id, name: target.name }, launch, firstObservation, firstPhysicalWindowId,
+        shared_profile_source: { project_key: sourceSave.project_store.hash, profile: sourceProfile },
+        primary_project_key: primaryScope.project_store.hash, primary_target: primaryTarget,
         requeued, immediate, successor, successorObservation }, null, 2), contentType: "application/json" });
       expect(errors, "zero console/page errors across UI reassignment, GUI restart and real launch").toEqual([]);
     } finally {

@@ -555,7 +555,26 @@ fn authenticated_pm_send_recovers_the_same_operation_after_dropped_submit() {
         &format!("{body}\r"),
         Some(responder),
     );
-    assert!(matches!(result.blocking_recv().unwrap(),
+    let first_result = result.blocking_recv().unwrap();
+    let first_observation = match &first_result {
+        BackendEvent::PmMessageSendResult { status, reason, .. } => {
+            let detail = reason.as_deref().unwrap_or_default().to_ascii_lowercase();
+            serde_json::json!({
+                "status": match status.as_str() {
+                    "unconfirmed" => "unconfirmed", "delivered" => "delivered",
+                    "failed" => "failed", "refused" => "refused", "lost" => "lost",
+                    _ => "other_status",
+                },
+                "receipt_commit_failed": detail.contains("receipt commit failed")
+                    || detail.contains("receipt terminal commit failed"),
+                "readback_error": detail.contains("receipt")
+                    && (detail.contains("unavailable") || detail.contains("replay failed")),
+                "readback_only": detail.contains("readback-only"),
+            })
+        }
+        _ => serde_json::json!({"status": "other_event"}),
+    };
+    assert!(matches!(&first_result,
         BackendEvent::PmMessageSendResult { status, .. } if status == "unconfirmed"));
     let entry = fixture.target.writer.as_ref().unwrap().clone();
     let original_transaction = entry
@@ -566,6 +585,41 @@ fn authenticated_pm_send_recovers_the_same_operation_after_dropped_submit() {
         .unwrap()
         .transaction_revision;
     let path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
+    // One raw snapshot: never lock, repair the receipt tail, or claim current authority.
+    let receipt_snapshot = match fs::read_to_string(&path) {
+        Ok(raw) => {
+            let rows = raw
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(serde_json::from_str::<gwt::pm_registry::PmDeliveryReceipt>)
+                .collect::<Result<Vec<_>, _>>();
+            match rows {
+                Ok(rows) => serde_json::json!({
+                    "read": "parsed", "unterminated_tail": !raw.is_empty() && !raw.ends_with('\n'),
+                    "matching_rows": rows.iter().filter(|row| row.operation_id == operation_id).count(),
+                    "last_status": rows.iter().rev().find(|row| row.operation_id == operation_id).map(|row| row.status),
+                }),
+                Err(_) => serde_json::json!({
+                    "read": "unparseable", "unterminated_tail": !raw.is_empty() && !raw.ends_with('\n'),
+                }),
+            }
+        }
+        Err(error) => serde_json::json!({
+            "read": "unavailable", "not_found": error.kind() == std::io::ErrorKind::NotFound,
+        }),
+    };
+    let guard_snapshot = entry.pm_delivery_replay.lock().ok().map(|replay| {
+        let guard = replay.as_ref();
+        serde_json::json!({
+            "present": guard.is_some(),
+            "same_operation": guard.is_some_and(|guard| guard.operation_id == operation_id),
+            "same_target": guard.is_some_and(|guard| guard.target_session_id == target_session_id),
+            "explicit_pm_guard": guard.is_some_and(|guard| guard.retained_input.is_none()),
+            "same_recorded_transaction": guard.is_some_and(|guard| guard.transaction_revision == original_transaction),
+            "ordinary_revision_matches": guard.is_some_and(|guard| entry.handle.ordinary_input_revision() == Some(guard.ordinary_revision)),
+            "unsent_user_input": entry.handle.has_unsent_user_input(),
+        })
+    });
     let (responder, result, recovery_cancellation) = AgentPmSendResponder::channel();
     fixture.send(
         "client".into(),
@@ -574,9 +628,19 @@ fn authenticated_pm_send_recovers_the_same_operation_after_dropped_submit() {
         &format!("{body}\r"),
         Some(responder),
     );
-    assert!(matches!(result.blocking_recv().unwrap(),
+    let recovered_result = result.blocking_recv().unwrap();
+    let status_reason = match &recovered_result {
+        BackendEvent::PmMessageSendResult { status, reason, .. } => {
+            Some((status.as_str(), reason.as_deref()))
+        }
+        _ => None,
+    };
+    assert!(
+        matches!(&recovered_result,
         BackendEvent::PmMessageSendResult { status, reason: Some(reason), .. }
-            if status == "unconfirmed" && reason.contains("Further calls are readback-only")));
+            if status == "unconfirmed" && reason.contains("Further calls are readback-only")),
+        "same-operation submit recovery status/reason: {status_reason:?}; first={first_observation} receipt_snapshot={receipt_snapshot} guard_snapshot={guard_snapshot:?}"
+    );
     assert!(
         recovery_cancellation.cancel(),
         "the bounded recovery must reach its input commit"

@@ -3316,7 +3316,12 @@ fn issue_monitor_final_spawn_reads_fresh_shared_auto_capacity() {
         })
         .collect();
     prefs_before_typed.set_launch_profile_pool(profiles);
-    assert_eq!(after, prefs_before_typed);
+    // First registration advances snapshot metadata; every persisted setting
+    // outside the explicitly asserted roster must still match the original.
+    assert_eq!(
+        serde_json::to_value(&after).unwrap(),
+        serde_json::to_value(&prefs_before_typed).unwrap()
+    );
     assert_eq!(
         gwt::machine_agent_settings::load().unwrap(),
         Some(machine_policy_before)
@@ -3491,7 +3496,12 @@ fn issue_monitor_final_spawn_preserves_live_wait_and_exempts_review() {
                 })
                 .collect();
             prefs_before_typed.set_launch_profile_pool(profiles);
-            assert_eq!(after, prefs_before_typed);
+            // The new common generation is read metadata, while the complete
+            // persisted project settings remain covered by this comparison.
+            assert_eq!(
+                serde_json::to_value(&after).unwrap(),
+                serde_json::to_value(&prefs_before_typed).unwrap()
+            );
         } else {
             assert_eq!(
                 prefs_after, prefs_before,
@@ -3773,6 +3783,7 @@ fn assert_genesis_receipt_cleanup_failure(close_before_enqueue: bool, close_befo
     fs::create_dir_all(&repo).unwrap();
     init_repo_with_initial_commit(&repo);
     seed_owner_fixture_roster(&repo, 8);
+    configure_owner_fixture_tools(&repo, &["pane-contract-fixture"]);
     let executor = tokio::runtime::Runtime::new().unwrap();
     let owner = Arc::new(executor.block_on(production_owner_fixture(&repo)));
     let mut runtime = sample_runtime(
@@ -6919,6 +6930,35 @@ fn spawn_owner_codex_fixture(
     configure_owner_fixture_tools(&root, &[config.agent_id.command()]);
     let temp = runtime.sessions_dir.parent().unwrap().to_path_buf();
     pin_live_pm_fixture_agents(runtime, &temp);
+    let mut child_config = config.clone();
+    gwt_agent::LaunchEnvironment::from_active_profile(
+        runtime.profile_config_path.as_deref().unwrap(),
+        child_config.runtime_target,
+    )
+    .unwrap()
+    .with_project_root(&root)
+    .apply_to_config(&mut child_config);
+    let semantics = if cfg!(windows) {
+        gwt::project_runtime::launch::HostEnvKeySemantics::WindowsCaseInsensitive
+    } else {
+        gwt::project_runtime::launch::HostEnvKeySemantics::CaseSensitive
+    };
+    let codex_path = gwt::project_runtime::launch::effective_host_codex_config_path(
+        &root,
+        &child_config.env_vars,
+        semantics,
+        dirs::home_dir().as_deref(),
+    );
+    assert!(
+        codex_path.is_ok(),
+        "fake-provider Codex path must resolve before checking isolation"
+    );
+    assert!(
+        codex_path
+            .as_ref()
+            .is_ok_and(|path| path.starts_with(dunce::canonicalize(&temp).unwrap())),
+        "fake-provider child Codex config must be confined to its private fixture home"
+    );
     runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
     runtime.launch_wizard_cache =
         LaunchWizardMemoryCache::load_with_agent_options(&runtime.sessions_dir, Vec::new());
@@ -7755,6 +7795,7 @@ pub(super) fn seed_owner_fixture_roster(project: &Path, capacity: usize) {
             origin_session_id: None,
             last_issue_number: None,
             last_spec_number: None,
+            last_owner_project_key: None,
             assignment: None,
         })
         .collect(),
@@ -10506,6 +10547,16 @@ fn pin_live_pm_fixture_agents(runtime: &AppRuntime, root: &Path) {
     }
     let mut settings = Settings::default();
     pin_launch_agents(&mut settings, &bin);
+    let codex_home = root.join(".codex");
+    fs::create_dir_all(&codex_home).expect("private fake-provider Codex home");
+    settings
+        .profiles
+        .set_env_var(
+            "default",
+            "CODEX_HOME",
+            codex_home.to_str().expect("UTF-8 private Codex home"),
+        )
+        .expect("pin fake-provider Codex home");
     write_profile_config(runtime.profile_config_path.as_deref().unwrap(), &settings);
     settings
         .save(&gwt_core::paths::gwt_config_path())

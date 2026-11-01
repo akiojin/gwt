@@ -14,7 +14,7 @@ const windows = [
 const live = windows.slice(0, 2).map((w, i) => ({ window_id: w.id, session_id: w.session_id, runtime_incarnation: i + 1, is_pm: !!w.is_pm, issue_number: w.is_pm ? null : 4777,
   current_task: w.is_pm ? "Coordinate the current project work" : null }));
 function catalog(wins, version = 1) { return { version, runtimeStates: {}, appState: { active_tab_id: "p", tabs: [{ id: "p", workspace: { windows: wins } }] } }; }
-async function fixture(telemetry = null, initialCatalog = catalog(windows)) {
+async function fixture(telemetry = null, initialCatalog = catalog(windows), previewAvailable = () => true) {
   const { createWorksSurface } = await import(moduleUrl);
   const { document, window } = parseHTML("<main></main>");
   const frames = new Set();
@@ -27,7 +27,7 @@ async function fixture(telemetry = null, initialCatalog = catalog(windows)) {
   const surface = createWorksSurface({ document, windowCatalogModel, activityModel, rosterModel, systemSettingsModel,
     windowDisplayTitle: w => `${w.agent_name || w.title || "Agent"}${w.dynamic_title ? ` — ${w.dynamic_title}` : ""}`,
     mountTerminal(id, root, options) { let input = runtimes.get(id); if (!input) { input = document.createElement("textarea"); runtimes.set(id, input); } root.appendChild(input); mounts.push({ id, root, readOnly: options?.readOnly }); },
-    mountPreview(id, root, options) { const pre = document.createElement("pre"); pre.textContent = `${id} output`; root.appendChild(pre); previews.add(pre); previewMounts.push({ id, root, lines: options?.tailLines }); return () => { previews.delete(pre); pre.remove(); }; },
+    mountPreview(id, root, options) { if (!previewAvailable()) return () => {}; const pre = document.createElement("pre"); pre.textContent = `${id} output`; root.appendChild(pre); previews.add(pre); previewMounts.push({ id, root, lines: options?.tailLines }); return () => { previews.delete(pre); pre.remove(); }; },
     onFocus: id => focused.push(id), onLayout() {}, onSelectMember: id => selected.push(id), getTelemetry: () => telemetry,
   });
   document.querySelector("main").append(surface.element); surface.sync();
@@ -296,11 +296,33 @@ test("Works read-only split preview follows selection and releases its output su
   const f = await fixture(); const host = f.document.createElement("aside"); f.document.querySelector("main").append(host);
   f.surface.setPreviewHost(host);
   assert.equal(host.querySelectorAll(".work-row").length, 2);
+  const output = host.querySelector('[data-window-id="one"] .terminal-text-preview, [data-window-id="one"] pre');
+  const mounts = f.previewMounts.length;
+  for (let index = 0; index < 3; index++) f.surface.sync();
+  assert.ok(host.querySelector('[data-window-id="one"] pre') === output,
+    "same-identity activation must retain the already displayed preview");
+  f.windowCatalogModel.update(() => ({ catalog: catalog(windows.map(window =>
+    window.id === "one" ? { ...window, dynamic_title: "Updated purpose" } : window), 2) })); f.flush();
+  assert.match(host.textContent, /Updated purpose/);
+  assert.ok(host.querySelector('[data-window-id="one"] pre') === output,
+    "metadata updates must preserve the subscribed output node");
+  assert.equal(f.previewMounts.length, mounts, "retained output must keep its existing subscription");
   f.surface.openWork("one");
   assert.match(host.textContent, /Read-only preview/);
   assert.equal(host.querySelector("textarea"), null);
+  const fullOutput = host.querySelector(".works-preview-output pre");
+  f.surface.sync();
+  assert.ok(host.querySelector(".works-preview-output pre") === fullOutput);
   f.surface.setPreviewHost(null); assert.equal(host.childNodes.length, 0);
   f.surface.dispose(); assert.equal(f.previews.size, 0);
+  let ready = false;
+  const cold = await fixture(null, catalog(windows), () => ready);
+  const coldHost = cold.document.createElement("aside"); cold.document.querySelector("main").append(coldHost);
+  cold.surface.setPreviewHost(coldHost);
+  assert.equal(coldHost.querySelectorAll("pre").length, 0);
+  ready = true; cold.surface.sync();
+  assert.match(coldHost.textContent, /one output/, "an unavailable first mount must recover for the same identity");
+  cold.surface.dispose(); assert.equal(cold.previews.size, 0);
 });
 
 test("Works and Agents CSS uses Operator tokens, responsive wrapping and an in-surface full view", () => {
