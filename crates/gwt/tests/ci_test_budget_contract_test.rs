@@ -553,6 +553,23 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
             expected_exact_cases
         );
         if lib {
+            let feedback = &steps[build + 2];
+            assert_eq!(
+                feedback["name"].as_str(),
+                Some("Run Windows feedback ownership and bootstrap contracts"),
+                "the exact-head library slice must execute the new feedback tests"
+            );
+            assert_eq!(feedback["shell"].as_str(), Some("bash"));
+            assert!(feedback["if"].is_null());
+            assert!(feedback["continue-on-error"].is_null());
+            let feedback_run = feedback["run"].as_str().unwrap();
+            assert!(feedback_run.contains("node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::feedback -- --test-threads=1 --nocapture | tee \"$RUNNER_TEMP/feedback-ownership.log\""));
+            assert!(feedback_run.contains("grep -Fq 'test result: ok. 38 passed; 0 failed; 0 ignored;' \"$RUNNER_TEMP/feedback-ownership.log\""));
+            assert_eq!(
+                steps[build + 3]["name"].as_str(),
+                Some("Run native fleet orphan process handle contracts"),
+                "feedback must run after T453 exact cases and before fleet regressions"
+            );
             let fleet = steps
                 .iter()
                 .find(|step| {
@@ -657,6 +674,7 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
     // Issue #5565 split the original 49 default filters across both hosts.
     // Issue #5560 adds the FIFO regression; warm keeps its separate filter above.
     let mut expected_filters = vec![
+        "gwt lib gwt cli::feedback -- --test-threads=1 --nocapture | tee \"$RUNNER_TEMP/feedback-ownership.log\"",
         "gwt lib gwt cli::fleet_disposition::tests::orphan_process_handle_ -- --test-threads=1 --nocapture",
         "gwt lib gwt issue_cache::tests::targeted_issue_refresh_writes_one_snapshot_without_marking_full_cache_fresh -- --exact",
         "gwt bin gwt app_runtime::tests::continuation_completion_tests::startup_self_heal_converges_legacy_config_without_a_runtime_guard -- --exact --test-threads=1",
@@ -725,7 +743,7 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
         "gwt test cli_contracts memory_cli_test::memory_add_writes_to_machine_local_work_notes -- --exact --test-threads=1 --nocapture",
         "gwt test cli_contracts gwtd_cli_test::auto_feedback_real_worker_has_no_consent_auth_process_or_raw_sinks -- --exact --test-threads=1 --nocapture",
     ];
-    assert_eq!(expected_filters.len(), 67);
+    assert_eq!(expected_filters.len(), 68);
     expected_filters.sort_unstable();
     actual_filters.sort_unstable();
     assert_eq!(actual_filters, expected_filters);

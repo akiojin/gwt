@@ -8,7 +8,7 @@ use crate::cli::{LinkedPrSummary, PrChecksSummary, PrReview, PrReviewThread};
 
 pub(crate) struct StdoutCaptureEnv<'a, E: CliEnv> {
     pub(crate) inner: &'a mut E,
-    pub(crate) stdout: &'a mut Vec<u8>,
+    pub(crate) stdout: &'a mut dyn io::Write,
 }
 
 impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
