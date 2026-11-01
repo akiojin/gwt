@@ -1,0 +1,512 @@
+{
+  "scope": "Issue #6301 AC-4 historical evidence only; no root-cause conclusion",
+  "session_id": "638426f5-8a22-40f2-888d-41408b50c83a",
+  "generation_id": "gen-b6c811e958941a649289a7c1",
+  "evidence": [
+    {
+      "path": "<HOME>\\.gwt\\logs\\gwt.log.2026-10-31",
+      "sha256": "66d11c2a3b55ac416e6a21b599fae694a5fad307bfc466ee53a33b79e26ff316",
+      "records": [
+        {
+          "line": 1105,
+          "record": {
+            "timestamp": "2026-10-31T09:00:57.815643400+09:00",
+            "level": "INFO",
+            "fields": {
+              "message": "embedded server access",
+              "method": "POST",
+              "path": "/internal/work-materialization-probe",
+              "status": 200,
+              "peer": "127.0.0.1:65351",
+              "user_agent": "None",
+              "elapsed_ms": 11769
+            },
+            "target": "gwt_access"
+          }
+        },
+        {
+          "line": 116643,
+          "record": {
+            "timestamp": "2026-10-31T10:41:47.743743600+09:00",
+            "level": "INFO",
+            "fields": {
+              "message": "runtime hook delivery",
+              "stage": "receipt",
+              "outcome": "authenticated",
+              "gwt_session_id": "638426f5-8a22-40f2-888d-41408b50c83a",
+              "source_event": "SessionStart",
+              "occurred_at": "2026-10-31T01:41:47Z"
+            },
+            "target": "gwt.hook.delivery"
+          }
+        },
+        {
+          "line": 116645,
+          "record": {
+            "timestamp": "2026-10-31T10:41:47.753775900+09:00",
+            "level": "INFO",
+            "fields": {
+              "message": "runtime hook delivery",
+              "stage": "receipt",
+              "outcome": "authenticated",
+              "gwt_session_id": "638426f5-8a22-40f2-888d-41408b50c83a",
+              "source_event": "none",
+              "occurred_at": "2026-10-31T01:41:47Z"
+            },
+            "target": "gwt.hook.delivery"
+          }
+        },
+        {
+          "line": 131022,
+          "record": {
+            "timestamp": "2026-10-31T10:55:00.726947800+09:00",
+            "level": "INFO",
+            "fields": {
+              "message": "process start",
+              "kind": "git",
+              "spawn_id": 791,
+              "label": "git rev-parse --show-toplevel",
+              "phase": "start"
+            },
+            "target": "gwt.process.summary"
+          }
+        },
+        {
+          "line": 131979,
+          "record": {
+            "timestamp": "2026-10-31T10:55:55.140672800+09:00",
+            "level": "INFO",
+            "fields": {
+              "message": "process end",
+              "kind": "git",
+              "spawn_id": 791,
+              "label": "git rev-parse --show-toplevel",
+              "phase": "end",
+              "exit_code": 0,
+              "duration_ms": 54413,
+              "stdout_lines": 1,
+              "stderr_lines": 0,
+              "success": true
+            },
+            "target": "gwt.process.summary"
+          }
+        },
+        {
+          "line": 131980,
+          "record": {
+            "timestamp": "2026-10-31T10:55:55.149399100+09:00",
+            "level": "INFO",
+            "fields": {
+              "message": "process start",
+              "kind": "git",
+              "spawn_id": 797,
+              "label": "git rev-parse --show-toplevel",
+              "phase": "start"
+            },
+            "target": "gwt.process.summary"
+          }
+        },
+        {
+          "line": 132317,
+          "record": {
+            "timestamp": "2026-10-31T10:56:11.871206400+09:00",
+            "level": "INFO",
+            "fields": {
+              "message": "process start",
+              "kind": "git",
+              "spawn_id": 798,
+              "label": "git rev-parse --show-toplevel",
+              "phase": "start"
+            },
+            "target": "gwt.process.summary"
+          }
+        },
+        {
+          "line": 133083,
+          "record": {
+            "timestamp": "2026-10-31T10:56:51.882057200+09:00",
+            "level": "INFO",
+            "fields": {
+              "message": "process end",
+              "kind": "git",
+              "spawn_id": 797,
+              "label": "git rev-parse --show-toplevel",
+              "phase": "end",
+              "exit_code": 0,
+              "duration_ms": 56732,
+              "stdout_lines": 1,
+              "stderr_lines": 0,
+              "success": true
+            },
+            "target": "gwt.process.summary"
+          }
+        },
+        {
+          "line": 133292,
+          "record": {
+            "timestamp": "2026-10-31T10:57:02.379176700+09:00",
+            "level": "INFO",
+            "fields": {
+              "message": "process end",
+              "kind": "git",
+              "spawn_id": 798,
+              "label": "git rev-parse --show-toplevel",
+              "phase": "end",
+              "exit_code": 0,
+              "duration_ms": 50507,
+              "stdout_lines": 1,
+              "stderr_lines": 0,
+              "success": true
+            },
+            "target": "gwt.process.summary"
+          }
+        },
+        {
+          "line": 137741,
+          "record": {
+            "timestamp": "2026-10-31T11:01:04.951449800+09:00",
+            "level": "INFO",
+            "fields": {
+              "message": "process end",
+              "kind": "git",
+              "spawn_id": 831,
+              "label": "git rev-parse --verify --quiet origin/develop",
+              "phase": "end",
+              "exit_code": 0,
+              "duration_ms": 60772,
+              "stdout_lines": 1,
+              "stderr_lines": 0,
+              "success": true
+            },
+            "target": "gwt.process.summary"
+          }
+        },
+        {
+          "line": 138213,
+          "record": {
+            "timestamp": "2026-10-31T11:01:30.978303500+09:00",
+            "level": "INFO",
+            "fields": {
+              "message": "process end",
+              "kind": "git",
+              "spawn_id": 846,
+              "label": "git for-each-ref --format=%(refname:short)\t%(objectname)\t%(committerdate:unix) refs/heads/ refs/remotes/origin/",
+              "phase": "end",
+              "exit_code": 0,
+              "duration_ms": 56174,
+              "stdout_lines": 131,
+              "stderr_lines": 0,
+              "success": true
+            },
+            "target": "gwt.process.summary"
+          }
+        },
+        {
+          "line": 138837,
+          "record": {
+            "timestamp": "2026-10-31T11:02:03.010108900+09:00",
+            "level": "INFO",
+            "fields": {
+              "message": "process end",
+              "kind": "git",
+              "spawn_id": 853,
+              "label": "git rev-parse --show-toplevel",
+              "phase": "end",
+              "exit_code": 0,
+              "duration_ms": 55778,
+              "stdout_lines": 1,
+              "stderr_lines": 0,
+              "success": true
+            },
+            "target": "gwt.process.summary"
+          }
+        },
+        {
+          "line": 138954,
+          "record": {
+            "timestamp": "2026-10-31T11:02:11.032674+09:00",
+            "level": "INFO",
+            "fields": {
+              "message": "process end",
+              "kind": "git",
+              "spawn_id": 854,
+              "label": "git rev-parse --show-toplevel",
+              "phase": "end",
+              "exit_code": 0,
+              "duration_ms": 59202,
+              "stdout_lines": 1,
+              "stderr_lines": 0,
+              "success": true
+            },
+            "target": "gwt.process.summary"
+          }
+        },
+        {
+          "line": 393347,
+          "record": {
+            "timestamp": "2026-10-31T14:50:20.337000800+09:00",
+            "level": "INFO",
+            "fields": {
+              "message": "embedded server access",
+              "method": "POST",
+              "path": "/internal/work-materialization-probe",
+              "status": 200,
+              "peer": "127.0.0.1:55877",
+              "user_agent": "None",
+              "elapsed_ms": 1114
+            },
+            "target": "gwt_access"
+          }
+        }
+      ]
+    },
+    {
+      "path": "<HOME>\\.gwt\\logs\\errors\\errors.2026-10-31.jsonl",
+      "sha256": "7d91946f5cd7100c5deff28264099c216fb11137e37c29b40c606b3bcf96e172",
+      "records": [
+        {
+          "line": 1110,
+          "record": {
+            "scope": "host",
+            "schema_version": 1,
+            "id": "1e506a97-634e-42fc-94bb-8ca4e382d84f",
+            "recorded_at": "2026-10-31T01:42:32.182178900Z",
+            "kind": "gui_event_loop_stall",
+            "message": "IssueMonitorFreshLaunchRepaired is blocking the GUI event loop (5008ms)",
+            "target": {},
+            "context": {
+              "cpu_percent": "247.78761",
+              "cpu_sample_ms": "220",
+              "detected_at": "2026-10-31T01:42:31.727632800+00:00",
+              "elapsed_ms": "5008",
+              "event": "IssueMonitorFreshLaunchRepaired",
+              "pid": "38952",
+              "resources_sampled_at": "2026-10-31T01:42:32.182168300+00:00",
+              "rss_bytes": "7876247552",
+              "started_at": "2026-10-31T01:42:26.718902+00:00",
+              "version": "9.146.0"
+            }
+          }
+        },
+        {
+          "line": 1113,
+          "record": {
+            "scope": "project",
+            "schema_version": 1,
+            "id": "581727a1-a2d9-4479-b52a-932a16b88f8d",
+            "recorded_at": "2026-10-31T01:43:32.733435800Z",
+            "kind": "daemon_fault",
+            "message": "[transport_failure] Host workspace bridge response is unavailable; no update retry or local fallback was attempted",
+            "target": {
+              "issue": 4093,
+              "session_id": "638426f5-8a22-40f2-888d-41408b50c83a",
+              "project_root": "E:\\gwt"
+            },
+            "repo_hash": "99a8660247f5bc49",
+            "context": {
+              "binary": "<HOME>\\AppData\\Local\\Programs\\GWT\\gwtd.exe",
+              "bridge_reason": "transport_failure",
+              "endpoint": "http://127.0.0.1:61764/internal/workspace-update",
+              "operation": "workspace.update",
+              "operation_id": "a1b4b098-437f-429a-9339-6ac1d4516f0a"
+            }
+          }
+        },
+        {
+          "line": 1114,
+          "record": {
+            "scope": "unknown",
+            "schema_version": 1,
+            "id": "0e654f26-8875-491d-9274-3a393d62385e",
+            "recorded_at": "2026-10-31T01:43:37.566631Z",
+            "kind": "operation_refusal",
+            "message": "workspace.update: network error: [transport_failure] Host workspace bridge response is unavailable; no update retry or local fallback was attempted; operation_id=a1b4b098-437f-429a-9339-6ac1d4516f0a, outcome=unconfirmed; inspect JSON operation workspace.receipt with this operation_id; do not resend the update",
+            "target": {
+              "session_id": "638426f5-8a22-40f2-888d-41408b50c83a"
+            }
+          }
+        },
+        {
+          "line": 1128,
+          "record": {
+            "scope": "host",
+            "schema_version": 1,
+            "id": "0a9e0b75-9a63-4609-80c2-804a623e8b97",
+            "recorded_at": "2026-10-31T01:44:32.815530900Z",
+            "kind": "gui_event_loop_stall",
+            "message": "IssueMonitorFreshLaunchRepaired is blocking the GUI event loop (5005ms)",
+            "target": {},
+            "context": {
+              "cpu_percent": "328.57144",
+              "cpu_sample_ms": "219",
+              "detected_at": "2026-10-31T01:44:32.357975100+00:00",
+              "elapsed_ms": "5005",
+              "event": "IssueMonitorFreshLaunchRepaired",
+              "pid": "38952",
+              "resources_sampled_at": "2026-10-31T01:44:32.815522900+00:00",
+              "rss_bytes": "8980647936",
+              "started_at": "2026-10-31T01:44:27.352973+00:00",
+              "version": "9.146.0"
+            }
+          }
+        },
+        {
+          "line": 1247,
+          "record": {
+            "scope": "unknown",
+            "schema_version": 1,
+            "id": "fee22ed0-21e5-494f-964f-d69c4d1bed2a",
+            "recorded_at": "2026-10-31T01:57:11.891484700Z",
+            "kind": "operation_refusal",
+            "message": "build.start: {\"error_code\":\"host_outcome_unknown\",\"ok\":false,\"reason\":\"Host Work materialization probe timed out after 60000 ms waiting for the Host response; the Host may be overloaded; no build lifecycle state was created; inspect execution.status; if the Host lacks this operation, update the Host and relaunch through Start Work / Launch\",\"recovery_operation\":\"execution.status\",\"retryable\":true}\n",
+            "target": {
+              "session_id": "638426f5-8a22-40f2-888d-41408b50c83a"
+            }
+          }
+        },
+        {
+          "line": 1268,
+          "record": {
+            "scope": "unknown",
+            "schema_version": 1,
+            "id": "8710668b-64bf-4c49-80eb-3a355fe5f303",
+            "recorded_at": "2026-10-31T01:59:03.369262900Z",
+            "kind": "operation_refusal",
+            "message": "build.start: {\"error_code\":\"host_outcome_unknown\",\"ok\":false,\"reason\":\"Host Work materialization probe timed out after 60000 ms waiting for the Host response; the Host may be overloaded; no build lifecycle state was created; inspect execution.status; if the Host lacks this operation, update the Host and relaunch through Start Work / Launch\",\"recovery_operation\":\"execution.status\",\"retryable\":true}\n",
+            "target": {
+              "session_id": "638426f5-8a22-40f2-888d-41408b50c83a"
+            }
+          }
+        },
+        {
+          "line": 1290,
+          "record": {
+            "scope": "project",
+            "schema_version": 1,
+            "id": "c06da569-44af-4b57-9a3b-b8ea31d03c18",
+            "recorded_at": "2026-10-31T02:01:21.846253Z",
+            "kind": "daemon_fault",
+            "message": "[transport_failure] Host workspace bridge response is unavailable; no update retry or local fallback was attempted",
+            "target": {
+              "issue": 4093,
+              "session_id": "638426f5-8a22-40f2-888d-41408b50c83a",
+              "project_root": "E:\\gwt"
+            },
+            "repo_hash": "99a8660247f5bc49",
+            "context": {
+              "binary": "E:\\gwt\\work\\issue-4093\\target\\debug\\gwtd.exe",
+              "bridge_reason": "transport_failure",
+              "endpoint": "http://127.0.0.1:61764/internal/workspace-update",
+              "operation": "workspace.update",
+              "operation_id": "9a685b3d-7133-4795-92e4-5bf16b00a28b"
+            }
+          }
+        },
+        {
+          "line": 1291,
+          "record": {
+            "scope": "unknown",
+            "schema_version": 1,
+            "id": "22177883-ce3b-46fe-89c6-e71370fd363e",
+            "recorded_at": "2026-10-31T02:01:31.644176300Z",
+            "kind": "operation_refusal",
+            "message": "workspace.update: network error: [transport_failure] Host workspace bridge response is unavailable; no update retry or local fallback was attempted; operation_id=9a685b3d-7133-4795-92e4-5bf16b00a28b, outcome=unconfirmed; inspect JSON operation workspace.receipt with this operation_id; do not resend the update",
+            "target": {
+              "session_id": "638426f5-8a22-40f2-888d-41408b50c83a"
+            }
+          }
+        },
+        {
+          "line": 1293,
+          "record": {
+            "scope": "unknown",
+            "schema_version": 1,
+            "id": "911bad85-269d-42e9-a41a-098ce9caabce",
+            "recorded_at": "2026-10-31T02:02:07.252156800Z",
+            "kind": "operation_refusal",
+            "message": "build.start: {\"error_code\":\"host_outcome_unknown\",\"ok\":false,\"reason\":\"Host Work materialization probe timed out after 60000 ms waiting for the Host response; the Host may be overloaded; no build lifecycle state was created; inspect execution.status; if the Host lacks this operation, update the Host and relaunch through Start Work / Launch\",\"recovery_operation\":\"execution.status\",\"retryable\":true}\n",
+            "target": {
+              "session_id": "638426f5-8a22-40f2-888d-41408b50c83a"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "path": "<HOME>\\.gwt\\logs\\perf\\perf-2026-10-31.jsonl",
+      "sha256": "bb78ff9a6033f9276cbe1e9bcc85b80aa095b4f19ebdc8800952880cd7b6ad64",
+      "records": [
+        {
+          "line": 2422,
+          "record": {
+            "schema_version": 1,
+            "type": "sample",
+            "timestamp": "2026-10-31T01:57:11.882382700Z",
+            "stream": "op",
+            "target": "gwtd:build.start",
+            "value": 64199.441300000006,
+            "unit": "ms",
+            "role": "mutation",
+            "detector_version": 1
+          }
+        },
+        {
+          "line": 2438,
+          "record": {
+            "schema_version": 1,
+            "type": "sample",
+            "timestamp": "2026-10-31T01:57:58.764024700Z",
+            "stream": "op",
+            "target": "gwtd:execution.status",
+            "value": 54.1706,
+            "unit": "ms",
+            "role": "read",
+            "detector_version": 1
+          }
+        },
+        {
+          "line": 2450,
+          "record": {
+            "schema_version": 1,
+            "type": "sample",
+            "timestamp": "2026-10-31T01:59:03.360307600Z",
+            "stream": "op",
+            "target": "gwtd:build.start",
+            "value": 62345.7767,
+            "unit": "ms",
+            "role": "mutation",
+            "detector_version": 1
+          }
+        },
+        {
+          "line": 2480,
+          "record": {
+            "schema_version": 1,
+            "type": "sample",
+            "timestamp": "2026-10-31T02:01:31.631165100Z",
+            "stream": "op",
+            "target": "gwtd:workspace.update",
+            "value": 29245.428,
+            "unit": "ms",
+            "role": "mutation",
+            "detector_version": 1
+          }
+        },
+        {
+          "line": 2491,
+          "record": {
+            "schema_version": 1,
+            "type": "sample",
+            "timestamp": "2026-10-31T02:02:07.242817800Z",
+            "stream": "op",
+            "target": "gwtd:build.start",
+            "value": 63258.4388,
+            "unit": "ms",
+            "role": "mutation",
+            "detector_version": 1
+          }
+        }
+      ]
+    }
+  ]
+}
