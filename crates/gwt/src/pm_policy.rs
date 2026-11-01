@@ -179,6 +179,7 @@ pub struct PlanningAssessment {
     pub missing_inputs: Vec<&'static str>,
     pub dependency_observations: Option<Vec<DependencyObservation>>,
     pub dependency_impacts: Option<Vec<DependencyImpactObservation>>,
+    pub dependency_reachability: Option<Vec<DependencyImpactObservation>>,
     pub issue_traces: Vec<IssueTrace>,
     pub roadmap: RoadmapHorizons,
     pub roadmap_items: Vec<RoadmapDiagnostic>,
@@ -206,6 +207,35 @@ pub struct DependencyObservation {
 pub struct DependencyImpactObservation {
     pub issue_number: u64,
     pub dependent_issues: Vec<u64>,
+}
+
+/// Reachable dependents in the union of supplied edges, not a complete graph.
+fn dependency_reachability(
+    impacts: &[DependencyImpactObservation],
+) -> Vec<DependencyImpactObservation> {
+    let direct: BTreeMap<_, _> = impacts
+        .iter()
+        .map(|row| (row.issue_number, &row.dependent_issues))
+        .collect();
+    impacts
+        .iter()
+        .filter_map(|row| {
+            let mut visited = BTreeSet::from([row.issue_number]);
+            let mut pending = row.dependent_issues.clone();
+            while let Some(number) = pending.pop() {
+                if visited.insert(number) {
+                    if let Some(dependents) = direct.get(&number) {
+                        pending.extend(dependents.iter().copied());
+                    }
+                }
+            }
+            visited.remove(&row.issue_number);
+            (!visited.is_empty()).then_some(DependencyImpactObservation {
+                issue_number: row.issue_number,
+                dependent_issues: visited.into_iter().collect(),
+            })
+        })
+        .collect()
 }
 
 /// Select member dependents while retaining blockers outside the membership.
@@ -921,6 +951,7 @@ pub struct RoadmapDiagnostic {
     pub id: String,
     pub dependency_observations: Option<Vec<DependencyObservation>>,
     pub dependency_impacts: Option<Vec<DependencyImpactObservation>>,
+    pub dependency_reachability: Option<Vec<DependencyImpactObservation>>,
     pub issues: Vec<u64>,
     pub observed_issue_states: Vec<MilestoneIssueStates>,
     pub unobserved_issues: Vec<u64>,
@@ -933,6 +964,7 @@ pub struct GoalDiagnostic {
     pub roadmap_item_ids: Vec<String>,
     pub dependency_observations: Option<Vec<DependencyObservation>>,
     pub dependency_impacts: Option<Vec<DependencyImpactObservation>>,
+    pub dependency_reachability: Option<Vec<DependencyImpactObservation>>,
     pub issues: Vec<u64>,
     pub observed_issue_states: Vec<MilestoneIssueStates>,
     pub unobserved_issues: Vec<u64>,
@@ -944,6 +976,7 @@ pub struct MilestoneDiagnostic {
     pub id: String,
     pub dependency_observations: Option<Vec<DependencyObservation>>,
     pub dependency_impacts: Option<Vec<DependencyImpactObservation>>,
+    pub dependency_reachability: Option<Vec<DependencyImpactObservation>>,
     pub issues: Vec<u64>,
     pub observed_issue_states: Vec<MilestoneIssueStates>,
     pub unobserved_issues: Vec<u64>,
@@ -1182,6 +1215,7 @@ pub fn assess_planning(
                 })
                 .collect()
         });
+    let dependency_reachability = dependency_impacts.as_deref().map(dependency_reachability);
     let mut issues = observed.clone();
     let mut roadmap = RoadmapHorizons::default();
     let roadmap_items: Vec<_> = state
@@ -1202,6 +1236,10 @@ pub fn assess_planning(
                 id: item.id.clone(),
                 dependency_impacts: member_dependency_impacts(
                     dependency_impacts.as_deref(),
+                    &members,
+                ),
+                dependency_reachability: member_dependency_impacts(
+                    dependency_reachability.as_deref(),
                     &members,
                 ),
                 dependency_observations: dependency_observations.as_ref().map(|rows| {
@@ -1298,6 +1336,10 @@ pub fn assess_planning(
                     dependency_impacts.as_deref(),
                     &members,
                 ),
+                dependency_reachability: member_dependency_impacts(
+                    dependency_reachability.as_deref(),
+                    &members,
+                ),
                 issues: members.into_iter().collect(),
                 observed_issue_states,
                 unobserved_issues,
@@ -1362,6 +1404,10 @@ pub fn assess_planning(
                     dependency_impacts.as_deref(),
                     &members,
                 ),
+                dependency_reachability: member_dependency_impacts(
+                    dependency_reachability.as_deref(),
+                    &members,
+                ),
                 issues: milestone.issues.clone(),
                 observed_issue_states,
                 unobserved_issues,
@@ -1393,6 +1439,7 @@ pub fn assess_planning(
         missing_inputs,
         dependency_observations,
         dependency_impacts,
+        dependency_reachability,
         issue_traces,
         roadmap,
         roadmap_items,
@@ -1657,12 +1704,18 @@ mod tests {
             {"issue_number":3,"dependent_issues":[8,9]}
         ]);
         assert_eq!(report.get("dependency_impacts"), Some(&impacts));
+        let reachability = json!([
+            {"issue_number":1,"dependent_issues":[3,8,9]},
+            {"issue_number":3,"dependent_issues":[8,9]}
+        ]);
+        assert_eq!(report.get("dependency_reachability"), Some(&reachability));
         assert_eq!(state, before.0);
         assert_eq!(serde_json::to_value(&monitor).unwrap(), before.1);
         monitor.source = IssueMonitorStatusSource::DegradedCache;
         let degraded = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
         assert_eq!(degraded["dependency_observations"], expected);
         assert_eq!(degraded.get("dependency_impacts"), Some(&impacts));
+        assert_eq!(degraded.get("dependency_reachability"), Some(&reachability));
         assert_eq!(degraded["monitor"]["source"], "degraded_cache");
         assert!(degraded["missing_inputs"]
             .as_array()
@@ -1672,6 +1725,7 @@ mod tests {
         let aborted_before = serde_json::to_value(&monitor).unwrap();
         let aborted = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
         assert_eq!(aborted.get("dependency_impacts"), Some(&impacts));
+        assert_eq!(aborted.get("dependency_reachability"), Some(&reachability));
         assert_eq!(aborted["monitor"]["scan_aborted"], true);
         assert!(aborted["missing_inputs"]
             .as_array()
@@ -1682,9 +1736,57 @@ mod tests {
         let empty = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
         assert_eq!(empty.get("dependency_observations"), Some(&json!([])));
         assert_eq!(empty.get("dependency_impacts"), Some(&json!([])));
+        assert_eq!(empty.get("dependency_reachability"), Some(&json!([])));
         let absent = serde_json::to_value(assess_planning(&state, None)).unwrap();
         assert_eq!(absent.get("dependency_observations"), Some(&Value::Null));
         assert_eq!(absent.get("dependency_impacts"), Some(&Value::Null));
+        assert_eq!(absent.get("dependency_reachability"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn dependency_reachability_traverses_external_members_and_terminates_cycles() {
+        let state: PmPlanningState = serde_json::from_value(json!({
+            "goals":[{"id":"g"}],
+            "milestones":[{"id":"m","issues":[4]}],
+            "roadmap_items":[{"id":"r","goal_id":"g","issues":[4,4]}]
+        }))
+        .unwrap();
+        let mut monitor = crate::IssueMonitorState::new(Default::default()).agent_status();
+        monitor.inbox = serde_json::from_value(json!([
+            {"issue_number":4,"state":"queued","attempts":0,
+             "dependency":{"blocked_by":[{"number":2},{"number":3}],"cycle":false,"bundle_with":[]}},
+            {"issue_number":2,"state":"queued","attempts":0,
+             "dependency":{"blocked_by":[{"number":1},{"number":3}],"cycle":true,"bundle_with":[]}},
+            {"issue_number":3,"state":"queued","attempts":0,
+             "dependency":{"blocked_by":[{"number":2}],"cycle":true,"bundle_with":[]}},
+            {"issue_number":1,"state":"queued","attempts":0,
+             "dependency":{"blocked_by":[{"number":1}],"cycle":true,"bundle_with":[]}},
+            {"issue_number":5,"state":"queued","attempts":0,
+             "dependency":{"blocked_by":[{"number":5}],"cycle":true,"bundle_with":[]}}
+        ]))
+        .unwrap();
+        let before = (state.clone(), serde_json::to_value(&monitor).unwrap());
+        let report = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(
+            report.get("dependency_reachability"),
+            Some(&json!([
+                {"issue_number":1,"dependent_issues":[2,3,4]},
+                {"issue_number":2,"dependent_issues":[3,4]},
+                {"issue_number":3,"dependent_issues":[2,4]}
+            ]))
+        );
+        for surface in ["goals", "milestones", "roadmap_items"] {
+            assert_eq!(
+                report[surface][0].get("dependency_reachability"),
+                Some(&json!([
+                    {"issue_number":1,"dependent_issues":[4]},
+                    {"issue_number":2,"dependent_issues":[4]},
+                    {"issue_number":3,"dependent_issues":[4]}
+                ]))
+            );
+        }
+        assert_eq!(state, before.0);
+        assert_eq!(serde_json::to_value(&monitor).unwrap(), before.1);
     }
 
     #[test]
@@ -2106,6 +2208,12 @@ mod tests {
             Some(&json!([{"issue_number":9,"dependent_issues":[6]}]))
         );
         assert_eq!(rows[3].get("dependency_impacts"), Some(&json!([])));
+        for row in rows.as_array().unwrap() {
+            assert_eq!(
+                row.get("dependency_reachability"),
+                row.get("dependency_impacts")
+            );
+        }
         assert!(!report.to_string().contains("private diagnostic"));
         assert_eq!(serde_json::to_value(&monitor).unwrap(), monitor_before);
         assert_eq!(rows[0]["issues"], json!([3, 1, 3, 2]));
@@ -2131,6 +2239,7 @@ mod tests {
         for row in absent["roadmap_items"].as_array().unwrap() {
             assert_eq!(row.get("dependency_observations"), Some(&Value::Null));
             assert_eq!(row.get("dependency_impacts"), Some(&Value::Null));
+            assert_eq!(row.get("dependency_reachability"), Some(&Value::Null));
         }
         assert_eq!(
             absent["roadmap_items"][0]["observed_issue_states"],
@@ -2160,6 +2269,7 @@ mod tests {
             for row in observation["roadmap_items"].as_array().unwrap() {
                 assert_eq!(row.get("dependency_observations"), Some(&json!([])));
                 assert_eq!(row.get("dependency_impacts"), Some(&json!([])));
+                assert_eq!(row.get("dependency_reachability"), Some(&json!([])));
             }
         }
         assert_eq!(state, before);
@@ -2863,6 +2973,9 @@ mod tests {
                 "id":"g", "roadmap_item_ids":["a","invalid","last"], "issues":[1,2,3,5],
                 "dependency_impacts":[{"issue_number":55,"dependent_issues":[1]},
                     {"issue_number":77,"dependent_issues":[1,2]}],
+                "dependency_reachability":[{"issue_number":44,"dependent_issues":[1,2]},
+                    {"issue_number":55,"dependent_issues":[1]},
+                    {"issue_number":77,"dependent_issues":[1,2]}],
                 "dependency_observations":[
                     {"issue_number":2,"state":"needs_human",
                      "dependency":{"blocked_by":[{"number":77}],"cycle":true,"bundle_with":[88]},
@@ -2962,6 +3075,7 @@ mod tests {
         for goal in goals {
             assert_eq!(goal.get("dependency_observations"), Some(&Value::Null));
             assert_eq!(goal.get("dependency_impacts"), Some(&Value::Null));
+            assert_eq!(goal.get("dependency_reachability"), Some(&Value::Null));
             for key in [
                 "roadmap_item_ids",
                 "issues",
@@ -2987,6 +3101,7 @@ mod tests {
         for goal in supplied["goals"].as_array().unwrap() {
             assert_eq!(goal.get("dependency_observations"), Some(&json!([])));
             assert_eq!(goal.get("dependency_impacts"), Some(&json!([])));
+            assert_eq!(goal.get("dependency_reachability"), Some(&json!([])));
         }
         assert_eq!(
             report["goals"][0]["missing_inputs"],
@@ -3054,6 +3169,10 @@ mod tests {
             assert_eq!(
                 report["milestones"][index].get("dependency_impacts"),
                 Some(&json!([{"issue_number":77,"dependent_issues":[number]}]))
+            );
+            assert_eq!(
+                report["milestones"][index].get("dependency_reachability"),
+                report["milestones"][index].get("dependency_impacts")
             );
         }
     }

@@ -465,29 +465,33 @@ pub fn apply_resume_identity_to_session(
     }
 }
 
-#[cfg(test)]
-type FinalizedSessionPostSaveHook = Box<dyn FnOnce() -> std::io::Result<()> + 'static>;
+#[cfg(any(test, feature = "test-gh-guard"))]
+type FinalizedSessionPostSaveHook =
+    Box<dyn FnOnce(&gwt_agent::Session) -> std::io::Result<()> + 'static>;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-gh-guard"))]
 thread_local! {
     static FINALIZED_SESSION_POST_SAVE_HOOK:
         std::cell::RefCell<Option<FinalizedSessionPostSaveHook>> =
             std::cell::RefCell::new(None);
 }
 
-#[cfg(test)]
-fn set_finalized_session_post_save_hook_for_test(hook: FinalizedSessionPostSaveHook) {
+#[cfg(any(test, feature = "test-gh-guard"))]
+pub(crate) fn set_finalized_session_post_save_hook_for_test(hook: FinalizedSessionPostSaveHook) {
     FINALIZED_SESSION_POST_SAVE_HOOK.with(|slot| *slot.borrow_mut() = Some(hook));
 }
 
-#[cfg(test)]
-fn invoke_finalized_session_post_save_hook() -> std::io::Result<()> {
-    FINALIZED_SESSION_POST_SAVE_HOOK
-        .with(|slot| slot.borrow_mut().take().map_or(Ok(()), |hook| hook()))
+#[cfg(any(test, feature = "test-gh-guard"))]
+fn invoke_finalized_session_post_save_hook(session: &gwt_agent::Session) -> std::io::Result<()> {
+    FINALIZED_SESSION_POST_SAVE_HOOK.with(|slot| {
+        slot.borrow_mut()
+            .take()
+            .map_or(Ok(()), |hook| hook(session))
+    })
 }
 
-#[cfg(not(test))]
-fn invoke_finalized_session_post_save_hook() -> std::io::Result<()> {
+#[cfg(not(any(test, feature = "test-gh-guard")))]
+fn invoke_finalized_session_post_save_hook(_session: &gwt_agent::Session) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -540,7 +544,7 @@ pub fn persist_finalized_launch_session(
     };
     match save_result {
         Ok(true) => {
-            if let Err(error) = invoke_finalized_session_post_save_hook() {
+            if let Err(error) = invoke_finalized_session_post_save_hook(session) {
                 return Err(interrupt_exact_running_session_after_persistence_error(
                     sessions_dir,
                     session,
@@ -878,7 +882,7 @@ mod tests {
         candidate.project_state_root = Some(temp.path().join("project"));
         candidate.update_status(gwt_agent::AgentStatus::Running);
         let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &candidate.id);
-        set_finalized_session_post_save_hook_for_test(Box::new(|| {
+        set_finalized_session_post_save_hook_for_test(Box::new(|_| {
             Err(std::io::Error::other(
                 "simulated parent-directory fsync failure after rename",
             ))

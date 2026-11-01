@@ -14,16 +14,13 @@ use crate::repo_browser::{
 };
 use base64::Engine;
 use gwt::{
-    cleanup_selected_branches_with_progress, collapse_duplicate_session_tabs, detect_shell_program,
+    cleanup_selected_branches_with_progress, collapse_duplicate_session_tabs,
     list_branch_entries_with_active_sessions, load_knowledge_bridge, load_restored_workspace_state,
-    load_session_state, migrate_legacy_workspace_state,
-    refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode, resolve_launch_spec,
-    workspace_state_path, AttachmentProgressPhase, BackendEvent, BranchCleanupOptions,
-    BranchEntriesPhase, BranchListEntry, ContentLimits, DockerWizardContext, FrontendEvent,
+    load_session_state, migrate_legacy_workspace_state, AttachmentProgressPhase, BackendEvent,
+    BranchCleanupOptions, BranchEntriesPhase, BranchListEntry, ContentLimits, FrontendEvent,
     KnowledgeKind, LaunchWizardState, LiveSessionEntry, ShellLaunchConfig, UiTracePayload,
     WindowPreset, WindowProcessStatus, WindowRegistry, APP_NAME,
 };
-use gwt_terminal::{Pane, PtyHandle};
 use tao::{
     event::Event,
     event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy},
@@ -38,10 +35,10 @@ use uuid::Uuid;
 mod app_runtime;
 mod attachment_upload;
 mod dispatch_watchdog;
-mod docker_launch;
+use gwt::docker_launch;
 mod embedded_server;
 mod embedded_web;
-mod launch_runtime;
+use gwt::launch_runtime;
 mod project_index_bootstrap;
 mod repo_browser;
 mod runtime_health_poller;
@@ -50,9 +47,6 @@ mod session_ledger_cache;
 mod session_retention;
 mod update_front_door;
 mod usage_poller;
-// Unix has no tree-wide CPU cap to lift (Issue #4405).
-#[cfg(windows)]
-mod verification_cap_relief;
 mod work_events_ingest;
 mod workspace_session_registry;
 
@@ -76,74 +70,66 @@ pub(crate) use app_runtime::LaunchWizardMemoryCache;
 pub(crate) use app_runtime::{
     build_frontend_sync_events, KnowledgeLoadRequest, LaunchWizardSession,
 };
+#[cfg(test)]
+pub(crate) use app_runtime::{ActiveAgentSession, AgentLaunchResult};
 pub(crate) use app_runtime::{
-    ActiveAgentSession, ActiveWorkProjectionPrepared, AgentFrontendDispatchOutcome,
-    AgentLaunchResult, AppEventProxy, AppRuntime, BlockingTaskSpawner, ContinueWorkReadinessWatch,
-    DispatchTarget, IssueLaunchWizardPrepared, OutboundEvent, PreparedRuntimeHookAgentFailure,
-    ProcessLaunch, ProjectNavigationPayload, ProjectNavigationPrepared, ProjectOpenTarget,
-    ProjectTabRuntime, ScheduledIssueMonitorScanOutcome, WindowAddress, WindowCloseMonitorResult,
+    ActiveWorkProjectionPrepared, AgentFrontendDispatchOutcome, AppEventProxy, AppRuntime,
+    BlockingTaskSpawner, DispatchTarget, IssueLaunchWizardPrepared, OutboundEvent,
+    ProjectNavigationPayload, ProjectNavigationPrepared, ProjectOpenTarget, ProjectTabRuntime,
+    ScheduledIssueMonitorScanOutcome, WindowAddress, WindowCloseMonitorResult,
 };
 pub(crate) use attachment_upload::{AttachmentUploadStore, UploadedAttachment};
+pub(crate) use docker_launch::detect_wizard_docker_context_and_status;
 #[cfg(test)]
 pub(crate) use docker_launch::{
-    compose_workspace_mount_target, docker_bundle_mounts_for_home, docker_bundle_override_content,
-    docker_compose_file_for_launch, docker_devcontainer_defaults, is_valid_docker_env_key,
-    mount_source_matches_project_root, normalize_docker_launch_action,
-    resolved_test_docker_runtime, DockerLaunchServiceAction,
+    compose_workspace_mount_target, docker_binary_for_launch, docker_bundle_mounts_for_home,
+    docker_bundle_override_content, docker_compose_exec_env_args, docker_compose_file_for_launch,
+    docker_devcontainer_defaults, finalize_docker_agent_launch_config_with_binding,
+    is_valid_docker_env_key, mount_source_matches_project_root, normalize_docker_launch_action,
+    resolve_docker_launch_plan, resolved_test_docker_runtime, DockerLaunchBinding,
+    DockerLaunchServiceAction,
 };
-pub(crate) use docker_launch::{
-    detect_wizard_docker_context_and_status, docker_binary_for_launch,
-    docker_compose_exec_env_args, ensure_docker_launch_service_ready,
-    finalize_docker_agent_launch_config_with_binding, prepare_docker_runtime_for_launch,
-    register_codex_managed_hook_trust_in_docker, register_codex_managed_project_trust_in_docker,
-    resolve_docker_agent_program_with_binding, resolve_docker_launch_plan,
-    resolve_docker_shell_command, DockerLaunchBinding,
-};
+#[cfg(test)]
+pub(crate) use embedded_server::AgentSelfCloseResponder;
 #[cfg(test)]
 use embedded_server::{broadcast_runtime_hook_event, health_handler, hook_forward_authorized};
 pub(crate) use embedded_server::{
-    AgentCapabilityGrant, AgentCapabilityIssuer, AgentDurableAuthority, AgentFrontendRequest,
-    AgentSelfCloseCapabilityTicket, AgentSelfCloseDirectAcceptance, AgentSelfCloseResponder,
-    AgentSessionPrincipal,
+    AgentCapabilityGrant, AgentCapabilityIssuer, AgentFrontendRequest,
+    AgentSelfCloseCapabilityTicket,
 };
 use embedded_server::{ClientHub, EmbeddedServer};
-pub(crate) use launch_runtime::{
-    apply_windows_host_shell_wrapper, build_shell_process_launch,
-    ensure_docker_launch_runtime_ready_for_runtime, execute_orphan_intake_worktree_prune,
-    install_launch_gwt_bin_env, plan_orphan_intake_worktree_prune,
-    plan_orphan_intake_worktree_prune_from_inventory, resolve_launch_worktree,
-    resolve_shell_launch_worktree, OrphanIntakePrunePlan,
-};
 #[cfg(test)]
 pub(crate) use launch_runtime::{
-    command_matches_runner, install_launch_gwt_bin_env_with_lookup, prune_orphan_intake_worktrees,
-    resolve_ephemeral_launch_worktree, resolve_launch_worktree_request,
+    apply_windows_host_shell_wrapper, command_matches_runner,
+    install_launch_gwt_bin_env_with_lookup, prune_orphan_intake_worktrees,
+    resolve_ephemeral_launch_worktree, resolve_launch_worktree, resolve_launch_worktree_request,
 };
+#[cfg(test)]
+pub(crate) use launch_runtime::{build_shell_process_launch, resolve_shell_launch_worktree};
+pub(crate) use launch_runtime::{
+    execute_orphan_intake_worktree_prune, plan_orphan_intake_worktree_prune,
+    plan_orphan_intake_worktree_prune_from_inventory, OrphanIntakePrunePlan,
+};
+#[cfg(test)]
+pub(crate) use runtime_support::should_auto_close_agent_window;
 #[cfg(test)]
 pub(crate) use runtime_support::{
-    app_state_view_from_parts, normalize_active_tab_id, parse_github_remote_url, spawn_env,
-    suffixed_worktree_path, worktree_path_is_occupied,
+    app_state_view_from_parts, first_available_worktree_path, normalize_active_tab_id,
+    parse_github_remote_url, spawn_env, suffixed_worktree_path, worktree_path_is_occupied,
 };
 pub(crate) use runtime_support::{
     attach_parent_console_for_cli, close_window_from_workspace, combined_window_id,
-    current_git_branch, dedupe_recent_projects, fallback_project_target,
-    first_available_worktree_path, front_door_route, intake_hook_config_is_disposable,
-    is_ephemeral_worktree_path, knowledge_kind_for_preset, local_branch_exists,
-    normalize_branch_name, normalize_recent_project_path, normalize_recent_projects,
-    origin_remote_ref, prune_missing_recent_projects, resolve_launch_spec_with_fallback,
-    resolve_project_target, run_cli, same_worktree_path, should_auto_close_agent_window,
+    current_git_branch, dedupe_recent_projects, fallback_project_target, front_door_route,
+    knowledge_kind_for_preset, local_branch_exists, normalize_branch_name,
+    normalize_recent_project_path, normalize_recent_projects, origin_remote_ref,
+    prune_missing_recent_projects, resolve_project_target, run_cli, same_worktree_path,
     should_auto_start_restored_window, synthetic_branch_entry, usable_worktree_path_for_branch,
-    worktrees_have_stale_branch_entry, EPHEMERAL_WORKTREE_PREFIX,
 };
 pub(crate) use update_front_door::spawn_startup_update_check;
 #[cfg(test)]
 pub(crate) use update_front_door::{classify_startup_update_state, StartupUpdateAction};
 
 type ClientId = String;
-const DEFAULT_NEW_BRANCH_BASE_BRANCH: &str = "develop";
-const DOCKER_GWTD_BIN_PATH: &str = "/usr/local/bin/gwtd";
-const DOCKER_HOST_GWT_BIN_NAME: &str = "gwt-linux";
-const DOCKER_HOST_GWTD_BIN_NAME: &str = "gwtd-linux";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct GuiFrontDoorLaunchSurface<'a> {
@@ -718,25 +704,6 @@ enum GuiShutdownOutcome {
 #[derive(Debug, Default)]
 struct GuiShutdownCoordinator {
     started: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AgentSelfCloseQuitAction {
-    Defer,
-    Shutdown,
-}
-
-fn agent_self_close_quit_action(
-    deferred: &mut bool,
-    has_pending_agent_self_closes: bool,
-) -> AgentSelfCloseQuitAction {
-    if has_pending_agent_self_closes {
-        *deferred = true;
-        AgentSelfCloseQuitAction::Defer
-    } else {
-        *deferred = false;
-        AgentSelfCloseQuitAction::Shutdown
-    }
 }
 
 fn request_gui_shutdown(
@@ -1592,6 +1559,13 @@ fn spawn_board_projection_refresh(
 /// resolve, so a daemon that comes up later is picked up automatically.
 #[derive(Default)]
 struct BoardDaemonSubscriberRegistry {
+    owner_subscribers: HashMap<
+        gwt_core::repo_hash::ProjectKey,
+        (
+            app_runtime::ProjectContext,
+            gwt::daemon_subscriber::DaemonSubscriber,
+        ),
+    >,
     subscribers: HashMap<
         PathBuf,
         (
@@ -1634,11 +1608,66 @@ impl BoardDaemonSubscriberRegistry {
         }
         self.subscribers
             .retain(|project_root, _| active_roots.contains(project_root));
+        let owner_contexts: HashMap<_, _> = app
+            .project_states
+            .values()
+            .map(|state| state.context.clone())
+            .filter(|context| app.project_context_is_current(context))
+            .filter(|context| {
+                app.tabs
+                    .iter()
+                    .any(|tab| tab.id == context.tab_id && !tab.migration_pending)
+            })
+            .map(|context| (context.project_key.clone(), context))
+            .collect();
+        self.owner_subscribers
+            .retain(|key, (context, _)| owner_contexts.get(key) == Some(context));
+        for (key, context) in owner_contexts {
+            self.owner_subscribers.entry(key).or_insert_with(|| {
+                app.ensure_runtime_daemon_for(&context.project_root);
+                let subscriber = spawn_project_owner_subscriber(context.clone(), proxy.clone());
+                (context, subscriber)
+            });
+        }
     }
 
     fn shutdown(&mut self) {
+        self.owner_subscribers.clear();
         self.subscribers.clear();
     }
+}
+
+fn spawn_project_owner_subscriber(
+    context: app_runtime::ProjectContext,
+    proxy: AppEventProxy,
+) -> gwt::daemon_subscriber::DaemonSubscriber {
+    let project_key = context.project_key.to_string();
+    let project_root = context.project_root.clone();
+    let health_context = context.clone();
+    let health_proxy = proxy.clone();
+    gwt::daemon_subscriber::DaemonSubscriber::spawn_project_owner_with_resolver(
+        project_key,
+        move || {
+            gwt::daemon_publisher::resolve_project_daemon_endpoint(&project_root)?
+                .ok_or_else(|| "Project execution owner is not running".into())
+        },
+        move |connection_id, identity, health| {
+            health_proxy.send(UserEvent::ProjectOwnerHealth {
+                context: health_context.clone(),
+                connection_id,
+                identity,
+                health,
+            })
+        },
+        move |connection_id, identity, event| {
+            proxy.send(UserEvent::ProjectOwnerEvent {
+                context: context.clone(),
+                connection_id,
+                identity,
+                event,
+            })
+        },
+    )
 }
 
 fn spawn_board_daemon_subscriber(
@@ -1875,47 +1904,12 @@ fn issue_monitor_daemon_user_event(
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct DockerBundleMounts {
-    host_gwt: PathBuf,
-    host_gwtd: PathBuf,
-}
-
-/// Shared lock-free PTY writer registry used by the WebSocket fast-path.
-///
-/// The WS receiver task (tokio async) looks up the `Arc<PtyHandle>` by window
-/// id and calls `write_input` directly, bypassing the tao event loop and the
-/// surrounding `Mutex<Pane>` guard. This eliminates the two main contention
-/// sources for intermittent key drops under heavy output bursts
-/// (bugfix/input-key): (a) FIFO queue behind many `RuntimeOutput` events on
-/// the single-threaded tao main loop, and (b) pane mutex held by the reader
-/// thread while parsing vt100 chunks. Reads are hot (every keystroke), writes
-/// are rare (pane create/destroy), so `RwLock` is the natural fit.
-pub(crate) struct PtyWriterEntry {
-    pub(crate) project_key: gwt_core::repo_hash::ProjectKey,
-    pub(crate) handle: Arc<PtyHandle>,
-    pub(crate) monitor_runtime: Option<gwt::monitor_duplicate_runtime::MonitorRuntimeRegistration>,
-    // Only the latest fully written PM prompt in this exact PTY generation
-    // may receive one bounded submit-only recovery. Never restore from disk.
-    pub(crate) pm_delivery_replay: Mutex<Option<PmDeliveryReplayGuard>>,
-}
-
-pub(crate) struct PmDeliveryReplayGuard {
-    operation_id: String,
-    target_session_id: String,
-    ordinary_revision: u64,
-    transaction_revision: u64,
-    // A wake keeps queued user input separate until its exact submit ACK.
-    // The boolean records a complete body; partial writes are readback-only.
-    retained_input: Option<(gwt_terminal::pty::PtyInputReservation, bool)>,
-}
-
-type PtyWriterRegistry = Arc<RwLock<HashMap<String, Arc<PtyWriterEntry>>>>;
-
 fn hub_frontend_event_allowed(event: &FrontendEvent) -> bool {
     matches!(
         event,
-        FrontendEvent::FrontendReady
+        FrontendEvent::RefreshOrphanDaemons
+            | FrontendEvent::ReapOrphanDaemon { .. }
+            | FrontendEvent::FrontendReady
             | FrontendEvent::StartupFirstFrame { .. }
             | FrontendEvent::RefreshUsage
             | FrontendEvent::SetClaudeAccountUsageEnabled { .. }
@@ -1979,6 +1973,29 @@ fn browser_project_input_allowed(
 )]
 #[derive(Debug, Clone)]
 enum UserEvent {
+    MobileInput(Arc<gwt::mobile_connection::MobileInputRequest>),
+    RemoteOwnerLaunchComplete(Box<app_runtime::RemoteOwnerLaunchComplete>),
+    LaunchPermissionChecked(Box<app_runtime::LaunchPermissionChecked>),
+    RemoteOwnerInventoryComplete(Box<app_runtime::RemoteOwnerInventoryComplete>),
+    RemoteRuntimeCommandComplete(Box<app_runtime::RemoteRuntimeCommandCompletion>),
+    ProjectOwnerSnapshot(Box<app_runtime::RemoteOwnerSnapshotCompletion>),
+    OrphanDaemonsObserved {
+        client_id: ClientId,
+        generation: String,
+        result: Result<(), String>,
+    },
+    ProjectOwnerHealth {
+        context: app_runtime::ProjectContext,
+        connection_id: u64,
+        identity: Option<gwt::daemon_subscriber::ProjectOwnerIdentity>,
+        health: gwt::protocol::ProjectOwnerHealthView,
+    },
+    ProjectOwnerEvent {
+        context: app_runtime::ProjectContext,
+        connection_id: u64,
+        identity: gwt::daemon_subscriber::ProjectOwnerIdentity,
+        event: gwt::project_runtime::events::OwnerEvent,
+    },
     SupportedAgentCatalogReady {
         client_id: ClientId,
         generation: u64,
@@ -1990,7 +2007,6 @@ enum UserEvent {
     IssueMonitorLaunchDeliveryAcknowledged(
         Box<app_runtime::IssueMonitorLaunchDeliveryAcknowledged>,
     ),
-    AgentSwitchSourceExited(Box<app_runtime::AgentSwitchSourceExited>),
     DrainAppEvents,
     TransientBrowserEnded {
         generation: u64,
@@ -2020,24 +2036,6 @@ enum UserEvent {
         grant: AgentCapabilityGrant,
         request: AgentFrontendRequest,
     },
-    /// Finalize one self-close that has already transitioned its exact
-    /// capability generation to Closing and attempted a direct origin-socket
-    /// acknowledgement.
-    CommitAgentSelfClose {
-        ticket: AgentSelfCloseCapabilityTicket,
-    },
-    /// Candidate Continue work launches must return an authenticated
-    /// SessionStart receipt before this correlated deadline. Issue #3475: the
-    /// deadline carries its own progress-aware state, so a fired deadline can
-    /// re-arm itself while the agent pane is demonstrably still coming up.
-    ContinueWorkReadyTimeout {
-        window_id: String,
-        watch: ContinueWorkReadinessWatch,
-    },
-    IssueMonitorStartupTimeout {
-        window_id: String,
-        generation: u64,
-    },
     LogEntry {
         entry: gwt_core::logging::LogEvent,
     },
@@ -2051,6 +2049,7 @@ enum UserEvent {
     ProviderUsageSnapshot {
         accounts: Vec<gwt_core::usage::ProviderUsage>,
     },
+    #[cfg(test)]
     RuntimeOutput {
         id: String,
         incarnation: u64,
@@ -2059,22 +2058,9 @@ enum UserEvent {
         seq: u64,
         screen: Option<String>,
     },
-    /// A submit-terminated choice or standalone Escape is about to be written
-    /// through the WebSocket PTY fast path. The write bypasses AppRuntime, so
-    /// mirror only this sanitized causal boundary back to the event loop.
-    RuntimeApprovalResolutionStarted {
-        id: String,
-    },
-    RuntimeApprovalResolutionCancelled {
-        id: String,
-    },
     /// Issue #3932: deliver or retry retained Agent idle edges without a tick.
     PmAgentIdleWake {
         context: app_runtime::ProjectContext,
-    },
-    /// Issue #3702: the fast-path submitted or cleared a composing PM pane.
-    FlushPendingPmWake {
-        id: String,
     },
     RuntimeApprovalSettle {
         id: String,
@@ -2085,6 +2071,7 @@ enum UserEvent {
         data: Vec<u8>,
         preview_text: Option<String>,
     },
+    #[cfg(test)]
     RuntimeStatus {
         id: String,
         incarnation: u64,
@@ -2176,7 +2163,6 @@ enum UserEvent {
         project_root: PathBuf,
     },
     ActiveWorkProjectionPrepared(Box<ActiveWorkProjectionPrepared>),
-    RuntimeHookAgentFailurePrepared(Box<PreparedRuntimeHookAgentFailure>),
     ProjectDispatch {
         context: app_runtime::ProjectContext,
         events: Vec<OutboundEvent>,
@@ -2205,19 +2191,6 @@ enum UserEvent {
         pm_status: Option<BackendEvent>,
         monitor_result: WindowCloseMonitorResult,
     },
-    FreshExecutionReadyResend {
-        grant: AgentCapabilityGrant,
-        request: gwt::AgentExecutionContinuationRequest,
-        reply: std::sync::mpsc::Sender<
-            Result<Option<gwt::AgentExecutionContinuationReceipt>, gwt::AgentWorkspaceUpdateError>,
-        >,
-    },
-    IssueMonitorFreshLaunchRepaired {
-        window_id: String,
-        operation_id: String,
-        binding: gwt_agent::SessionExecutionBinding,
-    },
-    FreshExecutionFinalized(Box<app_runtime::continuation::FreshExecutionFinalization>),
     RuntimeHook(gwt::RuntimeHookEvent),
     DaemonRuntimeHook(gwt::RuntimeHookEvent),
     DaemonRuntimeApprovalOverlay {
@@ -2225,6 +2198,7 @@ enum UserEvent {
         waiting: bool,
     },
     IssueMonitorLaunchPrepared(Box<app_runtime::IssueMonitorLaunchPrepared>),
+    IssueMonitorPreflightRejected(Box<app_runtime::IssueMonitorPreflightRejected>),
     IssueMonitorLaunchFactsPrefetched(Box<app_runtime::IssueMonitorLaunchFactsPrefetched>),
     IssueMonitorLaunchRequest {
         project_root: PathBuf,
@@ -2306,6 +2280,7 @@ enum UserEvent {
         project_root: PathBuf,
         dispatch: gwt::AutonomousReviewDispatch,
     },
+    #[cfg(test)]
     LaunchProgress {
         window_id: String,
         message: String,
@@ -2319,6 +2294,7 @@ enum UserEvent {
     },
     /// SPEC-2014 FR-139 — raw docker launch preparation output bytes that
     /// should be appended to the launching agent window's terminal.
+    #[cfg(test)]
     LaunchTerminalOutput {
         window_id: String,
         data: Vec<u8>,
@@ -2348,12 +2324,12 @@ enum UserEvent {
         project_root: String,
         status: Box<gwt::ProjectIndexStatusView>,
     },
+    #[cfg(test)]
     LaunchComplete {
         window_id: String,
         window_generation: Option<u64>,
         result: Box<AgentLaunchResult>,
     },
-    AgentLaunchPrepared(Box<crate::app_runtime::PreparedAgentLaunch>),
     /// Issue #4375: one PM worktree preparation finished on a blocking worker.
     /// The Git work it covers (`git worktree add`, `git fetch`) used to run
     /// inside the canvas-ready restore drain and held the GUI event loop for
@@ -2362,10 +2338,6 @@ enum UserEvent {
     PmWorktreePrepared {
         continuation: Box<crate::app_runtime::pm::PmWorktreeContinuation>,
         result: Result<PathBuf, String>,
-    },
-    ShellLaunchComplete {
-        window_id: String,
-        result: Box<Result<ProcessLaunch, String>>,
     },
     IssueLaunchWizardPrepared(IssueLaunchWizardPrepared),
     ProjectNavigationPrepared(Box<ProjectNavigationPrepared>),
@@ -2517,6 +2489,27 @@ enum UserEvent {
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
+    // A detached completion has no pending owner operation or physical resource.
+    fn discard_late_owner_completion(
+        runtime: &mut AppRuntime,
+        window_id: String,
+    ) -> Vec<OutboundEvent> {
+        runtime.handle_remote_owner_launch_complete(crate::app_runtime::RemoteOwnerLaunchComplete {
+            context: runtime.project_context("tab-1").unwrap(),
+            window_id,
+            generation: 0,
+            owner_pane_id: "unbound-completion".into(),
+            operation_id: "stale-operation".into(),
+            client_cell: Arc::new(Mutex::new(None)),
+            cancel_ack: Arc::new(tokio::sync::Mutex::new(
+                crate::app_runtime::RemoteLaunchCancellation::acknowledged_for_test(),
+            )),
+            restore_refusal: None,
+            restore_feedback: None,
+            result: Err("launch failed before owner admission".into()),
+        })
+    }
+
     include!("project_refresh_generation_tests.rs");
 
     #[test]
@@ -2618,9 +2611,19 @@ mod tests {
         let close = accepted_quit
             .find("proxy.close()")
             .expect("accepted quit closes delivery");
+        let startup_quit = event_loop
+            .split_once("if app.is_none() {")
+            .unwrap()
+            .1
+            .split_once("Event::UserEvent(UserEvent::QuitApp { reason }) => {")
+            .unwrap()
+            .1
+            .split_once("Event::LoopDestroyed => {")
+            .unwrap()
+            .0;
         assert!(
-            close > accepted_quit.find("return;").unwrap(),
-            "deferred quit keeps delivery open"
+            startup_quit.contains("return;") && !startup_quit.contains("proxy.close()"),
+            "deferred startup quit keeps delivery open until ownership returns for cleanup"
         );
         assert!(
             close < accepted_quit.find("app.stop_all_runtimes()").unwrap(),
@@ -2714,7 +2717,7 @@ mod tests {
         collections::HashMap,
         fs,
         path::{Path, PathBuf},
-        sync::{Arc, Mutex, RwLock},
+        sync::{Arc, Mutex},
         time::{Duration, Instant},
     };
 
@@ -2758,7 +2761,7 @@ mod tests {
         );
 
         assert!(
-            source.contains("app.ensure_runtime_daemons_for_enabled_projects()"),
+            source.contains("app.ensure_runtime_daemons_for_open_projects()"),
             "the ensure tick must reach the supervisor"
         );
         // Fast scan polling may match or beat supervision. Daemon recovery
@@ -2800,8 +2803,7 @@ mod tests {
         should_auto_start_restored_window, ActiveAgentSession, AgentFrontendDispatchOutcome,
         AppEventProxy, AppRuntime, AttachmentUploadStore, BlockingTaskSpawner, ClientHub,
         DispatchTarget, KnowledgeLoadRequest, LaunchWizardMemoryCache, LaunchWizardSession,
-        OutboundEvent, ProcessLaunch, ProjectNavigationPrepared, ProjectTabRuntime, UserEvent,
-        WindowAddress,
+        OutboundEvent, ProjectNavigationPrepared, ProjectTabRuntime, UserEvent, WindowAddress,
     };
 
     fn expected_launch_remove_env(additional: &[&str]) -> Vec<String> {
@@ -3525,45 +3527,6 @@ mod tests {
             2,
             "duplicate shutdown must not rerun cleanup"
         );
-    }
-
-    #[test]
-    fn pending_agent_self_close_does_not_consume_gui_shutdown_backstop_grace() {
-        let mut deferred = false;
-        let mut coordinator = super::GuiShutdownCoordinator::default();
-        let calls = std::cell::RefCell::new(Vec::new());
-
-        assert_eq!(
-            super::agent_self_close_quit_action(&mut deferred, true),
-            super::AgentSelfCloseQuitAction::Defer
-        );
-        assert!(
-            calls.borrow().is_empty(),
-            "the cleanup backstop must not start while ACK delivery is pending"
-        );
-
-        assert_eq!(
-            super::agent_self_close_quit_action(&mut deferred, false),
-            super::AgentSelfCloseQuitAction::Shutdown
-        );
-        let outcome = super::request_gui_shutdown(
-            &mut coordinator,
-            super::GuiShutdownReason::QuitApp,
-            |reason, grace| {
-                calls
-                    .borrow_mut()
-                    .push(format!("backstop:{reason:?}:{grace:?}"))
-            },
-            || calls.borrow_mut().push("cleanup".to_string()),
-        );
-
-        assert_eq!(outcome, super::GuiShutdownOutcome::Started);
-        assert_eq!(
-            calls.borrow().as_slice(),
-            vec!["backstop:QuitApp:5s".to_string(), "cleanup".to_string()].as_slice(),
-            "the full cleanup grace must begin only after pending ACK delivery finishes"
-        );
-        assert!(!deferred);
     }
 
     // Issue #4038 (AC-1): the update apply quits through the same coordinator
@@ -4817,6 +4780,7 @@ mod tests {
         let (project_tab_incarnations, next_project_incarnation) =
             crate::app_runtime::initial_project_tab_incarnations(&tabs);
         let mut runtime = AppRuntime {
+            test_project_owners: HashMap::new(),
             _runtime_namespace_gc: None,
             issue_monitor_review_dispatch_windows: std::collections::HashSet::new(),
             tabs,
@@ -4853,7 +4817,6 @@ mod tests {
 
             pending_launch_feedback_contexts: HashMap::new(),
             pending_launch_delivery_acks: HashMap::new(),
-            pending_monitor_startups: HashMap::new(),
             pending_launch_completions: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
             issue_monitor_launch_preparations: std::collections::HashSet::new(),
@@ -4871,7 +4834,6 @@ mod tests {
             pending_workspace_resume_contexts: HashMap::new(),
             pending_continue_work: HashMap::new(),
             pending_fresh_execution_launches: HashMap::new(),
-            pending_fresh_execution_finalizations: HashMap::new(),
 
             inflight_launches: HashMap::new(),
             initial_launch_workers: HashMap::new(),
@@ -4930,14 +4892,12 @@ mod tests {
             provider_quota_holds: std::collections::HashMap::new(),
             provider_quota_candidates: std::collections::HashMap::new(),
             provider_api_error_holds: std::collections::HashMap::new(),
-            provider_capacity_resumes: std::collections::HashMap::new(),
             released_provider_quota_notices: std::collections::HashMap::new(),
             provider_usage_accounts: Vec::new(),
             last_agent_activity: std::collections::HashMap::new(),
             last_issue_monitor_heartbeat: std::collections::HashMap::new(),
             agent_capability_issuer: None,
             agent_capability_tokens: HashMap::new(),
-            pending_agent_self_closes: HashMap::new(),
             issue_link_cache_dir: gwt_core::paths::gwt_cache_dir(),
             knowledge_related_snapshot: Default::default(),
             knowledge_monitor_snapshot: Default::default(),
@@ -4945,14 +4905,12 @@ mod tests {
             pending_update: None,
             update_download_in_flight: None,
             deferred_update_discovery: None,
-            pty_writers: Arc::new(RwLock::new(HashMap::new())),
             attachment_uploads: AttachmentUploadStore::new(temp_root.join("attachment-uploads")),
             persist_dispatcher,
 
             server_url: None,
             usage_refresh: None,
             image_paste_sequence: std::sync::atomic::AtomicU64::new(0),
-            agent_launch_stage_counter: std::sync::atomic::AtomicU64::new(1),
             agent_backend_probe_generation: 0,
             agent_backend_latest_probe_generations: HashMap::new(),
         };
@@ -6378,7 +6336,12 @@ mod tests {
             WindowProcessStatus::Error,
             Some("boom".to_string()),
         );
-        assert_eq!(error_events.len(), 2);
+        assert_eq!(error_events.len(), 3);
+        assert!(matches!(
+            error_events[2].event,
+            BackendEvent::ActiveWorkProjectionPatch { ref projection }
+                if projection.active_agents == 2
+        ));
         assert!(
             runtime.active_agent_sessions.contains_key(&claude_one_id),
             "PTY Error with a live hook state keeps Agent session ownership for recovery"
@@ -6410,7 +6373,12 @@ mod tests {
         );
         // PTY exit alone keeps the window open so launch diagnostics remain
         // visible; explicit hook stop owns structural auto-close.
-        assert_eq!(close_events.len(), 2);
+        assert_eq!(close_events.len(), 3);
+        assert!(matches!(
+            close_events[2].event,
+            BackendEvent::ActiveWorkProjectionPatch { ref projection }
+                if projection.active_agents == 1
+        ));
         assert!(matches!(
             close_events[0].event,
             BackendEvent::WindowState { ref window_id, state }
@@ -6427,57 +6395,20 @@ mod tests {
         assert!(!runtime.active_agent_sessions.contains_key(&claude_two_id));
         assert!(runtime.window_lookup.contains_key(&claude_two_id));
 
-        let failed_launch = runtime.handle_launch_complete_and_drain(
-            "tab-1::missing".to_string(),
-            Err("launch failed".into()),
-        );
+        let failed_launch = discard_late_owner_completion(&mut runtime, "tab-1::missing".into());
         assert!(
             failed_launch.is_empty(),
             "late completion without a live project owner must be discarded"
         );
 
-        let missing_window_launch = runtime.handle_launch_complete_and_drain(
-            "tab-1::missing".to_string(),
-            Ok((
-                ProcessLaunch {
-                    initial_prompt_file: None,
-                    command: "echo".to_string(),
-                    args: Vec::new(),
-                    env: HashMap::new(),
-                    remove_env: Vec::new(),
-                    cwd: None,
-                    resource_policy: None,
-                },
-                "session-3".to_string(),
-                "feature/demo".to_string(),
-                "Codex".to_string(),
-                repo.clone(),
-                AgentId::Codex,
-                None,
-                None,
-                gwt_agent::LaunchRuntimeTarget::Host,
-                gwt_agent::SessionMode::Normal,
-                false,
-                repo.display().to_string().into(),
-            )),
-        );
+        let missing_window_launch =
+            discard_late_owner_completion(&mut runtime, "tab-1::missing".into());
         assert!(
             missing_window_launch.is_empty(),
             "late completion without a live project owner must be discarded"
         );
 
-        let shell_launch = runtime.handle_shell_launch_complete(
-            "tab-1::missing".to_string(),
-            Ok(ProcessLaunch {
-                initial_prompt_file: None,
-                command: "echo".to_string(),
-                args: Vec::new(),
-                env: HashMap::new(),
-                remove_env: Vec::new(),
-                cwd: None,
-                resource_policy: None,
-            }),
-        );
+        let shell_launch = discard_late_owner_completion(&mut runtime, "tab-1::missing".into());
         assert!(
             shell_launch.is_empty(),
             "late completion without a live project owner must be discarded"
@@ -7472,7 +7403,8 @@ mod tests {
                     live_sessions: Vec::new(),
                     docker_context: None,
                     docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
-                    linked_issue_number: Some(42),
+                    // This NonRepo/Echo selection fixture is a non-producing launch.
+                    linked_issue_number: None,
                     linked_issue_kind: None,
                     ultracode_supported: false,
                     claude_workflows_enabled: false,
@@ -7618,37 +7550,14 @@ mod tests {
                 raw_id: "ghost".to_string(),
             },
         );
-        let project_missing = runtime.handle_launch_complete_and_drain(
-            project_missing_id.clone(),
-            Ok((
-                ProcessLaunch {
-                    initial_prompt_file: None,
-                    command: "echo".to_string(),
-                    args: Vec::new(),
-                    env: HashMap::new(),
-                    remove_env: Vec::new(),
-                    cwd: None,
-                    resource_policy: None,
-                },
-                "session-1".to_string(),
-                "feature/demo".to_string(),
-                "Codex".to_string(),
-                repo.clone(),
-                AgentId::Codex,
-                None,
-                None,
-                gwt_agent::LaunchRuntimeTarget::Host,
-                gwt_agent::SessionMode::Normal,
-                false,
-                repo.display().to_string().into(),
-            )),
-        );
+        let project_missing =
+            discard_late_owner_completion(&mut runtime, project_missing_id.clone());
         assert!(
             project_missing.is_empty(),
             "late completion without a live project owner must be discarded"
         );
 
-        let raw_missing_id = "tab-1::ghost-window".to_string();
+        let raw_missing_id = "tab-1::ghost".to_string();
         runtime.window_lookup.insert(
             raw_missing_id.clone(),
             WindowAddress {
@@ -7656,31 +7565,7 @@ mod tests {
                 raw_id: "ghost".to_string(),
             },
         );
-        let raw_missing = runtime.handle_launch_complete_and_drain(
-            raw_missing_id.clone(),
-            Ok((
-                ProcessLaunch {
-                    initial_prompt_file: None,
-                    command: "echo".to_string(),
-                    args: Vec::new(),
-                    env: HashMap::new(),
-                    remove_env: Vec::new(),
-                    cwd: None,
-                    resource_policy: None,
-                },
-                "session-2".to_string(),
-                "feature/demo".to_string(),
-                "Codex".to_string(),
-                repo.clone(),
-                AgentId::Codex,
-                None,
-                None,
-                gwt_agent::LaunchRuntimeTarget::Host,
-                gwt_agent::SessionMode::Normal,
-                false,
-                repo.display().to_string().into(),
-            )),
-        );
+        let raw_missing = runtime.start_window("tab-1", "ghost", WindowPreset::Agent);
         assert!(matches!(
             raw_missing[0].event,
             BackendEvent::WindowState { ref window_id, state }
@@ -7692,35 +7577,14 @@ mod tests {
                 if detail.as_deref() == Some("Window not found")
         ));
 
-        let shell_project_missing = runtime.handle_shell_launch_complete(
-            project_missing_id.clone(),
-            Ok(ProcessLaunch {
-                initial_prompt_file: None,
-                command: "echo".to_string(),
-                args: Vec::new(),
-                env: HashMap::new(),
-                remove_env: Vec::new(),
-                cwd: None,
-                resource_policy: None,
-            }),
-        );
+        let shell_project_missing =
+            discard_late_owner_completion(&mut runtime, project_missing_id.clone());
         assert!(
             shell_project_missing.is_empty(),
             "late completion without a live project owner must be discarded"
         );
 
-        let shell_raw_missing = runtime.handle_shell_launch_complete(
-            raw_missing_id.clone(),
-            Ok(ProcessLaunch {
-                initial_prompt_file: None,
-                command: "echo".to_string(),
-                args: Vec::new(),
-                env: HashMap::new(),
-                remove_env: Vec::new(),
-                cwd: None,
-                resource_policy: None,
-            }),
-        );
+        let shell_raw_missing = runtime.start_window("tab-1", "ghost", WindowPreset::Shell);
         assert!(matches!(
             shell_raw_missing[0].event,
             BackendEvent::WindowState { ref window_id, state }
@@ -9989,18 +9853,7 @@ fn apply_agent_frontend_dispatch_outcome(
     client_id: &str,
     outcome: AgentFrontendDispatchOutcome,
 ) {
-    match outcome {
-        AgentFrontendDispatchOutcome::Dispatched(events) => clients.dispatch(events),
-        AgentFrontendDispatchOutcome::StaleCapability => clients.unregister_with_close_frame(
-            client_id,
-            Some(crate::embedded_server::AGENT_STALE_BINDING_CLOSE),
-        ),
-        AgentFrontendDispatchOutcome::ExecutionAuthorityUnavailable => clients
-            .unregister_with_close_frame(
-                client_id,
-                Some(crate::embedded_server::AGENT_AUTHORITY_UNAVAILABLE_CLOSE),
-            ),
-    }
+    gwt::project_runtime::agent_dispatch::apply_dispatch_outcome(clients, client_id, outcome);
 }
 
 /// Issue #4145 AC-1: the startup route is measured from the first statement of
@@ -10081,7 +9934,6 @@ impl Drop for PendingApp {
 fn bootstrap_app(
     startup_dir: &Path,
     proxy: AppEventProxy,
-    pty_writers: PtyWriterRegistry,
     attachment_uploads: AttachmentUploadStore,
     blocking_tasks: BlockingTaskSpawner,
     log_router: Option<gwt_core::logging::ProjectLogRouter>,
@@ -10100,7 +9952,6 @@ fn bootstrap_app(
     }
     let mut pending = PendingApp(Some(AppRuntime::new(
         proxy,
-        pty_writers,
         attachment_uploads,
         blocking_tasks,
     )?));
@@ -10340,10 +10191,8 @@ fn main() -> std::io::Result<()> {
         let _ = menu_proxy.send_event(UserEvent::MenuEvent(event));
     }));
     let clients = ClientHub::default();
-    let pty_writers: PtyWriterRegistry = Arc::new(RwLock::new(HashMap::new()));
     let attachment_uploads = AttachmentUploadStore::in_system_temp();
     let bootstrap_proxy = proxy.clone();
-    let bootstrap_writers = pty_writers.clone();
     let bootstrap_uploads = attachment_uploads.clone();
     let bootstrap_tasks = BlockingTaskSpawner::tokio(runtime.handle().clone());
     let bootstrap_router = log_handles.as_ref().map(|handles| handles.router());
@@ -10351,7 +10200,6 @@ fn main() -> std::io::Result<()> {
         bootstrap_app(
             &startup_dir,
             bootstrap_proxy,
-            bootstrap_writers,
             bootstrap_uploads,
             bootstrap_tasks,
             bootstrap_router,
@@ -10478,7 +10326,6 @@ fn main() -> std::io::Result<()> {
         oauth_redirect_port,
         proxy.clone(),
         clients.clone(),
-        pty_writers.clone(),
         attachment_uploads,
         Some(tray_lock_handle.control_token().to_string()),
     )
@@ -10524,8 +10371,6 @@ fn main() -> std::io::Result<()> {
             let _ = usage_proxy.send_event(UserEvent::ProviderUsageSnapshot { accounts });
         }),
     );
-    #[cfg(windows)]
-    verification_cap_relief::spawn(pty_writers.clone());
     let monitor_projects = Arc::new(RwLock::new(BTreeMap::new()));
     // Capacity observation belongs to the host, independently of browser clients.
     // Only open projects supply target candidates; registered projects consume
@@ -10593,22 +10438,7 @@ fn main() -> std::io::Result<()> {
     {
         tracing::warn!(%error, "agent capacity sampler unavailable; Auto admission remains closed");
     }
-    let monitor_writers = pty_writers.clone();
-    gwt::monitor_duplicate_runtime::spawn(monitor_projects.clone(), move || {
-        let writers = monitor_writers.read().ok()?;
-        Some(
-            writers
-                .values()
-                .filter_map(|entry| {
-                    Some(gwt::monitor_duplicate_runtime::RegisteredMonitorRuntime {
-                        registration: entry.monitor_runtime.clone()?,
-                        handle: entry.handle.clone(),
-                    })
-                })
-                .collect(),
-        )
-    });
-    runtime_health_poller::spawn_runtime_health_poller(&runtime, clients.clone(), pty_writers);
+    runtime_health_poller::spawn_runtime_health_poller(&runtime, clients.clone());
     eprintln!("gwt browser URL: {browser_url}");
     // SPEC-1939 T-IDX-109/110 / Issue #2584 — Playwright e2e seam.
     // When `GWT_BROWSER_URL_FILE` is set, the embedded server URL is also
@@ -10790,15 +10620,9 @@ fn main() -> std::io::Result<()> {
     let is_headless = false;
     let mut gui_shutdown = GuiShutdownCoordinator::default();
     let mut update_apply_admission = update_front_door::UpdateApplyAdmission::default();
-    let mut agent_self_close_quit_deferred = false;
-    // Issue #4038: the reason a deferred quit (waiting for agent self-close
-    // ACKs) must resume with, so an update apply is not downgraded to a
-    // plain quit once the ACKs land.
-    let mut deferred_quit_reason: Option<GuiShutdownReason> = None;
     let mut gui_shutdown_backstop_armed = false;
     let mut board_refresh_queue = BoardRefreshQueue::default();
     let mut active_work_refresh_queue = ActiveWorkRefreshQueue::default();
-    let mut last_quota_sweep = std::time::Instant::now();
 
     let mut dispatch_watchdog = dispatch_watchdog::DispatchWatchdog::start();
     let mut dispatch_perf = gwt::perf::dispatch::DispatchCollector::start();
@@ -11002,21 +10826,8 @@ fn main() -> std::io::Result<()> {
             // (`UserEvent::QuitApp`), SIGINT/SIGTERM, or
             // `Event::LoopDestroyed` instead.
             Event::UserEvent(UserEvent::QuitApp { reason }) => {
-                let self_close_was_deferred = agent_self_close_quit_deferred;
-                if agent_self_close_quit_action(
-                    &mut agent_self_close_quit_deferred,
-                    app.has_pending_agent_self_closes(),
-                ) == AgentSelfCloseQuitAction::Defer
-                {
-                    deferred_quit_reason = Some(reason);
-                    if !self_close_was_deferred {
-                        tracing::info!(
-                            target: "gwt::shutdown",
-                            "deferring GUI shutdown until accepted agent self-close ACK attempts finish"
-                        );
-                    }
-                    return;
-                }
+                // Accepted origin replies and exact self-close draining belong
+                // to each project owner; GUI shutdown only detaches presence.
                 proxy.close();
                 drop(std::mem::take(&mut startup_events));
                 request_gui_shutdown(
@@ -11032,12 +10843,9 @@ fn main() -> std::io::Result<()> {
                         app.stop_all_runtimes();
                         board_projection_watchers.shutdown();
                         workspace_projection_watchers.shutdown();
-                        board_daemon_subscribers.shutdown();
-                        // Issue #3633: stop the daemons this GUI started so an
-                        // update never inherits a previous build's daemon.
-                        // Issue #4038 (AC-6): the supervisor additionally
-                        // refuses to adopt a live daemon of another version.
                         app.daemon_supervisor.shutdown();
+                        board_daemon_subscribers.shutdown();
+                        // Shared owner lifetime follows Rust GUI presence, not parent Child ownership.
                         server.shutdown();
                     },
                 );
@@ -11134,34 +10942,22 @@ fn main() -> std::io::Result<()> {
 
                 }
             }
-            Event::UserEvent(UserEvent::AgentFrontend {
-                client_id,
-                grant,
-                request,
-            }) => {
-                let outcome =
-                    app.handle_agent_frontend_event_if_current(client_id.clone(), grant, request);
-                apply_agent_frontend_dispatch_outcome(&clients, &client_id, outcome);
-            }
-            Event::UserEvent(UserEvent::CommitAgentSelfClose { ticket }) => {
-                let events = app.commit_agent_self_close(ticket);
-                clients.dispatch(events);
-                if agent_self_close_quit_deferred && !app.has_pending_agent_self_closes() {
-                    agent_self_close_quit_deferred = false;
-                    let reason = deferred_quit_reason
-                        .take()
-                        .unwrap_or(GuiShutdownReason::QuitApp);
-                    let _ = proxy.send_event(UserEvent::QuitApp { reason });
+            Event::UserEvent(UserEvent::MobileInput(request)) => {
+                match app.handle_mobile_input(request, &clients, || {
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|duration| duration.as_secs())
+                        .unwrap_or(0)
+                }) {
+                    Ok(()) => {}
+                    Err(error) => tracing::warn!(%error, "mobile terminal input rejected"),
                 }
             }
-            Event::UserEvent(UserEvent::AgentSwitchSourceExited(exited)) => {
-                clients.dispatch(app.agent_switch_source_exited_events(*exited));
-            }
-            Event::UserEvent(UserEvent::ContinueWorkReadyTimeout { window_id, watch }) => {
-                clients.dispatch(app.handle_continue_work_ready_timeout(&window_id, &watch));
-            }
-            Event::UserEvent(UserEvent::IssueMonitorStartupTimeout { window_id, generation }) => {
-                clients.dispatch(app.handle_issue_monitor_startup_timeout(&window_id, generation));
+            Event::UserEvent(UserEvent::AgentFrontend { client_id, grant, request }) => {
+                // This host listener has no producing capability issuer. A
+                // stale GUI grant must never reach the project owner's writers.
+                apply_agent_frontend_dispatch_outcome(&clients, &client_id, AgentFrontendDispatchOutcome::StaleCapability);
+                drop((grant, request));
             }
             Event::UserEvent(UserEvent::LogEntry { entry }) => {
                 // Issue #3366 — gated on an open Logs window; see
@@ -11174,6 +10970,7 @@ fn main() -> std::io::Result<()> {
                 let events = app.handle_provider_usage_snapshot(accounts, chrono::Utc::now());
                 clients.dispatch(events);
             }
+            #[cfg(test)]
             Event::UserEvent(UserEvent::RuntimeOutput {
                 id,
                 incarnation,
@@ -11184,25 +10981,41 @@ fn main() -> std::io::Result<()> {
                 let events = app.handle_runtime_output_event(id, incarnation, data, seq, screen);
                 clients.dispatch(events);
             }
-            Event::UserEvent(UserEvent::RuntimeApprovalResolutionStarted { id }) => {
-                app.begin_runtime_approval_resolution(&id);
-            }
-            Event::UserEvent(UserEvent::RuntimeApprovalResolutionCancelled { id }) => {
-                app.cancel_runtime_approval_resolution(&id);
-            }
             Event::UserEvent(UserEvent::PmAgentIdleWake { context }) => {
                 app.pm_agent_idle_wake_events(&context);
             }
-            Event::UserEvent(UserEvent::FlushPendingPmWake { id }) => {
-                app.flush_pending_pm_wake(&id);
-            }
             Event::UserEvent(UserEvent::RuntimeApprovalSettle { id, token }) => {
                 clients.dispatch(app.handle_runtime_approval_settle(&id, token));
+            }
+            Event::UserEvent(UserEvent::OrphanDaemonsObserved { client_id, generation, result }) => {
+                clients.dispatch(app.handle_orphan_daemons_observed(client_id, generation, result));
+            }
+            Event::UserEvent(UserEvent::RemoteOwnerLaunchComplete(completion)) => {
+                clients.dispatch(app.handle_remote_owner_launch_complete(*completion));
+            }
+            Event::UserEvent(UserEvent::LaunchPermissionChecked(completion)) => {
+                clients.dispatch(app.handle_launch_permission_checked(*completion));
+            }
+            Event::UserEvent(UserEvent::RemoteOwnerInventoryComplete(completion)) => {
+                clients.dispatch(app.handle_remote_owner_inventory_complete(*completion));
+            }
+            Event::UserEvent(UserEvent::RemoteRuntimeCommandComplete(completion)) => {
+                clients.dispatch(app.handle_remote_runtime_command_complete(*completion));
+            }
+            Event::UserEvent(UserEvent::ProjectOwnerSnapshot(completion)) => {
+                clients.dispatch(app.handle_project_owner_snapshot(*completion));
+            }
+            Event::UserEvent(UserEvent::ProjectOwnerHealth { context, connection_id, identity, health }) => {
+                clients.dispatch(app.handle_project_owner_health(&context, connection_id, identity, health));
+            }
+            Event::UserEvent(UserEvent::ProjectOwnerEvent { context, connection_id, identity, event }) => {
+                clients.dispatch(app.handle_project_owner_event(&context, connection_id, &identity, event));
             }
             Event::UserEvent(UserEvent::DaemonRuntimeOutput { id, data, preview_text }) => {
                 let events = app.handle_daemon_runtime_output(id, data, preview_text);
                 clients.dispatch(events);
             }
+            #[cfg(test)]
             Event::UserEvent(UserEvent::RuntimeStatus {
                 id,
                 incarnation,
@@ -11341,9 +11154,6 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::WorkspaceStateLoadFailed { project_root, error }) => {
                 clients.dispatch(app.handle_workspace_state_load_failed(&project_root, error));
             }
-            Event::UserEvent(UserEvent::RuntimeHookAgentFailurePrepared(prepared)) => {
-                clients.dispatch(app.handle_runtime_hook_agent_failure_prepared(*prepared));
-            }
             Event::UserEvent(UserEvent::WorkspaceProjectionPatchPrepared(prepared)) => {
                 if let Some(dispatch) = app.apply_workspace_projection_patch(*prepared) {
                     clients.dispatch_prepared_active_work(
@@ -11419,18 +11229,6 @@ fn main() -> std::io::Result<()> {
                     monitor_result,
                 ));
             }
-            Event::UserEvent(UserEvent::FreshExecutionReadyResend { grant, request, reply }) => {
-                clients.dispatch(app.resend_fresh_execution_ready(&grant, &request, reply));
-            }
-            Event::UserEvent(UserEvent::IssueMonitorFreshLaunchRepaired {
-                window_id,
-                operation_id,
-                binding,
-            }) => {
-                clients.dispatch(app.handle_issue_monitor_fresh_launch_repaired(
-                    &window_id, &operation_id, &binding,
-                ));
-            }
             Event::UserEvent(UserEvent::RuntimeHook(event)) => {
                 let handler_started = std::time::Instant::now();
                 let events = app.handle_runtime_hook_event(event);
@@ -11450,6 +11248,9 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::IssueMonitorLaunchPrepared(prepared)) => {
                 clients.dispatch(app.handle_issue_monitor_launch_prepared(*prepared));
+            }
+            Event::UserEvent(UserEvent::IssueMonitorPreflightRejected(completion)) => {
+                clients.dispatch(app.handle_monitor_preflight_rejected(*completion));
             }
             Event::UserEvent(UserEvent::IssueMonitorLaunchFactsPrefetched(prefetched)) => {
                 clients.dispatch(app.handle_issue_monitor_launch_facts_prefetched(*prefetched));
@@ -11479,21 +11280,13 @@ fn main() -> std::io::Result<()> {
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::RuntimeDaemonEnsureTick) => {
-                app.ensure_runtime_daemons_for_enabled_projects();
+                app.ensure_runtime_daemons_for_open_projects();
             }
             Event::UserEvent(UserEvent::TerminalConvergenceTick) => {
-                let mut events = app.assign_missing_agent_names();
-                events.extend(app.terminal_convergence_tick_events());
-                app.sweep_provider_capacity_resumes(std::time::Instant::now());
+                let mut events = app.terminal_convergence_tick_events();
                 // Issue #3906 AC-8: the 15 s convergence tick is also the
                 // update drain's clock (two clear ticks = quiescent).
                 events.extend(app.update_drain_tick_events());
-                // Account notifications now carry changes only. Pending screen
-                // evidence must still settle when only the clock advances.
-                if last_quota_sweep.elapsed() >= std::time::Duration::from_secs(30) {
-                    last_quota_sweep = std::time::Instant::now();
-                    events.extend(app.sweep_provider_quota_candidates(chrono::Utc::now()));
-                }
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::TerminalConvergenceObserved {
@@ -11589,6 +11382,7 @@ fn main() -> std::io::Result<()> {
                     );
                 clients.dispatch(events);
             }
+            #[cfg(test)]
             Event::UserEvent(UserEvent::LaunchProgress { window_id, message }) => {
                 if let Some(project_key) = app.project_key_for_window(&window_id).cloned() {
                     clients.dispatch(vec![OutboundEvent::project(
@@ -11607,6 +11401,7 @@ fn main() -> std::io::Result<()> {
                 let events = app.client_pane_snapshot_repair_events(&client_id, &pane_ids);
                 clients.dispatch(events);
             }
+            #[cfg(test)]
             Event::UserEvent(UserEvent::LaunchTerminalOutput { window_id, data }) => {
                 if let Some(project_key) = app.project_key_for_window(&window_id).cloned() {
                     clients.dispatch(vec![OutboundEvent::project(
@@ -11682,15 +11477,10 @@ fn main() -> std::io::Result<()> {
                     },
                 )]);
             }
-            Event::UserEvent(UserEvent::LaunchComplete { window_id, window_generation, result }) => {
-                let events = app.handle_launch_complete_for_generation(window_id, window_generation, *result);
-                clients.dispatch(events);
-            }
-            Event::UserEvent(UserEvent::FreshExecutionFinalized(completion)) => {
-                clients.dispatch(app.handle_fresh_execution_finalized(*completion));
-            }
-            Event::UserEvent(UserEvent::AgentLaunchPrepared(prepared)) => {
-                clients.dispatch(app.handle_agent_launch_prepared(*prepared));
+            #[cfg(test)]
+            Event::UserEvent(UserEvent::LaunchComplete { window_id, window_generation, .. }) => {
+                drop((window_id, window_generation));
+                unreachable!("pure launch preparation fixture has no native GUI event loop")
             }
             Event::UserEvent(UserEvent::IssueMonitorLaunchDeliveryAcknowledged(acknowledged)) => {
                 clients.dispatch(app.handle_issue_monitor_launch_delivery_ack(*acknowledged));
@@ -11704,10 +11494,6 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::IssueMonitorAnswerDeliveryComplete(delivery)) => {
                 clients.dispatch(app.handle_issue_monitor_answer_delivery_complete(delivery));
-            }
-            Event::UserEvent(UserEvent::ShellLaunchComplete { window_id, result }) => {
-                let events = app.handle_shell_launch_complete(window_id, *result);
-                clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::IssueLaunchWizardPrepared(prepared)) => {
                 let events = app.handle_issue_launch_wizard_prepared(prepared);
@@ -11725,7 +11511,6 @@ fn main() -> std::io::Result<()> {
                 if may_open_project && !events.is_empty() {
                     board_projection_watchers.sync(app, proxy.clone());
                     workspace_projection_watchers.sync(app, proxy.clone());
-                    #[cfg(unix)]
                     board_daemon_subscribers.sync(app, proxy.clone());
                 }
                 clients.dispatch(events);
@@ -12283,8 +12068,8 @@ fn main() -> std::io::Result<()> {
                         app.stop_all_runtimes();
                         board_projection_watchers.shutdown();
                         workspace_projection_watchers.shutdown();
-                        board_daemon_subscribers.shutdown();
                         app.daemon_supervisor.shutdown();
+                        board_daemon_subscribers.shutdown();
                         server.shutdown();
                     },
                 );

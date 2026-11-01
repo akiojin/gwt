@@ -1,10 +1,11 @@
-pub(crate) use gwt::agent_capability::AgentDurableAuthority;
-#[cfg(test)]
-pub(crate) use gwt::agent_capability::AgentExecutionAuthorityKind;
 pub(crate) use gwt::agent_capability::{
     AgentCapabilityGrant, AgentCapabilityIssuer, AgentCapabilityRegistry, AgentFrontendRequest,
-    AgentPmSendResponder, AgentSelfCloseCapabilityTicket, AgentSelfCloseDirectAcceptance,
-    AgentSelfCloseResponder, AgentSessionPrincipal,
+    AgentSelfCloseCapabilityTicket,
+};
+#[cfg(test)]
+pub(crate) use gwt::agent_capability::{
+    AgentDurableAuthority, AgentPmSendResponder, AgentSelfCloseDirectAcceptance,
+    AgentSelfCloseResponder,
 };
 #[cfg(test)]
 use gwt::project_transport::send_agent_self_close_acceptance_for_test as send_agent_self_close_acceptance;
@@ -16,13 +17,9 @@ use gwt::project_transport::{
 pub(crate) use gwt::project_transport::{
     hook_forward_authorized, prepare_outbound_event, ClientQueue, DrainStep,
 };
-pub(crate) use gwt::project_transport::{
-    ClientHub, ClientHubHealthStats, AGENT_AUTHORITY_UNAVAILABLE_CLOSE, AGENT_STALE_BINDING_CLOSE,
-};
+pub(crate) use gwt::project_transport::{ClientHub, ClientHubHealthStats};
 #[cfg(test)]
 use gwt::HookForwardTarget;
-#[cfg(test)]
-use std::{collections::HashMap, sync::RwLock};
 use std::{
     net::{IpAddr, SocketAddr},
     num::NonZeroU16,
@@ -59,8 +56,6 @@ use crate::{
     UserEvent,
 };
 
-use crate::PtyWriterRegistry;
-
 #[derive(Clone)]
 struct ServerState {
     proxy: AppEventProxy,
@@ -69,7 +64,6 @@ struct ServerState {
     host_instance_id: String,
     attachment_upload_token: String,
     attachment_uploads: AttachmentUploadStore,
-    pty_writers: PtyWriterRegistry,
     /// Issue #4538 AC-4: bearer token for `POST /internal/projects/open`,
     /// published only through the `0600` tray lock file. `None` refuses every
     /// control request.
@@ -90,15 +84,20 @@ impl ServerState {
             self.agent_capabilities.clone(),
             self.host_instance_id.clone(),
             Arc::new(move |event| match event {
+                TransportEvent::MobileInput(request) => {
+                    state.proxy.send(UserEvent::MobileInput(request))
+                }
                 TransportEvent::FreshExecutionReadyResend {
                     grant,
                     request,
                     reply,
-                } => state.proxy.send(UserEvent::FreshExecutionReadyResend {
-                    grant,
-                    request,
-                    reply,
-                }),
+                } => {
+                    // Producing capabilities are issued only by the project owner.
+                    let _ = (grant, request);
+                    let _ = reply.send(Err(
+                        gwt::project_runtime::continuation::fresh_execution_readiness_conflict(),
+                    ));
+                }
                 TransportEvent::RuntimeHook(event) => {
                     state.proxy.send(UserEvent::RuntimeHook(event))
                 }
@@ -157,7 +156,6 @@ impl EmbeddedServer {
         runtime: &Runtime,
         proxy: AppEventProxy,
         clients: ClientHub,
-        pty_writers: PtyWriterRegistry,
         attachment_uploads: AttachmentUploadStore,
     ) -> std::io::Result<Self> {
         Self::start_with_bind(
@@ -169,7 +167,6 @@ impl EmbeddedServer {
             0,
             proxy,
             clients,
-            pty_writers,
             attachment_uploads,
         )
     }
@@ -192,7 +189,6 @@ impl EmbeddedServer {
             0,
             proxy,
             ClientHub::default(),
-            Arc::new(RwLock::new(HashMap::new())),
             AttachmentUploadStore::in_system_temp(),
             Some(control_token.to_string()),
             project_open_timeout,
@@ -212,7 +208,6 @@ impl EmbeddedServer {
         oauth_redirect_port: u16,
         proxy: AppEventProxy,
         clients: ClientHub,
-        pty_writers: PtyWriterRegistry,
         attachment_uploads: AttachmentUploadStore,
     ) -> std::io::Result<Self> {
         let listener = runtime.block_on(TcpListener::bind(SocketAddr::new(bind, port)))?;
@@ -223,7 +218,6 @@ impl EmbeddedServer {
             oauth_redirect_port,
             proxy,
             clients,
-            pty_writers,
             attachment_uploads,
             None,
         )
@@ -238,7 +232,6 @@ impl EmbeddedServer {
         oauth_redirect_port: u16,
         proxy: AppEventProxy,
         clients: ClientHub,
-        pty_writers: PtyWriterRegistry,
         attachment_uploads: AttachmentUploadStore,
         control_token: Option<String>,
     ) -> std::io::Result<Self> {
@@ -248,7 +241,6 @@ impl EmbeddedServer {
             oauth_redirect_port,
             proxy,
             clients,
-            pty_writers,
             attachment_uploads,
             control_token,
             PROJECT_OPEN_CONTROL_TIMEOUT,
@@ -262,7 +254,6 @@ impl EmbeddedServer {
         oauth_redirect_port: u16,
         proxy: AppEventProxy,
         clients: ClientHub,
-        pty_writers: PtyWriterRegistry,
         attachment_uploads: AttachmentUploadStore,
         control_token: Option<String>,
         project_open_timeout: Duration,
@@ -313,7 +304,6 @@ impl EmbeddedServer {
             host_instance_id,
             attachment_upload_token,
             attachment_uploads,
-            pty_writers,
             control_token: control_token.map(Arc::from),
             pending_update_dir: gwt_core::update::pending_update_dir(),
             project_open_timeout,
@@ -961,8 +951,7 @@ fn handle_frontend_message(
             return;
         }
         FrontendEvent::StartupTerminalReady { id } => {
-            // Input uses this WebSocket fast path too: an unrelated event-loop
-            // backlog must not inflate the time at which keys can reach the PTY.
+            // This is a browser paint observation, independent of owner input ACKs.
             gwt::perf::startup::terminal_ready(&id);
             return;
         }
@@ -977,106 +966,13 @@ fn handle_frontend_message(
         }
     };
 
-    let Some(ClientScope::Project(project_key)) = state.clients.scope(client_id) else {
+    let Some(ClientScope::Project(_)) = state.clients.scope(client_id) else {
         return;
     };
-
-    // Issue #4145 AC-1: the prompt-send route is the submit reaching the PTY,
-    // covering both the WebSocket fast path and the event-loop fallback below.
-    // Only a submit is timed — Issue #3611 is the reminder that per-keystroke
-    // work on this path is exactly what must not be added.
-    let _perf_route = (data.contains('\n') || data.contains('\r'))
-        .then(|| gwt::perf::RouteTimer::start(gwt::perf::PerfRoute::PromptSend));
-
+    // The GUI adapter checks this authenticated project scope against its
+    // current projection, then sends exact identity/incarnation input to the
+    // physical owner. This transport never retains or writes a PTY handle.
     let seq = input_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-    tracing::debug!(
-        target: "gwt_input_trace",
-        stage = "ws_recv",
-        client_id = %client_id,
-        seq,
-        window_id = %id,
-        "terminal_input received over WebSocket"
-    );
-
-    let pty_handle = match state.pty_writers.read() {
-        Ok(guard) => guard.get(&id).map(|pty| (pty.clone(), guard.len())),
-        Err(_error) => {
-            tracing::warn!(
-                target: "gwt_input_trace",
-                stage = "fast_path_lock_poisoned",
-                client_id = %client_id,
-                seq,
-                window_id = %id,
-                "pty_writers read lock poisoned; falling back to event loop"
-            );
-            None
-        }
-    };
-
-    let approval_resolution = gwt::window_state::is_approval_resolution_input(&data);
-    let mut resolution_marked = false;
-    if let Some((entry, pty_writer_count)) = pty_handle {
-        if entry.project_key != project_key {
-            return;
-        }
-        let pty = &entry.handle;
-        if approval_resolution {
-            // `EventLoopProxy::send_event` completes the tao channel enqueue
-            // synchronously. Enqueue the causal marker before the PTY write so
-            // provider output cannot overtake it on the event-loop receiver.
-            state
-                .proxy
-                .send(UserEvent::RuntimeApprovalResolutionStarted { id: id.clone() });
-            resolution_marked = true;
-        }
-        let had_unsent = pty.has_unsent_user_input();
-        let write_started = Instant::now();
-        match pty.write_input(data.as_bytes()) {
-            Ok(()) => {
-                let completed_at = Instant::now();
-                log_terminal_input_completion(
-                    client_id,
-                    seq,
-                    &id,
-                    completed_at.duration_since(write_started).as_micros() as u64,
-                    completed_at.duration_since(received_at).as_millis() as u64,
-                    pty_writer_count,
-                );
-                if had_unsent && !pty.has_unsent_user_input() {
-                    state
-                        .proxy
-                        .send(UserEvent::FlushPendingPmWake { id: id.clone() });
-                }
-                return;
-            }
-            Err(_error) => {
-                if resolution_marked {
-                    state
-                        .proxy
-                        .send(UserEvent::RuntimeApprovalResolutionCancelled { id: id.clone() });
-                }
-                tracing::warn!(
-                    target: "gwt_input_trace",
-                    stage = "fast_path_write_err",
-                    client_id = %client_id,
-                    seq,
-                    window_id = %id,
-                    "fast-path PTY write failed; dropping input to preserve the generation fence"
-                );
-                return;
-            }
-        }
-    } else {
-        tracing::debug!(
-            target: "gwt_input_trace",
-            stage = "fast_path_miss",
-            client_id = %client_id,
-            seq,
-            window_id = %id,
-            "pty_writers registry miss; falling back to event loop"
-        );
-    }
-
     forward_terminal_input_to_event_loop(state, client_id, id.clone(), data, received_at);
     tracing::debug!(
         target: "gwt_input_trace",
@@ -1084,8 +980,7 @@ fn handle_frontend_message(
         client_id = %client_id,
         seq,
         window_id = %id,
-        ok = true,
-        "terminal_input forwarded to event loop proxy (fallback)"
+        "terminal_input forwarded to the current project owner adapter"
     );
 }
 
@@ -1104,41 +999,6 @@ fn forward_terminal_input_to_event_loop(
     });
 }
 
-fn log_terminal_input_completion(
-    client_id: &str,
-    seq: u64,
-    window_id: &str,
-    write_us: u64,
-    elapsed_ms: u64,
-    pty_writer_count: usize,
-) {
-    if elapsed_ms >= crate::GUI_EVENT_LOOP_SLOW_DISPATCH_MS {
-        tracing::warn!(
-            target: "gwt_input_trace",
-            stage = "fast_path_write",
-            client_id,
-            seq,
-            window_id,
-            write_us,
-            elapsed_ms,
-            pty_writer_count,
-            "terminal_input receive-to-PTY latency exceeded budget"
-        );
-    } else {
-        tracing::debug!(
-            target: "gwt_input_trace",
-            stage = "fast_path_write",
-            client_id,
-            seq,
-            window_id,
-            write_us,
-            elapsed_ms,
-            pty_writer_count,
-            "terminal_input written to PTY via WS fast-path"
-        );
-    }
-}
-
 pub fn websocket_origin_authorized(headers: &HeaderMap) -> bool {
     let Some(origin) = headers.get(ORIGIN) else {
         return true;
@@ -1152,7 +1012,6 @@ pub fn websocket_origin_authorized(headers: &HeaderMap) -> bool {
     let Ok(host) = host.to_str() else {
         return false;
     };
-
     let origin = origin.trim_end_matches('/');
     origin == format!("http://{host}") || origin == format!("https://{host}")
 }
@@ -1172,10 +1031,9 @@ pub fn broadcast_runtime_hook_event(clients: &ClientHub, event: RuntimeHookEvent
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::HashMap,
         net::IpAddr,
         pin::Pin,
-        sync::{atomic::AtomicU64, Arc, Mutex, RwLock},
+        sync::{atomic::AtomicU64, Arc, Mutex},
         task::{Context, Poll},
         time::{Duration, Instant},
     };
@@ -1285,7 +1143,6 @@ mod tests {
                 host_instance_id: "test-host-instance".to_string(),
                 attachment_upload_token: "upload-token".to_string(),
                 attachment_uploads: AttachmentUploadStore::in_system_temp(),
-                pty_writers: Arc::new(RwLock::new(HashMap::new())),
                 control_token: None,
                 pending_update_dir: gwt_core::update::pending_update_dir(),
                 project_open_timeout: Duration::from_secs(1),
@@ -1312,38 +1169,37 @@ mod tests {
     }
 
     fn direct_acceptance_for_test(
-        proxy: AppEventProxy,
+        commits: Arc<Mutex<Vec<super::AgentSelfCloseCapabilityTicket>>>,
         ticket_id: &str,
     ) -> AgentSelfCloseDirectAcceptance {
         AgentSelfCloseDirectAcceptance::new(
             "e544de42-fd9f-49a7-9ba2-b8b16ca1572a".to_string(),
             "tab-owned::agent-1".to_string(),
             super::AgentSelfCloseCapabilityTicket::for_test(ticket_id.to_string()),
-            Arc::new(move |ticket| proxy.send(UserEvent::CommitAgentSelfClose { ticket })),
+            Arc::new(move |ticket| commits.lock().unwrap().push(ticket)),
         )
     }
 
-    fn recorded_self_close_commit_ids(events: &Arc<Mutex<Vec<UserEvent>>>) -> Vec<String> {
+    fn recorded_self_close_commit_ids(
+        events: &Arc<Mutex<Vec<super::AgentSelfCloseCapabilityTicket>>>,
+    ) -> Vec<String> {
         events
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
-            .filter_map(|event| match event {
-                UserEvent::CommitAgentSelfClose { ticket } => Some(ticket.id().to_string()),
-                _ => None,
-            })
+            .map(|ticket| ticket.id().to_string())
             .collect()
     }
 
     #[test]
     fn accepted_self_close_send_error_still_finalizes_exactly_once() {
         let runtime = Runtime::new().expect("tokio runtime");
-        let (proxy, events) = AppEventProxy::stub();
+        let events = Arc::new(Mutex::new(Vec::new()));
         let mut sink = FailingMessageSink;
 
         runtime.block_on(send_agent_self_close_acceptance(
             &mut sink,
-            direct_acceptance_for_test(proxy, "send-error-ticket"),
+            direct_acceptance_for_test(events.clone(), "send-error-ticket"),
             Duration::from_secs(1),
         ));
 
@@ -1356,12 +1212,12 @@ mod tests {
     #[test]
     fn accepted_self_close_send_timeout_still_finalizes_exactly_once() {
         let runtime = Runtime::new().expect("tokio runtime");
-        let (proxy, events) = AppEventProxy::stub();
+        let events = Arc::new(Mutex::new(Vec::new()));
         let mut sink = PendingMessageSink;
 
         runtime.block_on(send_agent_self_close_acceptance(
             &mut sink,
-            direct_acceptance_for_test(proxy, "send-timeout-ticket"),
+            direct_acceptance_for_test(events.clone(), "send-timeout-ticket"),
             Duration::from_millis(10),
         ));
 
@@ -1374,10 +1230,10 @@ mod tests {
     #[test]
     fn accepted_self_close_task_cancellation_still_finalizes_exactly_once() {
         let runtime = Runtime::new().expect("tokio runtime");
-        let (proxy, events) = AppEventProxy::stub();
+        let events = Arc::new(Mutex::new(Vec::new()));
 
         runtime.block_on(async {
-            let acceptance = direct_acceptance_for_test(proxy, "cancelled-task-ticket");
+            let acceptance = direct_acceptance_for_test(events.clone(), "cancelled-task-ticket");
             let task = tokio::spawn(async move {
                 let mut sink = PendingMessageSink;
                 send_agent_self_close_acceptance(&mut sink, acceptance, Duration::from_secs(60))
@@ -1433,13 +1289,12 @@ mod tests {
     fn correlated_agent_self_close_acceptance_uses_only_the_origin_socket() {
         let runtime = Runtime::new().expect("tokio runtime");
         let (proxy, events) = AppEventProxy::stub();
-        let finalizer_proxy = proxy.clone();
+        let finalizer_commits = Arc::new(Mutex::new(Vec::new()));
         let clients = ClientHub::default();
         let mut server = EmbeddedServer::start(
             &runtime,
             proxy,
             clients.clone(),
-            Arc::new(RwLock::new(HashMap::new())),
             AttachmentUploadStore::in_system_temp(),
         )
         .expect("embedded server");
@@ -1552,8 +1407,8 @@ mod tests {
                     window_id.to_string(),
                     ticket,
                     Arc::new({
-                        let proxy = finalizer_proxy.clone();
-                        move |ticket| proxy.send(UserEvent::CommitAgentSelfClose { ticket })
+                        let commits = finalizer_commits.clone();
+                        move |ticket| commits.lock().unwrap().push(ticket)
                     }),
                 ))
                 .expect("origin response task is waiting");
@@ -1579,18 +1434,7 @@ mod tests {
 
             tokio::time::timeout(Duration::from_secs(1), async {
                 loop {
-                    let ticket = {
-                        let mut recorded = events
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        let position = recorded.iter().position(|event| {
-                            matches!(event, UserEvent::CommitAgentSelfClose { .. })
-                        });
-                        position.map(|position| match recorded.remove(position) {
-                            UserEvent::CommitAgentSelfClose { ticket } => ticket,
-                            _ => unreachable!("matched self-close finalizer"),
-                        })
-                    };
+                    let ticket = finalizer_commits.lock().unwrap().pop();
                     if let Some(ticket) = ticket {
                         break ticket;
                     }
@@ -1613,7 +1457,6 @@ mod tests {
             &runtime,
             proxy,
             clients.clone(),
-            Arc::new(RwLock::new(HashMap::new())),
             AttachmentUploadStore::in_system_temp(),
         )
         .expect("embedded server");
@@ -1765,7 +1608,6 @@ mod tests {
             &runtime,
             proxy,
             clients.clone(),
-            Arc::new(RwLock::new(HashMap::new())),
             AttachmentUploadStore::in_system_temp(),
         )
         .expect("embedded server");
@@ -1870,7 +1712,6 @@ mod tests {
             &runtime,
             proxy,
             clients.clone(),
-            Arc::new(RwLock::new(HashMap::new())),
             AttachmentUploadStore::in_system_temp(),
         )
         .expect("embedded server");
@@ -1977,7 +1818,6 @@ mod tests {
             &runtime,
             proxy,
             ClientHub::default(),
-            Arc::new(RwLock::new(HashMap::new())),
             AttachmentUploadStore::in_system_temp(),
         )
         .expect("embedded server");
@@ -2093,7 +1933,6 @@ mod tests {
             &runtime,
             proxy,
             ClientHub::default(),
-            Arc::new(RwLock::new(HashMap::new())),
             AttachmentUploadStore::in_system_temp(),
         )
         .expect("embedded server");
@@ -2227,7 +2066,6 @@ mod tests {
             &runtime,
             proxy,
             ClientHub::default(),
-            Arc::new(RwLock::new(HashMap::new())),
             AttachmentUploadStore::in_system_temp(),
         )
         .expect("embedded server");
@@ -2410,7 +2248,6 @@ mod tests {
             &runtime,
             proxy,
             ClientHub::default(),
-            Arc::new(RwLock::new(HashMap::new())),
             AttachmentUploadStore::in_system_temp(),
         )
         .expect("embedded server");
@@ -2537,7 +2374,6 @@ mod tests {
             &runtime,
             proxy,
             ClientHub::default(),
-            Arc::new(RwLock::new(HashMap::new())),
             AttachmentUploadStore::in_system_temp(),
         )
         .expect("embedded server");
@@ -2621,7 +2457,6 @@ mod tests {
             &runtime,
             proxy,
             ClientHub::default(),
-            Arc::new(RwLock::new(HashMap::new())),
             AttachmentUploadStore::in_system_temp(),
         )
         .expect("embedded server");
@@ -2718,7 +2553,6 @@ mod tests {
             &runtime,
             proxy,
             ClientHub::default(),
-            Arc::new(RwLock::new(HashMap::new())),
             AttachmentUploadStore::in_system_temp(),
         )
         .expect("embedded server");
@@ -2861,7 +2695,6 @@ mod tests {
             &runtime,
             proxy,
             ClientHub::default(),
-            Arc::new(RwLock::new(HashMap::new())),
             AttachmentUploadStore::in_system_temp(),
         )
         .expect("embedded server");
@@ -2988,7 +2821,6 @@ mod tests {
             &runtime,
             proxy,
             ClientHub::default(),
-            Arc::new(RwLock::new(HashMap::new())),
             AttachmentUploadStore::in_system_temp(),
         )
         .unwrap();
@@ -3166,7 +2998,6 @@ mod tests {
             &runtime,
             proxy,
             ClientHub::default(),
-            Arc::new(RwLock::new(HashMap::new())),
             AttachmentUploadStore::in_system_temp(),
         )
         .unwrap();
@@ -3435,7 +3266,6 @@ mod tests {
             &runtime,
             proxy_a,
             ClientHub::default(),
-            Arc::new(RwLock::new(HashMap::new())),
             AttachmentUploadStore::in_system_temp(),
         )
         .expect("first Host");
@@ -3466,7 +3296,6 @@ mod tests {
             &runtime,
             proxy_b,
             ClientHub::default(),
-            Arc::new(RwLock::new(HashMap::new())),
             AttachmentUploadStore::in_system_temp(),
         )
         .expect("second Host");
@@ -3805,7 +3634,6 @@ mod tests {
             &runtime,
             proxy,
             ClientHub::default(),
-            Arc::new(RwLock::new(HashMap::new())),
             AttachmentUploadStore::in_system_temp(),
         )
         .expect("embedded server");
@@ -3874,7 +3702,6 @@ mod tests {
             &runtime,
             proxy,
             ClientHub::default(),
-            Arc::new(RwLock::new(HashMap::new())),
             AttachmentUploadStore::in_system_temp(),
         )
         .expect("embedded server");
@@ -4100,7 +3927,6 @@ mod tests {
             &runtime,
             proxy,
             ClientHub::default(),
-            Arc::new(RwLock::new(HashMap::new())),
             AttachmentUploadStore::in_system_temp(),
         )
         .expect("embedded server");
@@ -4196,26 +4022,6 @@ mod tests {
     }
 
     #[test]
-    fn terminal_input_timing_warns_only_for_slow_successful_write() {
-        let output = crate::tests::capture_timing_warnings(|| {
-            super::log_terminal_input_completion("client-1", 7, "window-1", 1000, 30, 9);
-            super::log_terminal_input_completion("client-1", 8, "window-1", 1000, 29, 9);
-        });
-        let logs: Vec<serde_json::Value> = output
-            .lines()
-            .map(|line| serde_json::from_str(line).expect("timing JSON"))
-            .collect();
-        assert_eq!(logs.len(), 1, "29ms must not warn; 30ms must warn");
-        let fields = &logs[0]["fields"];
-        assert_eq!(fields["stage"], "fast_path_write");
-        assert_eq!(fields["elapsed_ms"], 30);
-        assert_eq!(fields["write_us"], 1000);
-        assert_eq!(fields["pty_writer_count"], 9);
-        assert_eq!(fields["seq"], 7);
-        assert!(fields.get("data").is_none());
-    }
-
-    #[test]
     fn websocket_handshake_binds_scope_until_disconnect_and_reconnect() {
         let runtime = Runtime::new().unwrap();
         let (proxy, events) = AppEventProxy::stub();
@@ -4224,7 +4030,6 @@ mod tests {
             &runtime,
             proxy,
             clients.clone(),
-            Arc::new(RwLock::new(HashMap::new())),
             AttachmentUploadStore::in_system_temp(),
         )
         .unwrap();
@@ -4410,63 +4215,84 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn forward_browser_inputs(
+        events: &Arc<Mutex<Vec<UserEvent>>>,
+        runtime: &mut crate::app_runtime::AppRuntime,
+    ) {
+        for event in std::mem::take(&mut *events.lock().unwrap()) {
+            let UserEvent::Frontend {
+                client_id,
+                client_scope: Some(scope),
+                event,
+                ..
+            } = event
+            else {
+                panic!("terminal transport must forward only a scoped typed frontend event");
+            };
+            runtime.handle_frontend_event_in_scope(client_id, event, &scope);
+        }
+    }
+
+    #[cfg(unix)]
     #[test]
     fn terminal_input_rejects_other_project_without_writing_or_fallback() {
+        let _env_lock = gwt_core::test_support::env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let (mut runtime, probe, id) =
+            crate::app_runtime::tests::owner_browser_input_fixture(temp.path());
         let (state, events) = sample_server_state();
-        let pane = gwt_terminal::Pane::new(
-            "scoped-pane".into(),
-            "sh".into(),
-            vec!["-c".into(), "cat >/dev/null".into()],
-            80,
-            24,
-            HashMap::new(),
-            None,
-        )
-        .unwrap();
-        let handle = pane.shared_pty();
-        state.pty_writers.write().unwrap().insert(
-            "pane-a".into(),
-            Arc::new(crate::PtyWriterEntry {
-                project_key: project_a(),
-                handle: handle.clone(),
-                monitor_runtime: None,
-                pm_delivery_replay: Mutex::new(None),
-            }),
-        );
+        let project = runtime.project_key_for_window(&id).unwrap().clone();
         state.clients.register_scoped(
             "b".into(),
             ClientScope::Project(ProjectKey::parse("fedcba9876543210").unwrap()),
         );
         state.clients.register("hub".into());
+        let before = probe.pty.ordinary_input_revision();
         for client_id in ["b", "hub", "unknown"] {
             handle_frontend_message(
                 &state,
                 client_id,
                 &AtomicU64::new(0),
                 FrontendEvent::TerminalInput {
-                    id: "pane-a".into(),
+                    id: id.clone(),
                     data: "x".into(),
                 },
                 Instant::now(),
             );
         }
-        assert!(!handle.has_unsent_user_input());
-        assert!(events.lock().unwrap().is_empty());
+        assert_eq!(
+            events.lock().unwrap().len(),
+            1,
+            "only a project connection may reach the scope-checking adapter"
+        );
+        forward_browser_inputs(&events, &mut runtime);
+        assert!(crate::app_runtime::tests::drain_browser_owner_input(&mut runtime).is_empty());
+        assert_eq!(probe.pty.ordinary_input_revision(), before);
+        assert!(!probe.pty.has_unsent_user_input());
         state
             .clients
-            .register_scoped("a".into(), ClientScope::Project(project_a()));
+            .register_scoped("a".into(), ClientScope::Project(project));
         handle_frontend_message(
             &state,
             "a",
             &AtomicU64::new(0),
             FrontendEvent::TerminalInput {
-                id: "pane-a".into(),
+                id: id.clone(),
                 data: "x".into(),
             },
             Instant::now(),
         );
-        assert!(handle.has_unsent_user_input());
-        assert!(events.lock().unwrap().is_empty());
+        assert!(
+            !probe.pty.has_unsent_user_input(),
+            "the transport cannot physically write before the owner adapter runs"
+        );
+        forward_browser_inputs(&events, &mut runtime);
+        assert!(crate::app_runtime::tests::drain_browser_owner_input(&mut runtime).is_empty());
+        assert!(
+            probe.pty.has_unsent_user_input(),
+            "the same-project exact owner command reached the actual PTY"
+        );
     }
 
     #[test]
@@ -4489,12 +4315,12 @@ mod tests {
     }
 
     #[test]
-    fn handle_frontend_message_falls_back_to_proxy_when_pty_writer_is_missing() {
+    fn handle_frontend_message_preserves_scope_and_received_time_for_owner_input() {
         let (state, events) = sample_server_state();
         state
             .clients
             .register_scoped("client-1".into(), ClientScope::Project(project_a()));
-        let received_at = Instant::now() - Duration::from_millis(50);
+        let received_at = Instant::now();
 
         handle_frontend_message(
             &state,
@@ -4522,195 +4348,200 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn invalidated_fast_path_generation_cancels_resolution_without_fallback_input() {
+    fn invalidated_owner_generation_cancels_resolution_without_retry_input() {
+        let _env_lock = gwt_core::test_support::env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let (mut runtime, probe, id) =
+            crate::app_runtime::tests::owner_browser_input_fixture(temp.path());
         let (state, events) = sample_server_state();
-        state
-            .clients
-            .register_scoped("client-1".into(), ClientScope::Project(project_a()));
-        let pane = gwt_terminal::Pane::new(
-            "stale-pane".to_string(),
-            "sh".to_string(),
-            vec!["-c".to_string(), "cat >/dev/null".to_string()],
-            80,
-            24,
-            HashMap::new(),
-            None,
-        )
-        .expect("long-running stale pane");
-        let stale_generation = pane.shared_pty();
-        stale_generation.invalidate_input_generation();
-        state.pty_writers.write().expect("writer registry").insert(
-            "tab-1::agent-1".to_string(),
-            Arc::new(crate::PtyWriterEntry {
-                project_key: project_a(),
-                handle: stale_generation,
-                monitor_runtime: None,
-                pm_delivery_replay: Mutex::new(None),
-            }),
+        state.clients.register_scoped(
+            "client-1".into(),
+            ClientScope::Project(runtime.project_key_for_window(&id).unwrap().clone()),
         );
-
+        runtime.window_approval_waiting.insert(
+            id.clone(),
+            crate::app_runtime::ApprovalPromptLatch {
+                active_fingerprint: Some(7),
+                resolving_fingerprint: None,
+                resolution_started: false,
+                pending_settle_token: None,
+            },
+        );
+        probe.pty.invalidate_input_generation();
+        let before = probe.pty.ordinary_input_revision();
         handle_frontend_message(
             &state,
             "client-1",
             &AtomicU64::new(0),
             FrontendEvent::TerminalInput {
-                id: "tab-1::agent-1".to_string(),
-                data: "1\r".to_string(),
+                id: id.clone(),
+                data: "1\r".into(),
             },
             Instant::now(),
         );
-
-        let recorded = events
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert!(matches!(
-            recorded.as_slice(),
-            [
-                UserEvent::RuntimeApprovalResolutionStarted { id: started },
-                UserEvent::RuntimeApprovalResolutionCancelled { id: cancelled },
-            ] if started == "tab-1::agent-1" && cancelled == "tab-1::agent-1"
-        ));
-        assert!(recorded.iter().all(|event| !matches!(
-            event,
-            UserEvent::Frontend {
-                event: FrontendEvent::TerminalInput { .. },
-                ..
-            }
-        )));
-        drop(recorded);
-        drop(pane);
+        forward_browser_inputs(&events, &mut runtime);
+        assert!(
+            runtime.window_approval_waiting[&id].resolution_started,
+            "display correlation starts before the exact command worker can write"
+        );
+        let refused = crate::app_runtime::tests::drain_browser_owner_input(&mut runtime);
+        assert!(
+            !refused.is_empty(),
+            "the retired physical generation must return its actual command failure"
+        );
+        assert!(!runtime.window_approval_waiting[&id].resolution_started);
+        assert!(runtime.window_approval_waiting[&id]
+            .resolving_fingerprint
+            .is_none());
+        assert_eq!(probe.pty.ordinary_input_revision(), before);
+        assert!(!probe.pty.has_unsent_user_input());
+        assert!(
+            events.lock().unwrap().is_empty(),
+            "a failed exact owner write must not enqueue a second input attempt"
+        );
     }
 
     #[cfg(unix)]
     #[test]
-    fn handle_frontend_message_fast_path_marks_submit_before_write_and_ignores_navigation() {
+    fn handle_frontend_message_marks_owner_submit_before_write_and_ignores_navigation() {
+        let _env_lock = gwt_core::test_support::env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let (mut runtime, probe, id) =
+            crate::app_runtime::tests::owner_browser_input_fixture(temp.path());
         let (state, events) = sample_server_state();
-        state
-            .clients
-            .register_scoped("client-1".into(), ClientScope::Project(project_a()));
-        let pane = gwt_terminal::Pane::new(
-            "test-pane".to_string(),
-            "sh".to_string(),
-            vec!["-c".to_string(), "cat >/dev/null".to_string()],
-            80,
-            24,
-            HashMap::new(),
-            None,
-        )
-        .expect("long-running test pane");
-        state.pty_writers.write().expect("writer registry").insert(
-            "tab-1::agent-1".to_string(),
-            Arc::new(crate::PtyWriterEntry {
-                project_key: project_a(),
-                handle: pane.shared_pty(),
-                monitor_runtime: None,
-                pm_delivery_replay: Mutex::new(None),
-            }),
+        state.clients.register_scoped(
+            "client-1".into(),
+            ClientScope::Project(runtime.project_key_for_window(&id).unwrap().clone()),
         );
-
+        runtime.window_approval_waiting.insert(
+            id.clone(),
+            crate::app_runtime::ApprovalPromptLatch {
+                active_fingerprint: Some(7),
+                resolving_fingerprint: None,
+                resolution_started: false,
+                pending_settle_token: None,
+            },
+        );
+        let before = probe.pty.ordinary_input_revision();
         handle_frontend_message(
             &state,
             "client-1",
             &AtomicU64::new(0),
             FrontendEvent::TerminalInput {
-                id: "tab-1::agent-1".to_string(),
-                data: "1\r".to_string(),
+                id: id.clone(),
+                data: "1\r".into(),
             },
             Instant::now(),
         );
-        handle_frontend_message(
-            &state,
-            "client-1",
-            &AtomicU64::new(1),
-            FrontendEvent::TerminalInput {
-                id: "tab-1::agent-1".to_string(),
-                data: "\u{1b}[A".to_string(),
-            },
-            Instant::now(),
+        forward_browser_inputs(&events, &mut runtime);
+        assert_eq!(
+            runtime.window_approval_waiting[&id].resolving_fingerprint,
+            Some(7)
         );
-        handle_frontend_message(
-            &state,
-            "client-1",
-            &AtomicU64::new(2),
-            FrontendEvent::TerminalInput {
-                id: "tab-1::agent-1".to_string(),
-                data: "x".to_string(),
-            },
-            Instant::now(),
+        assert_eq!(
+            probe.pty.ordinary_input_revision(),
+            before,
+            "the real command is queued behind the causal display marker"
         );
-
-        let recorded = events
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert!(matches!(
-            recorded.as_slice(),
-            [UserEvent::RuntimeApprovalResolutionStarted { id }]
-                if id == "tab-1::agent-1"
-        ));
-        drop(recorded);
-        drop(pane);
+        assert!(crate::app_runtime::tests::drain_browser_owner_input(&mut runtime).is_empty());
+        assert_ne!(probe.pty.ordinary_input_revision(), before);
+        runtime.cancel_runtime_approval_resolution(&id);
+        for (seq, data) in [(1, "\u{1b}[A"), (2, "x")] {
+            handle_frontend_message(
+                &state,
+                "client-1",
+                &AtomicU64::new(seq),
+                FrontendEvent::TerminalInput {
+                    id: id.clone(),
+                    data: data.into(),
+                },
+                Instant::now(),
+            );
+        }
+        forward_browser_inputs(&events, &mut runtime);
+        assert!(!runtime.window_approval_waiting[&id].resolution_started);
+        assert!(crate::app_runtime::tests::drain_browser_owner_input(&mut runtime).is_empty());
     }
 
     #[cfg(unix)]
     #[test]
     fn handle_frontend_message_flushes_held_pm_wake_after_composer_submit() {
-        let (state, events) = sample_server_state();
-        state
-            .clients
-            .register_scoped("client-1".into(), ClientScope::Project(project_a()));
-        let pane = gwt_terminal::Pane::new(
-            "test-pane".to_string(),
-            "sh".to_string(),
-            vec!["-c".to_string(), "cat >/dev/null".to_string()],
-            80,
-            24,
-            HashMap::new(),
-            None,
-        )
-        .expect("long-running test pane");
-        state.pty_writers.write().expect("writer registry").insert(
-            "tab-1::pm-window".to_string(),
-            Arc::new(crate::PtyWriterEntry {
-                project_key: project_a(),
-                handle: pane.shared_pty(),
-                monitor_runtime: None,
-                pm_delivery_replay: Mutex::new(None),
-            }),
+        let _env_lock = gwt_core::test_support::env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let (mut runtime, probe, id) =
+            crate::app_runtime::tests::owner_browser_input_fixture(temp.path());
+        let runtime_path = gwt_agent::runtime_state_path(
+            &runtime.sessions_dir,
+            &probe.session.as_ref().unwrap().id,
         );
-
+        let mut observed = gwt_agent::SessionRuntimeState::load(&runtime_path).unwrap();
+        assert_eq!(observed.child_pid, probe.pty.process_id());
+        assert_eq!(observed.runtime_incarnation, Some(probe.incarnation));
+        // The input-draining provider is waiting for its next prompt. Model
+        // that telemetry without changing its actual launch/child identity.
+        observed.status = gwt_agent::AgentStatus::Idle;
+        observed.save(&runtime_path).unwrap();
+        assert!(
+            !gwt::project_runtime::pm_delivery::pm_wake_runtime_is_busy(
+                &runtime_path,
+                probe.incarnation,
+            ),
+            "the composer-only fixture must start with an Idle provider: status={:?}, source={:?}, completed={:?}",
+            observed.status,
+            observed.source_event,
+            observed.last_completed_hook_event_at,
+        );
+        let (state, events) = sample_server_state();
+        state.clients.register_scoped(
+            "client-1".into(),
+            ClientScope::Project(runtime.project_key_for_window(&id).unwrap().clone()),
+        );
         handle_frontend_message(
             &state,
             "client-1",
             &AtomicU64::new(0),
             FrontendEvent::TerminalInput {
-                id: "tab-1::pm-window".to_string(),
-                data: "実行されてい".to_string(),
+                id: id.clone(),
+                data: "実行されてい".into(),
             },
             Instant::now(),
         );
+        forward_browser_inputs(&events, &mut runtime);
+        assert!(crate::app_runtime::tests::drain_browser_owner_input(&mut runtime).is_empty());
+        assert!(probe.pty.has_unsent_user_input());
+        assert!(runtime.pane_has_unsent_user_input(&id));
+        runtime.retain_test_pm_wake(&id, "HELD-OWNER-WAKE\r");
+        let before = probe
+            .pty
+            .reserve_input_transaction()
+            .unwrap()
+            .previous_transaction_revision();
         handle_frontend_message(
             &state,
             "client-1",
             &AtomicU64::new(1),
             FrontendEvent::TerminalInput {
-                id: "tab-1::pm-window".to_string(),
-                data: "ますか？\r".to_string(),
+                id: id.clone(),
+                data: "ますか？\r".into(),
             },
             Instant::now(),
         );
-
-        let recorded = events
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert!(
-            recorded.iter().any(|event| matches!(
-                event,
-                UserEvent::FlushPendingPmWake { id } if id == "tab-1::pm-window"
-            )),
-            "submitting unsent composer text must ask the event loop to flush a held PM wake: {recorded:?}"
-        );
-        drop(recorded);
-        drop(pane);
+        forward_browser_inputs(&events, &mut runtime);
+        crate::app_runtime::tests::drain_pm_wake_delivery_tasks(&mut runtime);
+        assert!(crate::app_runtime::tests::drain_browser_owner_input(&mut runtime).is_empty());
+        assert!(!probe.pty.has_unsent_user_input());
+        assert!(!runtime.pane_has_unsent_user_input(&id));
+        let context = runtime.project_context("browser-tab").unwrap();
+        assert!(runtime
+            .project_state(&context)
+            .unwrap()
+            .pending_pm_wakes
+            .is_empty());
+        assert_eq!(probe.pty.reserve_input_transaction().unwrap().previous_transaction_revision(), before + 2,
+            "the owner input ACK must flush exactly one held protected wake after the ordinary composer submit");
     }
 
     #[test]
@@ -4734,12 +4565,10 @@ mod tests {
         let runtime = Runtime::new().expect("tokio runtime");
         let (proxy, events) = AppEventProxy::stub();
         let clients = ClientHub::default();
-        let pty_writers = Arc::new(RwLock::new(HashMap::new()));
         let mut server = EmbeddedServer::start(
             &runtime,
             proxy,
             clients,
-            pty_writers,
             AttachmentUploadStore::in_system_temp(),
         )
         .expect("embedded server");
@@ -4897,12 +4726,10 @@ mod tests {
         let runtime = Runtime::new().expect("tokio runtime");
         let (proxy, _events) = AppEventProxy::stub();
         let clients = ClientHub::default();
-        let pty_writers = Arc::new(RwLock::new(HashMap::new()));
         let mut server = EmbeddedServer::start(
             &runtime,
             proxy,
             clients,
-            pty_writers,
             AttachmentUploadStore::in_system_temp(),
         )
         .expect("server");
@@ -4933,12 +4760,10 @@ mod tests {
         let runtime = Runtime::new().expect("tokio runtime");
         let (proxy, _events) = AppEventProxy::stub();
         let clients = ClientHub::default();
-        let pty_writers = Arc::new(RwLock::new(HashMap::new()));
         let mut server = EmbeddedServer::start(
             &runtime,
             proxy,
             clients,
-            pty_writers,
             AttachmentUploadStore::in_system_temp(),
         )
         .expect("server");
@@ -4973,7 +4798,6 @@ mod tests {
             &runtime,
             proxy,
             ClientHub::default(),
-            Arc::new(RwLock::new(HashMap::new())),
             AttachmentUploadStore::in_system_temp(),
         )
         .expect("server");
@@ -5130,11 +4954,9 @@ mod tests {
         let runtime = Runtime::new().expect("tokio runtime");
         let (proxy, _events) = AppEventProxy::stub();
         let clients = ClientHub::default();
-        let pty_writers = Arc::new(RwLock::new(HashMap::new()));
         let upload_store = AttachmentUploadStore::in_system_temp();
-        let mut server =
-            EmbeddedServer::start(&runtime, proxy, clients, pty_writers, upload_store.clone())
-                .expect("embedded server");
+        let mut server = EmbeddedServer::start(&runtime, proxy, clients, upload_store.clone())
+            .expect("embedded server");
         let client = reqwest::blocking::Client::new();
         let token_response: serde_json::Value = client
             .get(format!("{}internal/attachment-upload-token", server.url()))
@@ -5187,11 +5009,9 @@ mod tests {
         let runtime = Runtime::new().expect("tokio runtime");
         let (proxy, _events) = AppEventProxy::stub();
         let clients = ClientHub::default();
-        let pty_writers = Arc::new(RwLock::new(HashMap::new()));
         let upload_store = AttachmentUploadStore::in_system_temp();
-        let mut server =
-            EmbeddedServer::start(&runtime, proxy, clients, pty_writers, upload_store.clone())
-                .expect("embedded server");
+        let mut server = EmbeddedServer::start(&runtime, proxy, clients, upload_store.clone())
+            .expect("embedded server");
         let client = reqwest::blocking::Client::new();
         let token_response: serde_json::Value = client
             .get(format!("{}internal/attachment-upload-token", server.url()))
@@ -5250,7 +5070,6 @@ mod tests {
         let runtime = Runtime::new().expect("tokio runtime");
         let (proxy, _events) = AppEventProxy::stub();
         let clients = ClientHub::default();
-        let pty_writers = Arc::new(RwLock::new(HashMap::new()));
         let mut server = EmbeddedServer::start_with_bind(
             &runtime,
             std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
@@ -5258,7 +5077,6 @@ mod tests {
             0, // no dedicated OAuth listener in tests
             proxy,
             clients,
-            pty_writers,
             AttachmentUploadStore::in_system_temp(),
         )
         .expect("loopback bind succeeds");
@@ -5278,7 +5096,6 @@ mod tests {
         let runtime = Runtime::new().expect("tokio runtime");
         let (proxy, _events) = AppEventProxy::stub();
         let clients = ClientHub::default();
-        let pty_writers = Arc::new(RwLock::new(HashMap::new()));
         let mut server = EmbeddedServer::start_with_bind(
             &runtime,
             std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
@@ -5286,7 +5103,6 @@ mod tests {
             0, // no dedicated OAuth listener in tests
             proxy,
             clients,
-            pty_writers,
             AttachmentUploadStore::in_system_temp(),
         )
         .expect("0.0.0.0 bind succeeds");
@@ -5337,7 +5153,6 @@ mod tests {
         let runtime = Runtime::new().expect("tokio runtime");
         let (proxy, _events) = AppEventProxy::stub();
         let clients = ClientHub::default();
-        let pty_writers = Arc::new(RwLock::new(HashMap::new()));
         let mut server = EmbeddedServer::start_with_bind(
             &runtime,
             tray_args.bind,
@@ -5345,7 +5160,6 @@ mod tests {
             0, // no dedicated OAuth listener in tests
             proxy,
             clients,
-            pty_writers,
             AttachmentUploadStore::in_system_temp(),
         )
         .expect("start_with_bind succeeds for parsed TrayArgs");
@@ -5363,12 +5177,10 @@ mod tests {
         let runtime = Runtime::new().expect("tokio runtime");
         let (proxy, _events) = AppEventProxy::stub();
         let clients = ClientHub::default();
-        let pty_writers = Arc::new(RwLock::new(HashMap::new()));
         let mut server = EmbeddedServer::start(
             &runtime,
             proxy,
             clients,
-            pty_writers,
             AttachmentUploadStore::in_system_temp(),
         )
         .expect("server");
@@ -5408,12 +5220,10 @@ mod tests {
         let runtime = Runtime::new().expect("tokio runtime");
         let (proxy, _events) = AppEventProxy::stub();
         let clients = ClientHub::default();
-        let pty_writers = Arc::new(RwLock::new(HashMap::new()));
         let mut server = EmbeddedServer::start(
             &runtime,
             proxy,
             clients,
-            pty_writers,
             AttachmentUploadStore::in_system_temp(),
         )
         .expect("server");
@@ -5451,7 +5261,6 @@ mod tests {
             &runtime,
             proxy,
             ClientHub::default(),
-            Arc::new(RwLock::new(HashMap::new())),
             AttachmentUploadStore::in_system_temp(),
         )
         .expect("embedded server");
@@ -5767,7 +5576,6 @@ mod tests {
             &runtime,
             proxy,
             ClientHub::default(),
-            Arc::new(RwLock::new(HashMap::new())),
             AttachmentUploadStore::in_system_temp(),
         )
         .expect("embedded server");

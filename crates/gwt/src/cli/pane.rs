@@ -283,16 +283,8 @@ fn read_pane_health(project_root: &Path, requested_id: Option<&str>) -> Result<S
         &crate::persistence::workspace_state_path(project_root),
     )
     .map_err(|error| format!("pane health workspace unavailable: {error}"))?;
-    let tabs = crate::persistence::load_session_state(&gwt_core::paths::gwt_session_state_path())
-        .map_err(|error| format!("pane health project inventory unavailable: {error}"))?;
-    if let Some(tab) = tabs
-        .tabs
-        .iter()
-        .find(|tab| gwt_core::paths::project_scope_hash(&tab.project_root) == scope)
-    {
-        for window in &mut workspace.windows {
-            window.id = format!("{}::{}", tab.id, window.id);
-        }
+    for window in &mut workspace.windows {
+        window.id = format!("{scope}::{}", window.id);
     }
     workspace.windows.retain(is_agent_pane);
     if let Some(id) = requested_id {
@@ -347,6 +339,13 @@ fn read_pane_health(project_root: &Path, requested_id: Option<&str>) -> Result<S
     .flat_map(|prefs| prefs.failed_issues)
     .filter(|failure| failure.message == gwt_core::pane_health::CODEX_DIRECTORY_TRUST_PROMPT_REASON)
     .filter_map(|failure| failure.window_id)
+    .map(|id| {
+        if id.contains("::") {
+            id
+        } else {
+            format!("{scope}::{id}")
+        }
+    })
     .collect();
     let panes: Vec<_> = workspace
         .windows
@@ -2412,13 +2411,14 @@ mod tests {
             assert_eq!(pane["recommended_action"], "none");
         }
         assert_eq!(std::fs::read(&path).unwrap(), before);
+        let owner_id = format!("{}::agent-3", gwt_core::paths::project_scope_hash(&project));
         let command =
-            super::super::json_envelope::parse_operation("pane.health", &json!({"id":"agent-3"}))
+            super::super::json_envelope::parse_operation("pane.health", &json!({"id":owner_id}))
                 .unwrap();
         let (_, output) = super::super::run_collect(&mut env, command).unwrap();
         let result: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(result["panes"].as_array().unwrap().len(), 1);
-        assert_eq!(result["panes"][0]["id"], "agent-3");
+        assert_eq!(result["panes"][0]["id"], owner_id);
     }
 
     #[test]

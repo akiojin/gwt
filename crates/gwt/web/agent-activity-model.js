@@ -147,9 +147,10 @@ export function createAgentRosterModel(projectKey, { onRename = () => {}, schedu
     if (error) {
       updateNameEdit(memberId, current => ({ ...current, error, status: "invalid" })); sendNextName(); return;
     }
+    // Normalize the saved name without changing the draft or its typing position.
     const name = edit.value.trim();
     if (name === member.name) {
-      updateNameEdit(memberId, current => ({ ...current, value: name, error: "", status: "saved" })); sendNextName(); return;
+      updateNameEdit(memberId, current => ({ ...current, error: "", status: "saved" })); sendNextName(); return;
     }
     const request = { kind: "agent_roster", action: { kind: "rename", member_id: memberId, name },
       expected_revision: state.revision, request_id: createLaunchOperationId("member-name") };
@@ -183,7 +184,7 @@ export function createAgentRosterModel(projectKey, { onRename = () => {}, schedu
       name_edits: { ...current.name_edits, [memberId]: error
         ? { ...edit, blocked: true, error, status: "error" }
         : !edit.composing && edit.value.trim() === pending.action.name
-          ? { ...edit, value: pending.action.name, error: "", status: "saved" }
+          ? { ...edit, error: "", status: "saved" }
           : { ...edit, error: validationError, status: edit.composing ? "editing" : validationError ? "invalid" : "queued" } } }));
   }
   function applyAgentRosterSnapshot(snapshot, requestId) {
@@ -195,7 +196,7 @@ export function createAgentRosterModel(projectKey, { onRename = () => {}, schedu
       const nameEdits = { ...state.name_edits };
       for (const member of snapshot.members) {
         const edit = nameEdits[member.agent_member_id];
-        if (edit?.status === "saved" && edit.value !== member.name) nameEdits[member.agent_member_id] = { ...edit, value: member.name };
+        if (edit?.status === "saved" && edit.value.trim() !== member.name) nameEdits[member.agent_member_id] = { ...edit, value: member.name };
       }
       return { ...snapshot, name_edits: nameEdits, pending_name: state.pending_name, members: snapshot.members.map(member => ({ ...member,
         member_id: member.agent_member_id, tokens: member.tokens ?? memberUsage[member.agent_member_id] ?? null })) };
@@ -241,6 +242,16 @@ export function selectWorksTelemetry({ sessions = [], projectRoot, agents = [], 
   });
   const sumKnown = values => values.length && values.every(value => typeof value === "number" && Number.isFinite(value))
     ? values.reduce((sum, value) => sum + value, 0) : null;
+  const availability = (rows, complete, scope) => {
+    if (complete) return { state: "measured", detail: `Measured: ${scope} measurements are complete.` };
+    const failed = rows.find(row => ["unavailable", "stale", "disabled"].includes(row?.state?.kind));
+    if (failed) return { state: "unavailable", detail: `Unavailable: ${failed.state.reason ||
+      (failed.state.kind === "stale" ? "session measurements are stale" : failed.state.kind === "disabled"
+        ? "session usage collection is disabled" : "session usage could not be read")}.` };
+    return rows.some(row => row?.telemetry)
+      ? { state: "partial", detail: `Partial: ${scope} measurements are incomplete.` }
+      : { state: "no_data", detail: `No data: no ${scope} measurements.` };
+  };
   const today = key => sumKnown(projectSessions.map(session => session.telemetry?.[key]));
   const cache = (provider, read, creation) => provider === "codex" ? read ?? null : sumKnown([read, creation]);
   const by_member = {};
@@ -277,16 +288,23 @@ export function selectWorksTelemetry({ sessions = [], projectRoot, agents = [], 
     };
   }
   // Each bucket needs evidence for every live participant at the same timestamp.
-  const series = agents.map(agent => projectSessions.find(session => session.session_id === agent.session_id && session.active !== false)?.telemetry?.minute_buckets);
+  const liveSessions = agents.map(agent => projectSessions.find(session => session.session_id === agent.session_id && session.active !== false));
+  const series = liveSessions.map(session => session?.telemetry?.minute_buckets);
   const fleet = Array.from({ length: 30 }, (_, index) => {
     const starts = series.map(buckets => buckets?.[index]?.started_at);
     return starts.length && starts[0] && starts.every(start => start === starts[0])
       ? sumKnown(series.map(buckets => buckets?.[index]?.tokens)) : null;
   });
-  return { today: { input_tokens: today("today_input_tokens"), output_tokens: today("today_output_tokens"),
+  const todayTotals = { input_tokens: today("today_input_tokens"), output_tokens: today("today_output_tokens"),
     cache_tokens: sumKnown(projectSessions.map(session => cache(session.provider,
       session.telemetry?.today_cache_read_tokens, session.telemetry?.today_cache_creation_tokens))),
-    cost_usd: null, landed_pr_count: null }, fleet_tokens_per_minute: fleet, by_window, by_member };
+    cost_usd: null, landed_pr_count: null };
+  return { today: todayTotals, fleet_tokens_per_minute: fleet, by_window, by_member,
+    availability: {
+      today: availability(projectSessions, [todayTotals.input_tokens, todayTotals.cache_tokens, todayTotals.output_tokens]
+        .every(value => typeof value === "number" && Number.isFinite(value)), "project session token"),
+      fleet: availability(liveSessions, fleet.every(value => typeof value === "number" && Number.isFinite(value)), "live agent minute"),
+    } };
 }
 
 // Display-only membership. Window status, Work history and Monitor reservations

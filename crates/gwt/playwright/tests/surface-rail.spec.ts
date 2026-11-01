@@ -74,6 +74,24 @@ test.describe("Surface rail", () => {
     });
   }
 
+  test("rail choice survives delayed initial windows", async ({ page }, testInfo) => {
+    const errors = captureBrowserErrors(page);
+    await installSurfaceAssets(page);
+    await installSurfaceRailBackend(page, false, false, "board-window", true);
+    await page.goto(surfaceAppUrl);
+    await expect(page).toHaveTitle(/Surface Rail Fixture/);
+    await expect(page.locator('.workspace-window[data-id="board-window"]')).toHaveCount(0);
+    await page.locator('.op-rail__surface[data-surface="agents"]').click();
+    const main = page.getByRole("region", { name: "Main pane", exact: true });
+    await expect(main).toHaveAttribute("data-surface", "agents");
+    await page.evaluate(() => (window as any).__releaseSurfaceWindows());
+    await expect(page.locator('.workspace-window[data-id="board-window"]')).toBeAttached();
+    await expect(main).toHaveAttribute("data-surface", "agents");
+    await expect(page.locator('.op-rail__surface[data-surface="agents"]')).toHaveAttribute("aria-pressed", "true");
+    await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.includes("light") ? "light" : "dark");
+    expect(errors).toEqual([]);
+  });
+
   for (const id of ["pm-window", "shell-window"]) {
     test(`fixed ${id} has no destructive canvas chrome after restoration`, async ({ page }, testInfo) => {
       const errors = captureBrowserErrors(page);
@@ -531,10 +549,11 @@ test.describe("Surface rail", () => {
     await expect(page.locator('.issue-control-explanation[role="tooltip"]:visible')).toHaveCount(1);
     await issueView.getByRole("button", {name:"Issues settings",exact:true}).click();
     const issues = settings.locator('[data-settings-panel="issues"]');
-    await expect(issues.getByRole("spinbutton", { name: "Max active", exact: true })).toBeEnabled();
+    await expect(issues.getByRole("spinbutton", { name: "Max active", exact: true })).toHaveCount(0);
     await clearMessages(page);
     const explain = async (control: ReturnType<Page["locator"]>, pattern: RegExp) => {
       await control.hover();
+      await expect(control).toHaveAttribute("aria-describedby", /\S/);
       let ids = (await control.getAttribute("aria-describedby"))!.split(/\s+/);
       const popup = page.locator(`#${ids.at(-1)}`);
       await expect(popup).toBeVisible();
@@ -547,7 +566,7 @@ test.describe("Surface rail", () => {
       await expect(popup).toBeHidden();
     };
     for (const [name, pattern] of [
-      ["Max active mode", /Auto.*Manual/], ["Max active", /agent/i],
+      ["Autonomous", /human approval/i], ["Monitoring", /queued issues/i],
       ["Auto-refill", /queue/i], ["Refill limit", /0.*disable/i], ["Allowed labels", /matching issues/i],
     ] as const) await explain(issues.locator("[data-settings-issues-controls]").getByLabel(name, { exact: true }), pattern);
     await settings.getByRole("tab", { name: "Project Manager", exact: true }).click();
@@ -890,8 +909,8 @@ async function clearMessages(page: Page): Promise<void> {
   });
 }
 
-async function installSurfaceRailBackend(page: Page, groupedSettings = false, ownership = false, focusedId = "board-window"): Promise<void> {
-  await page.addInitScript(({ groupedSettings, ownership, focusedId }) => {
+async function installSurfaceRailBackend(page: Page, groupedSettings = false, ownership = false, focusedId = "board-window", deferWindows = false): Promise<void> {
+  await page.addInitScript(({ groupedSettings, ownership, focusedId, deferWindows }) => {
     (window as any).__gwtPlaywrightTestBridge = true;
     const surfaceWindow = (id: string, overrides: Record<string, unknown>) => ({
       id,
@@ -1026,7 +1045,7 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false, ow
             kind: "git",
             workspace: {
               viewport: { x: 0, y: 0, zoom: 1 },
-              windows: windows.map((windowData) => ({ ...windowData })),
+              windows: deferWindows ? [] : windows.map((windowData) => ({ ...windowData })),
             },
           },
           {
@@ -1130,6 +1149,10 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false, ow
       value: FixtureWebSocket,
     });
     (window as any).__surfaceRailSocket = () => socket;
+    (window as any).__releaseSurfaceWindows = () => {
+      deferWindows = false;
+      socket?.emit(workspaceState());
+    };
     (window as any).__switchSurfaceProject = (id: string) => {
       activeTabId = id;
       socket?.emit(workspaceState());
@@ -1149,5 +1172,5 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false, ow
       if (immediate) window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: workspaceState() }));
       else socket?.emit(workspaceState());
     };
-  }, { groupedSettings, ownership, focusedId });
+  }, { groupedSettings, ownership, focusedId, deferWindows });
 }

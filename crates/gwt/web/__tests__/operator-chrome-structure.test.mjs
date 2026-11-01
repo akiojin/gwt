@@ -107,6 +107,16 @@ const inlineStyle = readFileSync(resolve(here, "../styles/app.css"), "utf8");
 const componentsStyle = readFileSync(resolve(here, "../styles/components.css"), "utf8");
 const frontendStyle = `${inlineStyle}\n${componentsStyle}`;
 
+test("Issue #6476: narrow project chrome keeps Operator tokens and shared controls", () => {
+  const mobile = extractMediaBlocks(componentsStyle, "max-width: 600px");
+  assert.match(mobile, /\.project-bar/, "project actions need a narrow-screen layout");
+  assert.match(mobile, /var\(--space-/);
+  assert.doesNotMatch(mobile, /#[0-9a-f]{3,8}\b|\brgba?\(|\bhsla?\(/i);
+  assert.equal(document.querySelector("#op-theme-toggle").getAttribute("role"), "radiogroup");
+  assert.ok(document.querySelector("#split-view-button"));
+  assert.ok(document.querySelector("#close-project-button"));
+});
+
 function cssRemVar(source, name) {
   const match = source.match(new RegExp(`${name}:\\s*([0-9.]+)rem\\s*;`));
   assert.ok(match, `missing typography token: ${name}`);

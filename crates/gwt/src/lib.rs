@@ -4,10 +4,15 @@ pub mod agent_capacity;
 pub mod agent_maintenance;
 pub mod agent_names;
 pub(crate) mod agent_project_state;
+pub mod agent_registry_import;
 pub mod agent_resource_policy;
+pub mod docker_launch;
+pub mod launch_runtime;
 pub mod pane_runtime;
 pub mod session_finalizer;
 pub mod session_launch;
+#[cfg(windows)]
+pub(crate) mod verification_cap_relief;
 #[doc(hidden)]
 pub use agent_project_state::validated_project_state_root_for_session_recovery;
 pub mod autonomous_handoff;
@@ -51,6 +56,7 @@ pub mod machine_agent_settings;
 pub mod managed_assets;
 pub mod memory_pressure;
 pub mod migration;
+pub mod mobile_connection;
 pub mod monitor_duplicate_runtime;
 pub mod native_app;
 pub mod native_notification_permission;

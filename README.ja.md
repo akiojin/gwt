@@ -247,6 +247,34 @@ stderr に出力されるので、その URL を手動で開くか `gwt open` �
 ユーザーで二重に `gwt` を起動した場合、後続プロセスは既存インスタンスの
 URL を stderr に出して exit 0 で終了します。
 
+### モバイル接続（開発中）
+
+iOS Safari / Android Chrome から安全に操作する接続機能を
+[SPEC #6476](https://github.com/akiojin/gwt/issues/6476) で開発しています。
+端末認可と端末情報の永続保存は内部基盤として実装済みですが、稼働するサーバーには
+未接続です。モバイルのペアリング、暗号化されたリモート通信、Direct / Relay の自動選択、
+実機での検証はまだ提供・完了していません。`--bind` は待受アドレスを変更するだけで、
+これらの保護を有効にしません。既存ブラウザサーバーは loopback または信頼できる
+ネットワーク内で利用してください。
+
+計画中の自己ホスト接続には、次の前提があります。
+
+- クライアントの読込みと接続情報の交換には、スマートフォンから到達でき、ブラウザが
+  証明書を信頼する HTTPS origin が必要です。PC の loopback HTTP URL は外出先の
+  初期接続先にはなりません。LAN の private IP を HTTP で開くだけでは、計画中の
+  ブラウザ認証に必要な secure context を満たしません。
+- スマートフォンが紐づく Project を操作する前に、PC 側での明示承認が必要です。
+  CLI / Git / Agent の実行と認可は引き続き PC が担当します。
+- 直結できない場合は、到達可能な自己ホスト中継が必要です。NAT 越えによる直結は
+  すべてのネットワークで保証できません。中継が未配置・到達不能なら未接続とします。
+- Tailscale のアカウント・アプリや有料サービス契約を必須にしません。運用者が管理する
+  既存機器と回線を利用できますが、ホスト環境・帯域・適切なホスト名・証明書管理は
+  用意する必要があります。無料の公衆中継サービスは付属しません。
+
+構成、HTTPS での初期接続、ネットワーク条件、失敗時の挙動は上記 SPEC に記録しています。
+実行可能なモバイル設定手順は transport 統合と検証後に案内します。
+既存の LAN 向け bind の例は、その設定手順ではありません。
+
 ### `gwt serve` 廃止について
 
 `gwt serve` / `gwt --headless` 経路は v10.0.0 で削除されました (SPEC #2920 Q9)。
@@ -380,31 +408,27 @@ JSON object です。入力名、必須値、型、choice の選択肢を送信�
 1件平均2 KiBなら20件で約40 KiBです。固定バイト上限はなく、長文ほど増え、
 `all: true` では数百 KiB以上になる場合があります。
 
-managed hook と runtime 委譲は `gwtd` を使います。macOS と Linux では、
-ユーザーが JSON operation `daemon.start` を実行することでプロジェクトごとの
-runtime daemon（Unix ドメインソケット IPC）が起動します。daemon
-が live な間、同じリポジトリに繋がっている全 `gwt` インスタンスへ
-イベントが fan-out されます（例: 片方のウィンドウで Board に投稿
-した内容が、別インスタンスにも遅延なく届く）。Ctrl-C / SIGTERM で
-daemon を停止するまでバックグラウンドで動き続けます。診断用に
-JSON operation `daemon.status` で現在の endpoint を確認できます。
-JSON operation `daemon.start` を実行していない場合は multi-instance fan-out は
-無効ですが、ローカルのファイルベース state とファイル watcher は
-従来どおり動作します。
+managed hook とプロジェクト runtime の委譲は `gwtd` を使います。プロジェクトを
+開くと共有 daemon が起動、または既存 daemon に再接続します。daemon は agent pane
+と Issue Monitor を所有します。接続障害はそのプロジェクトだけに影響し、Hub と
+他のプロジェクトは引き続き利用できます。GUI が起動した daemon は最後の GUI が
+切断し、再接続の猶予期間を過ぎると終了処理へ進みます。GUI を一つ閉じても共有
+daemon を強制終了しません。明示的な JSON `daemon.start` は停止するまで常駐し、
+既存の GUI 管理 daemon に対しても常駐へ切り替えます。`daemon.status` で現在の
+endpoint を確認できます。
 
-Windows でも daemon は同じ形で動きます。GUI の Issue Monitor がユーザー
-セッションの子プロセスとして起動・監視し、JSON operation `daemon.start` で
-手動起動もできます。通信は named pipe（`\\.\pipe\gwtd-<scope>-<hash>`、
-ローカルクライアントのみ。auth token は `~/.gwt` 配下の endpoint file が
-持つ）です。`daemon.status` / `daemon.subscribe` / Issue Monitor control /
-複数インスタンス間の fan-out は macOS / Linux と同じように動作します。
-手動起動した daemon は Ctrl-C、Ctrl-Break、コンソールを閉じることで停止し、
-ログオフとシャットダウンでも同じ cleanup が走ります。GUI が終了させた
-daemon は次回起動時の liveness 判定で回収されます。gwt は Windows Service を
-インストールしません。daemon が行うのは scan と claim までで、エージェント
-pane の生成は GUI 側が担うため、Service 化してもヘッドレス自律実行には
-ならず、ユーザー単位の `~/.gwt` state とも噛み合わないためです。ヘッドレス
-自律実行は daemon の目標には含めていません。
+Hub の **終了待ちプロジェクト** には既知のプロジェクトの daemon 状態を表示します。
+**再確認** で更新し、**終了を再試行** で失敗した終了処理を再試行できます。対象は
+認証済みで終了処理中の GUI 管理 daemon に限り、GUI が接続していないことを確認します。
+所有者の変更やプロジェクトの再オープンで観測は無効になるため、再確認してください。
+常駐 daemon、接続中のプロジェクト、所有者を確認できない daemon はこの操作で
+終了できません。失敗理由は対象プロジェクトの `DaemonFault` に記録されます。
+
+macOS / Linux の daemon control は Unix ドメインソケット、Windows はローカル
+named pipe を使用します。private runtime 接続は認証され、認証情報は Rust と
+`~/.gwt` 配下の endpoint file 内に保持されます。Windows Service はインストール
+しません。手動起動した daemon は Ctrl-C、SIGTERM、または OS のコンソール終了
+signal で停止できます。
 
 ## Agent Workflow
 
@@ -447,7 +471,7 @@ pane の生成は GUI 側が担うため、Service 化してもヘッドレス�
   バック)。設定はグローバルで `~/.gwt/config.toml` の `[ai].language` に保存
   されます。UI 文言は引き続き英語固定です (SPEC-1933 NFR-005)。
   アプリ全体とプロジェクトごとの設定は区別して表示します。`Issues execution settings` では
-  Autonomous、Max active、キュー補充、許可ラベル、起動プロファイルと候補の
+  Autonomous、Monitoring、キュー補充、許可ラベル、起動プロファイルと候補の
   順序・優先条件を同じ欄で編集できます。
   起動候補の変更は確定時に自動保存され、テキスト欄はフォーカスを外すと保存されます。
   拒否された入力は保持され、該当欄の近くにエラーを表示します。
@@ -524,13 +548,12 @@ Waiting（Full / Hold / Empty）、Stopped（停止）、Error の状態、Activ
 容量通知へのリンク、隣り合う Auto-refill と Autonomous、Start / Stop、**Issues settings** を表示します。
 スイッチの On / Off はサーバーで確定した状態を示します。現在の障害だけを赤く表示し、
 エラーの詳細と履歴は通知センターで確認できます。**Issues settings** から **Settings → Project → Issues execution settings** を開き、
-**Launch control（起動制御）**で Autonomous・Max active・Monitoring、**Refill（補充）**で Auto-refill と上限、
+**Launch control（起動制御）**で Autonomous・Monitoring、**Refill（補充）**で Auto-refill と上限、
 **Target（対象）**で Allowed labels を設定します。その下に候補プロファイルが並びます。
 Issues と Settings は独立した面で、Split view で並べても Issue の検索・選択と設定の編集中入力を保持します。
 Auto-apply updates は **System** で設定します。
-Agents 名簿のあるプロジェクトでは **Max active** で有効メンバー数を編集し、**Apply** で名簿を増減します。**Auto** は選べません。
-名簿のない旧設定では **Manual** で数値を編集できます。**Auto** では編集できず、実効上限を表示し、計測が未完了なら **Measuring capacity…** と表示します。
-稼働数より小さい上限に下げても既存エージェントは継続し、稼働数が上限未満になるまで新規起動を待ちます。
+メンバーの登録・休止は **Agents** で操作します。Project settings では名簿人数や機械上限を変更しません。
+新規起動には引き続き機械の安全上限を適用し、登録の変更で実行中のエージェントを停止しません。
 Auto-refill は**既定で OFF**です。
 有効にすると、条件を満たす open Issue を設定したキュー上限まで自動補充します。
 空のキューから新しい作業は起動せず、実行中の作業は継続します。
@@ -554,10 +577,9 @@ GUI の CPU 使用量、他プロジェクトの稼働中エージェントを�
 `target` が存在しない場合や計測中の場合も、それを理由に新規起動を止めません。
 完全な実測により上限が 0 になることはあります。容量を下げた資源や稼働中エージェントの
 消費は status とエラー台帳に記録します。
-名簿の作成前は、旧 **Max active** 操作で **Manual** の固定上限または推奨値へ追従する **Auto** を選べます。
-この machine policy は全プロジェクトで共通です。Manual は
+Auto/Manual の machine policy は全プロジェクトで共通です。Manual は
 実装・レビュー窓の合計上限で、他プロジェクトの消費を引いた残りを各プロジェクトへ配分します。
-PM 窓の会計は別に表示し、Settings には自プロジェクトの割当と他プロジェクトの消費を併記します。
+PM 窓の会計は別に表示します。
 共通の容量設定の仕様は [SPEC #3200](https://github.com/akiojin/gwt/issues/3200) を参照してください。推奨値を超える入力も許可しますが、
 検証が完走しない可能性と、時間に依存するテストの失敗が無関係な PR を妨げる可能性を警告します。
 名簿のあるプロジェクトでは `issue.monitor.config.set` に `{"max_active":4}` を渡すと有効メンバーを4人へ増減します。
@@ -900,6 +922,16 @@ Monitor は宣言がない場合に診断を省略し、解消済み・不明の
 Monitor の取得元・スキャン時刻・観測範囲の制約を併せて確認してください。
 この部分的な逆引きから影響なし・現在の阻害・重要度・推移的な遅延・critical path は
 判断できず、優先順位・起動可能性・起動の変更を許可しません。
+`policy.dependency_reachability` は、供給辺を併合して直接・間接の到達先を
+番号順・重複なしで示します。循環や自己参照でも停止し、根自身を除外します。
+cycle・bundle 宣言だけから辺は作りません。Goal・milestone・ロードマップの各診断も
+同じ項目を持ち、外部 blocker・中間 Issue を含む全体を探索した後、既存の所属条件で
+到達先だけを絞り、空の行を除きます。Monitor 不在は空所属でも null、到達先なしは []
+です。元の観測・直接依存の逆引き・degraded/aborted の事実と provenance は保持します。
+これは部分観測を併合した構造上の到達可能性であり、完全なグラフや依存が同時に有効
+だったことを保証しません。現在の閉塞・遅延・critical path・priority・health・readiness・
+起動許可の根拠にはなりません。
+
 各 milestone の `dependency_observations` は、直接参照した Issue と、一意な非空
 milestone ID で解決した roadmap 所属 Issue の行を抽出します。供給順・重複・依存情報の
 欠測を保持し、Monitor 不在は null、一致行がなければ [] です。`unobserved_issues` と
@@ -1178,7 +1210,20 @@ Bundled workflow skills は active worktree の `.claude/skills`、
 - `gwt-agent` — running agent pane の確認と操作
 - `gwt-feedback` — 任意のプロジェクトから gwt の問題を報告する
 
-gwt の不具合や workflow の問題は、PM と実装 agent のどちらも
+Project Settings の **Autonomous ON** では、`feedback.create` は即座に返り、
+hidden worker が安全な構造化報告を `akiojin/gwt` へ送信します。同意・preview・
+認証・失敗 dialog/browser/worker console は開きません。既存設定を使用し、
+追加 opt-in は不要です。容量計算の Auto とは別です。保存・送信する情報は固定
+schema/template、既知 operation/error enum、数値に制限した版数、OS/architecture
+だけです。自由文、source、機密情報、URL/path、project 識別情報、agent 数は
+保存・fingerprint・log の前に除外します。未知 operation は withheld となります。
+認証不足や設定失効・読取不能も静的な failed/withheld receipt に残し、同意画面へ
+fallback しません。Auto の認証は既存プロセスの `GH_TOKEN` / `GITHUB_TOKEN` のみを
+使い、credential store の解錠は起動しません。GitHub CLI へのログインだけでは
+Auto feedback は未送信のままです。agent の JSON/env/repository flag では Auto 権限を付与できず、
+既存の原文 receipt が Auto に昇格することもありません。
+
+設定が存在しない場合や false の場合（Manual）では、PM と実装 agent のどちらも
 `gwt-feedback` で対象 operation、拒否文の原文、再現手順、回避策を集めて
 報告できます。JSON operation `feedback.create` の宛先は常に
 `akiojin/gwt` で、診断コンテキストをローカルで自動収集します。
@@ -1188,7 +1233,7 @@ dialog でユーザーが **Send feedback** を選ぶ必要があります。取
 不在でも内容はローカルに残ります。gwt 自体の開発では承認を求めず同期送信し、
 Issue 番号と URL を返します。
 
-ローカル receipt は完全な原文を保持します。公開内容では既知の認証情報、
+Manual のローカル receipt は完全な原文を保持します。公開内容では既知の認証情報、
 環境変数の代入値、プロジェクト識別情報、URL を含むパス、ソースコードを自動で伏せます。
 公開する環境情報は gwt/gwtd 版数と OS・アーキテクチャのみとし、報告元のメタデータと
 任意の追加本文は含めません。スクロールできる承認画面は両方の選択肢を常に表示し、
@@ -1198,8 +1243,11 @@ preview と送信に同じ内容を使い、伏せ字以外の拒否文は切り
 
 返された request id を `feedback.status` に渡すと、送信先 Issue の番号と
 URL を確認できます。類似する既存 Issue があればコメントを追記します。
-`feedback.retry` は declined / failed の receipt だけ再試行し、外部プロジェクト
-では改めて承認を求めます。送信結果が uncertain の場合は内容を保全し、
+Auto status は sender lock の取得により孤立した `sending` を `uncertain` へ直し、再送はしません。
+`feedback.retry` は Manual の declined / failed を再試行し、外部プロジェクト
+では改めて承認を求めます。Auto の failed / withheld は正本の設定を再確認します。
+withheld からの回復では設定を戻すか既知 operation を報告し、原文追加で制約を
+回避しないでください。送信結果が uncertain の場合は内容を保全し、
 自動再送しません。
 
 報告は PM が分類するための証拠として扱います。確認できた不具合は、要件を整理した
@@ -1642,7 +1690,7 @@ project 固有の規約を明示的に渡すには、
 - **PM** は独立したレール入口から単一ペインで開け、Works の先頭にも表示します。割り当てられた名前と PM バッジは Agents の先頭にも表示します。
 - **Works** は端末上で稼働する Agent を1人1行で表示し、直近の出力を載せます。**Settings → System → Works output lines** で3〜10行（既定3行）を選べ、読み取り専用の一覧にも即時反映し、再読み込み・アプリ再起動後も保持します。出力は選択・スクロールでき、端末を開きません。出力欄以外の行のクリック・Enter・Space で同じネイティブ端末を開き、**Back to Works** で一覧へ戻ります。矢印で前後の Agent へ移り、Esc などのキーは端末へ渡します。
 - **Agents** の **Team** には固定メンバー、担当履歴と実測集計を、**Past** には過去の実際の担当を表示します。Works の名前から該当メンバーへ、Agents の現在タスクからその Works 端末へ移動できます。
-- **Agents** で表示名を入力して利用ツールを選び、**Register** で登録します。選択した人物の **Display name** はその場で編集すると自動保存され、同じ人物 ID と進行中の作業を保持します。無効な入力は欄に残り、保存失敗や競合は **Retry name** で再試行できます。担当履歴と Board は当時の名前を保持します。 **Saved manual candidate** には選択した人物の手動候補として保存されたモデル・推論・実行環境・権限設定を表示し、自動起動には tier 設定を使用します。 **Current work** には現在の exact Session の起動時記録を別に表示します。 **Assignment history** には各 Session に記録された名前・ツール・起動モデルを表示します。未取得の値は **—** とし、ツール内でのモデル変更の実測値とは区別します。空名と、前後の空白・大文字小文字の違いを除いた重複名（休止中のメンバーを含む）は登録できません。登録後はそのツールに固定します。**Agents Settings** では登録済みの人物を名前で選び、固定ツールを確認します。候補ごとのモデル・実行環境も設定できます。選択したツールが利用できないときは待機理由を表示し、別ツールへ自動切替しません。既存の候補は起動設定と設定済みの同時実行容量を保って取り込みます。
+- **Agents** で表示名を入力して利用ツールを選び、**Register** で登録します。選択した人物の **Display name** はその場で編集すると自動保存され、同じ人物 ID と進行中の作業を保持します。無効な入力は欄に残り、保存失敗や競合は **Retry name** で再試行できます。担当履歴と Board は当時の名前を保持します。 **Saved manual candidate** には選択した人物の手動候補として保存されたモデル・推論・実行環境・権限設定を表示し、自動起動には tier 設定を使用します。 **Saved manual candidate revision** は保存設定の内容を識別します。設定変更で変わり、人物の改名や同じ設定への復帰では同じ値になります。読み取り専用欄へフォーカスすると全文を選択・コピーできます。時系列の番号ではありません。 **Current work** には現在の exact Session の起動時記録を別に表示します。 **Assignment history** には各 Session に記録された名前・ツール・起動モデルを表示します。未取得の値は **—** とし、ツール内でのモデル変更の実測値とは区別します。空名と、前後の空白・大文字小文字の違いを除いた重複名（休止中のメンバーを含む）は登録できません。登録後はそのツールに固定します。**Agents Settings** では登録済みの人物を名前で選び、固定ツールを確認します。候補ごとのモデル・実行環境も設定できます。選択したツールが利用できないときは待機理由を表示し、別ツールへ自動切替しません。既存の候補は起動設定と設定済みの同時実行容量を保って取り込みます。
 - **Team** でメンバーを選ぶと、詳細の **Next planned issues** に次の担当予定と割当理由を順番に表示します。別のメンバーを選んで **Reassign** で未開始の Issue を移し、競合や応答失敗の後は **Refresh plans** で最新の予定を読み直せます。
 - **Switch to next issue** は現在の作業が静止するまで待ち、エージェントが区切りのよい状態を保存・push してから、同じメンバーで選択した Issue を開始します。静止や保存を確認できなければ現在のタスクを保持します。停止前は **Cancel switch** で取り消せ、次の起動に失敗した場合は **Continue saved work** から保存済みタスクの通常の継続操作へ進めます。Host の再起動では未実行の切替要求を破棄します。
 - **Register** はプロジェクトの希望同時実行数を1人増やします。**Rest member** は1人減らし、現在の作業は完了まで続けます。有効メンバーは最低1人を保ち、端末の安全上限により実際の割当数が少なくなる場合があります。
@@ -1656,6 +1704,9 @@ Works には Session に帰属する入力・キャッシュ・出力、直近30
 ブランチと検証の状態を表示します。取得できない値は **—** とし、コンテキスト残量は
 provider の直接報告がある場合だけ表示します。Today はこのプロジェクトの実測会話を集計し、
 アカウント全体の使用量を転用しません。個別 PR 情報は表示しません。
+Today と Fleet には未取得・部分取得・取得エラー・実測済みの説明を表示します。
+不明な合計は **—**、実測ゼロは **0** として区別します。Cost は Session ごとの USD が
+未対応、Landed PRs は完全な日次マージデータが未接続のため、引き続き取得不能として表示します。
 
 保存した Session は現在の各面へ復元します。旧端末タブ・grid・Columns 指定は再読み込みや
 再起動後も復活せず、名簿の Team/Past タブは維持します。

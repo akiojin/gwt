@@ -299,130 +299,11 @@ function renderIssuesSettingsPanel(panel, options) {
     control.dataset.confirmed = String(control.checked);
     control.disabled = !status;
     setControlExplanation(control, action === "monitor-autonomous"
-      ? "Allow eligible issues to run without waiting for human approval."
+      ? "Allow eligible issues to run without waiting for human approval. Also send structured gwt feedback without a dialog; free text is excluded. This is separate from Auto capacity. Feedback needs existing GH_TOKEN/GITHUB_TOKEN credentials; GitHub CLI sign-in alone keeps it unsent."
       : "Start or pause monitoring for queued issues.", `settings-${action}`);
     slot.appendChild(control);
     row(launch, name, slot).dataset.settingsLaunchAction = action;
   }
-  if (panel.dataset.maxActiveProject !== project?.project_root) delete panel.dataset.maxActiveDraft;
-  panel.dataset.maxActiveProject = project?.project_root || "";
-  let committedMax = status?.agent_roster_capacity ?? status?.max_active_agents_override;
-  const max = field(launch, "Max active", "number", committedMax == null
-    ? status?.max_active_agents ?? 0
-    : panel.dataset.maxActiveDraft ?? committedMax);
-  const capacityExplanation = "Maximum number of issue agents across all projects on this machine. Auto uses the current recommended capacity; Manual requests a shared maximum. Each project's effective allocation may be lower.";
-  setControlExplanation(max, capacityExplanation, "settings-max-active");
-  launch.insertBefore(max.closest("label"), launch.querySelector('[data-settings-launch-action="monitor-toggle"]'));
-  max.min = "1";
-  max.step = "1";
-  const mode = document.createElement("select");
-  mode.className = "settings-select";
-  mode.setAttribute("aria-label", "Max active mode");
-  setControlExplanation(mode, "Choose Automatic capacity from current system limits, or Manual to request a shared maximum for all projects on this machine.", "settings-max-active-mode");
-  for (const [value, name] of [["auto", "Auto"], ["manual", "Manual"]]) {
-    const option = document.createElement("option");
-    option.value = value;
-    option.textContent = name;
-    option.selected = value === (status?.max_active_agents_override == null ? "auto" : "manual");
-    mode.appendChild(option);
-  }
-  max.disabled = status?.max_active_agents_override == null;
-  const capacity = document.createElement("span");
-  capacity.className = "settings-issues-capacity";
-  setControlExplanation(capacity, capacityExplanation, "settings-capacity");
-  max.replaceWith(capacity);
-  const apply = document.createElement("button");
-  apply.type = "button";
-  apply.className = "wizard-button";
-  apply.textContent = "Apply";
-  apply.setAttribute("aria-label", "Apply Max active");
-  setControlExplanation(apply, "Save the final Manual limit. Editing the number does not save intermediate values.", "settings-max-active-apply");
-  const updateApply = () => {
-    const value = Number(max.value);
-    apply.disabled = max.disabled || !Number.isInteger(value) || value < 1 || value === committedMax;
-  };
-  updateApply();
-  capacity.append(mode, max, apply);
-  const scope = document.createElement("span");
-  scope.className = "settings-help";
-  scope.textContent = "All projects on this machine. Manual sets the shared requested maximum.";
-  const allocation = document.createElement("span");
-  allocation.className = "settings-help";
-  allocation.setAttribute("role", "status");
-  capacity.append(scope, allocation);
-  const message = document.createElement("span");
-  message.className = "settings-help";
-  message.setAttribute("role", "status");
-  capacity.appendChild(message);
-  let latestStatus = status;
-  panel.updateMaxActiveStatus = nextStatus => {
-    latestStatus = nextStatus;
-    const wasAuto = max.disabled;
-    const projectMembers = Number.isInteger(nextStatus?.agent_roster_capacity) && nextStatus.agent_roster_capacity > 0;
-    committedMax = projectMembers ? nextStatus.agent_roster_capacity : nextStatus?.max_active_agents_override ?? null;
-    mode.disabled = projectMembers;
-    scope.textContent = projectMembers
-      ? "This project: enabled members determine the requested capacity. Machine safety limits still apply."
-      : "All projects on this machine. Manual sets the shared requested maximum.";
-    const explanation = projectMembers
-      ? "Enabled members in this project. Changing this number resizes the persistent Agents roster; effective launch allocation can be lower because of machine safety limits."
-      : capacityExplanation;
-    setControlExplanation(max, explanation, "settings-max-active");
-    setControlExplanation(capacity, explanation, "settings-capacity");
-    max.disabled = committedMax == null;
-    mode.querySelector(`[value="${max.disabled ? "auto" : "manual"}"]`).selected = true;
-    if (max.disabled || wasAuto || panel.dataset.maxActiveDraft == null) {
-      delete panel.dataset.maxActiveDraft;
-      max.value = String(committedMax ?? nextStatus?.max_active_agents ?? 0);
-    }
-    updateApply();
-    const otherWorkers = Math.max(0, (nextStatus?.agent_capacity?.other_live_agents ?? 0)
-      - (nextStatus?.agent_capacity?.other_pm_agents ?? 0));
-    allocation.textContent = `This project allocation: ${nextStatus?.max_active_agents ?? 0} · Other project workers: ${otherWorkers}`;
-    message.textContent = max.disabled && !nextStatus?.agent_capacity?.measurement_complete
-      ? "Measuring capacity…"
-      : Number(nextStatus?.active_count) > Number(nextStatus?.max_active_agents)
-        ? "Existing agents continue; new launches wait until active agents fall below this limit."
-        : "";
-    message.hidden = !message.textContent;
-  };
-  panel.updateMaxActiveStatus(status);
-  mode.addEventListener("change", () => {
-    if (latestStatus?.agent_roster_capacity != null) return;
-    const wasAuto = max.disabled;
-    delete panel.dataset.maxActiveDraft;
-    max.disabled = mode.value === "auto";
-    if (!max.disabled && wasAuto) {
-      const capacity = latestStatus?.agent_capacity;
-      const machineWorkers = Number.isFinite(capacity?.machine_budget)
-        ? capacity.machine_budget - (capacity.other_pm_agents ?? 0) - Math.max(capacity.own_pm_agents ?? 0, 1)
-        : (latestStatus?.max_active_agents ?? 0)
-          + Math.max(0, (capacity?.other_live_agents ?? 0) - (capacity?.other_pm_agents ?? 0))
-          + (capacity?.own_untracked_workers ?? 0);
-      max.value = String(Math.max(1, machineWorkers));
-    }
-    if (!max.disabled && !(Number.isInteger(Number(max.value)) && Number(max.value) > 0)) max.value = "1";
-    committedMax = max.disabled ? null : Number(max.value);
-    updateApply();
-    panel.updateMaxActiveStatus({ ...latestStatus, max_active_agents_override: committedMax });
-    send({ kind: "set_issue_monitor_max_active_agents",
-      max_active_agents: committedMax });
-  });
-  const editMax = () => {
-    if (max.disabled) return;
-    panel.dataset.maxActiveDraft = max.value;
-    updateApply();
-  };
-  max.addEventListener("input", editMax);
-  max.addEventListener("change", editMax);
-  apply.addEventListener("click", () => {
-    if (apply.disabled || latestStatus?.max_active_agents_override == null) return;
-    const value = Number(max.value);
-    committedMax = value;
-    delete panel.dataset.maxActiveDraft;
-    updateApply();
-    send({ kind: "set_issue_monitor_max_active_agents", max_active_agents: value });
-  });
   const replenishment = group("Refill");
   const refill = field(replenishment, "Auto-refill", "checkbox", status?.terminal_queue_auto_refill);
   const limit = field(replenishment, "Refill limit", "number", status?.terminal_queue_auto_refill_limit ?? 3);
@@ -832,8 +713,8 @@ export function installSettingsOpenHandler(options) {
         && (settingsBody.dataset.surfaceOwner || null) === surfaceOwner,
     );
     if (existingBody) {
-      switchSettingsTab(existingBody, target, true);
       focusOrSpawnPreset("settings", { surfaceOwner });
+      switchSettingsTab(existingBody, target, true);
       if (target === "system") send({ kind: "get_update_settings" });
       return;
     }
@@ -1144,9 +1025,9 @@ export function createSettingsSurface({
         const availableMembers = rosterModel?.read().revision == null ? null : rosterModel.read().members;
         for (const [section, render] of [["issues", renderIssuesSettingsPanel], ["agents", renderAgentsSettingsPanel]]) {
           const panel = body.querySelector(section === "issues" ? "[data-settings-issues-controls]" : "[data-settings-candidates]");
+          // A field's focusout can flush here between a button's mousedown and click.
           const editing = panel?.contains(document.activeElement)
-            && document.activeElement?.matches(section === "agents" ? "input, select, textarea" : "input:not([type=checkbox]), select, textarea, [aria-label='Apply Max active']");
-          if (section === "issues") panel?.updateMaxActiveStatus?.(current.status);
+            && document.activeElement?.matches(section === "agents" ? "input, select, textarea, button" : "input:not([type=checkbox]), select, textarea");
           if (editing) body.dataset.issuesRenderDeferred = "true";
           if (panel && !editing && !(section === "agents" && panel.dataset.dirty === "true")) render(panel, {
             project, status: current.status, profiles: current.profiles, choices: current.choices, send: dispatch, launchControls,
@@ -1528,12 +1409,17 @@ export function createSettingsSurface({
         });
         settingsWindowBodies.add(body);
         renderUpdateStatus(body, globalUpdateModel.read());
-        body.addEventListener("focusout", () => queueMicrotask(() => {
-          if (body.dataset.issuesRenderDeferred === "true") {
-            delete body.dataset.issuesRenderDeferred;
-            renderProjectSettings(body);
-          }
-        }));
+        body.addEventListener("focusout", event => {
+          // activeElement can still be BODY until the next focusin fires.
+          const candidates = event.target.closest?.("[data-settings-candidates]");
+          if (candidates && event.relatedTarget?.closest?.("[data-settings-candidates]") === candidates) return;
+          queueMicrotask(() => {
+            if (body.dataset.issuesRenderDeferred === "true") {
+              delete body.dataset.issuesRenderDeferred;
+              renderProjectSettings(body);
+            }
+          });
+        });
         renderProjectSettings(body);
         requestSettingsSnapshots();
         renderSystemPanel(systemContent);

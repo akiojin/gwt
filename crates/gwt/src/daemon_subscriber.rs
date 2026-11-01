@@ -865,3 +865,252 @@ mod tests {
         });
     }
 }
+
+#[cfg(test)]
+mod project_owner_tests {
+    use super::*;
+
+    #[test]
+    fn project_owner_subscriber_authenticates_identity_and_reports_loss() {
+        let _env_lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let scope = gwt_core::daemon::RuntimeScope::new(
+                "abcdef0123456789",
+                "feedfacecafebeef",
+                home.path().to_path_buf(),
+                gwt_core::daemon::RuntimeTarget::Host,
+            )
+            .unwrap();
+            let mut endpoint = DaemonEndpoint::new(
+                scope,
+                std::process::id(),
+                "unused".into(),
+                "private-test-token".into(),
+                "test".into(),
+            );
+            let bound =
+                crate::project_runtime::transport::BoundProjectTransport::bind(&endpoint).unwrap();
+            endpoint.project_transport_url = Some(bound.private_url.clone());
+            let transport = bound.serve().unwrap();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let probe_endpoint = endpoint.clone();
+            let subscriber = DaemonSubscriber::spawn_project_owner_with_resolver(
+                "abcdef0123456789".into(),
+                move || Ok(endpoint.clone()),
+                move |connection_id, identity, health| {
+                    let _ = tx.send((connection_id, identity, health));
+                },
+                |_, _, _| {},
+            );
+            let (connection_id, identity) = tokio::task::spawn_blocking(move || loop {
+                let (connection_id, identity, health) = rx
+                    .recv_timeout(gwt_core::deadline_budget::HANG_GUARD) // test-hygiene: allow-wall-clock-deadline Bounds receipt of the actual owner connection or loss event.
+                    .unwrap();
+                if health.state == crate::protocol::ProjectOwnerHealthState::Healthy {
+                    break (connection_id, (identity.unwrap(), rx));
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(identity.0.pid, std::process::id());
+            assert_eq!(
+                Some(identity.0.host_started_at),
+                crate::process::host_process_start_time(std::process::id())
+            );
+            assert!(!identity.0.host_instance_id.is_empty());
+            let mut unavailable_health = serde_json::json!({
+                "project_key": probe_endpoint.scope.repo_hash,
+                "pid": identity.0.pid,
+                "host_started_at": identity.0.host_started_at,
+                "host_instance_id": identity.0.host_instance_id,
+                "draining": true,
+                "reconciliation_required": false,
+            });
+            let draining =
+                validate_project_owner_health(unavailable_health.clone(), &probe_endpoint);
+            unavailable_health["draining"] = false.into();
+            unavailable_health["reconciliation_required"] = true.into();
+            assert!(
+                draining.is_err()
+                    && validate_project_owner_health(unavailable_health, &probe_endpoint).is_err(),
+                "an exact owner awaiting drain or reconciliation is degraded"
+            );
+            transport.shutdown().await;
+            tokio::task::spawn_blocking(move || {
+                let (_, rx) = identity;
+                loop {
+                    let (lost_connection_id, _, health) = rx
+                        .recv_timeout(gwt_core::deadline_budget::HANG_GUARD) // test-hygiene: allow-wall-clock-deadline Bounds receipt of the actual owner connection or loss event.
+                        .unwrap();
+                    if health.state == crate::protocol::ProjectOwnerHealthState::Degraded {
+                        assert_eq!(lost_connection_id, connection_id);
+                        break;
+                    }
+                }
+                subscriber.stop();
+            })
+            .await
+            .unwrap();
+        });
+    }
+}
+
+/// Exact authenticated execution owner. Kept in Rust; never sent to browsers.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct ProjectOwnerIdentity {
+    pub pid: u32,
+    pub host_started_at: u64,
+    pub host_instance_id: String,
+}
+
+type OwnerHealthCallback = dyn Fn(u64, Option<ProjectOwnerIdentity>, crate::protocol::ProjectOwnerHealthView)
+    + Send
+    + Sync;
+type OwnerEventCallback =
+    dyn Fn(u64, ProjectOwnerIdentity, crate::project_runtime::events::OwnerEvent) + Send + Sync;
+static NEXT_OWNER_CONNECTION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+const OWNER_HEALTH_INTERVAL: Duration = Duration::from_secs(2);
+const OWNER_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+impl DaemonSubscriber {
+    /// Observe one project's private execution owner without acquiring a Monitor role.
+    pub fn spawn_project_owner_with_resolver<R, H, E>(
+        project_key: String,
+        resolver: R,
+        on_health: H,
+        on_event: E,
+    ) -> Self
+    where
+        R: Fn() -> Result<DaemonEndpoint, String> + Send + Sync + 'static,
+        H: Fn(u64, Option<ProjectOwnerIdentity>, crate::protocol::ProjectOwnerHealthView)
+            + Send
+            + Sync
+            + 'static,
+        E: Fn(u64, ProjectOwnerIdentity, crate::project_runtime::events::OwnerEvent)
+            + Send
+            + Sync
+            + 'static,
+    {
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let shutdown = Arc::new(Notify::new());
+        let stop = stop_flag.clone();
+        let stop_notify = shutdown.clone();
+        let on_health: Arc<OwnerHealthCallback> = Arc::new(on_health);
+        let on_event: Arc<OwnerEventCallback> = Arc::new(on_event);
+        let join_handle = thread::Builder::new().name("gwt-project-owner-subscriber".into()).spawn(move || {
+            use crate::protocol::{ProjectOwnerHealthState as State, ProjectOwnerHealthView};
+            let publish = |id, identity, state, detail| on_health(id, identity, ProjectOwnerHealthView { project_key: project_key.clone(), state, detail });
+            let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(runtime) => runtime,
+                Err(error) => { publish(0, None, State::Degraded, Some(error.to_string())); return; }
+            };
+            let mut backoff = RETRY_BACKOFF_MIN;
+            let mut first = true;
+            while !stop.load(Ordering::SeqCst) {
+                let connection_id = NEXT_OWNER_CONNECTION.fetch_add(1, Ordering::SeqCst);
+                if first { publish(connection_id, None, State::Connecting, None); first = false; }
+                let result = runtime.block_on(async {
+                    let cancelled = stop_notify.notified();
+                    tokio::pin!(cancelled);
+                    cancelled.as_mut().enable();
+                    if stop.load(Ordering::SeqCst) { return Ok(()); }
+                    let endpoint = resolver()?;
+                    if stop.load(Ordering::SeqCst) { return Ok(()); }
+                    if endpoint.scope.repo_hash != project_key { return Err("Project owner discovery returned another project".into()); }
+                    let client = crate::project_runtime::client::ProjectRuntimeClient::new(&endpoint)?;
+                    let session = async {
+                        let identity = inspect_project_owner(&client, &endpoint).await?;
+                        let stream = tokio::time::timeout(OWNER_REQUEST_TIMEOUT, client.gui_events()).await.map_err(|_| "Project event connection timed out".to_string())??;
+                        futures_util::pin_mut!(stream);
+                        publish(connection_id, Some(identity.clone()), State::Healthy, None);
+                        let mut interval = tokio::time::interval(OWNER_HEALTH_INTERVAL);
+                        interval.tick().await;
+                        loop {
+                            use futures_util::StreamExt;
+                            tokio::select! {
+                                event = stream.next() => match event {
+                                    Some(Ok(event)) => on_event(connection_id, identity.clone(), event),
+                                    Some(Err(error)) => return Err(error),
+                                    None => return Err("Project event connection ended".into()),
+                                },
+                                _ = interval.tick() => {
+                                    let current = inspect_project_owner(&client, &endpoint).await?;
+                                    if current != identity { return Err("Project execution owner identity changed".into()); }
+                                }
+                            }
+                        }
+                    };
+                    tokio::select! { biased; _ = cancelled => Ok(()), result = session => result }
+                });
+                if stop.load(Ordering::SeqCst) { break; }
+                if let Err(error) = result { publish(connection_id, None, State::Degraded, Some(error)); }
+                runtime.block_on(async {
+                    let cancelled = stop_notify.notified();
+                    tokio::pin!(cancelled);
+                    cancelled.as_mut().enable();
+                    if stop.load(Ordering::SeqCst) { return; }
+                    tokio::select! { _ = cancelled => {}, _ = tokio::time::sleep(backoff) => {} }
+                });
+                backoff = (backoff * 2).min(RETRY_BACKOFF_MAX);
+            }
+        }).expect("project owner subscriber thread spawn");
+        Self {
+            stop_flag,
+            shutdown,
+            join_handle: Some(join_handle),
+        }
+    }
+}
+
+pub(crate) async fn inspect_project_owner(
+    client: &crate::project_runtime::client::ProjectRuntimeClient,
+    endpoint: &DaemonEndpoint,
+) -> Result<ProjectOwnerIdentity, String> {
+    let value = tokio::time::timeout(
+        OWNER_REQUEST_TIMEOUT,
+        client.command(crate::project_runtime::events::OwnerCommand::Health),
+    )
+    .await
+    .map_err(|_| "Project health request timed out".to_string())??;
+    validate_project_owner_health(value, endpoint)
+}
+
+fn validate_project_owner_health(
+    value: serde_json::Value,
+    endpoint: &DaemonEndpoint,
+) -> Result<ProjectOwnerIdentity, String> {
+    #[derive(serde::Deserialize)]
+    struct Health {
+        project_key: String,
+        #[serde(flatten)]
+        identity: ProjectOwnerIdentity,
+        #[serde(default)]
+        draining: bool,
+        #[serde(default)]
+        reconciliation_required: bool,
+    }
+    let health: Health = serde_json::from_value(value)
+        .map_err(|_| "Project health identity is missing or invalid".to_string())?;
+    if health.project_key != endpoint.scope.repo_hash
+        || health.identity.pid != endpoint.pid
+        || health.identity.host_started_at == 0
+        || health.identity.host_instance_id.is_empty()
+        || crate::process::host_process_start_time(endpoint.pid)
+            != Some(health.identity.host_started_at)
+    {
+        return Err("Project execution owner identity did not match discovery".into());
+    }
+    if health.draining || health.reconciliation_required {
+        return Err("Project execution owner is draining or requires reconciliation".into());
+    }
+    Ok(health.identity)
+}

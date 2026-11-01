@@ -41,8 +41,8 @@ pub use switch::{
     AgentSwitchRequest, AgentSwitchSnapshot, AgentSwitchSource, AgentSwitchStage, AgentSwitchView,
 };
 pub use switch_checkpoint::{
-    observe_agent_switch_cwd, verify_switch_continuation, verify_switch_git_checkpoint,
-    AgentSwitchCwdObservation,
+    observe_agent_switch_checkpoint_cwd, observe_agent_switch_cwd, verify_switch_continuation,
+    verify_switch_git_checkpoint, AgentSwitchCwdObservation,
 };
 
 mod urgent;
@@ -11189,9 +11189,8 @@ impl IssueMonitorState {
 
     /// Persist only an explicit accepted change, preserving its replay identity.
     pub fn persist_machine_max_active_change(&mut self, control_id: &str) -> io::Result<()> {
-        if self.agent_roster.is_some() {
-            return Ok(());
-        }
+        // The roster owns project membership; an explicit limit also updates
+        // the separate machine budget used to admit those members.
         let change = self.max_active_last_change.as_ref().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -15405,6 +15404,25 @@ impl IssueMonitorState {
                 .is_none_or(|record| record.review_passed != Some(false))
     }
 
+    /// A failed review vetoes completion; it does not establish a human decision.
+    fn hold_failed_merged_review(&mut self, issue_number: u64) {
+        if self.issue_is_closed(issue_number)
+            || self
+                .autonomous_record(issue_number)
+                .is_some_and(|record| record.phase == AutonomousPhase::NeedsHuman)
+            || self.open_autonomous_handoff(issue_number).is_some()
+        {
+            return;
+        }
+        let reason = "merged delivery has a failed independent acceptance review; resolve the review before closing";
+        if self.autonomous_mode {
+            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            self.request_autonomous_steering(issue_number, reason, &now);
+        } else {
+            self.escalate_to_needs_human(issue_number, NeedsHumanKind::UserChoiceRequired, reason);
+        }
+    }
+
     /// Change the auto-close override. Like the autonomous toggle, a change
     /// advances the effect authority so unsubmitted settlement grants are
     /// revoked and an in-flight one cannot close under stale authority.
@@ -16525,11 +16543,7 @@ impl IssueMonitorState {
                 )
             })
         {
-            self.escalate_to_needs_human(
-                issue_number,
-                NeedsHumanKind::UserChoiceRequired,
-                "merged delivery has a failed independent acceptance review; resolve the review before closing",
-            );
+            self.hold_failed_merged_review(issue_number);
         }
     }
 
@@ -20923,11 +20937,7 @@ impl IssueMonitorState {
             .autonomous_record(issue_number)
             .is_some_and(|record| record.review_passed == Some(false))
         {
-            self.escalate_to_needs_human(
-                issue_number,
-                NeedsHumanKind::UserChoiceRequired,
-                "merged delivery has a failed independent acceptance review; resolve the review before closing",
-            );
+            self.hold_failed_merged_review(issue_number);
             return false;
         }
         let issue = self.inbox_item(issue_number).map(|item| item.issue.clone());
@@ -23900,16 +23910,33 @@ impl IssueMonitorState {
             {
                 continue;
             }
+            let live_replacement = snapshot.windows.iter().find(|other| {
+                other.issue_number == Some(*issue_number)
+                    && self.verified_window_owner(
+                        &other.window_id,
+                        *issue_number,
+                        &snapshot.observed_at,
+                    )
+                    && follows_execution_holder(*issue_number, other)
+                    && issue_monitor_qualified_window_id(&other.window_id)
+                        .is_some_and(|(tab, _)| self.window_snapshot_tabs.contains(tab))
+                    && !other.review_dispatch
+                    && idle_window_is_alive(other.status)
+                    && !issue_monitor_window_ids_match(window_id, &other.window_id)
+            });
             let owned_here =
                 issue_monitor_qualified_window_id(window_id).is_some_and(|(tab, _)| {
                     self.window_snapshot_tabs.contains(tab)
-                    // A new GUI incarnation has new tab IDs. Reaper interruption
-                    // or exact host-death evidence for a settled holder proves
-                    // the old runtime is gone; live or unknown authority does not.
+                    // A new GUI incarnation has new tab IDs. The exact live
+                    // holder may already occupy an authenticated restored pane;
+                    // otherwise retain the reaper/host-death proof requirement.
                     || (self.window_snapshot_host.is_some()
                         && !self.window_snapshot_tabs.contains(tab)
                         && settlements.get(issue_number).is_some_and(|observation| {
-                            (observation.settlement == IssueMonitorExecutionSettlement::Interrupted
+                            (live_replacement.is_some()
+                                && observation.process_held
+                                && observation.held_holder_session_id.is_some())
+                                || (observation.settlement == IssueMonitorExecutionSettlement::Interrupted
                                 && !observation.process_held)
                                 || (observation.holder_host_dead
                                     && matches!(observation.settlement,
@@ -23988,24 +24015,7 @@ impl IssueMonitorState {
                 },
             };
             if idle_kind == IssueMonitorIdleKind::BindingDead {
-                rebind_to = snapshot
-                    .windows
-                    .iter()
-                    .find(|other| {
-                        other.issue_number == Some(*issue_number)
-                            && self.verified_window_owner(
-                                &other.window_id,
-                                *issue_number,
-                                &snapshot.observed_at,
-                            )
-                            && follows_execution_holder(*issue_number, other)
-                            && issue_monitor_qualified_window_id(&other.window_id)
-                                .is_some_and(|(tab, _)| self.window_snapshot_tabs.contains(tab))
-                            && !other.review_dispatch
-                            && idle_window_is_alive(other.status)
-                            && !issue_monitor_window_ids_match(window_id, &other.window_id)
-                    })
-                    .map(|other| other.window_id.clone());
+                rebind_to = live_replacement.map(|other| other.window_id.clone());
             }
             if (idle_kind == IssueMonitorIdleKind::BindingDead
                 || (idle_kind == IssueMonitorIdleKind::ExecutionSettled
@@ -39606,6 +39616,107 @@ mod tests {
     }
 
     #[test]
+    fn issue_4131_restored_sessions_rebind_two_windows_after_restart() {
+        for old_tab in ["tab-1", "previous-tab"] {
+            let old_windows = [format!("{old_tab}::old-42"), format!("{old_tab}::old-43")];
+            let monitor = launched_cohort(&[(42, &old_windows[0]), (43, &old_windows[1])]);
+            let prefs =
+                serde_json::from_str(&serde_json::to_string(&monitor.prefs()).unwrap()).unwrap();
+            let mut restored = test_monitor_with_prefs(monitor.config.clone(), prefs);
+            let mut observed = settlements(&[
+                (42, IssueMonitorExecutionSettlement::Active),
+                (43, IssueMonitorExecutionSettlement::Active),
+            ]);
+            let mut windows = Vec::new();
+            let mut owners = BTreeMap::new();
+            for number in [42, 43] {
+                let session = format!("session-{number}");
+                let execution = observed.get_mut(&number).unwrap();
+                execution.process_held = true;
+                execution.held_holder_session_id = Some(session.clone());
+                let window_id = format!("tab-1::restored-{number}");
+                let mut window =
+                    idle_observation(&window_id, Some(number), WindowState::Running, false);
+                window.monitor_owned = true;
+                window.session_id = Some(session);
+                windows.push(window);
+                owners.insert(window_id, number);
+            }
+            restored.record_window_snapshot_from_host(
+                idle_snapshot(IDLE_NOW, windows),
+                123,
+                1,
+                BTreeSet::new(),
+            );
+            restored.record_verified_live_launch_owners(&owners, IDLE_NOW);
+
+            let outcome = restored.reconcile_idle_windows(&observed, IDLE_NOW);
+
+            assert_eq!(
+                outcome.rebound,
+                vec![
+                    (42, "tab-1::restored-42".into()),
+                    (43, "tab-1::restored-43".into()),
+                ],
+                "{old_tab}"
+            );
+            assert!(outcome.released.is_empty());
+            assert!(outcome.requeued.is_empty());
+            assert_eq!(restored.active_issue_numbers(), vec![42, 43]);
+            assert_eq!(restored.occupied_slot_count(), 2);
+            let reloaded = test_monitor_with_prefs(restored.config.clone(), restored.prefs());
+            for number in [42, 43] {
+                assert_eq!(
+                    reloaded.launched_window_id(number),
+                    Some(format!("tab-1::restored-{number}"))
+                );
+            }
+            assert_eq!(reloaded.active_issue_numbers(), vec![42, 43]);
+            assert_eq!(reloaded.occupied_slot_count(), 2);
+        }
+    }
+
+    #[test]
+    fn issue_4131_cross_tab_rebind_requires_verified_exact_holder() {
+        for (holder, verified) in [
+            (None, true),
+            (Some("other-session"), true),
+            (Some("holder"), false),
+        ] {
+            let mut monitor = launched_monitor(42, "previous-tab::gone");
+            let mut observed = settlements(&[(42, IssueMonitorExecutionSettlement::Active)]);
+            let execution = observed.get_mut(&42).unwrap();
+            execution.process_held = true;
+            execution.held_holder_session_id = holder.map(str::to_string);
+            let mut window =
+                idle_observation("tab-1::restored", Some(42), WindowState::Running, false);
+            window.session_id = Some("holder".into());
+            monitor.record_window_snapshot_from_host(
+                idle_snapshot(IDLE_NOW, vec![window]),
+                123,
+                1,
+                BTreeSet::new(),
+            );
+            if verified {
+                monitor.record_verified_live_launch_owners(
+                    &BTreeMap::from([("tab-1::restored".into(), 42)]),
+                    IDLE_NOW,
+                );
+            }
+            let before = monitor.prefs();
+
+            let outcome = monitor.reconcile_idle_windows(&observed, IDLE_NOW);
+
+            assert!(
+                outcome.rebound.is_empty(),
+                "{holder:?}, verified={verified}"
+            );
+            assert!(outcome.released.is_empty());
+            assert_eq!(monitor.prefs(), before);
+        }
+    }
+
+    #[test]
     fn issue_4862_rebinding_selects_the_exact_live_holder_session() {
         let mut monitor = launched_monitor(42, "tab-1::gone");
         let mut observed = settlements(&[(42, IssueMonitorExecutionSettlement::Unknown)]);
@@ -47945,40 +48056,173 @@ mod tests {
 
     #[test]
     fn merged_delivery_with_failed_review_keeps_acceptance_unmet() {
-        let mut monitor = test_monitor(IssueMonitorConfig::default());
-        monitor.set_auto_close_merged_issues_with_effect_revocation(Some(true));
-        scan_queued_candidates(&mut monitor, &[checked_issue(42)], "2026-09-01T00:00:00Z");
-        monitor.begin_review(42, 7, "aaa");
-        assert!(monitor.merged_issue_close_allowed(42));
-        assert!(monitor.propose_merged_issue_settlement(
-            42,
-            &merged_delivery(7, "aaa", "2026-09-01T00:01:00Z"),
-            MergedIssueSettlementAction::Close { delegated: false },
-        ));
+        for autonomous in [false, true] {
+            let mut monitor = test_monitor(IssueMonitorConfig::default());
+            monitor.set_autonomous_mode(autonomous);
+            monitor.set_auto_close_merged_issues_with_effect_revocation(Some(true));
+            let mut candidate = checked_issue(42);
+            candidate.labels.push("gwt-spec".into());
+            candidate.readiness = IssueMonitorReadiness::ReadyWithCompletedTasks;
+            scan_queued_candidates(&mut monitor, &[candidate.clone()], "2026-09-01T00:00:00Z");
+            monitor.capture_acceptance_snapshot(
+                42,
+                crate::issue_monitor_gate::classify_acceptance_criteria(
+                    checked_issue(42).body.as_deref().unwrap(),
+                )
+                .snapshot(),
+            );
+            monitor.begin_review(42, 7, "aaa");
+            assert!(monitor.merged_issue_close_allowed(42));
+            assert!(monitor.propose_merged_issue_settlement(
+                42,
+                &merged_delivery(7, "aaa", "2026-09-01T00:01:00Z"),
+                MergedIssueSettlementAction::Close { delegated: false },
+            ));
+            let expected_state = if autonomous {
+                MonitorInboxState::Queued
+            } else {
+                MonitorInboxState::NeedsHuman
+            };
+            monitor.record_review_verdict(42, false);
+            assert!(!monitor.merged_issue_close_allowed(42));
+            assert_eq!(
+                monitor.inbox_item(42).map(|item| item.state),
+                Some(expected_state),
+                "FAIL vetoes the pending close without inventing a human decision"
+            );
+            monitor.record_merged(42);
+            assert_eq!(
+                monitor.inbox_item(42).map(|item| item.state),
+                Some(expected_state),
+                "Issue #5126: checked boxes cannot override a failed independent review"
+            );
+            assert_eq!(
+                monitor.autonomous_record(42).unwrap().review_passed,
+                Some(false)
+            );
+            let deliveries = BTreeMap::from([(
+                "work/issue-42".to_string(),
+                merged_delivery(7, "aaa", "2026-09-01T00:01:00Z"),
+            )]);
+            assert!(monitor
+                .merged_issue_settlement_candidates(&deliveries)
+                .is_empty());
+            let record = monitor.autonomous_record(42).unwrap().clone();
+            assert_eq!(record.reviewed_sha.as_deref(), Some("aaa"));
+            assert!(record.acceptance_snapshot.is_some());
+            assert!(record.review_attempts.is_some());
+            assert_eq!(record.steering.is_some(), autonomous);
+            if autonomous {
+                assert_eq!(record.steering.as_ref().unwrap().count, 1);
+                let mut restored =
+                    test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+                restored.record_candidate(candidate);
+                restored.record_merged(42);
+                let saved = restored.autonomous_record(42).unwrap();
+                assert_eq!(saved.review_passed, Some(false));
+                assert_eq!(saved.reviewed_sha, record.reviewed_sha);
+                assert_eq!(saved.acceptance_snapshot, record.acceptance_snapshot);
+                assert_eq!(saved.review_attempts, record.review_attempts);
+                assert_eq!(
+                    saved.steering, record.steering,
+                    "same failure is not renewed"
+                );
+                assert!(!restored.merged_issue_close_allowed(42));
+            }
+        }
+    }
+
+    #[test]
+    fn autonomous_failed_review_merge_retains_live_partial_ownership() {
+        let candidate = spec_issue(42, IssueMonitorReadiness::ReadyWithOpenTasks, IDLE_NOW);
+        let window = "tab-1::agent-42";
+        let mut monitor = launched_monitor_for_issue(candidate, window);
+        monitor.set_autonomous_mode(true);
+        monitor.config.max_active = 1;
+        monitor.record_candidate(issue(43));
+        monitor.begin_review(42, 7, "failed-head");
         monitor.record_review_verdict(42, false);
-        assert!(!monitor.merged_issue_close_allowed(42));
-        assert_eq!(
-            monitor.inbox_item(42).map(|item| item.state),
-            Some(MonitorInboxState::NeedsHuman),
-            "a failed review must park a pending close before its worker finishes"
+        let before = monitor.prefs();
+        monitor.record_window_snapshot(pane_snapshot(
+            IDLE_NOW,
+            vec![live_pane_observation(window, 42, WindowState::Running)],
+        ));
+        monitor.record_issue_completion_with_live_pane(
+            42,
+            IssueCompletionEvidence::WorkBranch,
+            true,
         );
-        monitor.record_merged(42);
         assert_eq!(
-            monitor.inbox_item(42).map(|item| item.state),
-            Some(MonitorInboxState::NeedsHuman),
-            "Issue #5126: checked boxes cannot override a failed independent review"
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Launched
+        );
+        assert_eq!(monitor.active_count(), 1);
+        assert_eq!(monitor.launched_window_id(42).as_deref(), Some(window));
+        assert_eq!(monitor.prefs().launched_claims, before.launched_claims);
+        assert_eq!(monitor.prefs().launch_bindings, before.launch_bindings);
+        assert_eq!(
+            monitor.prefs().launch_confirmations,
+            before.launch_confirmations
         );
         assert_eq!(
             monitor.autonomous_record(42).unwrap().review_passed,
             Some(false)
         );
-        let deliveries = BTreeMap::from([(
-            "work/issue-42".to_string(),
-            merged_delivery(7, "aaa", "2026-09-01T00:01:00Z"),
+        assert_eq!(
+            monitor
+                .autonomous_record(42)
+                .unwrap()
+                .reviewed_sha
+                .as_deref(),
+            Some("failed-head")
+        );
+        assert!(!monitor.merged_issue_close_allowed(42));
+        assert!(monitor.next_launch_request(IDLE_NOW).is_none());
+
+        // An unprocessed question is a separate authority, even before it parks the row.
+        use crate::autonomous_handoff::{
+            AutonomousExecutionContext, AutonomousQuestionHandoff, ExtractedQuestion,
+        };
+        monitor.absorb_autonomous_handoffs([AutonomousQuestionHandoff::new(
+            "pending-question".into(),
+            &AutonomousExecutionContext {
+                issue_number: 42,
+                session_id: "session-42".into(),
+            },
+            "codex",
+            "request_user_input",
+            ExtractedQuestion {
+                question: "Approve a destructive change?".into(),
+                options: vec![],
+            },
+            IDLE_NOW,
         )]);
-        assert!(monitor
-            .merged_issue_settlement_candidates(&deliveries)
-            .is_empty());
+        let pending = monitor.prefs();
+        monitor.record_merged(42);
+        assert_eq!(monitor.prefs(), pending);
+
+        // A real human decision remains authoritative on later merge observations.
+        monitor.escalate_to_needs_human(
+            42,
+            NeedsHumanKind::ProviderAuthenticationRequired,
+            "credentials required",
+        );
+        let parked = monitor.prefs();
+        monitor.record_merged(42);
+        assert_eq!(
+            monitor.prefs(),
+            parked,
+            "FAIL must not replace a real human park"
+        );
+
+        // A fresh Closed owner cannot gain steering merely from the old FAIL.
+        let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), before);
+        monitor.record_closed(42, Some(IDLE_NOW.into()));
+        monitor.begin_review(42, 7, "old-head");
+        monitor.record_review_verdict(42, false);
+        let closed = monitor.prefs();
+        monitor.record_merged(42);
+        assert_eq!(monitor.prefs(), closed);
     }
 
     /// Issue #3959 AC-5: a `needs_human` park stamped by the pre-#3930
@@ -49945,6 +50189,15 @@ mod tests {
                 .into(),
         );
         let mut monitor = launched_monitor_for_issue(candidate.clone(), "old-tab::slice");
+        monitor.set_autonomous_mode(true);
+        monitor.begin_review(42, 7, "failed-parent-head");
+        monitor.record_review_verdict(42, false);
+        monitor.record_merged(42);
+        assert_eq!(
+            monitor.autonomous_record(42).unwrap().review_passed,
+            Some(false)
+        );
+        assert!(!monitor.merged_issue_close_allowed(42));
         let mut observed = settlements(&[(42, IssueMonitorExecutionSettlement::Completed)]);
         observed.get_mut(&42).unwrap().holder_host_dead = true;
         let attempts = monitor.attempt_count(42);
@@ -49987,6 +50240,10 @@ mod tests {
                 .is_empty());
             assert_eq!(restored.queued_issue_numbers(), vec![42]);
         }
+        let review = restored.autonomous_record(42).unwrap();
+        assert_eq!(review.review_passed, Some(false));
+        assert_eq!(review.reviewed_sha.as_deref(), Some("failed-parent-head"));
+        assert!(!restored.merged_issue_close_allowed(42));
         let mut admission = restored.clone();
         let launch = admission
             .next_launch_request(IDLE_NOW)

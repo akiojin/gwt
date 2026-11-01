@@ -6,11 +6,12 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
 import type { TestInfo } from "@playwright/test";
-import { startExactRelaunchFixture, writeFixtureNodeCommand } from "./exact-relaunch";
+import { startExactRelaunchFixture, writeFixtureNodeCommand, type ExactRelaunchSetup } from "./exact-relaunch";
 
 /** Real monitor, claims, materialization and PTY; GitHub and provider are local recorders. */
 export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
-  targetIssueNumber?: 44; switching?: boolean; positive?: boolean; terminalConvergence?: boolean;
+  targetIssueNumber?: 44; switching?: boolean; positive?: boolean; terminalConvergence?: boolean; autonomousMode?: boolean;
+  prepare?: ExactRelaunchSetup["prepare"];
 } = {}) {
   const windows = process.platform === "win32";
   const comments: { id: number; body: string; updated_at: string }[] = [];
@@ -148,7 +149,7 @@ export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
       switching: options.switching ? { sourceIssueNumber: issue.number,
         positive: !!options.positive && process.platform === "linux" && process.env.GWT_PLAYWRIGHT_SWITCH_POSITIVE === "1" } : undefined,
       monitorPreferences: {
-        enabled: true, autonomous_mode: false, auto_close_merged_issues: false,
+        enabled: true, autonomous_mode: options.autonomousMode ?? false, auto_close_merged_issues: false,
         auto_apply_updates: false, terminal_queue_auto_refill: false,
         launch_profile: { agent_id: "codex", version: "installed", runtime_target: "Host", skip_permissions: true },
       },
@@ -246,6 +247,7 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
         await mkdir(join(project, ".codex"), { recursive: true });
         await writeFile(join(project, ".codex/hooks.json"), "{}");
         auditHooks(project, true);
+        await options.prepare?.({ home, bin, project, env });
       },
     });
   } catch (error) {
@@ -305,11 +307,13 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
     return typeof envelope.output === "string" ? JSON.parse(envelope.output) : envelope.output;
   }
   function scheduleOperation(
-    operation: "issue.monitor.schedule.read" | "issue.monitor.schedule.reassign" | "issue.monitor.requeue" | "issue.monitor.launch_now",
+    operation: "issue.monitor.schedule.read" | "issue.monitor.schedule.reassign" | "issue.monitor.requeue" | "issue.monitor.launch_now"
+      | "issue.monitor.config.set" | "issue.monitor.status",
     params: Record<string, unknown> = {},
+    projectRoot = active.project,
   ) {
-    const result = spawnSync(checkoutGwtd, [], { cwd: active.project, env: auditEnv, encoding: "utf8", timeout: 30_000, windowsHide: true,
-      input: JSON.stringify({ schema_version: 1, operation, params: { ...params, project_root: active.project } }),
+    const result = spawnSync(checkoutGwtd, [], { cwd: projectRoot, env: auditEnv, encoding: "utf8", timeout: 30_000, windowsHide: true,
+      input: JSON.stringify({ schema_version: 1, operation, params: { ...params, project_root: projectRoot } }),
     });
     if (result.error) throw result.error;
     if (!result.stdout.trim()) throw new Error(`Fixture ${operation} returned no envelope: ${result.stderr}`);

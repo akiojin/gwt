@@ -50,6 +50,9 @@ test("Works joins exact local-live sessions, places PM first and keeps unknown t
   assert.match(surface.element.textContent, /Today.*Input.*Cache.*Output.*Landed PRs/s);
   assert.equal(surface.element.querySelector('[data-metric="today-cost"]').textContent, "—");
   assert.equal(surface.element.querySelector('[data-metric="today-total"]')?.textContent, "—");
+  assert.match(surface.element.querySelector('[data-availability="today"]')?.textContent || "", /No data/);
+  assert.match(surface.element.querySelector('[data-availability="fleet"]')?.textContent || "", /No data/);
+  assert.match(surface.element.querySelector(".works-source-note")?.textContent || "", /Cost.*per-session USD.*Landed PRs.*daily merge data/s);
   assert.match(rows[1].textContent, /Context remaining.*Branch.*Verification.*Last action/s);
   assert.equal(rows[0].querySelector(".work-member"), null, "PM is a role, not a fictional member link");
   assert.equal(rows[0].querySelector(".work-name").textContent, "Manager");
@@ -217,9 +220,14 @@ test("Works batches bursts, resolves synchronous navigation and rejects ended or
 test("Works distinguishes measured zero from unavailable tokens and thirty-minute graph gaps", async () => {
   const values = [...Array(29).fill(null), 0];
   const telemetry = { today: { input_tokens: 0, cache_tokens: 0, output_tokens: 0, cost_usd: 0, landed_pr_count: 0 }, fleet_tokens_per_minute: values, by_window: { one: { input_tokens: 0, cache_tokens: 0, output_tokens: 0, context_remaining_percent: 0, ahead_of_develop: 0, tokens_per_minute: values } } };
+  telemetry.availability = { today: { state: "measured", detail: "Measured: all project session tokens are available." },
+    fleet: { state: "partial", detail: "Partial: some live agent minutes are missing." } };
   const f = await fixture(telemetry);
   assert.equal(f.surface.element.querySelector('[data-metric="today-total"]')?.textContent, "0");
   assert.equal(f.surface.element.querySelector('[data-metric="today-cost"]').textContent, "$0.00");
+  assert.equal(f.surface.element.querySelector('[data-availability="today"]')?.dataset.state, "measured");
+  assert.equal(f.surface.element.querySelector('[data-availability="fleet"]').textContent, telemetry.availability.fleet.detail);
+  assert.equal(f.surface.element.querySelector(".works-source-note").hidden, true);
   assert.equal(f.surface.element.querySelector('[data-metric="fleet-now"]').textContent, "0");
   const graph = f.surface.element.querySelector('[data-window-id="one"] svg');
   assert.equal(graph.dataset.knownCount, "1");
@@ -229,6 +237,25 @@ test("Works distinguishes measured zero from unavailable tokens and thirty-minut
   assert.equal(f.surface.element.querySelector('[data-window-id="pm"] svg').dataset.knownCount, "0");
   telemetry.today = { ...telemetry.today, input_tokens: 12, cache_tokens: 10, output_tokens: 3 }; f.surface.sync();
   assert.equal(f.surface.element.querySelector('[data-metric="today-total"]').textContent, "15", "cached input is already included in input and must not be added twice");
+  const row = f.surface.element.querySelector('[data-window-id="one"]');
+  telemetry.today = { input_tokens: null, cache_tokens: null, output_tokens: null };
+  telemetry.fleet_tokens_per_minute = Array(30).fill(null);
+  for (const state of ["unavailable", "partial"]) {
+    telemetry.availability = { today: { state, detail: `${state}: project session measurements are missing.` },
+      fleet: { state, detail: `${state}: live agent measurements are missing.` } };
+    f.surface.sync();
+    assert.equal(f.surface.element.querySelector('[data-availability="today"]').textContent, telemetry.availability.today.detail);
+    assert.equal(f.surface.element.querySelector('[data-availability="fleet"]').dataset.state, state);
+    assert.equal(f.surface.element.querySelector('[data-metric="today-total"]').textContent, "—");
+    assert.equal(f.surface.element.querySelector('[data-metric="fleet-now"]').textContent, "—");
+  }
+  telemetry.today = { input_tokens: 0, cache_tokens: 0, output_tokens: 0 };
+  telemetry.fleet_tokens_per_minute = Array(30).fill(0);
+  telemetry.availability = { today: { state: "measured", detail: "Measured project tokens." }, fleet: { state: "measured", detail: "Measured live agent minutes." } };
+  f.surface.sync();
+  assert.equal(f.surface.element.querySelector('[data-metric="today-total"]').textContent, "0");
+  assert.equal(f.surface.element.querySelector('[data-metric="fleet-now"]').textContent, "0");
+  assert.equal(f.surface.element.querySelector('[data-window-id="one"]'), row);
   f.surface.dispose();
 });
 
@@ -285,6 +312,7 @@ test("Works and Agents CSS uses Operator tokens, responsive wrapping and an in-s
   assert.match(css, /prefers-reduced-motion/);
   assert.match(css, /data-state="waiting"[^}]*\.work-spark[^}]*--color-state-needs-input/s);
   assert.match(css, /\.works-full[\s\S]*min-height:\s*0/);
+  assert.match(css, /\.works-availability[^}]*var\(--type-xs\)[^}]*overflow-wrap:\s*anywhere/s);
 });
 
 

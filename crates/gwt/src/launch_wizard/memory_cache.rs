@@ -372,9 +372,11 @@ impl LaunchWizardMemoryCache {
         session_id: &str,
         session: Option<gwt_agent::Session>,
     ) {
-        let sessions = Arc::make_mut(&mut self.sessions)
-            .get_mut()
-            .expect("launch worker resolved the Session ledger");
+        let Some(sessions) = Arc::make_mut(&mut self.sessions).get_mut() else {
+            // A cold cache has no snapshot to update. Its later canonical
+            // hydration reads the saved Session and recovery filter together.
+            return;
+        };
         match session {
             Some(session) => {
                 if let Some(existing) = sessions
@@ -394,9 +396,11 @@ impl LaunchWizardMemoryCache {
         &mut self,
         identity: &gwt_agent::SessionExecutionIdentity,
     ) {
-        let sessions = Arc::make_mut(&mut self.sessions)
-            .get_mut()
-            .expect("launch worker resolved the Session ledger");
+        // A cold cache has no stale snapshot to evict. Do not initialize the
+        // ledger or perform disk I/O while applying this immutable readback.
+        let Some(sessions) = Arc::make_mut(&mut self.sessions).get_mut() else {
+            return;
+        };
         sessions.retain(|session| {
             gwt_agent::SessionExecutionIdentity::from_session(session)
                 .ok()

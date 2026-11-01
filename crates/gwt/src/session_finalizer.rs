@@ -161,22 +161,60 @@ pub fn finalize_exact_close(
     pty: &PtyHandle,
     window_id: &str,
 ) -> std::io::Result<Option<()>> {
-    if incarnation == 0 {
-        return Ok(None);
-    }
-    crate::cli::execution_state::with_current_runtime_cleanup_session_execution_identity_lease(
+    finalize_exact_close_with_restore_policy(
         sessions_dir,
         identity,
+        incarnation,
+        pty,
+        window_id,
+        Some(false),
+        None,
+    )
+}
+
+/// A lifetime stop preserves the latest saved restore decision under the same exact lease.
+pub(crate) fn finalize_exact_close_with_restore_policy(
+    sessions_dir: &Path,
+    identity: &gwt_agent::SessionExecutionIdentity,
+    incarnation: u64,
+    pty: &PtyHandle,
+    window_id: &str,
+    desired_restore_on_startup: Option<bool>,
+    exit_receipt: Option<&gwt_agent::SessionExitReceipt>,
+) -> std::io::Result<Option<()>> {
+    let proof = gwt_agent::ManualLaunchRuntimeProof {
+        host_pid: std::process::id(),
+        runtime_incarnation: incarnation,
+    };
+    crate::cli::execution_state::with_exact_owned_runtime_cleanup_lease(
+        sessions_dir,
+        identity,
+        proof,
         || {
-            // Cleanup can follow Completed; it never grants producing authority.
-            // Recheck this Host's captured runtime while owner and Session are leased.
-            let runtime = gwt_agent::SessionRuntimeState::load(
-                &gwt_agent::runtime_state_path_for_pid(sessions_dir, std::process::id(), &identity.session_id),
-            )?;
-            if runtime.execution_identity.as_ref() != Some(identity)
-                || runtime.runtime_incarnation != Some(incarnation)
+            let sidecar = gwt_agent::runtime_state_path_for_pid(
+                sessions_dir,
+                proof.host_pid,
+                &identity.session_id,
+            );
+            let current = gwt_agent::SessionRuntimeState::load(&sidecar)?;
+            let child_pid = pty
+                .process_id()
+                .ok_or_else(|| std::io::Error::other("captured child PID unavailable"))?;
+            let child_running = pty
+                .try_wait()
+                .map_err(|error| std::io::Error::other(error.to_string()))?
+                .is_none();
+            if current.host_started_at != crate::process::host_process_start_time(proof.host_pid)
+                || current.host_started_at.is_none()
+                || current.child_pid != Some(child_pid)
+                || current.child_started_at.is_none_or(|started| started == 0)
+                || (child_running
+                    && current.child_started_at
+                        != crate::process::host_process_start_time(child_pid))
             {
-                return Err(std::io::Error::other("captured runtime proof changed before close"));
+                return Err(std::io::Error::other(
+                    "captured runtime process identity changed before close",
+                ));
             }
             if !kill_and_reap(pty, window_id)? {
                 return Err(std::io::Error::other(
@@ -193,18 +231,40 @@ pub fn finalize_exact_close(
                     "holder Session changed before terminal proof persistence",
                 ));
             }
-            if !gwt_agent::persist_session_restore_window_on_startup_if_execution_identity_matches_under_lease(
+            if let Some(restore_on_startup) = desired_restore_on_startup {
+                if !gwt_agent::persist_session_restore_window_on_startup_if_execution_identity_matches_under_lease(
                 sessions_dir,
                 identity,
-                false,
+                restore_on_startup,
             )? {
                 return Err(std::io::Error::other(
                     "holder Session changed before startup-restore persistence",
                 ));
             }
+            }
+            if let Some(receipt) = exit_receipt {
+                let path = sessions_dir.join(format!("{}.toml", identity.session_id));
+                let expected = gwt_agent::Session::load(&path)?;
+                if gwt_agent::SessionExecutionIdentity::from_session(&expected)
+                    .map_err(std::io::Error::other)?
+                    .as_ref()
+                    != Some(identity)
+                {
+                    return Err(std::io::Error::other(
+                        "holder Session changed before exit receipt persistence",
+                    ));
+                }
+                let mut updated = expected.clone();
+                updated.record_process_exit(receipt);
+                if !updated.save_if_unchanged_under_lease(sessions_dir, &expected)? {
+                    return Err(std::io::Error::other(
+                        "holder Session changed during exit receipt persistence",
+                    ));
+                }
+            }
             Ok(())
         },
-    ).and_then(|result| result.transpose())
+    )
 }
 
 /// Stop under the exact runtime lease without waiting on the caller's event loop.
@@ -492,6 +552,30 @@ impl TerminalPersistence {
                 exit_confirmed, %reason, %error, "terminal persistence failure marker could not be saved"),
         }
     }
+}
+
+/// Commit the existing terminal proof synchronously after a captured worker reaped its child.
+pub(crate) fn persist_exact_terminal_after_exit(
+    pty: &PtyHandle,
+    sessions_dir: &Path,
+    identity: &gwt_agent::SessionExecutionIdentity,
+    incarnation: u64,
+    window_id: &str,
+) -> std::io::Result<bool> {
+    if pty
+        .try_wait()
+        .map_err(|error| std::io::Error::other(error.to_string()))?
+        .is_none()
+    {
+        return Ok(false);
+    }
+    TerminalPersistence {
+        sessions_dir: sessions_dir.into(),
+        identity: identity.clone(),
+        incarnation,
+        window_id: window_id.into(),
+    }
+    .persist()
 }
 
 /// Finalize on a background thread, including an already-exited child: acquiring

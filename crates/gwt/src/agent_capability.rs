@@ -98,6 +98,10 @@ pub enum AgentFrontendRequest {
         candidate: String,
         request_id: String,
     },
+    /// Read an already assigned identity without allocating or repairing it.
+    ReadName {
+        request_id: String,
+    },
     CloseWindow {
         id: String,
         request_id: Option<String>,
@@ -140,6 +144,9 @@ impl std::fmt::Debug for AgentFrontendRequest {
                 formatter.write_str("AgentFrontendRequest::CloseWork(<redacted>)")
             }
             Self::Name { .. } => formatter.write_str("AgentFrontendRequest::Name(<redacted>)"),
+            Self::ReadName { .. } => {
+                formatter.write_str("AgentFrontendRequest::ReadName(<redacted>)")
+            }
             Self::CloseWindow { .. } => {
                 formatter.write_str("AgentFrontendRequest::CloseWindow(<redacted>)")
             }
@@ -1806,6 +1813,20 @@ impl AgentCapabilityIssuer {
         token: &str,
     ) -> Option<gwt_agent::SessionExecutionBinding> {
         self.registry.active_execution_binding_for_token(token)
+    }
+
+    pub(crate) fn with_current_active_token<T>(
+        &self,
+        token: &str,
+        expected: &gwt_agent::SessionExecutionBinding,
+        dispatch: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let principal = self.registry.authenticate(token)?;
+        if principal.active_execution_binding() != Some(expected) {
+            return None;
+        }
+        let grant = AgentCapabilityGrant::new(token.to_owned(), principal);
+        self.registry.with_current_grant(&grant, dispatch)
     }
 
     pub fn self_close_active_execution_binding(
