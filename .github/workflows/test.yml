@@ -842,6 +842,11 @@ jobs:
           exact node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::execution_state::tests::command::repair_recovers_mirror_pointer_partial_authority_advertised_by_status -- --exact --test-threads=1 --nocapture
           exact node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::execution_state::tests::command::repair_recovers_malformed_mirror_only_ecr -- --exact --test-threads=1 --nocapture
         timeout-minutes: 15
+      - name: Run Windows feedback ownership and bootstrap contracts
+        shell: bash
+        run: |
+          node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::feedback -- --test-threads=1 --nocapture | tee "$RUNNER_TEMP/feedback-ownership.log"
+          grep -Fq 'test result: ok. 38 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/feedback-ownership.log"
       - name: Run native fleet orphan process handle contracts
         shell: bash
         run: |

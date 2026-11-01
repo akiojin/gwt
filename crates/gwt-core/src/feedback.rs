@@ -13,7 +13,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub mod auto_report;
-use auto_report::{AutoFeedbackRecord, AutoReason, SafeAutoReport};
+use auto_report::{
+    AutoFeedbackRecord, AutoReason, OwnedAutoAttempt, OwnedAutoMetadata, OwnedAutoOrigin,
+    OwnedAutoPhase, OwnedAutoReason, OwnedCancelResult, OwnedCleanupObservation,
+    OwnedExitObservation, SafeAutoReport,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -498,7 +502,7 @@ impl FeedbackStore {
         if value.get("mode").is_some() {
             let record: AutoFeedbackRecord =
                 serde_json::from_value(value).map_err(|_| invalid())?;
-            if record.snapshot.id() != id {
+            if record.snapshot.id() != id || !record.valid_owned() {
                 return Err(invalid());
             }
             Ok(StoredFeedback::Auto(record))
@@ -523,6 +527,23 @@ impl FeedbackStore {
 
     pub fn save_auto(&self, record: &AutoFeedbackRecord) -> io::Result<()> {
         fs::create_dir_all(&self.root)?;
+        let _gate = self.dispatch_lock(&record.snapshot.id())?;
+        // A legacy caller may have read before a new owner registered. Never
+        // permit an unconditional whole-record write to erase owned metadata.
+        if record.owned.is_some()
+            || (self.path(&record.snapshot.id())?.exists()
+                && self.read_auto(&record.snapshot.id())?.owned.is_some())
+        {
+            return Err(owned_error());
+        }
+        self.write_auto(record)
+    }
+
+    fn write_auto(&self, record: &AutoFeedbackRecord) -> io::Result<()> {
+        if !record.valid_owned() {
+            return Err(owned_error());
+        }
+        fs::create_dir_all(&self.root)?;
         durable_write(
             &self.path(&record.snapshot.id())?,
             &serde_json::to_vec_pretty(record)?,
@@ -534,7 +555,7 @@ impl FeedbackStore {
         report: SafeAutoReport,
         now: DateTime<Utc>,
     ) -> io::Result<(AutoFeedbackRecord, bool)> {
-        self.submit_auto_intake(report, now, None)
+        self.submit_auto_intake(report, now, None, false)
     }
 
     /// Unavailable authority permits safe local storage, never a sender. Set
@@ -545,7 +566,26 @@ impl FeedbackStore {
         now: DateTime<Utc>,
         reason: AutoReason,
     ) -> io::Result<(AutoFeedbackRecord, bool)> {
-        self.submit_auto_intake(report, now, Some(reason))
+        self.submit_auto_intake(report, now, Some(reason), false)
+    }
+
+    /// Select the owned format only for a newly created receipt. A deduplicated
+    /// legacy receipt is returned unchanged and is never promoted in place.
+    pub fn submit_owned_auto(
+        &self,
+        report: SafeAutoReport,
+        now: DateTime<Utc>,
+    ) -> io::Result<(AutoFeedbackRecord, bool)> {
+        self.submit_auto_intake(report, now, None, true)
+    }
+
+    pub fn submit_owned_auto_withheld(
+        &self,
+        report: SafeAutoReport,
+        now: DateTime<Utc>,
+        reason: AutoReason,
+    ) -> io::Result<(AutoFeedbackRecord, bool)> {
+        self.submit_auto_intake(report, now, Some(reason), true)
     }
 
     fn submit_auto_intake(
@@ -553,6 +593,7 @@ impl FeedbackStore {
         report: SafeAutoReport,
         now: DateTime<Utc>,
         withheld: Option<AutoReason>,
+        owned: bool,
     ) -> io::Result<(AutoFeedbackRecord, bool)> {
         fs::create_dir_all(self.root.join("fingerprints"))?;
         let lock = self.open_lock("intake")?;
@@ -575,11 +616,15 @@ impl FeedbackStore {
             return Ok((self.read_auto(&receipt.id)?, false));
         }
         let mut record = AutoFeedbackRecord::new(report, now);
+        if owned {
+            record.owned = Some(OwnedAutoMetadata::pending());
+        }
         if let Some(reason) = withheld {
             record.state = FeedbackState::Withheld;
             record.error = Some(reason);
         }
-        self.save_auto(&record)?;
+        let _gate = self.dispatch_lock(&record.snapshot.id())?;
+        self.write_auto(&record)?;
         durable_write(
             &index,
             &serde_json::to_vec(&Receipt {
@@ -588,6 +633,328 @@ impl FeedbackStore {
             })?,
         )?;
         Ok((record, true))
+    }
+
+    /// The supervisor retains this lock for the complete attempt lifetime.
+    pub fn try_owner_lock(&self, id: &str) -> io::Result<File> {
+        self.path(id)?;
+        let lock = self.open_lock(&format!("{id}.owner"))?;
+        lock.try_lock_exclusive()?;
+        Ok(lock)
+    }
+
+    /// Caller already owns the owner lock. Sender admission precedes the short
+    /// dispatch gate, so an existing legacy sender cannot be adopted or raced.
+    /// `authorize` must be bounded local policy/liveness/deadline checks only.
+    pub fn begin_owned_attempt(
+        &self,
+        id: &str,
+        attempt_id: uuid::Uuid,
+        authorize: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<AutoFeedbackRecord> {
+        let _sender = self.try_sender_lock(id)?;
+        self.auto_transaction(id, |record| {
+            if attempt_id.is_nil()
+                || record.state != FeedbackState::Queued
+                || !record.snapshot.report().sendable()
+                || record
+                    .owned
+                    .as_ref()
+                    .ok_or_else(owned_error)?
+                    .attempt
+                    .is_some()
+            {
+                return Err(owned_error());
+            }
+            authorize()?;
+            record.owned.as_mut().ok_or_else(owned_error)?.attempt = Some(OwnedAutoAttempt {
+                id: attempt_id,
+                origin: OwnedAutoOrigin::InheritedCliEnvironment,
+                phase: OwnedAutoPhase::PreDispatch,
+                exit: OwnedExitObservation::Unknown,
+                cleanup: OwnedCleanupObservation::Unknown,
+                reason: None,
+            });
+            record.state = FeedbackState::Sending;
+            record.error = None;
+            Ok(())
+        })
+        .map(|(record, ())| record)
+    }
+
+    /// Linearizes permission to start auth or another remote read. No network
+    /// operation, upstream-lock wait, process discovery or exit wait runs here.
+    pub fn check_owned_attempt(
+        &self,
+        id: &str,
+        attempt_id: uuid::Uuid,
+        authorize: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<AutoFeedbackRecord> {
+        self.auto_transaction(id, |record| {
+            let attempt = owned_attempt(record, attempt_id)?;
+            if attempt.phase != OwnedAutoPhase::PreDispatch
+                || attempt.exit != OwnedExitObservation::Unknown
+                || attempt.cleanup != OwnedCleanupObservation::Unknown
+                || record.state != FeedbackState::Sending
+            {
+                return Err(owned_error());
+            }
+            authorize()
+        })
+        .map(|(record, ())| record)
+    }
+
+    /// Cancellation never waits for the sender lock. Acceptance is returned
+    /// only after the durable PreDispatch -> CancelAccepted transition.
+    pub fn cancel_owned_attempt(
+        &self,
+        id: &str,
+        attempt_id: uuid::Uuid,
+        reason: OwnedAutoReason,
+    ) -> io::Result<OwnedCancelResult> {
+        self.auto_transaction(id, |record| {
+            owned_attempt(record, attempt_id)?;
+            if matches!(record.state, FeedbackState::Sent | FeedbackState::Uncertain) {
+                return Ok(OwnedCancelResult::TooLateOrUnknown);
+            }
+            let attempt = owned_attempt(record, attempt_id)?;
+            match attempt.phase {
+                OwnedAutoPhase::PreDispatch => {
+                    attempt.phase = OwnedAutoPhase::CancelAccepted;
+                    attempt.reason.get_or_insert(reason);
+                    if record.state != FeedbackState::Sent {
+                        record.state = FeedbackState::Failed;
+                        record.error = Some(AutoReason::PreSubmitFailed);
+                    }
+                    Ok(OwnedCancelResult::Accepted)
+                }
+                // A prior rename may be visible even when its durability
+                // barrier failed. Re-reading it is not a new acceptance witness.
+                OwnedAutoPhase::CancelAccepted => Ok(OwnedCancelResult::TooLateOrUnknown),
+                OwnedAutoPhase::DispatchCommitted => {
+                    attempt.reason.get_or_insert(reason);
+                    if record.state != FeedbackState::Sent {
+                        record.state = FeedbackState::Uncertain;
+                        record.error = Some(AutoReason::RemoteOutcomeUnknown);
+                    }
+                    Ok(OwnedCancelResult::TooLateOrUnknown)
+                }
+            }
+        })
+        .map(|(_, result)| result)
+    }
+
+    /// The caller may enter one Issue/Comment mutation only after this durable
+    /// commit succeeds. It must release the gate before performing HTTP.
+    pub fn commit_owned_attempt(
+        &self,
+        id: &str,
+        attempt_id: uuid::Uuid,
+        authorize: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<AutoFeedbackRecord> {
+        self.auto_transaction(id, |record| {
+            let attempt = owned_attempt(record, attempt_id)?;
+            if attempt.phase != OwnedAutoPhase::PreDispatch
+                || attempt.exit != OwnedExitObservation::Unknown
+                || attempt.cleanup != OwnedCleanupObservation::Unknown
+                || record.state != FeedbackState::Sending
+            {
+                return Err(owned_error());
+            }
+            authorize()?;
+            owned_attempt(record, attempt_id)?.phase = OwnedAutoPhase::DispatchCommitted;
+            Ok(())
+        })
+        .map(|(record, ())| record)
+    }
+
+    /// A verified remote fact is independent of local cancellation and cleanup.
+    /// Once committed, every unresolved failure stays uncertain and nonretryable.
+    pub fn finish_owned_attempt(
+        &self,
+        id: &str,
+        attempt_id: uuid::Uuid,
+        outcome: Result<u64, AutoReason>,
+    ) -> io::Result<AutoFeedbackRecord> {
+        self.auto_transaction(id, |record| {
+            let phase = owned_attempt(record, attempt_id)?.phase;
+            if record.state == FeedbackState::Sent {
+                return Ok(());
+            }
+            match outcome {
+                Ok(number) => {
+                    record.state = FeedbackState::Sent;
+                    record.issue_number = Some(number);
+                    record.error = None;
+                }
+                Err(reason) => {
+                    if record.state == FeedbackState::Uncertain {
+                        return Ok(());
+                    }
+                    record.state = if phase == OwnedAutoPhase::DispatchCommitted
+                        || matches!(
+                            reason,
+                            AutoReason::RemoteOutcomeUnknown | AutoReason::SenderInterrupted
+                        ) {
+                        FeedbackState::Uncertain
+                    } else if matches!(
+                        reason,
+                        AutoReason::PolicyUnavailable
+                            | AutoReason::PolicyRevoked
+                            | AutoReason::InsufficientInformation
+                    ) {
+                        FeedbackState::Withheld
+                    } else {
+                        FeedbackState::Failed
+                    };
+                    record.error = Some(reason);
+                    if phase == OwnedAutoPhase::PreDispatch {
+                        owned_attempt(record, attempt_id)?.phase = OwnedAutoPhase::CancelAccepted;
+                    }
+                }
+            }
+            Ok(())
+        })
+        .map(|(record, ())| record)
+    }
+
+    /// Only the exact Child/Job owner supplies these observations. Handle close
+    /// or lock disappearance is not an observation, and facts never regress.
+    pub fn observe_owned_exit(
+        &self,
+        id: &str,
+        attempt_id: uuid::Uuid,
+        exit: OwnedExitObservation,
+        cleanup: OwnedCleanupObservation,
+        reason: Option<OwnedAutoReason>,
+    ) -> io::Result<AutoFeedbackRecord> {
+        self.auto_transaction(id, |record| {
+            let attempt = owned_attempt(record, attempt_id)?;
+            if (attempt.exit != OwnedExitObservation::Unknown && attempt.exit != exit)
+                || (attempt.cleanup == OwnedCleanupObservation::Confirmed
+                    && cleanup != OwnedCleanupObservation::Confirmed)
+                || (cleanup == OwnedCleanupObservation::Confirmed
+                    && exit == OwnedExitObservation::Unknown)
+                || (exit == OwnedExitObservation::NotStarted
+                    && attempt.phase == OwnedAutoPhase::DispatchCommitted)
+            {
+                return Err(owned_error());
+            }
+            attempt.exit = exit;
+            attempt.cleanup = cleanup;
+            if reason.is_some() {
+                attempt.reason = reason;
+            }
+            if record.state != FeedbackState::Sent
+                && matches!(
+                    reason,
+                    Some(OwnedAutoReason::ExitDeadline | OwnedAutoReason::CleanupUnobserved)
+                )
+                && (exit == OwnedExitObservation::Unknown
+                    || cleanup == OwnedCleanupObservation::Unknown)
+            {
+                record.state = FeedbackState::Uncertain;
+                record.error = Some(AutoReason::SenderInterrupted);
+            }
+            Ok(())
+        })
+        .map(|(record, ())| record)
+    }
+
+    pub fn retry_owned_auto(
+        &self,
+        id: &str,
+        authorize: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<AutoFeedbackRecord> {
+        let _owner = self.try_owner_lock(id)?;
+        let _sender = self.try_sender_lock(id)?;
+        self.auto_transaction(id, |record| {
+            if !matches!(
+                record.state,
+                FeedbackState::Failed | FeedbackState::Withheld
+            ) {
+                return Err(owned_error());
+            }
+            let owned = record.owned.as_ref().ok_or_else(owned_error)?;
+            if let Some(attempt) = &owned.attempt {
+                if attempt.cleanup != OwnedCleanupObservation::Confirmed
+                    || !(attempt.exit == OwnedExitObservation::NotStarted
+                        || (attempt.phase == OwnedAutoPhase::CancelAccepted
+                            && attempt.exit == OwnedExitObservation::Confirmed))
+                {
+                    return Err(owned_error());
+                }
+            }
+            if !record.snapshot.report().sendable() {
+                return Err(owned_error());
+            }
+            authorize()?;
+            record.owned.as_mut().ok_or_else(owned_error)?.attempt = None;
+            record.state = FeedbackState::Queued;
+            record.error = None;
+            Ok(())
+        })
+        .map(|(record, ())| record)
+    }
+
+    /// Losing a lock owner is not proof of child exit. Fence a late startup
+    /// without changing attempt identity or inventing cleanup observations.
+    pub fn reconcile_owned_auto(&self, id: &str) -> io::Result<AutoFeedbackRecord> {
+        let _owner = match self.try_owner_lock(id) {
+            Ok(lock) => lock,
+            Err(error) if lock_busy(&error) => return self.read_auto(id),
+            Err(error) => return Err(error),
+        };
+        let _sender = match self.try_sender_lock(id) {
+            Ok(lock) => lock,
+            Err(error) if lock_busy(&error) => return self.read_auto(id),
+            Err(error) => return Err(error),
+        };
+        self.auto_transaction(id, |record| {
+            let owned = record.owned.as_mut().ok_or_else(owned_error)?;
+            let cleanup_unknown = owned.attempt.as_ref().is_some_and(|attempt| {
+                attempt.exit == OwnedExitObservation::Unknown
+                    || attempt.cleanup == OwnedCleanupObservation::Unknown
+            });
+            if matches!(record.state, FeedbackState::Queued | FeedbackState::Sending)
+                || (matches!(
+                    record.state,
+                    FeedbackState::Failed | FeedbackState::Withheld
+                ) && cleanup_unknown)
+            {
+                record.state = FeedbackState::Uncertain;
+                record.error = Some(AutoReason::SenderInterrupted);
+                if let Some(attempt) = &mut owned.attempt {
+                    attempt
+                        .reason
+                        .get_or_insert(OwnedAutoReason::OwnerUnavailable);
+                }
+            }
+            Ok(())
+        })
+        .map(|(record, ())| record)
+    }
+
+    fn dispatch_lock(&self, id: &str) -> io::Result<File> {
+        self.path(id)?;
+        let lock = self.open_lock(&format!("{id}.dispatch"))?;
+        lock.lock_exclusive()?;
+        Ok(lock)
+    }
+
+    fn auto_transaction<T>(
+        &self,
+        id: &str,
+        change: impl FnOnce(&mut AutoFeedbackRecord) -> io::Result<T>,
+    ) -> io::Result<(AutoFeedbackRecord, T)> {
+        let _gate = self.dispatch_lock(id)?;
+        let mut record = self.read_auto(id)?;
+        let original = record.clone();
+        let result = change(&mut record)?;
+        if record != original {
+            self.write_auto(&record)?;
+        }
+        Ok((record, result))
     }
 
     pub fn save(&self, record: &FeedbackRecord) -> io::Result<()> {
@@ -676,6 +1043,30 @@ impl FeedbackStore {
             .write(true)
             .open(self.root.join(format!("{name}.lock")))
     }
+}
+
+fn owned_error() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        "invalid owned feedback transition",
+    )
+}
+
+fn lock_busy(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::WouldBlock
+        || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+}
+
+fn owned_attempt(
+    record: &mut AutoFeedbackRecord,
+    attempt_id: uuid::Uuid,
+) -> io::Result<&mut OwnedAutoAttempt> {
+    record
+        .owned
+        .as_mut()
+        .and_then(|owned| owned.attempt.as_mut())
+        .filter(|attempt| attempt.id == attempt_id)
+        .ok_or_else(owned_error)
 }
 
 fn durable_write(path: &Path, bytes: &[u8]) -> io::Result<()> {

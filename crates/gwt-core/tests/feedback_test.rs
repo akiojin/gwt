@@ -1,10 +1,417 @@
 use std::{fs, path::Path};
 
 use chrono::{TimeDelta, Utc};
+use gwt_core::feedback::auto_report::{
+    AutoReason, KnownOperation, OwnedAutoPhase, OwnedAutoReason, OwnedCancelResult,
+    OwnedCleanupObservation, OwnedExitObservation, SafeAutoReport,
+};
 use gwt_core::feedback::{
     requires_approval, FeedbackContext, FeedbackInput, FeedbackKind, FeedbackState, FeedbackStore,
 };
 use gwt_core::test_support::ScopedEnvVar;
+
+#[test]
+fn owned_attempt_registration_is_fresh_only_and_rejects_stale_writers() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FeedbackStore::new(dir.path().join("feedback"));
+    let report = SafeAutoReport::current(KnownOperation::Search);
+    let (legacy, _) = store.submit_auto(report.clone(), Utc::now()).unwrap();
+    let legacy_path = store.path(&legacy.snapshot.id()).unwrap();
+    let legacy_bytes = fs::read(&legacy_path).unwrap();
+    let (repeated, fresh) = store.submit_owned_auto(report, Utc::now()).unwrap();
+    assert!(!fresh);
+    assert!(repeated.owned.is_none());
+    assert_eq!(fs::read(legacy_path).unwrap(), legacy_bytes);
+    assert!(store
+        .begin_owned_attempt(&legacy.snapshot.id(), uuid::Uuid::new_v4(), || Ok(()))
+        .is_err());
+    let (record, fresh) = store
+        .submit_owned_auto(
+            SafeAutoReport::current(KnownOperation::VerifyRun),
+            Utc::now(),
+        )
+        .unwrap();
+    assert!(fresh);
+    assert!(record.owned.as_ref().unwrap().attempt.is_none());
+    let id = record.snapshot.id();
+    let attempt = uuid::Uuid::new_v4();
+    let _owner = store.try_owner_lock(&id).unwrap();
+    let sender = store.try_sender_lock(&id).unwrap();
+    assert!(store.begin_owned_attempt(&id, attempt, || Ok(())).is_err());
+    assert_eq!(store.read_auto(&id).unwrap(), record);
+    drop(sender);
+    assert!(store
+        .begin_owned_attempt(&id, attempt, || Err(std::io::Error::other(
+            "not authorized"
+        )))
+        .is_err());
+    assert_eq!(store.read_auto(&id).unwrap(), record);
+    let registered = store.begin_owned_attempt(&id, attempt, || Ok(())).unwrap();
+    assert_eq!(registered.state, FeedbackState::Sending);
+    let metadata = registered.owned.as_ref().unwrap().attempt.as_ref().unwrap();
+    assert_eq!(metadata.phase, OwnedAutoPhase::PreDispatch);
+    assert_eq!(metadata.exit, OwnedExitObservation::Unknown);
+    assert_eq!(metadata.cleanup, OwnedCleanupObservation::Unknown);
+    assert!(store.begin_owned_attempt(&id, attempt, || Ok(())).is_err());
+    assert!(store.save_auto(&registered).is_err());
+    let mut stale = record;
+    stale.owned = None;
+    assert!(store.save_auto(&stale).is_err());
+    assert_eq!(store.read_auto(&id).unwrap(), registered);
+    assert_eq!(store.reconcile_owned_auto(&id).unwrap(), registered);
+    drop(_owner);
+    let orphan = store.reconcile_owned_auto(&id).unwrap();
+    assert_eq!(orphan.state, FeedbackState::Uncertain);
+    assert_eq!(orphan.error, Some(AutoReason::SenderInterrupted));
+    let metadata = orphan.owned.unwrap().attempt.unwrap();
+    assert_eq!(metadata.phase, OwnedAutoPhase::PreDispatch);
+    assert_eq!(metadata.exit, OwnedExitObservation::Unknown);
+    assert_eq!(metadata.cleanup, OwnedCleanupObservation::Unknown);
+    assert_eq!(metadata.reason, Some(OwnedAutoReason::OwnerUnavailable));
+    assert_eq!(
+        store
+            .finish_owned_attempt(&id, attempt, Err(AutoReason::AuthUnavailable))
+            .unwrap()
+            .state,
+        FeedbackState::Uncertain
+    );
+    store
+        .cancel_owned_attempt(&id, attempt, OwnedAutoReason::Cancelled)
+        .unwrap();
+    assert_eq!(
+        store.read_auto(&id).unwrap().state,
+        FeedbackState::Uncertain
+    );
+    assert!(store.retry_owned_auto(&id, || Ok(())).is_err());
+    let (failed, _) = store
+        .submit_owned_auto(
+            SafeAutoReport::current(KnownOperation::VerifyPlan),
+            Utc::now(),
+        )
+        .unwrap();
+    let failed_id = failed.snapshot.id();
+    let failed_attempt = uuid::Uuid::new_v4();
+    let owner = store.try_owner_lock(&failed_id).unwrap();
+    store
+        .begin_owned_attempt(&failed_id, failed_attempt, || Ok(()))
+        .unwrap();
+    store
+        .cancel_owned_attempt(&failed_id, failed_attempt, OwnedAutoReason::WorkDeadline)
+        .unwrap();
+    drop(owner);
+    let orphan = store.reconcile_owned_auto(&failed_id).unwrap();
+    assert_eq!(orphan.state, FeedbackState::Uncertain);
+    assert_eq!(
+        orphan.owned.unwrap().attempt.unwrap().reason,
+        Some(OwnedAutoReason::WorkDeadline)
+    );
+}
+
+#[test]
+fn owned_cancel_blocks_dispatch_and_retry_requires_exit_and_cleanup() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FeedbackStore::new(dir.path().join("feedback"));
+    let (record, _) = store
+        .submit_owned_auto(SafeAutoReport::current(KnownOperation::Search), Utc::now())
+        .unwrap();
+    let id = record.snapshot.id();
+    let attempt = uuid::Uuid::new_v4();
+    let owner = store.try_owner_lock(&id).unwrap();
+    store.begin_owned_attempt(&id, attempt, || Ok(())).unwrap();
+    assert_eq!(
+        store
+            .cancel_owned_attempt(&id, attempt, OwnedAutoReason::WorkDeadline)
+            .unwrap(),
+        OwnedCancelResult::Accepted
+    );
+    assert_eq!(
+        store
+            .cancel_owned_attempt(&id, attempt, OwnedAutoReason::WorkDeadline)
+            .unwrap(),
+        OwnedCancelResult::TooLateOrUnknown
+    );
+    assert!(store.check_owned_attempt(&id, attempt, || Ok(())).is_err());
+    assert!(store.commit_owned_attempt(&id, attempt, || Ok(())).is_err());
+    store
+        .finish_owned_attempt(&id, attempt, Err(AutoReason::AuthUnavailable))
+        .unwrap();
+    assert!(store.retry_owned_auto(&id, || Ok(())).is_err());
+    drop(owner);
+    store
+        .observe_owned_exit(
+            &id,
+            attempt,
+            OwnedExitObservation::Confirmed,
+            OwnedCleanupObservation::Unknown,
+            None,
+        )
+        .unwrap();
+    assert!(store.retry_owned_auto(&id, || Ok(())).is_err());
+    store
+        .observe_owned_exit(
+            &id,
+            attempt,
+            OwnedExitObservation::Confirmed,
+            OwnedCleanupObservation::Confirmed,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        store.reconcile_owned_auto(&id).unwrap().state,
+        FeedbackState::Failed
+    );
+    let retried = store.retry_owned_auto(&id, || Ok(())).unwrap();
+    assert_eq!(retried.snapshot, record.snapshot);
+    assert_eq!(retried.state, FeedbackState::Queued);
+    assert!(retried.owned.unwrap().attempt.is_none());
+    let _owner = store.try_owner_lock(&id).unwrap();
+    store
+        .begin_owned_attempt(&id, uuid::Uuid::new_v4(), || Ok(()))
+        .unwrap();
+    assert!(store.finish_owned_attempt(&id, attempt, Ok(7)).is_err());
+    assert!(store
+        .observe_owned_exit(
+            &id,
+            attempt,
+            OwnedExitObservation::Confirmed,
+            OwnedCleanupObservation::Confirmed,
+            None
+        )
+        .is_err());
+}
+
+#[test]
+fn owned_commit_is_durable_and_remote_success_survives_unknown_cleanup() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = dir.path().join("feedback");
+    let store = FeedbackStore::new(storage.clone());
+    let (record, _) = store
+        .submit_owned_auto(SafeAutoReport::current(KnownOperation::Search), Utc::now())
+        .unwrap();
+    let id = record.snapshot.id();
+    let attempt = uuid::Uuid::new_v4();
+    let _owner = store.try_owner_lock(&id).unwrap();
+    let receipt = store.path(&id).unwrap();
+    let backup = dir.path().join("receipt-backup.json");
+    let block_save = || {
+        // Keep the live owner/sender/dispatch lock files in their directory.
+        // A failed setup must not masquerade as a publication failure.
+        fs::rename(&receipt, &backup).expect("back up the closed receipt");
+        fs::create_dir(&receipt).expect("obstruct the receipt publication target");
+        Ok(())
+    };
+    assert!(store.begin_owned_attempt(&id, attempt, block_save).is_err());
+    fs::remove_dir(&receipt).unwrap();
+    fs::rename(&backup, &receipt).unwrap();
+    assert_eq!(store.read_auto(&id).unwrap(), record);
+    store.begin_owned_attempt(&id, attempt, || Ok(())).unwrap();
+    store.check_owned_attempt(&id, attempt, || Ok(())).unwrap();
+    let pre_dispatch = store.read_auto(&id).unwrap();
+    assert!(store
+        .commit_owned_attempt(&id, attempt, block_save)
+        .is_err());
+    fs::remove_dir(&receipt).unwrap();
+    fs::rename(&backup, &receipt).unwrap();
+    assert_eq!(store.read_auto(&id).unwrap(), pre_dispatch);
+    store.commit_owned_attempt(&id, attempt, || Ok(())).unwrap();
+    assert_eq!(
+        store
+            .cancel_owned_attempt(&id, attempt, OwnedAutoReason::Cancelled)
+            .unwrap(),
+        OwnedCancelResult::TooLateOrUnknown
+    );
+    let uncertain = store
+        .finish_owned_attempt(&id, attempt, Err(AutoReason::PreSubmitFailed))
+        .unwrap();
+    assert_eq!(uncertain.state, FeedbackState::Uncertain);
+    assert!(store.retry_owned_auto(&id, || Ok(())).is_err());
+    let sent = store.finish_owned_attempt(&id, attempt, Ok(42)).unwrap();
+    assert_eq!(sent.state, FeedbackState::Sent);
+    assert_eq!(
+        sent.owned.unwrap().attempt.unwrap().cleanup,
+        OwnedCleanupObservation::Unknown
+    );
+    assert_eq!(
+        store
+            .observe_owned_exit(
+                &id,
+                attempt,
+                OwnedExitObservation::Unknown,
+                OwnedCleanupObservation::Unknown,
+                Some(OwnedAutoReason::CleanupUnobserved)
+            )
+            .unwrap()
+            .state,
+        FeedbackState::Sent
+    );
+    let observed = store
+        .observe_owned_exit(
+            &id,
+            attempt,
+            OwnedExitObservation::Confirmed,
+            OwnedCleanupObservation::Confirmed,
+            None,
+        )
+        .unwrap();
+    assert_eq!(observed.state, FeedbackState::Sent);
+    assert_eq!(observed.issue_number, Some(42));
+    assert_eq!(
+        store
+            .finish_owned_attempt(&id, attempt, Err(AutoReason::SenderInterrupted))
+            .unwrap(),
+        observed
+    );
+    let (unfinished, _) = store
+        .submit_owned_auto(
+            SafeAutoReport::current(KnownOperation::HookHealth),
+            Utc::now(),
+        )
+        .unwrap();
+    let unfinished_id = unfinished.snapshot.id();
+    let _owner = store.try_owner_lock(&unfinished_id).unwrap();
+    let unfinished_attempt = uuid::Uuid::new_v4();
+    store
+        .begin_owned_attempt(&unfinished_id, unfinished_attempt, || Ok(()))
+        .unwrap();
+    let fenced = store
+        .observe_owned_exit(
+            &unfinished_id,
+            unfinished_attempt,
+            OwnedExitObservation::Unknown,
+            OwnedCleanupObservation::Unknown,
+            Some(OwnedAutoReason::ExitDeadline),
+        )
+        .unwrap();
+    assert_eq!(fenced.state, FeedbackState::Uncertain);
+    assert_eq!(fenced.error, Some(AutoReason::SenderInterrupted));
+    let metadata = fenced.owned.unwrap().attempt.unwrap();
+    assert_eq!(metadata.phase, OwnedAutoPhase::PreDispatch);
+    assert_eq!(metadata.exit, OwnedExitObservation::Unknown);
+    assert_eq!(metadata.cleanup, OwnedCleanupObservation::Unknown);
+}
+
+#[test]
+fn owned_retry_accepts_confirmed_no_sender_and_initial_withheld_receipts() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FeedbackStore::new(dir.path().join("feedback"));
+    let (record, _) = store
+        .submit_owned_auto_withheld(
+            SafeAutoReport::current(KnownOperation::Search),
+            Utc::now(),
+            AutoReason::PolicyUnavailable,
+        )
+        .unwrap();
+    let id = record.snapshot.id();
+    assert_eq!(store.reconcile_owned_auto(&id).unwrap(), record);
+    let queued = store.retry_owned_auto(&id, || Ok(())).unwrap();
+    assert_eq!(queued.state, FeedbackState::Queued);
+    let owner = store.try_owner_lock(&id).unwrap();
+    let attempt = uuid::Uuid::new_v4();
+    store.begin_owned_attempt(&id, attempt, || Ok(())).unwrap();
+    store
+        .observe_owned_exit(
+            &id,
+            attempt,
+            OwnedExitObservation::NotStarted,
+            OwnedCleanupObservation::Confirmed,
+            Some(OwnedAutoReason::WorkerUnavailable),
+        )
+        .unwrap();
+    assert!(store.check_owned_attempt(&id, attempt, || Ok(())).is_err());
+    assert!(store.commit_owned_attempt(&id, attempt, || Ok(())).is_err());
+    store
+        .finish_owned_attempt(&id, attempt, Err(AutoReason::WorkerUnavailable))
+        .unwrap();
+    drop(owner);
+    let pending = store.retry_owned_auto(&id, || Ok(())).unwrap();
+    assert_eq!(pending.state, FeedbackState::Queued);
+    let orphan = store.reconcile_owned_auto(&id).unwrap();
+    assert_eq!(orphan.state, FeedbackState::Uncertain);
+    assert!(orphan.owned.unwrap().attempt.is_none());
+    assert!(store
+        .begin_owned_attempt(&id, uuid::Uuid::new_v4(), || Ok(()))
+        .is_err());
+}
+
+#[test]
+fn owned_receipt_schema_is_versioned_and_preserves_legacy_serialization() {
+    use gwt_core::feedback::auto_report::{
+        AutoFeedbackRecord, AutoReason, KnownOperation, SafeAutoReport, SafeAutoSnapshot,
+    };
+    // Frozen pre-owned reader: unknown local ownership must never be ignored.
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    #[allow(dead_code)]
+    struct LegacyAutoRecord {
+        mode: String,
+        snapshot: SafeAutoSnapshot,
+        created_at: chrono::DateTime<Utc>,
+        state: FeedbackState,
+        issue_number: Option<u64>,
+        error: Option<AutoReason>,
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let store = FeedbackStore::new(dir.path().join("feedback"));
+    let (legacy, _) = store
+        .submit_auto(SafeAutoReport::current(KnownOperation::Search), Utc::now())
+        .unwrap();
+    let path = store.path(&legacy.snapshot.id()).unwrap();
+    let bytes = fs::read(&path).unwrap();
+    let decoded: AutoFeedbackRecord = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(serde_json::to_vec_pretty(&decoded).unwrap(), bytes);
+    assert!(serde_json::from_slice::<LegacyAutoRecord>(&bytes).is_ok());
+    let mut owned: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    owned["owned"] = serde_json::json!({"version":"v1","attempt":null});
+    fs::write(&path, serde_json::to_vec(&owned).unwrap()).unwrap();
+    let pending = store.read_auto(&legacy.snapshot.id()).unwrap();
+    assert_eq!(pending.snapshot, legacy.snapshot);
+    assert!(serde_json::from_value::<LegacyAutoRecord>(owned.clone()).is_err());
+    assert!(store.read(&legacy.snapshot.id()).is_err());
+    for invalid in [
+        serde_json::Value::Null,
+        serde_json::json!({"version":"v2","attempt":null}),
+        serde_json::json!({"version":"v1","attempt":null,"token":"forbidden"}),
+    ] {
+        owned["owned"] = invalid;
+        fs::write(&path, serde_json::to_vec(&owned).unwrap()).unwrap();
+        assert!(store.read_entry(&legacy.snapshot.id()).is_err());
+    }
+}
+
+#[test]
+fn owned_receipt_requires_consistent_exit_and_cleanup_observations() {
+    use gwt_core::feedback::auto_report::{KnownOperation, SafeAutoReport};
+    let dir = tempfile::tempdir().unwrap();
+    let store = FeedbackStore::new(dir.path().join("feedback"));
+    let (record, _) = store
+        .submit_auto(SafeAutoReport::current(KnownOperation::Search), Utc::now())
+        .unwrap();
+    let path = store.path(&record.snapshot.id()).unwrap();
+    let mut value = serde_json::to_value(&record).unwrap();
+    value["state"] = serde_json::json!("sending");
+    value["owned"] = serde_json::json!({
+        "version":"v1", "attempt":{
+            "id":uuid::Uuid::new_v4().to_string(), "origin":"inherited_cli_environment",
+            "phase":"pre_dispatch", "exit":"unknown", "cleanup":"unknown", "reason":null
+        }
+    });
+    fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    assert!(store.read_auto(&record.snapshot.id()).is_ok());
+    for (field, invalid) in [
+        ("id", serde_json::json!("invalid-id")),
+        ("origin", serde_json::json!("arbitrary_environment")),
+        ("cleanup", serde_json::json!("confirmed")),
+    ] {
+        let mut corrupted = value.clone();
+        corrupted["owned"]["attempt"][field] = invalid;
+        fs::write(&path, serde_json::to_vec(&corrupted).unwrap()).unwrap();
+        assert!(store.read_entry(&record.snapshot.id()).is_err());
+    }
+    value["owned"]["attempt"]["phase"] = serde_json::json!("dispatch_committed");
+    value["owned"]["attempt"]["exit"] = serde_json::json!("not_started");
+    fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    assert!(store.read_entry(&record.snapshot.id()).is_err());
+}
 
 #[test]
 fn auto_receipts_contain_only_safe_snapshots_and_dedupe_uncertain_indefinitely() {

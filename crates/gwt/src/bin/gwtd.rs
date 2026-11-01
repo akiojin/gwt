@@ -11,6 +11,11 @@ fn forbid_real_gh_in_tests() {
 
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().collect();
+    if let Some(code) = gwt::cli::run_feedback_private_role(&argv) {
+        // A bounded private owner may still have an unobserved bookkeeping
+        // thread. This role must not enter ordinary startup or join that I/O.
+        std::process::exit(code.clamp(0, 255));
+    }
     if argv.get(1).map(String::as_str)
         == Some(gwt::cli::verification_record::interruption::WATCHDOG_ARG)
     {
