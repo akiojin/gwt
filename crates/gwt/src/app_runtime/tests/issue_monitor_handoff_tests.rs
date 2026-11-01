@@ -2850,7 +2850,37 @@ fn native_grok_answer_holder(
         gwt::daemon_runtime::handle_runtime_state("SessionStart", &hook).unwrap();
         gwt::daemon_runtime::handle_forward_for_event("SessionStart", &hook).unwrap();
     });
-    if pane.pending_fresh_execution.is_some() {
+    if let Some(pending) = pane.pending_fresh_execution.as_ref() {
+        owner_fixture_block_on(async {
+            // test-hygiene: allow-wall-clock-deadline Observe the preceding real SessionStart's committed completion before a separate positive HTTP resend; no scheduler delay or elapsed-time assertion.
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    let active = owner
+                        .probe(&pane.id, pane.incarnation)
+                        .await
+                        .expect("Grok runtime");
+                    assert!(
+                        active.current.load(Ordering::Acquire),
+                        "revoked Grok holder"
+                    );
+                    let active_session = active.session.as_ref().expect("Grok Session");
+                    assert!(active_session.id == session.id, "changed Grok Session");
+                    if active.readiness_watch.is_none()
+                        && !active.readiness_inflight
+                        && active.pending_fresh_execution.is_none()
+                    {
+                        let grant = active.grant.as_ref().expect("Grok grant");
+                        assert!(active.issuer.grant_is_current(grant));
+                        let binding = grant.principal().active_execution_binding();
+                        assert!(binding == Some(&pending.binding), "changed Active binding");
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("Grok SessionStart must complete readiness");
+        });
         authenticate_monitor_owner_readiness(&owner, &pane);
     }
     owner_fixture_block_on(owner.command(gwt::project_runtime::events::OwnerCommand::Health))
