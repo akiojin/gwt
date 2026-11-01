@@ -1053,7 +1053,7 @@ impl AppRuntime {
                         .and_then(|coordinator| coordinator.heavy_pool_status())
                         .map_err(|error| format!("Cannot inspect verification leases: {error}"))?;
                 let lease_ids = restart_impact_lease_ids(&pool.slots, |pid| {
-                    gwt::process::is_descendant_of(pid, std::process::id())
+                    gwt::process::is_descendant_of(pid, std::process::id()).unwrap_or(true)
                 });
                 for path in unresolved_sessions {
                     if let Ok(session) = gwt_agent::Session::load(&path) {
