@@ -344,14 +344,18 @@ test.describe("Issue queue real backend launch", () => {
       target.on("pageerror", error => errors.push(error.message));
       target.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
     };
+    let rosterRequestSequence = 0;
     const request = async (event: unknown, kind: string) => {
+      const requestId = kind === "agent_roster" ? `t20a-roster-${++rosterRequestSequence}` : null;
       const after = await current.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
-      await sendLiveGwtEvent(current, event);
-      return (await current.waitForFunction(({ after, kind }) => {
+      await sendLiveGwtEvent(current, requestId
+        ? { ...(event as Record<string, unknown>), request_id: requestId } : event);
+      return (await current.waitForFunction(({ after, kind, requestId }) => {
         const entry = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) =>
-          entry.sequence > after && [kind, `${kind}_error`].includes(entry.payload.kind));
+          entry.sequence > after && [kind, `${kind}_error`].includes(entry.payload.kind)
+          && (requestId === null || entry.payload.request_id === requestId));
         return entry?.payload || null;
-      }, { after, kind }, { timeout: 30_000 })).jsonValue();
+      }, { after, kind, requestId }, { timeout: 30_000 })).jsonValue();
     };
     const schedule = () => {
       const reply = fixture.scheduleOperation("issue.monitor.schedule.read");
