@@ -21,6 +21,37 @@ const panel = (page: Page, section: string) => section === "agents"
   : settings(page).locator(`[data-settings-panel="${section}"]`);
 const autonomous = (page: Page) => panel(page, "issues").locator('[data-action="monitor-autonomous"]');
 
+test("Issue #6576 Autonomous explains safe feedback without changing the preference", async ({ page }, info) => {
+  const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+  test.skip(!base || !process.env.GWT_PLAYWRIGHT_CHECK_HOME, "requires browser-check isolated checkout and HOME");
+  await withLiveGwtBackendLock(base!, info, async () => {
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    await gotoLiveGwt(page, base!, { enableTestBridge: true });
+    await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
+      .some(({ payload }: any) => payload.kind === "workspace_state"));
+    const theme = themeFor(info);
+    await page.locator(`#op-theme-toggle [data-theme-value="${theme}"]`).click();
+    await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", {
+      detail: { section: "issues" },
+    })));
+    const control = autonomous(page);
+    await expect(control).toBeEnabled();
+    const checked = await control.isChecked();
+    await control.focus();
+    await expect(control).toHaveAttribute("aria-description", /structured gwt feedback without a dialog; free text is excluded.*GH_TOKEN.*GitHub CLI.*unsent/);
+    const description = await control.getAttribute("aria-describedby");
+    expect(description).toBeTruthy();
+    await expect(page.locator(`[id="${description}"]`)).toBeVisible();
+    await expect(page.locator(`[id="${description}"]`)).toContainText("separate from Auto capacity");
+    expect(await control.isChecked()).toBe(checked);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    await info.attach(`auto-feedback-explanation-${theme}`, { body: await settings(page).screenshot(), contentType: "image/png" });
+    expect(errors).toEqual([]);
+  });
+});
+
 test.afterEach(async ({ page }) => {
   if (!process.env.GWT_PLAYWRIGHT_BASE_URL || page.isClosed()) return;
   // Release the fixed surface before closing its disposable backing window.

@@ -1322,6 +1322,112 @@ fn run_browser_check_hook_audit(
     expected_hook_bin: &Path,
     path: Option<&std::ffi::OsStr>,
 ) -> Output {
+    // The target surface cases now run with a genuine, private source context.
+    // Native constructors and a real hook event supply the proof; no live
+    // authority or synthetic completion is copied into the fixture.
+    use gwt::cli::execution_state::{
+        self, ExecutionOwnerKey, ExecutionOwnerKind, LegacyActiveDisposition,
+    };
+    use gwt_agent::{
+        AgentStatus, Session, SessionExecutionBinding, SessionExecutionIdentity,
+        SessionRuntimeState,
+    };
+    let canonical_worktree = dunce::canonicalize(worktree).unwrap();
+    let worktree = canonical_worktree.as_path();
+    // This override is the user-home root, matching the child HOME below.
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(worktree);
+    run_git(
+        worktree,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.com/browser-check-6622.git",
+        ],
+    );
+    let sessions = gwt_core::paths::gwt_sessions_dir();
+    let mut session = Session::new(worktree, "fixture", AgentId::ClaudeCode);
+    session.project_state_root = Some(worktree.to_path_buf());
+    session.linked_issue_number = Some(6622);
+    let owner = ExecutionOwnerKey {
+        kind: ExecutionOwnerKind::Spec,
+        number: 6622,
+    };
+    execution_state::materialize_at_launch(
+        worktree,
+        owner.kind,
+        owner.number,
+        &session.id,
+        "gwt-execute",
+        false,
+    )
+    .unwrap();
+    execution_state::ensure_generation_ledger(worktree, owner, LegacyActiveDisposition::Live)
+        .unwrap();
+    let binding = execution_state::current_execution_binding(worktree, owner)
+        .unwrap()
+        .unwrap();
+    session
+        .set_execution_binding(Some(SessionExecutionBinding {
+            schema_version: 1,
+            session_id: session.id.clone(),
+            repo_hash: session.repo_hash.clone().unwrap(),
+            owner_kind: "spec".into(),
+            owner_number: 6622,
+            identity: binding,
+            capability_generation: 1,
+        }))
+        .unwrap();
+    session.save(&sessions).unwrap();
+    let identity = SessionExecutionIdentity::from_session(&session)
+        .unwrap()
+        .unwrap();
+    let pid = std::process::id();
+    let started = gwt::process::host_process_start_time(pid).unwrap();
+    let runtime_path = gwt_agent::runtime_state_path(&sessions, &session.id);
+    SessionRuntimeState::for_execution_process(
+        AgentStatus::Running,
+        &identity,
+        17,
+        started,
+        pid,
+        started,
+    )
+    .save(&runtime_path)
+    .unwrap();
+    gwt_skills::register_codex_managed_hook_trust_for_mode_with_expected_bin(
+        worktree,
+        &worktree.join(".codex/config.toml"),
+        CodexHookDiscoveryMode::Both,
+        expected_hook_bin.to_str(),
+    )
+    .unwrap();
+    let mut source = hidden_command(env!("CARGO_BIN_EXE_gwtd"));
+    source
+        .args(["hook", "event", "PostToolUse"])
+        .current_dir(worktree)
+        .env("HOME", worktree)
+        .env("USERPROFILE", worktree)
+        .env("CODEX_HOME", worktree.join(".codex"))
+        .env("GWT_SESSION_ID", &session.id)
+        .env("GWT_SESSION_RUNTIME_PATH", &runtime_path)
+        .env("GWT_HOOK_BIN", expected_hook_bin)
+        .env_remove("GWT_PROJECT_ROOT")
+        .env_remove("GWT_BIN_PATH")
+        .env_remove("GWT_HOOK_FORWARD_URL")
+        .env_remove("GWT_HOOK_FORWARD_TOKEN");
+    let source = source.output().unwrap();
+    assert!(
+        source.status.success(),
+        "{}",
+        String::from_utf8_lossy(&source.stderr)
+    );
+    assert_eq!(
+        SessionRuntimeState::load(&runtime_path)
+            .unwrap()
+            .last_completed_hook_outcome,
+        Some(gwt_agent::session::HookCompletionOutcome::Normal)
+    );
     let script = format!(
         "test \"$HOME\" = \"$CHECK_HOME\" && test \"$USERPROFILE\" = \"$CHECK_HOME\" || exit 90\n{}\n{}",
         browser_check_shell_block("hook-authority"),
@@ -1335,14 +1441,15 @@ fn run_browser_check_hook_audit(
         .env("CHECK_HOME", worktree)
         .env("HOME", worktree)
         .env("USERPROFILE", worktree)
+        .env("CODEX_HOME", worktree.join(".codex"))
         .env("CHECKOUT_GWTD", env!("CARGO_BIN_EXE_gwtd"))
         .env("GWT_HOOK_BIN", expected_hook_bin)
         .env("GWT_BIN_PATH", "/ambient/stale/target/debug/gwtd")
-        .env_remove(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV)
+        .env("GWT_SESSION_RUNTIME_PATH", &runtime_path)
         .env_remove("GWT_HOOK_FORWARD_TOKEN")
         .env_remove("GWT_HOOK_FORWARD_URL")
         .env_remove("GWT_PROJECT_ROOT")
-        .env_remove("GWT_SESSION_ID");
+        .env("GWT_SESSION_ID", &session.id);
     if let Some(path) = path {
         command.env("PATH", path);
     }

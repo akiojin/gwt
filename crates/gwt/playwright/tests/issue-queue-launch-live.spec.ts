@@ -215,7 +215,9 @@ test.describe("Issue queue real backend launch", () => {
   test("T20b saved checkpoint switches through the real Host and Monitor", async ({ page }, info) => {
     test.skip(process.platform !== "linux" || process.env.GWT_PLAYWRIGHT_SWITCH_POSITIVE !== "1",
       "positive proof requires the isolated Linux root process namespace");
-    const fixture = await startIssueQueueLaunchFixture(info, { targetIssueNumber: 44, switching: true, positive: true });
+    const fixture = await startIssueQueueLaunchFixture(info, {
+      targetIssueNumber: 44, switching: true, positive: true, autonomousMode: true,
+    });
     const errors: string[] = [];
     const theme = info.project.name.includes("light") ? "light" : "dark";
     page.on("pageerror", error => errors.push(error.message));
@@ -237,6 +239,7 @@ test.describe("Issue queue real backend launch", () => {
       await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
       await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      expect((await preferences()).autonomous_mode).toBe(true);
       await sendLiveGwtEvent(page, { kind: "set_issue_monitor_max_active_agents", max_active_agents: 1 });
       await expect.poll(async () => (await preferences()).max_active_agents_mode, { timeout: 30_000 }).toBe("manual");
       await request({ kind: "issue_monitor_queue_push", issue_numbers: [fixture.issueNumber] }, "issue_monitor_queue_result");
@@ -245,7 +248,7 @@ test.describe("Issue queue real backend launch", () => {
       await expect.poll(async () => !!await actor("idle"), { timeout: 60_000 }).toBe(true);
       const idle = await actor("idle");
       expect(idle.owner_number).toBe(fixture.issueNumber);
-      expect(idle.cwd).not.toBe(source.cwd);
+      expect(idle.cwd, "the source waits in its ordinary worktree before checkpoint delivery").toBe(source.cwd);
       expect(idle.tree_child_pid).toBeGreaterThan(0);
       expect(fixture.processAlive(idle.tree_child_pid)).toBe(true);
       expect(fixture.executionStatus(source.cwd).ecr_status).toBe("active");
@@ -277,6 +280,8 @@ test.describe("Issue queue real backend launch", () => {
       const ack = await actor("checkpoint_acked");
       expect(ack).toMatchObject({ operation: saved.request.operation_id, head: saved.checkpoint.verified_head,
         work_id: saved.checkpoint.work_id, board_entry_id: saved.checkpoint.board_entry_id });
+      expect(await actor("checkpoint_idle")).toMatchObject({ operation: saved.request.operation_id, cwd: source.cwd });
+      expect((await preferences()).autonomous_mode).toBe(true);
       expect(fixture.processAlive(source.pid)).toBe(false);
       expect(fixture.processAlive(idle.tree_child_pid)).toBe(false);
       expect(fixture.processAlive(target.pid)).toBe(true);

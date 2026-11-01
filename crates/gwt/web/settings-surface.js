@@ -299,7 +299,7 @@ function renderIssuesSettingsPanel(panel, options) {
     control.dataset.confirmed = String(control.checked);
     control.disabled = !status;
     setControlExplanation(control, action === "monitor-autonomous"
-      ? "Allow eligible issues to run without waiting for human approval."
+      ? "Allow eligible issues to run without waiting for human approval. Also send structured gwt feedback without a dialog; free text is excluded. This is separate from Auto capacity. Feedback needs existing GH_TOKEN/GITHUB_TOKEN credentials; GitHub CLI sign-in alone keeps it unsent."
       : "Start or pause monitoring for queued issues.", `settings-${action}`);
     slot.appendChild(control);
     row(launch, name, slot).dataset.settingsLaunchAction = action;

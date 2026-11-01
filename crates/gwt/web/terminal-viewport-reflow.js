@@ -14,6 +14,28 @@ function defaultScheduleFrame(callback) {
   return setTimeout(callback, 0);
 }
 
+// Initial readiness must advance even when an inactive window receives no
+// animation frames. Ordinary fit/refresh queues keep their frame budgets.
+export function scheduleTerminalInitialFit(callback) {
+  let finished = false;
+  let frame = null;
+  const cancel = () => {
+    finished = true;
+    clearTimeout(timer);
+    if (frame !== null && typeof cancelAnimationFrame === "function") {
+      cancelAnimationFrame(frame);
+    }
+  };
+  const run = () => {
+    if (finished) return;
+    cancel();
+    callback();
+  };
+  const timer = setTimeout(run, 100);
+  if (typeof requestAnimationFrame === "function") frame = requestAnimationFrame(run);
+  return cancel;
+}
+
 function normalizeMaxTerminalFitsPerFrame(value) {
   if (!Number.isFinite(value) || value <= 0) {
     return DEFAULT_MAX_TERMINAL_FITS_PER_FRAME;
@@ -32,20 +54,17 @@ function normalizeMaxTerminalRefreshesPerFrame(value) {
  * Decode a replacement snapshot independently from the live streaming UTF-8
  * decoder and return a fresh decoder for subsequent live output.
  *
- * A live decoder may hold an incomplete multi-byte prefix because output is
- * decoded with `{ stream: true }`. Reusing it for a snapshot can inject a
- * replacement character into the snapshot and can also contaminate the first
- * live chunk after replacement. Snapshot replacement is an explicit stream
- * boundary, so both sides receive fresh decoder state.
+ * Discard the old live decoder's incomplete prefix. A snapshot can carry its
+ * own unfinished UTF-8 scalar from the backend parser, so retain that fresh
+ * decoder's streaming state for the following live bytes.
  */
 export function decodeTerminalSnapshotBoundary(
   snapshotBytes,
   createDecoder = () => new TextDecoder(),
 ) {
-  const snapshotDecoder = createDecoder();
   const nextLiveDecoder = createDecoder();
   return {
-    snapshotText: snapshotDecoder.decode(snapshotBytes),
+    snapshotText: nextLiveDecoder.decode(snapshotBytes, { stream: true }),
     nextLiveDecoder,
   };
 }
