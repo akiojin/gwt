@@ -1891,42 +1891,58 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             })
         }
         "pm.report.post" => {
-            let kind: gwt_core::pm_report::PmReportKind = serde_json::from_value(Value::String(
-                required_string(params, "kind")?,
-            ))
-            .map_err(|_| CliParseError::InvalidValue {
-                flag: "kind",
-                reason: "expected one of: progress, decision, blocker, qa",
-            })?;
-            let question = if kind == gwt_core::pm_report::PmReportKind::Qa {
-                Some(required_string(params, "question")?)
-            } else {
-                optional_string(params, "question")?
-            };
-            let instruction = lookup(params, "instruction")
-                .map(|value| {
-                    serde_json::from_value::<gwt_core::user_instruction::UserInstructionInput>(
-                        value.clone(),
-                    )
-                    .map(Box::new)
-                    .map_err(|error| {
-                        CliParseError::InvalidJson(format!("invalid instruction capture: {error}"))
-                    })
+            if let Some(value) = lookup(params, "submission") {
+                reject_unknown_params(params, &["submission", "project_root"], "pm.report.post")?;
+                let submission: gwt_core::pm_report::Submission =
+                    serde_json::from_value(value.clone()).map_err(|error| {
+                        CliParseError::InvalidJson(format!("invalid report submission: {error}"))
+                    })?;
+                submission
+                    .validate()
+                    .map_err(|error| CliParseError::InvalidJson(error.to_string()))?;
+                CliCommand::Pm(crate::cli::pm::PmCommand::ReportBatch {
+                    project_root: optional_string(params, "project_root")?,
+                    submission: Box::new(submission),
                 })
-                .transpose()?;
-            if instruction.is_some() && kind != gwt_core::pm_report::PmReportKind::Qa {
-                return Err(CliParseError::InvalidValue {
-                    flag: "instruction",
-                    reason: "requires kind: qa",
-                });
+            } else {
+                let kind: gwt_core::pm_report::PmReportKind =
+                    serde_json::from_value(Value::String(required_string(params, "kind")?))
+                        .map_err(|_| CliParseError::InvalidValue {
+                            flag: "kind",
+                            reason: "expected one of: progress, decision, blocker, qa",
+                        })?;
+                let question = if kind == gwt_core::pm_report::PmReportKind::Qa {
+                    Some(required_string(params, "question")?)
+                } else {
+                    optional_string(params, "question")?
+                };
+                let instruction = lookup(params, "instruction")
+                    .map(|value| {
+                        serde_json::from_value::<gwt_core::user_instruction::UserInstructionInput>(
+                            value.clone(),
+                        )
+                        .map(Box::new)
+                        .map_err(|error| {
+                            CliParseError::InvalidJson(format!(
+                                "invalid instruction capture: {error}"
+                            ))
+                        })
+                    })
+                    .transpose()?;
+                if instruction.is_some() && kind != gwt_core::pm_report::PmReportKind::Qa {
+                    return Err(CliParseError::InvalidValue {
+                        flag: "instruction",
+                        reason: "requires kind: qa",
+                    });
+                }
+                CliCommand::Pm(crate::cli::pm::PmCommand::ReportPost {
+                    project_root: optional_string(params, "project_root")?,
+                    kind,
+                    question,
+                    body: required_string(params, "body")?,
+                    instruction,
+                })
             }
-            CliCommand::Pm(crate::cli::pm::PmCommand::ReportPost {
-                project_root: optional_string(params, "project_root")?,
-                kind,
-                question,
-                body: required_string(params, "body")?,
-                instruction,
-            })
         }
         "pm.report.list" => CliCommand::Pm(crate::cli::pm::PmCommand::ReportList {
             project_root: optional_string(params, "project_root")?,
@@ -7388,6 +7404,29 @@ mod tests {
     }
 
     #[test]
+    fn pm_report_structured_submission_parser_preserves_typed_contract() {
+        let input = json!({"submission": {
+            "schema_version":1,"request_id":"tick-1","events":[{
+                "episode_id":"wait-1","event_id":"worker","expected_revision":0,"kind":"progress",
+                "state":{"status":"waiting","severity":"routine","impact":"project"},
+                "summary":{"result":"Waiting for CI"},"details":"Full failure remains open","refs":[]
+            }]
+        }});
+        assert!(matches!(
+            ok("pm.report.post", input.clone()),
+            CliCommand::Pm(_)
+        ));
+        let mut mixed = input.clone();
+        mixed["body"] = json!("legacy bypass");
+        assert!(parse(&envelope("pm.report.post", mixed)).is_err());
+        for (key, value) in [("schema_version", json!(2)), ("unknown", json!(true))] {
+            let mut bad = input.clone();
+            bad["submission"][key] = value;
+            assert!(parse(&envelope("pm.report.post", bad)).is_err());
+        }
+    }
+
+    #[test]
     fn pm_report_post_requires_pm_authority_except_for_direct_cli() {
         use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
         let _lock = crate::env_test_lock()
@@ -7463,6 +7502,9 @@ mod tests {
         .unwrap();
         let error = crate::cli::pm::run(&mut env, post(), &mut output).unwrap_err();
         assert!(error.to_string().contains("instruction"), "{error}");
+        // Joined PM capture is tested with real native-message identity in
+        // pm_reporting. This fixture exercises explicit direct-CLI compatibility.
+        drop(_agent);
         let capture = || match ok(
             "pm.report.post",
             json!({"kind":"qa", "question":"Can we ship?", "body":"Checks passed.",

@@ -292,6 +292,7 @@ pub fn reports_with_deadline(
                 waiting
             );
             Some(PmReport {
+                structured: None,
                 id: format!("pm-peer-{}", message.id),
                 kind: PmReportKind::Progress,
                 question: None,

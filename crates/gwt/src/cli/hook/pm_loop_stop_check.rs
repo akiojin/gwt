@@ -560,8 +560,8 @@ fn handle_at(
          follows its `fallback` (triage → rerun a flake → fresh-launch a regression → escalate); \
          stale (no update for `stale_after_hours`), SUPERSEDED, owner-Issue-closed, and \
          `escalation_due` rows are digest escalations — never auto-close them. \
-         A cycle with any CI-RED, CONFLICTED, READY_TO_PROMOTE, or `escalation_due` open PR is \
-         never a no-change cycle: advance one or escalate with the reason. A READY_TO_PROMOTE \
+         Triage every CI-RED, CONFLICTED, READY_TO_PROMOTE, or `escalation_due` open PR; \
+         advance one or escalate with the reason. A READY_TO_PROMOTE \
          row is advanced by running `pr.ready` on it, with no user confirmation. \
          Run `concern.list`, execute the stored measurement for every `open` and `fix_landed` \
          Concern, and submit its structured result and owner progress with `concern.measure`. \
@@ -586,13 +586,14 @@ fn handle_at(
          start over. Give the directive through `board.post` with a mention or `pm.message.send`; \
          close it only once you have read why it is idle and that reason makes the window \
          unusable. \
-         Treat that required advance or handoff as a reportable milestone or escalation under \
-         the shared conditional-reporting clause below. \
-         Re-report every unresolved wait in every cycle using the window title and required user \
-         action; if the window title is unavailable, identify the owning Issue and say `title \
+         Submit only material changes through `pm.report.post` `submission` under the shared \
+         conditional-reporting clause below. \
+         Reconcile every unresolved wait in every cycle; report new or materially changed state \
+         using the window title and required user action; if the window title is unavailable, \
+         identify the owning Issue and say `title \
          unavailable`; do not promote a pane or window ID to the primary identity. For a decision \
          include the question, your recommendation and rationale, and a copy-paste answer \
-         example. Only an empty stalled-item inventory may end silently. \
+         example in full details. An unchanged wait or non-empty inventory alone creates no new Report. \
          {steering_clause} {clause} \
          If the snapshot shows nothing actionable, stop again — the loop parks on its own \
          after repeated empty cycles (a cycle whose monitor snapshot changed — new launches, \
@@ -1352,7 +1353,7 @@ mod tests {
 
     /// Issue #3791 / SPEC-3431 FR-151/154: a forced cycle is a driver,
     /// not a passive snapshot. The compact reminder keeps the full policy in
-    /// gwt-pm while making recurring waits and one concrete advance impossible
+    /// gwt-pm while making continued supervision and one concrete advance impossible
     /// to omit from the highest-frequency injected prompt.
     #[test]
     fn forced_continuation_inventories_and_advances_stalled_work() {
@@ -1372,16 +1373,16 @@ mod tests {
         for phrase in [
             "Build a stalled-item inventory covering `needs_human`, decision waits, ownerless PRs, red or escalation-due PRs, and quiet agents",
             "advance at least one item",
-            // Issue #3868 AC-2 / AC-3: the fallback order and the red-PR
-            // exception to the silent cycle are in the Stop hook itself.
+            // PR triage remains mandatory even when its unchanged state
+            // does not create a second Report.
             "a row with `default_action_executable` false follows its `fallback`",
-            "A cycle with any CI-RED, CONFLICTED, READY_TO_PROMOTE, or `escalation_due` open PR is",
-            "Treat that required advance or handoff as a reportable milestone or escalation",
-            "Re-report every unresolved wait in every cycle using the window title and required user action",
+            "Triage every CI-RED, CONFLICTED, READY_TO_PROMOTE, or `escalation_due` open PR",
+            "Submit only material changes through `pm.report.post` `submission`",
+            "Reconcile every unresolved wait in every cycle",
             "identify the owning Issue and say `title unavailable`",
             "do not promote a pane or window ID to the primary identity",
             "the question, your recommendation and rationale, and a copy-paste answer example",
-            "Only an empty stalled-item inventory may end silently",
+            "An unchanged wait or non-empty inventory alone creates no new Report",
             // Issue #3767 AC-2 / AC-3: the running launches are steered
             // through the ruling channels before the no-change judgment.
             "Steer every running launch before you judge the cycle unchanged",
@@ -1417,6 +1418,8 @@ mod tests {
             );
         }
         assert!(reason.contains(pm_registry::PM_CYCLE_REPORTING_CLAUSE));
+        assert!(!reason.contains("Re-report every unresolved wait in every cycle"));
+        assert!(!reason.contains("Only an empty stalled-item inventory may end silently"));
         assert!(reason.contains(pm_registry::PM_GWTD_EXECUTION_CLAUSE));
         assert!(
             reason.contains(pm_registry::PM_STEERING_CLAUSE),

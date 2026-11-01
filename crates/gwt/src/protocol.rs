@@ -34,12 +34,37 @@ pub struct PmReportView {
     #[serde(flatten)]
     pub report: gwt_core::pm_report::PmReport,
     pub body_html: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details_html: Option<String>,
 }
 
 impl From<gwt_core::pm_report::PmReport> for PmReportView {
     fn from(report: gwt_core::pm_report::PmReport) -> Self {
-        let body_html = crate::board_remote::markdown::markdown_to_html(&report.body);
-        Self { report, body_html }
+        let body_html = if report.structured.is_some() {
+            String::new()
+        } else {
+            crate::board_remote::markdown::markdown_to_html(&report.body)
+        };
+        let details_html = report.structured.as_ref().map(|structured| {
+            let mut details = structured.details.clone();
+            if !structured.refs.is_empty() {
+                details.push_str("\n\n");
+                details.push_str(
+                    &structured
+                        .refs
+                        .iter()
+                        .map(|reference| format!("- {reference}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                );
+            }
+            crate::board_remote::markdown::markdown_to_html(&details)
+        });
+        Self {
+            report,
+            body_html,
+            details_html,
+        }
     }
 }
 
@@ -3995,6 +4020,7 @@ mod tests {
             request_id: 7, version: Some(version.clone()), snapshot: false,
             current: None,
             reports: vec![super::PmReportView::from(gwt_core::pm_report::PmReport {
+                structured: None,
                 id: "one".into(), kind: gwt_core::pm_report::PmReportKind::Progress, question: None,
                 body: "# Report\n\n**Ready** and `code`\n\n- Item\n\n```sh\ncargo test\n```\n<script>bad()</script>".into(),
                 created_at: chrono::Utc::now(),

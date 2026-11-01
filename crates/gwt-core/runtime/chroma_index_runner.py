@@ -6130,6 +6130,132 @@ def action_index_memory_v2(
     )
 
 
+def _report_fields(value: Any, required: set[str], optional: set[str] = frozenset()) -> None:
+    if not isinstance(value, dict) or not required <= value.keys() <= required | optional:
+        raise ValueError("invalid versioned PM report fields")
+
+
+def _report_json_object(pairs: list[tuple[str, Any]]) -> dict:
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate PM report JSON field")
+        value[key] = item
+    return value
+
+
+def _validate_report_summary(summary: Any) -> None:
+    _report_fields(summary, {"result"}, {"impact", "owner", "next_action", "decision"})
+    values = [summary["result"]]
+    values.extend(summary[field] for field in ("impact", "owner", "next_action") if summary.get(field) is not None)
+    decision = summary.get("decision")
+    if decision is not None:
+        _report_fields(decision, {"question", "recommendation", "reason", "options"})
+        if not isinstance(decision["options"], list) or not 2 <= len(decision["options"]) <= 3:
+            raise ValueError("invalid PM report decision options")
+        values.extend([decision["question"], decision["recommendation"], decision["reason"], *decision["options"]])
+    if any(not isinstance(value, str) or not value.strip() or len(value) > 240
+           or any(ord(char) < 32 or 127 <= ord(char) < 160 or char in "\u2028\u2029" for char in value) for value in values):
+        raise ValueError("invalid PM report summary")
+
+
+def _validate_report_text(value: Any) -> None:
+    if not isinstance(value.get("details"), str) or not isinstance(value.get("refs", []), list) or any(
+        not isinstance(ref, str) or not ref.strip() or len(ref.encode("utf-8")) > 2048
+        or any(ord(char) < 32 or 127 <= ord(char) < 160 or char in "\u2028\u2029" for char in ref)
+        for ref in value.get("refs", [])
+    ):
+        raise ValueError("invalid PM report details or refs")
+    _validate_report_summary(value.get("summary"))
+
+
+def _versioned_report_cards(envelope: Any, requests: set[str]) -> list[dict]:
+    """Check the journal wire and project saved cards, without rerunning posting policy."""
+    _report_fields(envelope, {"journal_schema", "payload", "payload_sha256"})
+    payload = envelope["payload"]
+    if (type(envelope["journal_schema"]) is not int or envelope["journal_schema"] != 2
+            or not isinstance(payload, str) or not isinstance(envelope["payload_sha256"], str)
+            or hashlib.sha256(payload.encode("utf-8")).hexdigest() != envelope["payload_sha256"]):
+        raise ValueError("invalid or unsupported PM report journal envelope")
+    transaction = json.loads(payload, parse_constant=_reject_non_json_constant, object_pairs_hook=_report_json_object)
+    _report_fields(transaction, {"submission", "receipt"})
+    submission, receipt = transaction["submission"], transaction["receipt"]
+    _report_fields(submission, {"schema_version", "request_id", "events"}, {"digest"})
+    _report_fields(receipt, {"schema_version", "request_id", "created_at", "decisions", "reports"})
+    request_id = submission["request_id"]
+    if (type(submission["schema_version"]) is not int or submission["schema_version"] != 1
+            or type(receipt["schema_version"]) is not int or receipt["schema_version"] != 1
+            or not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_.:/-]{1,128}", request_id)
+            or receipt["request_id"] != request_id or request_id in requests
+            or not isinstance(receipt["created_at"], str)):
+        raise ValueError("invalid PM report submission or receipt identity")
+    _parse_rfc3339_instant(receipt["created_at"])
+    events, decisions, cards = submission["events"], receipt["decisions"], receipt["reports"]
+    if (not isinstance(events, list) or not 1 <= len(events) <= 32
+            or not isinstance(decisions, list) or len(decisions) != len(events) or not isinstance(cards, list)):
+        raise ValueError("invalid PM report transaction lists")
+    if submission.get("digest") is not None:
+        _validate_report_summary(submission["digest"])
+    event_keys, referenced = set(), set()
+    for event, decision in zip(events, decisions):
+        _report_fields(event, {"episode_id", "event_id", "expected_revision", "kind", "state", "summary", "details"}, {"refs", "observed_at"})
+        _report_fields(decision, {"episode_id", "event_id", "revision", "reason", "report_id"})
+        key = event["episode_id"], event["event_id"]
+        if (any(not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_.:/-]{1,128}", value) for value in key)
+                or key in event_keys or key != (decision["episode_id"], decision["event_id"])
+                or type(event["expected_revision"]) is not int or not 0 <= event["expected_revision"] < (1 << 53) - 1
+                or type(decision["revision"]) is not int or not 1 <= decision["revision"] <= (1 << 53) - 1
+                or event["kind"] not in ("progress", "decision", "blocker")
+                or decision["reason"] not in ("unchanged", "immediate", "first", "changed", "resolved", "recurrence")
+                or decision["revision"] != event["expected_revision"] + int(decision["reason"] != "unchanged")):
+            raise ValueError("invalid PM report event or decision")
+        event_keys.add(key)
+        state = event["state"]
+        _report_fields(state, {"status", "severity", "impact"}, {"action", "milestone_id"})
+        if (state["status"] not in ("active", "waiting", "completed", "resolved", "unknown")
+                or state["severity"] not in ("routine", "important", "fatal", "blackout", "needs_human", "stale_unknown")
+                or state["impact"] not in ("none", "local", "project", "service", "data_loss")):
+            raise ValueError("invalid PM report material state")
+        action = state.get("action")
+        if action is not None:
+            _report_fields(action, {"id", "kind"}, {"deadline"})
+            if action["kind"] not in ("monitor", "retry", "respond", "decide", "intervene"):
+                raise ValueError("invalid PM report action")
+            if action.get("deadline") is not None:
+                if not isinstance(action["deadline"], str):
+                    raise ValueError("invalid PM report action deadline")
+                _parse_rfc3339_instant(action["deadline"])
+        for identity in (state.get("milestone_id"), action["id"] if action else None):
+            if identity is not None and (not isinstance(identity, str) or not re.fullmatch(r"[A-Za-z0-9_.:/-]{1,128}", identity)):
+                raise ValueError("invalid PM report material identity")
+        if event.get("observed_at") is not None:
+            if not isinstance(event["observed_at"], str):
+                raise ValueError("invalid PM report observation timestamp")
+            _parse_rfc3339_instant(event["observed_at"])
+        _validate_report_text(event)
+        report_id = decision["report_id"]
+        if (decision["reason"] == "unchanged") != (report_id is None):
+            raise ValueError("invalid suppressed PM report decision")
+        if report_id is not None:
+            if not isinstance(report_id, str) or not report_id:
+                raise ValueError("invalid PM report reference")
+            referenced.add(report_id)
+    card_ids = set()
+    for card in cards:
+        _report_fields(card, {"id", "kind", "body", "created_at", "structured"}, {"question"})
+        if (not isinstance(card["id"], str) or not card["id"] or card["id"] in card_ids
+                or card["kind"] not in ("progress", "decision", "blocker") or card.get("question") is not None
+                or card["created_at"] != receipt["created_at"]):
+            raise ValueError("invalid versioned PM report card")
+        card_ids.add(card["id"])
+        _report_fields(card["structured"], {"summary", "details", "refs"})
+        _validate_report_text(card["structured"])
+    if card_ids != referenced:
+        raise ValueError("PM report receipt references do not match saved cards")
+    requests.add(request_id)
+    return cards
+
+
 def _load_report_records(repo_hash: str) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Read posted Reports and instruction-backed Q&A for this project only.
 
@@ -6153,32 +6279,42 @@ def _load_report_records(repo_hash: str) -> tuple[List[Dict[str, Any]], List[Dic
             if text and not text.endswith("\n"):
                 raise ValueError("incomplete PM report record (missing newline)")
             seen = set()
+            requests = set()
             for line in text.split("\n"):
                 if not line.strip():
                     continue
-                report = json.loads(line, parse_constant=_reject_non_json_constant)
-                if (
-                    not isinstance(report, dict)
-                    or any(not isinstance(report.get(field), str) for field in (
-                        "id", "kind", "body", "created_at"
-                    ))
-                    or not report["id"] or report["id"] in seen
-                    or report["kind"] not in {"progress", "decision", "blocker", "qa"}
-                    or (report.get("question") is not None and not isinstance(report["question"], str))
-                ):
-                    raise ValueError("invalid PM report record")
-                if datetime.datetime.fromisoformat(report["created_at"].replace("Z", "+00:00")).tzinfo is None:
-                    raise ValueError("PM report timestamp requires timezone")
-                seen.add(report["id"])
-                report["source"] = "pm_report"
-                report["issue_numbers"] = sorted({
-                    int(number) for prefix, number in re.findall(
-                        r"((?<!\w)(?:PR|pull\s+request)\s*#|(?<!\w)#|/issues/)([1-9]\d*)\b",
-                        f"{report.get('question') or ''}\n{report['body']}",
-                        flags=re.IGNORECASE,
-                    ) if prefix.lower() in {"#", "/issues/"}
-                })
-                reports.append(report)
+                row = json.loads(line, parse_constant=_reject_non_json_constant, object_pairs_hook=_report_json_object)
+                cards = _versioned_report_cards(row, requests) if isinstance(row, dict) and "journal_schema" in row else [row]
+                for report in cards:
+                    if (
+                        not isinstance(report, dict)
+                        or any(not isinstance(report.get(field), str) for field in (
+                            "id", "kind", "body", "created_at"
+                        ))
+                        or not report["id"] or report["id"] in seen
+                        or report["kind"] not in ("progress", "decision", "blocker", "qa")
+                        or (report.get("question") is not None and not isinstance(report["question"], str))
+                    ):
+                        raise ValueError("invalid PM report record")
+                    if datetime.datetime.fromisoformat(report["created_at"].replace("Z", "+00:00")).tzinfo is None:
+                        raise ValueError("PM report timestamp requires timezone")
+                    structured = report.get("structured")
+                    detail_text = ""
+                    if structured is not None:
+                        _report_fields(structured, {"summary", "details", "refs"})
+                        _validate_report_text(structured)
+                        detail_text = "\n".join([structured["details"], *structured["refs"]])
+                    seen.add(report["id"])
+                    report["source"] = "pm_report"
+                    report["detail_document"] = detail_text
+                    report["issue_numbers"] = sorted({
+                        int(number) for prefix, number in re.findall(
+                            r"((?<!\w)(?:PR|pull\s+request)\s*#|(?<!\w)#|/issues/)([1-9]\d*)\b",
+                            f"{report.get('question') or ''}\n{report['body']}\n{detail_text}",
+                            flags=re.IGNORECASE,
+                        ) if prefix.lower() in {"#", "/issues/"}
+                    })
+                    reports.append(report)
             entries.append({
                 "path": str(source), "mtime": int(source.stat().st_mtime),
                 "size": len(content), "content_hash": hashlib.sha256(content).hexdigest(),
@@ -6205,7 +6341,7 @@ def _load_report_records(repo_hash: str) -> tuple[List[Dict[str, Any]], List[Dic
                 report["kind"], report["created_at"], question, body,
                 " ".join(f"#{number}" for number in report["issue_numbers"]),
                 report.get("instruction_document", ""),
-            ]),
+            ] + ([report["detail_document"]] if report.get("detail_document") else [])),
             "metadata": {
                 "report_id": report["id"], "source": report["source"],
                 "kind": report["kind"], "report_type": "qa" if report["kind"] == "qa" else "digest",

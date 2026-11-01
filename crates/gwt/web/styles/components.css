@@ -6001,6 +6001,7 @@ button.workspace-board-ref:focus-visible {
 .pm-chat__author { display: flex; align-items: center; gap: var(--space-2); color: var(--color-text-muted); font-size: var(--type-xs); }
 .pm-chat__author button { margin-inline-start: auto; }
 .pm-chat__text { margin: var(--space-2) 0 0; overflow-wrap: anywhere; line-height: 1.5; }
+.pm-chat__text.is-plaintext { white-space: pre-wrap; }
 .pm-chat__section-label { margin: var(--space-3) 0 0; color: var(--color-text-muted); font-size: var(--type-xs); }
 .pm-chat__question { margin: var(--space-2) 0 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
 .pm-chat__answer { margin-top: var(--space-3); border-top: 1px solid var(--color-border); }

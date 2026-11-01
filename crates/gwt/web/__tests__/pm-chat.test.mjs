@@ -8,6 +8,12 @@ const report = (id = 'one') => ({ id, kind: 'progress', created_at: '2026-10-11T
   body: '# Update\n\n**Ready** and `code`\n\n- checked\n\n```sh\ncargo test\n```',
   body_html: '<h1>Update</h1><p><strong>Ready</strong> and <code>code</code></p><ul><li>checked</li></ul><pre><code>cargo test</code></pre>' });
 
+const structuredReport = (id = 'typed') => ({ ...report(id),
+  body: 'Ready <literal>\nNext: Check delivery', body_html: '<p>Ready Next: Check delivery</p>',
+  structured: { summary: { result: 'Ready', next_action: 'Check delivery' },
+    details: '**All checks passed.**', refs: ['https://example.com/issues/3431'] },
+  details_html: '<p><strong>All checks passed.</strong></p><ul><li><a href="https://example.com/issues/3431">https://example.com/issues/3431</a></li></ul>' });
+
 function fixture() {
   const { document } = parseHTML('<html><body><div id="host"></div></body></html>');
   const root = document.getElementById('host');
@@ -198,6 +204,87 @@ test('Q&A separates safe question text from the Markdown answer and copies both'
   assert.deepEqual(copied, [`Q: ${qa.question}\n\nA:\n${qa.body}`]);
 });
 
+test('structured Reports show a compact overview and copy all expandable details and references', async () => {
+  const { root, update, copied } = fixture();
+  const incoming = structuredReport();
+  const complete = `${'詳細'.repeat(9000)}\n\nTAIL: item 48 remains available`;
+  incoming.structured.details = complete;
+  incoming.details_html = `<p>${complete}</p><p><strong>Complete evidence</strong></p><ul><li><a href="${incoming.structured.refs[0]}">Issue evidence</a></li></ul>`;
+  update([incoming]);
+  const article = root.querySelector('article');
+  const details = article.querySelector('details');
+  assert.ok(details, 'structured details use native disclosure');
+  assert.equal(details.hasAttribute('open'), false);
+  assert.equal(details.querySelector('summary').textContent, 'Details');
+  const overview = article.querySelector(':scope > .pm-chat__text');
+  assert.equal(overview.textContent, incoming.body, 'typed overview preserves literal text and logical lines');
+  assert.ok(overview.classList.contains('is-plaintext'));
+  assert.equal(overview.querySelector('literal'), null);
+  assert.ok(details.querySelector('.knowledge-markdown-body'), 'details use the common Markdown renderer');
+  assert.ok(details.textContent.includes(complete), 'all 18k characters and the final item survive');
+  assert.equal(details.querySelector('strong').textContent, 'Complete evidence');
+  assert.equal(details.querySelector('a').getAttribute('href'), incoming.structured.refs[0]);
+  article.querySelector('[aria-label="Copy report"]').click();
+  await Promise.resolve();
+  assert.deepEqual(copied, [`${incoming.body}\n\n${complete}\n\n- ${incoming.structured.refs[0]}`]);
+});
+
+test('structured details have a safe text fallback while legacy, peer and Q&A retain full content', () => {
+  const { root, update } = fixture();
+  const incoming = structuredReport();
+  delete incoming.details_html;
+  incoming.structured.details = '<script>literal detail</script>\nLast detail';
+  const legacy = report('legacy');
+  const peer = { ...report('pm-peer-one'), body: 'Complete peer text', body_html: '<p>Complete peer text</p>' };
+  const qa = { ...report('qa'), kind: 'qa', question: 'Explain every result.' };
+  update([incoming, legacy, peer, qa]);
+  const articles = Array.from(root.querySelectorAll('article'));
+  const details = articles[0].querySelector('details');
+  assert.ok(details, 'typed report retains its disclosure without HTML');
+  assert.equal(details.querySelector('script'), null);
+  assert.equal(details.querySelector('.is-plaintext').textContent,
+    `${incoming.structured.details}\n\n- ${incoming.structured.refs[0]}`);
+  assert.equal(root.querySelectorAll('article details').length, 1, 'legacy sources do not gain a disclosure');
+  assert.match(articles[1].textContent, /Update.*Ready.*checked.*cargo test/s);
+  assert.match(articles[2].textContent, /Complete peer text/);
+  assert.match(articles[3].querySelector('[aria-label="Answer"]').textContent, /Update.*Ready.*checked.*cargo test/s);
+});
+
+test('structured disclosure follows report identity across polling and filters without moving a history reader', () => {
+  const { root, model, update } = fixture();
+  const body = root.querySelector('.pm-chat__body');
+  Object.defineProperties(body, { clientHeight: { value: 100 }, scrollHeight: { value: 2000 } });
+  const first = structuredReport('first');
+  const second = { ...structuredReport('second'), kind: 'decision' };
+  update([first]);
+  const opened = root.querySelector('article details');
+  assert.ok(opened, 'typed report has a disclosure to open');
+  opened.setAttribute('open', '');
+  body.scrollTop = 120;
+  update([first, second]);
+  let details = root.querySelectorAll('article details');
+  assert.equal(details[0].hasAttribute('open'), true, 'a new report does not close an expanded report');
+  assert.equal(details[1].hasAttribute('open'), false, 'a different report starts collapsed');
+  assert.equal(body.scrollTop, 120);
+  const select = root.querySelector('select');
+  const choose = kind => {
+    select.querySelector(`option[value="${kind}"]`).selected = true;
+    select.dispatchEvent(new root.ownerDocument.defaultView.Event('change'));
+  };
+  choose('decision');
+  choose('all');
+  details = root.querySelectorAll('article details');
+  assert.equal(details[0].hasAttribute('open'), true, 'filtering retains the state by report id');
+  details[0].removeAttribute('open');
+  update([second, first]);
+  assert.equal(Array.from(root.querySelectorAll('article details')).some(node => node.hasAttribute('open')), false,
+    'closing a report survives reordering and polling');
+  root.querySelector('article details').setAttribute('open', '');
+  model.bindPmWindowState('pm', 'replacement');
+  update([second]);
+  assert.equal(root.querySelector('article details').hasAttribute('open'), false, 'a new session resets local disclosure state');
+});
+
 test('report kind filter retains its selection on polling and hides with the execution log', () => {
   const { root, update } = fixture();
   const history = [report(), { ...report('qa'), kind: 'qa', question: 'Why?' }, { ...report('decision'), kind: 'decision' }];
@@ -335,6 +422,7 @@ test('Reports reuses the content renderer and Operator tokens without an overlay
   assert.match(section, /\.pm-chat__filter\s*\{[^}]*var\(--space-/);
   assert.match(section, /\.pm-chat__filter select:focus-visible\s*\{[^}]*var\(--color-focus-ring\)/);
   assert.match(section, /\.pm-chat__question\s*\{[^}]*white-space:\s*pre-wrap/);
+  assert.match(section, /\.pm-chat__text\.is-plaintext\s*\{[^}]*white-space:\s*pre-wrap/);
   assert.match(section, /\.pm-chat__section-label\s*\{[^}]*var\(--type-/);
   assert.doesNotMatch(section, /#[\da-f]{3,8}\b|rgba?\(|position:\s*(fixed|absolute)/i);
 });
