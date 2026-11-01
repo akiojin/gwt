@@ -2840,6 +2840,7 @@ fn native_grok_answer_holder(
         "cwd":session.worktree_path,
     })
     .to_string();
+    let mut readiness = owner.subscribe();
     pane.with_agent_environment(|| {
         let _ready_nonce = pane.pending_fresh_execution.as_ref().map(|pending| {
             ScopedEnvVar::set(
@@ -2850,12 +2851,12 @@ fn native_grok_answer_holder(
         gwt::daemon_runtime::handle_runtime_state("SessionStart", &hook).unwrap();
         gwt::daemon_runtime::handle_forward_for_event("SessionStart", &hook).unwrap();
     });
-    if let Some(pending) = &pane.pending_fresh_execution {
-        // The protected SessionStart already started readiness. Observe that
-        // exact job instead of racing a second request across bearer promotion.
+    // Avoid a competing Prepared request while SessionStart promotes the
+    // holder; retain the positive HTTP resend after its exact commit settles.
+    if let Some(pending) = pane.pending_fresh_execution.as_ref() {
         owner_fixture_block_on(async {
-            // test-hygiene: allow-wall-clock-deadline Bounds the original protected readiness job; identity and canonical publication establish success.
-            tokio::time::timeout(Duration::from_secs(30), async {
+            // test-hygiene: allow-wall-clock-deadline Bounds an actual SessionStart worker hang; the exact owner assertions establish completion before the positive HTTP resend.
+            tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
                 loop {
                     let current = owner.probe(&pane.id, pane.incarnation).await.unwrap();
                     assert!(current.current.load(std::sync::atomic::Ordering::Acquire));
@@ -2875,7 +2876,7 @@ fn native_grok_answer_holder(
                         );
                         break;
                     }
-                    tokio::task::yield_now().await;
+                    readiness.recv().await.expect("owner readiness progress");
                 }
             })
             .await
@@ -2958,6 +2959,12 @@ fn app_runtime_answered_handoff_continues_the_exact_live_holder() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _control_budget = ScopedEnvVar::set(
+        "GWT_TEST_BUDGET_DURABLE_ISSUE_MONITOR_CONTROL_MS",
+        gwt_core::deadline_budget::HANG_GUARD
+            .as_millis()
+            .to_string(),
+    );
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -3236,6 +3243,12 @@ fn app_runtime_failed_live_handoff_delivery_keeps_the_answer_pending() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _control_budget = ScopedEnvVar::set(
+        "GWT_TEST_BUDGET_DURABLE_ISSUE_MONITOR_CONTROL_MS",
+        gwt_core::deadline_budget::HANG_GUARD
+            .as_millis()
+            .to_string(),
+    );
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());

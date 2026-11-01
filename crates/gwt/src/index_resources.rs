@@ -147,7 +147,7 @@ fn measure_process_trees(root_pid: Option<u32>) -> Option<ProcessTreeUsage> {
         .with_cmd(UpdateKind::OnlyIfNotSet)
         // Linux otherwise exposes threads as children with duplicate RSS.
         .without_tasks();
-    let mut system = System::new();
+    let mut system = System::new().ok()?;
     system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh);
     if let Some(root) = root {
         system.process(root)?;
@@ -210,7 +210,7 @@ fn query_worker_status_at(worker_dir: &Path) -> QueryWorkerStatus {
         let endpoint: serde_json::Value =
             serde_json::from_slice(&std::fs::read(worker_dir.join("endpoint.json")).ok()?).ok()?;
         let pid = u32::try_from(endpoint.get("pid")?.as_u64()?).ok()?;
-        let mut system = System::new();
+        let mut system = System::new().ok()?;
         system.refresh_processes_specifics(
             ProcessesToUpdate::Some(&[Pid::from_u32(pid)]),
             true,

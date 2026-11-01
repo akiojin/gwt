@@ -7,7 +7,7 @@ use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 #[derive(Default)]
 pub(crate) struct InteractiveProcessDetector {
-    system: System,
+    system: Option<System>,
 }
 
 struct ProcessSample {
@@ -19,7 +19,20 @@ struct ProcessSample {
 
 impl InteractiveProcessDetector {
     pub(crate) fn detect(&mut self, root_pid: u32) -> Option<String> {
-        self.system.refresh_processes_specifics(
+        if self.system.is_none() {
+            match System::new() {
+                Ok(system) => self.system = Some(system),
+                Err(error) => {
+                    return Some(format!(
+                        "interactive authentication process observation unavailable: {error}; \
+                         reclaiming only owned command pid {root_pid}; repair the observation \
+                         environment and rerun verify.run."
+                    ));
+                }
+            }
+        }
+        let system = self.system.as_mut()?;
+        system.refresh_processes_specifics(
             ProcessesToUpdate::All,
             true,
             ProcessRefreshKind::nothing()
@@ -27,8 +40,7 @@ impl InteractiveProcessDetector {
                 // A shell can exec a helper without changing its PID.
                 .with_exe(UpdateKind::Always),
         );
-        let processes = self
-            .system
+        let processes = system
             .processes()
             .values()
             .map(|process| ProcessSample {

@@ -232,7 +232,7 @@ struct HarnessWorker(sysinfo::Pid, u64);
 impl HarnessWorker {
     fn new(pid: u32) -> Self {
         let pid = sysinfo::Pid::from_u32(pid);
-        let mut system = sysinfo::System::new();
+        let mut system = sysinfo::System::new().expect("initialize test process observation");
         system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
         Self(
             pid,
@@ -246,7 +246,7 @@ impl HarnessWorker {
 
 impl Drop for HarnessWorker {
     fn drop(&mut self) {
-        let mut system = sysinfo::System::new();
+        let mut system = sysinfo::System::new().expect("initialize test process observation");
         system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[self.0]), true);
         if let Some(process) = system
             .process(self.0)
