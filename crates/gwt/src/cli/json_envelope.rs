@@ -2356,8 +2356,22 @@ fn hook_health(params: &Map<String, Value>) -> Result<CliCommand, CliParseError>
 }
 
 fn hook_doctor(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
+    let purpose = match optional_string(params, "purpose")?.as_deref() {
+        None => None,
+        Some("managed_browser") => Some(super::hook::health::HookDoctorPurpose::ManagedBrowser),
+        Some(_) => {
+            return Err(CliParseError::InvalidJson(
+                "unknown hook.doctor purpose".to_string(),
+            ))
+        }
+    };
+    let runtime_state_path = optional_path(params, "runtime_state_path")?;
+    if purpose.is_some() && runtime_state_path.is_some() {
+        return Err(CliParseError::InvalidJson("managed_browser resolves the current source internally; runtime_state_path is not accepted".to_string()));
+    }
     Ok(CliCommand::Hook(HookCommand::Doctor {
-        runtime_state_path: optional_path(params, "runtime_state_path")?,
+        purpose,
+        runtime_state_path,
         profile_path: optional_path(params, "profile_path")?,
         expected_hook_bin: optional_string(params, "expected_hook_bin")?,
         repair: optional_bool(params, "repair")?.unwrap_or(false),
@@ -6821,6 +6835,25 @@ mod tests {
             err("issue.monitor.priority.set", json!({})),
             CliParseError::MissingFlag("issue_numbers")
         ));
+    }
+
+    #[test]
+    fn managed_browser_doctor_accepts_only_internal_current_source_resolution() {
+        assert!(matches!(
+            ok("hook.doctor", json!({"purpose":"managed_browser"})),
+            CliCommand::Hook(HookCommand::Doctor {
+                purpose: Some(super::super::hook::health::HookDoctorPurpose::ManagedBrowser),
+                ..
+            })
+        ));
+        for params in [
+            json!({"purpose":"unknown"}),
+            json!({"purpose":"managed_browser","runtime_state_path":"/arbitrary/runtime.json"}),
+            json!({"purpose":"managed_browser","session_id":"self-reported"}),
+            json!({"purpose":"managed_browser","authority_hash":"self-reported"}),
+        ] {
+            let _ = err("hook.doctor", params);
+        }
     }
 
     #[test]

@@ -489,6 +489,14 @@ pub struct PendingDiscussionResume {
     pub next_question: Option<String>,
 }
 
+/// Protocol outcome of a completed managed hook, independent of its exit code.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HookCompletionOutcome {
+    Normal,
+    Blocked,
+}
+
 /// Lightweight runtime state updated by hook events while the PTY is alive.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionRuntimeState {
@@ -527,6 +535,9 @@ pub struct SessionRuntimeState {
     /// the newest hook failure to tell "recovered" from "unresolved".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_completed_hook_event_at: Option<DateTime<Utc>>,
+    /// Missing in old sidecars; absence is never evidence of a normal outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_completed_hook_outcome: Option<HookCompletionOutcome>,
     #[serde(default)]
     pub pending_discussion: Option<PendingDiscussionResume>,
 }
@@ -2073,6 +2084,7 @@ impl SessionRuntimeState {
             source_event: None,
             active_tool_calls: None,
             last_completed_hook_event_at: None,
+            last_completed_hook_outcome: None,
             pending_discussion: None,
         }
     }
@@ -5608,6 +5620,23 @@ display_name = "Claude Code"
     }
 
     #[test]
+    fn runtime_state_completion_outcome_is_optional_and_roundtrips_without_guessing() {
+        let fresh = SessionRuntimeState::new(AgentStatus::Running);
+        let mut wire = serde_json::to_value(&fresh).unwrap();
+        assert!(wire.get("last_completed_hook_outcome").is_none());
+        for outcome in ["normal", "blocked"] {
+            wire["last_completed_hook_outcome"] = serde_json::json!(outcome);
+            let state: SessionRuntimeState = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(
+                serde_json::to_value(state).unwrap()["last_completed_hook_outcome"],
+                outcome
+            );
+        }
+        wire["last_completed_hook_outcome"] = serde_json::json!("future_unknown");
+        assert!(serde_json::from_value::<SessionRuntimeState>(wire).is_err());
+    }
+
+    #[test]
     fn runtime_state_legacy_json_defaults_execution_proof_to_none() {
         let legacy = r#"{
   "status": "Running",
@@ -5623,6 +5652,7 @@ display_name = "Claude Code"
         assert!(runtime.runtime_incarnation.is_none());
         assert!(runtime.host_started_at.is_none());
         assert!(runtime.active_tool_calls.is_none());
+        assert!(runtime.last_completed_hook_outcome.is_none());
     }
 
     #[test]
@@ -5639,6 +5669,8 @@ display_name = "Claude Code"
 
         assert_eq!(runtime.execution_identity.as_ref(), Some(&identity));
         assert_eq!(runtime.runtime_incarnation, Some(17));
+        assert!(runtime.last_completed_hook_event_at.is_none());
+        assert!(runtime.last_completed_hook_outcome.is_none());
     }
 
     #[test]

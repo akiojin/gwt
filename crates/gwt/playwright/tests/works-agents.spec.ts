@@ -5,6 +5,7 @@
  */
 import { expect, test, type Page } from "@playwright/test";
 import { APP_PROJECT_KEY, APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { startWorksManagedSource } from "./_helpers/works-managed-source";
 
 const appUrl = process.env.GWT_PLAYWRIGHT_BASE_URL
   ? new URL(new URL(APP_URL).pathname, process.env.GWT_PLAYWRIGHT_BASE_URL).href
@@ -26,8 +27,21 @@ async function expectNoHorizontalOverflow(page: Page, selector: string) {
 test.describe("Works and Agents approved baseline", () => {
   test.setTimeout(60_000);
   test.use({ deviceScaleFactor: 1, viewport: { width: 1440, height: 1000 } });
+  let managedSource: Awaited<ReturnType<typeof startWorksManagedSource>> | undefined;
+
+  test.beforeAll(async ({ browser }, info) => {
+    if (process.env.GWT_PLAYWRIGHT_WORKS_SOURCE === "1") {
+      managedSource = await startWorksManagedSource(browser, info);
+    }
+  });
+
+  test.afterAll(async () => {
+    await managedSource?.stop();
+    managedSource = undefined;
+  });
 
   test.beforeEach(async ({ page }, info) => {
+    await managedSource?.audit("before");
     const errors: string[] = []; capturedErrors.set(page, errors);
     page.on("pageerror", error => errors.push(error.message));
     page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
@@ -35,19 +49,33 @@ test.describe("Works and Agents approved baseline", () => {
       localStorage.setItem("gwt:ui:theme", theme);
       localStorage.setItem("gwt:ui:agent-columns", "3");
     }, info.project.name.includes("light") ? "light" : "dark");
-    if (!process.env.GWT_PLAYWRIGHT_BASE_URL) await installEmbeddedRoutes(page);
+    if (!managedSource && !process.env.GWT_PLAYWRIGHT_BASE_URL) await installEmbeddedRoutes(page);
     await installWorksAgentsBackend(page);
-    await page.goto(appUrl);
+    await page.goto(managedSource
+      ? new URL(new URL(APP_URL).pathname, managedSource.url).href
+      : appUrl);
     await openRail(page, "works");
     await expect(main(page)).toHaveAttribute("data-surface", "works");
     await expect(workRow(page, "agent-one")).toBeVisible();
   });
 
   test.afterEach(async ({ page }, info) => {
-    await expect(page.locator(".render-degradation-banner")).toHaveCount(0);
-    await expect(page.locator("html")).toHaveAttribute("data-theme", info.project.name.includes("light") ? "light" : "dark");
-    expect(capturedErrors.get(page), "zero console/page errors, including readback and navigation").toEqual([]);
-    expect((await sent(page)).filter(message => ["close_window", "stop_agent", "stop_window", "restart_window"].includes(message.kind))).toEqual([]);
+    const failures: unknown[] = [];
+    try {
+      await expect(page.locator(".render-degradation-banner")).toHaveCount(0);
+      await expect(page.locator("html")).toHaveAttribute("data-theme", info.project.name.includes("light") ? "light" : "dark");
+      expect(capturedErrors.get(page), "zero console/page errors, including readback and navigation").toEqual([]);
+      expect((await sent(page)).filter(message => ["close_window", "stop_agent", "stop_window", "restart_window"].includes(message.kind))).toEqual([]);
+    } catch (error) {
+      failures.push(error);
+    }
+    try {
+      await managedSource?.audit("post");
+    } catch (error) {
+      failures.push(error);
+    }
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) throw new AggregateError(failures, "Works assertions and source post proof failed");
   });
 
   test("live Works never disappear while activity and catalogs converge", async ({ page }, info) => {

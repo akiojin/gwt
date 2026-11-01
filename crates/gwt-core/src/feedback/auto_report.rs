@@ -192,6 +192,89 @@ enum AutoMode {
     Auto,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnedAutoVersion {
+    V1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnedAutoOrigin {
+    InheritedCliEnvironment,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnedAutoPhase {
+    PreDispatch,
+    CancelAccepted,
+    DispatchCommitted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnedExitObservation {
+    Unknown,
+    NotStarted,
+    Confirmed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnedCleanupObservation {
+    Unknown,
+    Confirmed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnedAutoReason {
+    Cancelled,
+    WorkDeadline,
+    ExitDeadline,
+    OwnerUnavailable,
+    WorkerUnavailable,
+    CleanupUnobserved,
+    SenderInterrupted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnedCancelResult {
+    Accepted,
+    TooLateOrUnknown,
+}
+
+/// Local lifecycle facts only. Process identities and authentication stay in
+/// the private owner; neither belongs in a durable receipt or public payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnedAutoAttempt {
+    #[serde(with = "request_id")]
+    pub id: uuid::Uuid,
+    pub origin: OwnedAutoOrigin,
+    pub phase: OwnedAutoPhase,
+    pub exit: OwnedExitObservation,
+    pub cleanup: OwnedCleanupObservation,
+    pub reason: Option<OwnedAutoReason>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnedAutoMetadata {
+    pub version: OwnedAutoVersion,
+    pub attempt: Option<OwnedAutoAttempt>,
+}
+
+impl OwnedAutoMetadata {
+    pub(super) fn pending() -> Self {
+        Self {
+            version: OwnedAutoVersion::V1,
+            attempt: None,
+        }
+    }
+}
+
 /// Immutable snapshot shared by storage, fingerprinting and the typed sender.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -225,6 +308,13 @@ pub struct AutoFeedbackRecord {
     pub state: FeedbackState,
     pub issue_number: Option<u64>,
     pub error: Option<AutoReason>,
+    // Missing means legacy; an explicit null must never downgrade an owned tag.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_owned"
+    )]
+    pub owned: Option<OwnedAutoMetadata>,
 }
 
 impl AutoFeedbackRecord {
@@ -244,8 +334,40 @@ impl AutoFeedbackRecord {
             },
             issue_number: None,
             error: (!sendable).then_some(AutoReason::InsufficientInformation),
+            owned: None,
         }
     }
+
+    pub(super) fn valid_owned(&self) -> bool {
+        let Some(owned) = &self.owned else {
+            return true;
+        };
+        let Some(attempt) = &owned.attempt else {
+            return matches!(
+                self.state,
+                FeedbackState::Queued
+                    | FeedbackState::Failed
+                    | FeedbackState::Withheld
+                    | FeedbackState::Uncertain
+            );
+        };
+        !attempt.id.is_nil()
+            && (attempt.cleanup != OwnedCleanupObservation::Confirmed
+                || attempt.exit != OwnedExitObservation::Unknown)
+            && !(attempt.phase == OwnedAutoPhase::DispatchCommitted
+                && attempt.exit == OwnedExitObservation::NotStarted)
+            && (attempt.phase != OwnedAutoPhase::DispatchCommitted
+                || matches!(
+                    self.state,
+                    FeedbackState::Sending | FeedbackState::Sent | FeedbackState::Uncertain
+                ))
+    }
+}
+
+fn deserialize_owned<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<OwnedAutoMetadata>, D::Error> {
+    OwnedAutoMetadata::deserialize(deserializer).map(Some)
 }
 
 mod request_id {

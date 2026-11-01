@@ -63,6 +63,11 @@ fn first_inline_code(line: &str) -> &str {
 }
 
 #[cfg(unix)]
+fn browser_preflight(result: &str) -> serde_json::Value {
+    serde_json::json!({"schema_version":1,"result":result,"context":"current","normal_completion":"normal","convergence":"converged","reasons":[],"diagnostics":[]})
+}
+
+#[cfg(unix)]
 fn browser_check_shell_block(name: &str) -> String {
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let skill_path = workspace_root.join(".claude/skills/browser-check/SKILL.md");
@@ -547,6 +552,30 @@ fn browser_check_authority_fails_closed_when_materialization_resolver_fails() {
 
 #[cfg(unix)]
 #[test]
+fn browser_check_keeps_current_source_separate_from_target_and_retained_history() {
+    for name in ["hook-repair", "hook-audit"] {
+        let block = browser_check_shell_block(name);
+        assert!(
+            !block.contains("browser-check-missing-runtime-state"),
+            "{name}: a missing target runtime is not source evidence"
+        );
+        assert!(
+            block.contains("managed_browser"),
+            "{name}: use the typed doctor purpose"
+        );
+        assert!(
+            block.contains(".preflight.result"),
+            "{name}: consume typed readiness"
+        );
+        assert!(
+            !block.contains("state=fail-open"),
+            "{name}: retained strings do not authorize readiness"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn browser_check_repairs_exact_hook_fallback_before_launch() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -555,7 +584,7 @@ fn browser_check_repairs_exact_hook_fallback_before_launch() {
     let capture = dir.path().join("capture.txt");
     fs::write(
         &fake_gwtd,
-        "#!/bin/sh\nprintf 'GWT_BIN_PATH=%s\\nGWT_HOOK_BIN=%s\\n' \"${GWT_BIN_PATH-unset}\" \"${GWT_HOOK_BIN-unset}\" > \"$CAPTURE\"\ncat >> \"$CAPTURE\"\nprintf '%s\\n' '{\"ok\":true,\"output\":\"{\\\"repair\\\":{},\\\"health\\\":{\\\"status\\\":\\\"healthy\\\",\\\"issues\\\":[]}}\"}'\n",
+        "#!/bin/sh\nprintf 'GWT_BIN_PATH=%s\\nGWT_HOOK_BIN=%s\\n' \"${GWT_BIN_PATH-unset}\" \"${GWT_HOOK_BIN-unset}\" > \"$CAPTURE\"\ncat >> \"$CAPTURE\"\nprintf '%s\\n' \"$DOCTOR_RESPONSE\"\n",
     )
     .expect("write fake gwtd");
     fs::set_permissions(&fake_gwtd, fs::Permissions::from_mode(0o755))
@@ -569,6 +598,7 @@ fn browser_check_repairs_exact_hook_fallback_before_launch() {
         .env("CHECKOUT_GWTD", &fake_gwtd)
         .env("CHECK_HOOK_BIN", "gwtd")
         .env("CAPTURE", &capture)
+        .env("DOCTOR_RESPONSE", serde_json::json!({"ok":true,"output":serde_json::json!({"health":{"status":"ready","issues":[]},"preflight":browser_preflight("proceed")}).to_string()}).to_string())
         .env("GWT_BIN_PATH", "/stale/target/debug/gwtd")
         .output()
         .expect("run hook repair block");
@@ -585,6 +615,8 @@ fn browser_check_repairs_exact_hook_fallback_before_launch() {
     let request = captured.lines().skip(2).collect::<Vec<_>>().join("\n");
     let request: serde_json::Value = serde_json::from_str(&request).expect("doctor request JSON");
     assert_eq!(request["operation"], "hook.doctor");
+    assert_eq!(request["params"]["purpose"], "managed_browser");
+    assert!(request["params"].get("runtime_state_path").is_none());
     assert_eq!(request["params"]["repair"], true);
     assert_eq!(request["params"]["expected_hook_bin"], "gwtd");
 }
@@ -860,11 +892,10 @@ fn browser_check_gates_allow_only_fail_open_hook_failures() {
             "issues": [issue],
         });
         for gate in ["hook-repair", "hook-audit"] {
-            let evidence = if gate == "hook-repair" {
-                serde_json::json!({"health": health})
-            } else {
-                health.clone()
-            };
+            let evidence = serde_json::json!({
+                "health": health,
+                "preflight": browser_preflight(if state == "fail-open" { "proceed" } else { "blocked" }),
+            });
             let response = serde_json::json!({"ok": true, "output": evidence.to_string()});
             let output = hidden_command("bash")
                 .args(["-c", &browser_check_shell_block(gate)])
@@ -885,6 +916,49 @@ fn browser_check_gates_allow_only_fail_open_hook_failures() {
             if state != "fail-open" {
                 assert!(stderr.contains(&format!("state={state}")), "{stderr}");
             }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn browser_check_rejects_old_partial_and_contradictory_typed_evidence() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let daemon = dir.path().join("gwtd");
+    fs::write(
+        &daemon,
+        "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' \"$DOCTOR_RESPONSE\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&daemon, fs::Permissions::from_mode(0o755)).unwrap();
+    for preflight in [
+        serde_json::Value::Null,
+        serde_json::json!({"result":"proceed"}),
+        {
+            let mut p = browser_preflight("proceed");
+            p["diagnostics"] = serde_json::json!([{"id":"failure", "classification":"unresolved"}]);
+            p
+        },
+        {
+            let mut p = browser_preflight("proceed");
+            p["diagnostics"] =
+                serde_json::json!([{"id":"failure", "classification":"unattributed"}]);
+            p
+        },
+    ] {
+        for gate in ["hook-repair", "hook-audit"] {
+            let response = serde_json::json!({"ok":true,"output":serde_json::json!({"health":{"status":"needs_attention","issues":["managed hook failure: retained state=recovered"]},"preflight":preflight}).to_string()});
+            let result = hidden_command("bash")
+                .args(["-c", &browser_check_shell_block(gate)])
+                .env("REPO_ROOT", dir.path())
+                .env("CHECK_HOME", dir.path())
+                .env("CHECKOUT_GWTD", &daemon)
+                .env("CHECK_HOOK_BIN", "gwtd")
+                .env("DOCTOR_RESPONSE", response.to_string())
+                .output()
+                .unwrap();
+            assert!(!result.status.success(), "{gate}: {preflight}");
         }
     }
 }
