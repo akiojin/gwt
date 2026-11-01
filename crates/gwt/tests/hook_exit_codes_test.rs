@@ -486,7 +486,9 @@ fn event_dispatcher_user_prompt_fails_open_when_session_toml_is_corrupt() {
     let _userprofile = ScopedEnvVar::set("USERPROFILE", tmp.path());
     let sessions_dir = tmp.path().join(".gwt").join("sessions");
     std::fs::create_dir_all(&sessions_dir).unwrap();
-    std::fs::write(sessions_dir.join("session-corrupt.toml"), "odex\"").unwrap();
+    let session_path = sessions_dir.join("session-corrupt.toml");
+    std::fs::write(&session_path, "odex\"").unwrap();
+    let metadata = std::fs::read(&session_path).unwrap();
     let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, "session-corrupt");
     let _session_id = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "session-corrupt");
     let _runtime_path = ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
@@ -500,10 +502,11 @@ fn event_dispatcher_user_prompt_fails_open_when_session_toml_is_corrupt() {
     .expect("corrupt session TOML must not make UserPromptSubmit exit 1");
 
     assert_eq!(output, HookOutput::Silent);
-    let runtime_raw = std::fs::read_to_string(&runtime_path).unwrap();
-    let runtime_state: RuntimeState = serde_json::from_str(&runtime_raw).unwrap();
-    assert_eq!(runtime_state.status, "Running");
-    assert_eq!(runtime_state.source_event, "UserPromptSubmit");
+    assert_eq!(std::fs::read(&session_path).unwrap(), metadata);
+    assert!(
+        !runtime_path.exists(),
+        "unknown source must not create a sidecar"
+    );
 }
 
 #[test]
@@ -516,7 +519,9 @@ fn event_dispatcher_stop_fails_open_when_completed_stop_metadata_is_corrupt() {
     let _userprofile = ScopedEnvVar::set("USERPROFILE", tmp.path());
     let sessions_dir = tmp.path().join(".gwt").join("sessions");
     std::fs::create_dir_all(&sessions_dir).unwrap();
-    std::fs::write(sessions_dir.join("session-corrupt.toml"), "411253Z\"").unwrap();
+    let session_path = sessions_dir.join("session-corrupt.toml");
+    std::fs::write(&session_path, "411253Z\"").unwrap();
+    let metadata = std::fs::read(&session_path).unwrap();
     let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, "session-corrupt");
     let _session_id = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "session-corrupt");
     let _runtime_path = ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
@@ -526,10 +531,11 @@ fn event_dispatcher_stop_fails_open_when_completed_stop_metadata_is_corrupt() {
             .expect("corrupt session TOML must not make Stop completed-stop exit 1");
 
     assert_eq!(output, HookOutput::Silent);
-    let runtime_raw = std::fs::read_to_string(&runtime_path).unwrap();
-    let runtime_state: RuntimeState = serde_json::from_str(&runtime_raw).unwrap();
-    assert_eq!(runtime_state.status, "Idle");
-    assert_eq!(runtime_state.source_event, "Stop");
+    assert_eq!(std::fs::read(&session_path).unwrap(), metadata);
+    assert!(
+        !runtime_path.exists(),
+        "unknown source must not create a sidecar"
+    );
 }
 
 // SPEC #3245 AC-1/AC-4 (T-107): the lane mechanism is gone — a leftover
@@ -598,4 +604,361 @@ fn stale_lane_file_does_not_alter_hook_dispatch_behavior() {
             "no Stop gate may fire (stale_lane_file={stale_lane_file}): {stdout}"
         );
     }
+}
+
+// Issue #3165: output from an older Stop must not complete a newer Stop.
+fn with_stop_completion_fixture(
+    check: impl FnOnce(&mut TestEnv, &std::path::Path, &std::path::Path),
+) {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().unwrap();
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+    let _home = ScopedEnvVar::set("HOME", home.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+    let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+    let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+    let _codex_thread = ScopedEnvVar::unset("CODEX_THREAD_ID");
+    let _autonomous = ScopedEnvVar::unset(gwt::autonomous_handoff::GWT_AUTONOMOUS_EXECUTION_ENV);
+    let _issue = ScopedEnvVar::unset(gwt::autonomous_handoff::GWT_AUTONOMOUS_ISSUE_ENV);
+    let worktree = home.path().join("repo");
+    std::fs::create_dir_all(&worktree).unwrap();
+    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    assert!(sessions_dir.starts_with(home.path()));
+    let mut session = Session::new(&worktree, "work/issue-3165", AgentId::Codex);
+    session.agent_session_id = Some("provider-stop-3165".to_string());
+    session.project_state_root = Some(worktree.clone());
+    session.repo_hash = Some("repo-stop-3165".to_string());
+    session.linked_issue_number = Some(3165);
+    session
+        .set_execution_binding(Some(gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: session.id.clone(),
+            repo_hash: "repo-stop-3165".to_string(),
+            owner_kind: "issue".to_string(),
+            owner_number: 3165,
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation-stop-3165".to_string(),
+                binding_id: "binding-stop-3165".to_string(),
+                ledger_head_hash: "head-stop-3165".to_string(),
+            },
+            capability_generation: 3,
+        }))
+        .unwrap();
+    session.save(&sessions_dir).unwrap();
+    let session_path = sessions_dir.join(format!("{}.toml", session.id));
+    let saved = Session::load(&session_path).unwrap();
+    let identity = gwt_agent::SessionExecutionIdentity::from_session(&saved)
+        .unwrap()
+        .unwrap();
+    let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session.id);
+    let process_id = std::process::id();
+    let process_started_at = gwt::process::host_process_start_time(process_id)
+        .expect("current test process start identity");
+    gwt_agent::SessionRuntimeState::for_execution_process(
+        gwt_agent::AgentStatus::Running,
+        &identity,
+        41,
+        process_started_at,
+        process_id,
+        process_started_at,
+    )
+    .save(&runtime_path)
+    .unwrap();
+    let _session_id = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
+    let _runtime_path = ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
+    skill_state::save(
+        &worktree,
+        "build-spec",
+        &SkillState {
+            start_evidence: None,
+            active: true,
+            owner_spec: Some(3165),
+            started_at: Utc::now(),
+            phase: Some("red".to_string()),
+            session_id: session.id,
+        },
+    )
+    .unwrap();
+    let mut env = TestEnv::new(worktree);
+    env.stdin = r#"{"session_id":"provider-stop-3165"}"#.to_string();
+    check(&mut env, &runtime_path, &session_path);
+}
+
+struct StopProtocolWriter {
+    before_first_write: Option<Box<dyn FnOnce() + Send>>,
+    bytes: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    fail: bool,
+}
+
+impl std::io::Write for StopProtocolWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if let Some(before) = self.before_first_write.take() {
+            before();
+        }
+        if self.fail {
+            return Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+        }
+        self.bytes.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn assert_stop_completion_is_not_assigned_to_a_successor(stop_is_allowed: bool) {
+    with_stop_completion_fixture(|env, runtime_path, session_path| {
+        if stop_is_allowed {
+            env.stdin =
+                r#"{"session_id":"provider-stop-3165","stop_hook_active":true}"#.to_string();
+        }
+        let runtime = runtime_path.to_path_buf();
+        let session_path = session_path.to_path_buf();
+        let worktree = env.repo_path.clone();
+        let bytes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let b_bytes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_b = b_bytes.clone();
+        env.stdout_writer = Some(Box::new(StopProtocolWriter {
+            before_first_write: Some(Box::new(move || {
+                let a = gwt_agent::SessionRuntimeState::load(&runtime).unwrap();
+                let expected_status = if stop_is_allowed {
+                    gwt_agent::AgentStatus::Idle
+                } else {
+                    gwt_agent::AgentStatus::Running
+                };
+                assert_eq!(a.status, expected_status);
+                assert_eq!(a.source_event.as_deref(), Some("Stop"));
+                assert!(a.last_completed_hook_event_at.is_none());
+                let session = Session::load(&session_path).unwrap();
+                assert_eq!(
+                    session.agent_session_id.as_deref(),
+                    Some("provider-stop-3165")
+                );
+                assert_eq!(session.last_completed_stop_at.is_some(), stop_is_allowed);
+                let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(a.execution_identity.as_ref(), Some(&identity));
+                assert_eq!(a.runtime_incarnation, Some(41));
+                let process_id = std::process::id();
+                let process_started_at = gwt::process::host_process_start_time(process_id)
+                    .expect("current test process still has its start identity");
+                assert_eq!(a.host_started_at, Some(process_started_at));
+                assert_eq!(a.child_pid, Some(process_id));
+                assert_eq!(a.child_started_at, Some(process_started_at));
+                let output = event_dispatcher::handle_with_input(
+                    "Stop",
+                    r#"{"session_id":"provider-stop-3165","stop_hook_active":true}"#,
+                    &worktree,
+                    Some(&session.id),
+                )
+                .unwrap();
+                assert!(matches!(output, HookOutput::SystemMessage(_)));
+                let b = gwt_agent::SessionRuntimeState::load(&runtime).unwrap();
+                assert_eq!(b.status, gwt_agent::AgentStatus::Idle);
+                assert_eq!(b.source_event.as_deref(), Some("Stop"));
+                assert!(b.last_completed_hook_event_at.is_none());
+                assert_eq!(b.execution_identity, a.execution_identity);
+                assert_eq!(b.runtime_incarnation, a.runtime_incarnation);
+                assert_eq!(b.host_started_at, a.host_started_at);
+                assert_eq!(b.child_pid, a.child_pid);
+                assert_eq!(b.child_started_at, a.child_started_at);
+                let a_observation = a.current_hook_event.as_ref().unwrap();
+                let b_observation = b.current_hook_event.as_ref().unwrap();
+                assert_ne!(a_observation.correlation_id, b_observation.correlation_id);
+                assert_eq!(b_observation.event, "Stop");
+                assert!(b_observation.completed_outcome.is_none());
+                let stopped = Session::load(&session_path).unwrap();
+                assert_eq!(stopped.agent_session_id, session.agent_session_id);
+                assert_eq!(
+                    gwt_agent::SessionExecutionIdentity::from_session(&stopped).unwrap(),
+                    Some(identity)
+                );
+                assert_eq!(stopped.last_hook_event.as_deref(), Some("Stop"));
+                assert!(stopped.last_completed_stop_at.is_some());
+                *captured_b.lock().unwrap() = std::fs::read(&runtime).unwrap();
+                // B has made its decision; no B protocol output is emitted.
+            })),
+            bytes: bytes.clone(),
+            fail: false,
+        }));
+        let code = gwt::cli::hook::run_daemon_hook(env, "event", &argv(&["Stop"]))
+            .expect("Stop dispatcher must succeed");
+        assert_eq!(code, 0, "successful Stop protocol serialization exits zero");
+        let output: serde_json::Value = serde_json::from_slice(&bytes.lock().unwrap()).unwrap();
+        if stop_is_allowed {
+            assert!(output["systemMessage"].is_string());
+            assert!(output.get("decision").is_none());
+        } else {
+            assert_eq!(output["decision"], "block");
+        }
+        let b = gwt_agent::SessionRuntimeState::load(runtime_path).unwrap();
+        assert!(
+            b.last_completed_hook_event_at.is_none(),
+            "A's output (allowed={stop_is_allowed}) must not complete B's un-emitted protocol: {b:?}"
+        );
+        assert_eq!(
+            std::fs::read(runtime_path).unwrap(),
+            *b_bytes.lock().unwrap(),
+            "A's completion must leave B's publication unchanged"
+        );
+    });
+}
+
+#[test]
+fn issue_3165_stop_completion_waits_for_its_own_protocol_output() {
+    assert_stop_completion_is_not_assigned_to_a_successor(false);
+}
+
+#[test]
+fn issue_3165_stop_completion_distinguishes_two_allowed_stops() {
+    assert_stop_completion_is_not_assigned_to_a_successor(true);
+}
+
+#[test]
+fn issue_3165_stop_completion_records_allowed_protocol_success() {
+    with_stop_completion_fixture(|env, runtime_path, session_path| {
+        env.stdin = r#"{"session_id":"provider-stop-3165","stop_hook_active":true}"#.to_string();
+        let code = gwt::cli::hook::run_daemon_hook(env, "event", &argv(&["Stop"]))
+            .expect("Stop dispatcher must succeed");
+        assert_eq!(code, 0);
+        let output: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
+        assert!(output["systemMessage"].is_string());
+        assert!(output.get("decision").is_none());
+        let runtime = gwt_agent::SessionRuntimeState::load(runtime_path).unwrap();
+        assert_eq!(runtime.status, gwt_agent::AgentStatus::Idle);
+        assert!(runtime.last_completed_hook_event_at.is_some());
+        assert_eq!(
+            runtime
+                .current_hook_event
+                .as_ref()
+                .unwrap()
+                .completed_outcome,
+            Some(gwt_agent::session::HookCompletionOutcome::Normal)
+        );
+        assert!(Session::load(session_path)
+            .unwrap()
+            .last_completed_stop_at
+            .is_some());
+    });
+}
+
+#[test]
+fn issue_3165_stop_completion_does_not_record_failed_protocol_output() {
+    with_stop_completion_fixture(|env, runtime_path, _| {
+        let bytes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        env.stdout_writer = Some(Box::new(StopProtocolWriter {
+            before_first_write: None,
+            bytes: bytes.clone(),
+            fail: true,
+        }));
+        let code = gwt::cli::hook::run_daemon_hook(env, "event", &argv(&["Stop"]))
+            .expect("Stop dispatcher must succeed");
+        assert_eq!(code, 1, "a failed nonempty StopBlock write must fail");
+        assert!(bytes.lock().unwrap().is_empty());
+        let runtime = gwt_agent::SessionRuntimeState::load(runtime_path).unwrap();
+        assert_eq!(runtime.status, gwt_agent::AgentStatus::Running);
+        assert!(runtime.last_completed_hook_event_at.is_none());
+    });
+}
+
+#[test]
+fn issue_3165_stop_completion_does_not_complete_before_cli_publication() {
+    with_stop_completion_fixture(|env, runtime_path, _| {
+        let bytes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        env.stdout_writer = Some(Box::new(StopProtocolWriter {
+            before_first_write: None,
+            bytes: bytes.clone(),
+            fail: true,
+        }));
+        let code = dispatch(
+            env,
+            &argv(&["gwt", "__internal", "daemon-hook", "event", "Stop"]),
+        );
+        assert_eq!(code, 1, "a failed nonempty StopBlock write must fail");
+        assert!(bytes.lock().unwrap().is_empty());
+        let runtime = gwt_agent::SessionRuntimeState::load(runtime_path).unwrap();
+        assert_eq!(runtime.status, gwt_agent::AgentStatus::Running);
+        assert!(runtime.last_completed_hook_event_at.is_none());
+    });
+}
+
+#[test]
+fn issue_3165_early_refusal_clears_normal_without_starting_tool_lifetime() {
+    with_stop_completion_fixture(|env, runtime_path, session_path| {
+        env.stdin = r#"{"session_id":"provider-stop-3165","stop_hook_active":true}"#.into();
+        assert_eq!(
+            gwt::cli::hook::run_daemon_hook(env, "event", &argv(&["Stop"])).unwrap(),
+            0
+        );
+        let mut expected: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(runtime_path).unwrap()).unwrap();
+        assert_eq!(
+            expected["current_hook_event"]["completed_outcome"],
+            "normal"
+        );
+        let session = std::fs::read(session_path).unwrap();
+        env.stdout.clear();
+        env.stdin = r#"{"session_id":"provider-stop-3165","tool_name":"Bash","tool_input":{"command":"gh issue edit 123 --title updated"}}"#.into();
+        assert_eq!(
+            gwt::cli::hook::run_daemon_hook(env, "event", &argv(&["PreToolUse"])).unwrap(),
+            2
+        );
+        let output: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
+        assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "deny");
+        let actual: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(runtime_path).unwrap()).unwrap();
+        expected
+            .as_object_mut()
+            .unwrap()
+            .remove("current_hook_event");
+        expected["last_completed_hook_event_at"] = actual["last_completed_hook_event_at"].clone();
+        expected["last_completed_hook_outcome"] = serde_json::json!("blocked");
+        assert_eq!(
+            actual, expected,
+            "a refused tool changes only completion evidence"
+        );
+        assert_eq!(std::fs::read(session_path).unwrap(), session);
+    });
+}
+
+#[test]
+fn issue_3165_early_refusal_completion_cannot_change_a_newer_stop() {
+    with_stop_completion_fixture(|env, runtime_path, session_path| {
+        let runtime = runtime_path.to_path_buf();
+        let metadata = session_path.to_path_buf();
+        let worktree = env.repo_path.clone();
+        let successor = std::sync::Arc::new(std::sync::Mutex::new((Vec::new(), Vec::new())));
+        let captured = successor.clone();
+        env.stdout_writer = Some(Box::new(StopProtocolWriter {
+            before_first_write: Some(Box::new(move || {
+                let session = Session::load(&metadata).unwrap();
+                event_dispatcher::handle_with_input(
+                    "Stop",
+                    r#"{"session_id":"provider-stop-3165","stop_hook_active":true}"#,
+                    &worktree,
+                    Some(&session.id),
+                )
+                .unwrap();
+                *captured.lock().unwrap() = (
+                    std::fs::read(&runtime).unwrap(),
+                    std::fs::read(&metadata).unwrap(),
+                );
+            })),
+            bytes: Default::default(),
+            fail: false,
+        }));
+        env.stdin = r#"{"session_id":"provider-stop-3165","tool_name":"Bash","tool_input":{"command":"gh issue edit 123 --title updated"}}"#.into();
+        assert_eq!(
+            gwt::cli::hook::run_daemon_hook(env, "event", &argv(&["PreToolUse"])).unwrap(),
+            2
+        );
+        let successor = successor.lock().unwrap();
+        assert!(!successor.0.is_empty());
+        assert_eq!(std::fs::read(runtime_path).unwrap(), successor.0);
+        assert_eq!(std::fs::read(session_path).unwrap(), successor.1);
+    });
 }

@@ -532,20 +532,19 @@ fn run_daemon_hook_inner<E: CliEnv>(
                 return Ok(2);
             };
             let cwd = env.repo_path().to_path_buf();
-            let completion = if publish_completion {
-                runtime_state::capture_hook_completion(&cwd)
-            } else {
-                None
-            };
             let current_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
-            let dispatch_result = event_dispatcher::handle_with_input(
+            let dispatch_result = event_dispatcher::handle_with_input_owned(
                 event,
                 &stdin,
                 &cwd,
                 current_session.as_deref(),
             );
             match dispatch_result {
-                Ok(output) => Ok(emit_event_output(env, &output, completion)),
+                Ok((output, completion)) => Ok(emit_event_output(
+                    env,
+                    &output,
+                    completion.filter(|_| publish_completion),
+                )),
                 Err(err) => Ok(emit_event_error(env, name, event, &err)),
             }
         }
@@ -565,13 +564,8 @@ fn run_daemon_hook_inner<E: CliEnv>(
                 return Ok(2);
             };
             let cwd = env.repo_path().to_path_buf();
-            let completion = if publish_completion {
-                runtime_state::capture_hook_completion(&cwd)
-            } else {
-                None
-            };
             let current_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
-            let dispatch_result = provider_event::handle_with_input(
+            let dispatch_result = provider_event::handle_with_input_owned(
                 provider,
                 native_event,
                 &stdin,
@@ -579,7 +573,11 @@ fn run_daemon_hook_inner<E: CliEnv>(
                 current_session.as_deref(),
             );
             match dispatch_result {
-                Ok(output) => Ok(emit_event_output(env, &output, completion)),
+                Ok((output, completion)) => Ok(emit_event_output(
+                    env,
+                    &output,
+                    completion.filter(|_| publish_completion),
+                )),
                 Err(err) => Ok(emit_event_error(
                     env,
                     name,

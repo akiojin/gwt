@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
-import { mkdir, readFile, realpath } from "node:fs/promises";
+import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { startIssueQueueLaunchFixture } from "./_helpers/issue-queue-launch";
 import { gotoLiveGwt, sendLiveGwtEvent } from "./_helpers/live-gwt";
@@ -228,14 +229,16 @@ test.describe("Issue queue real backend launch", () => {
     const actor = async (stage: string) => (await fixture.actorEvents()).find((entry: any) => entry.stage === stage);
     const session = async (id: string) => readFile(join(fixture.home, ".gwt", "sessions", `${id}.toml`), "utf8");
     const field = (record: string, key: string) => record.match(new RegExp(`^${key}\\s*=\\s*"([^"]*)"`, "m"))?.[1];
-    const request = async (event: unknown, kind: string): Promise<any> => {
+    const request = async (event: unknown, kind: string, requestId?: string): Promise<any> => {
       const after = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
       await sendLiveGwtEvent(page, event);
-      return (await page.waitForFunction(({ after, kind }) => {
+      return (await page.waitForFunction(({ after, kind, requestId }) => {
         const found = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) =>
-          entry.sequence > after && [kind, `${kind}_error`].includes(entry.payload.kind));
+          entry.sequence > after && [kind, `${kind}_error`].includes(entry.payload.kind)
+          && (requestId === undefined || entry.payload.kind === `${kind}_error`
+            || entry.payload.snapshot?.request_id === requestId));
         return found?.payload || null;
-      }, { after, kind }, { timeout: 30_000 })).jsonValue();
+      }, { after, kind, requestId }, { timeout: 30_000 })).jsonValue();
     };
     try {
       await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
@@ -249,6 +252,15 @@ test.describe("Issue queue real backend launch", () => {
       const source = (await fixture.launches())[0];
       await expect.poll(async () => !!await actor("idle"), { timeout: 60_000 }).toBe(true);
       const idle = await actor("idle");
+      const n1 = await actor("normal_n1");
+      expect(n1.runtime.current_hook_event).toMatchObject({ event: "Stop", completed_outcome: "normal" });
+      expect(n1.runtime.current_hook_event.correlation_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+      expect(n1.runtime.runtime_incarnation).toBeGreaterThan(0);
+      expect(n1.runtime.execution_identity.session_id).toBe(source.gwt_session_id);
+      expect(n1.runtime_binary).toBe(await realpath(join(process.env.GWT_PLAYWRIGHT_CHECKOUT_ROOT!, "target/debug/gwtd")));
+      expect(n1.runtime_binary_sha256).toBe(createHash("sha256")
+        .update(await readFile(n1.runtime_binary)).digest("hex"));
+      expect((await actor("neutral_after_n1")).runtime_sha256).toBe(n1.runtime_sha256);
       expect(idle.owner_number).toBe(fixture.issueNumber);
       expect(idle.cwd, "the source waits in its ordinary worktree before checkpoint delivery").toBe(source.cwd);
       expect(idle.tree_child_pid).toBeGreaterThan(0);
@@ -268,6 +280,33 @@ test.describe("Issue queue real backend launch", () => {
       await plans.getByRole("button", { name: "Refresh plans", exact: true }).click();
       await expect(plans.locator('[data-action="switch-next"]')).toBeEnabled();
       await plans.locator('[data-action="switch-next"]').click();
+      await expect.poll(async () => !!await actor("awaiting_normal_n2"), { timeout: 90_000 }).toBe(true);
+      const beforeActivity = await actor("before_checkpoint_activity");
+      expect(beforeActivity.runtime_sha256, "Requested and checkpoint delivery preserve N1").toBe(n1.runtime_sha256);
+      const activity = await actor("checkpoint_activity");
+      expect(activity.runtime.current_hook_event).toMatchObject({ event: "UserPromptSubmit", completed_outcome: "normal" });
+      expect(activity.runtime.current_hook_event.correlation_id).not.toBe(n1.runtime.current_hook_event.correlation_id);
+      const awaiting = await actor("awaiting_normal_n2");
+      expect(awaiting.runtime.current_hook_event.event).toBe("UserPromptSubmit");
+      // Use the ordinary Switch read to request a Host tick before releasing N2.
+      // Its reply is a read receipt; the unchanged guard assertion below proves evaluation.
+      const driverRead = await request({ kind: "agent_switch",
+        action: { kind: "read", request_id: awaiting.operation } }, "agent_switch", awaiting.operation);
+      expect(driverRead.kind).toBe("agent_switch");
+      expect(driverRead.snapshot.request_id).toBe(awaiting.operation);
+      await expect.poll(async () => {
+        const intent = Object.values((await preferences()).agent_switch_intents || {})[0] as any;
+        return intent && { stage: intent.stage, reason: intent.reason };
+      }, { timeout: 30_000 }).toEqual({ stage: "checkpoint_verified",
+        reason: "Waiting for the current turn to finish. Current work is kept." });
+      expect(fixture.processAlive(source.pid)).toBe(true);
+      expect(fixture.processAlive(idle.tree_child_pid)).toBe(true);
+      expect((await preferences()).monitor_runtime_stop_requests || []).toEqual([]);
+      expect(await fixture.launches()).toHaveLength(1);
+      const hooks = (await fixture.actorEvents()).filter((entry: any) => entry.stage === "native_hook");
+      expect(hooks.map((entry: any) => entry.event)).toEqual(["UserPromptSubmit", "Stop", "UserPromptSubmit"]);
+      expect(hooks.every((entry: any) => entry.commands > 0)).toBe(true);
+      await writeFile(awaiting.release, "Release the genuine provider Stop after the observed driver guard.\n");
       await expect.poll(async () => (await fixture.launches()).length,
         { timeout: 120_000, message: "actual source checkpoint ACK, physical exit and ordinary target Monitor launch" }).toBe(2);
       const launches = await fixture.launches();

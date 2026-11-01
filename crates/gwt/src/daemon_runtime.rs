@@ -1389,6 +1389,21 @@ pub fn handle_runtime_state(event: &str, input: &str) -> Result<(), HookError> {
     handle_runtime_state_prepared(event, input).map(|_| ())
 }
 
+pub(crate) fn handle_runtime_state_owned_prepared(
+    event: &str,
+    input: &str,
+    completion: Option<&mut runtime_state::HookCompletionContext>,
+) -> Result<Option<Session>, HookError> {
+    if std::env::var_os(GWT_SESSION_RUNTIME_PATH_ENV).is_none() {
+        return Ok(None);
+    }
+    let publication = runtime_state::handle_with_input_owned(event, input, completion)?;
+    if publication.published {
+        emit_runtime_state_notice(event, input, publication.session.clone());
+    }
+    Ok(publication.session)
+}
+
 pub(crate) fn handle_runtime_state_prepared(
     event: &str,
     input: &str,
@@ -1397,6 +1412,11 @@ pub(crate) fn handle_runtime_state_prepared(
         return Ok(None);
     }
     let session = runtime_state::handle_with_input_prepared(event, input)?;
+    emit_runtime_state_notice(event, input, session.clone());
+    Ok(session)
+}
+
+fn emit_runtime_state_notice(event: &str, input: &str, session: Option<Session>) {
     // Hook-live is a best-effort notification after the authoritative runtime
     // state write. A missing GUI must not consume half of the aggregate
     // UserPromptSubmit budget before the Board and obligation handlers run.
@@ -1413,7 +1433,7 @@ pub(crate) fn handle_runtime_state_prepared(
             Some(event),
             runtime_state::status_for_event(event).map(str::to_string),
             None,
-            session.clone(),
+            session,
             parse_hook_event_best_effort(input),
         ),
     );
@@ -1423,7 +1443,27 @@ pub(crate) fn handle_runtime_state_prepared(
         live_started.elapsed(),
         "ok",
     );
-    Ok(session)
+}
+
+pub(crate) fn handle_blocked_stop_runtime_state_owned(
+    input: &str,
+    completion: Option<&mut runtime_state::HookCompletionContext>,
+) -> Result<(), HookError> {
+    let publication = runtime_state::record_blocked_stop_owned(completion)?;
+    if publication.published {
+        emit_live_event_fail_open(
+            Some("Stop"),
+            RuntimeHookEvent::from_hook(
+                RuntimeHookEventKind::RuntimeState,
+                Some("Stop"),
+                Some("Running".to_string()),
+                Some("blocked-stop".to_string()),
+                publication.session,
+                parse_hook_event_best_effort(input),
+            ),
+        );
+    }
+    Ok(())
 }
 
 pub fn handle_blocked_stop_runtime_state(input: &str) -> Result<(), HookError> {

@@ -198,7 +198,9 @@ pub struct ManagedBrowserPreflight {
 }
 
 pub fn read_managed_browser_preflight(input: &ManagedHookHealthInput) -> ManagedBrowserPreflight {
-    read_managed_browser_preflight_with(input, &ManagedHookFailureSnapshot::read(), || {
+    let mut input = input.clone();
+    input.worktree_root = gwt_core::paths::resolve_current_worktree_root(&input.worktree_root);
+    read_managed_browser_preflight_with(&input, &ManagedHookFailureSnapshot::read(), || {
         super::runtime_state::current_hook_context(&input.worktree_root)
     })
 }
@@ -1748,6 +1750,93 @@ mod browser_preflight_tests {
     }
 
     #[test]
+    fn managed_browser_nested_cwd_completes_only_for_the_current_git_worktree() {
+        with_source(|input, _, path, runtime| {
+            let nested = input.worktree_root.join("src/deep");
+            fs::create_dir_all(&nested).unwrap();
+            let completion =
+                super::super::runtime_state::begin_hook_observation("Stop", "", &nested)
+                    .unwrap()
+                    .expect("same worktree subdirectory is a current source");
+            completion.record(Normal);
+            let completed = SessionRuntimeState::load(path).unwrap();
+            assert!(completed.last_completed_hook_event_at > runtime.last_completed_hook_event_at);
+            assert_eq!(completed.last_completed_hook_outcome, Some(Normal));
+
+            let foreign = input.worktree_root.join("vendor/other");
+            fs::create_dir_all(&foreign).unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(&foreign);
+            let foreign_nested = foreign.join("src");
+            fs::create_dir(&foreign_nested).unwrap();
+            assert_eq!(
+                super::super::runtime_state::current_hook_context(&foreign_nested).unwrap_err(),
+                super::super::runtime_state::HookContextError::Foreign
+            );
+            assert!(super::super::runtime_state::begin_hook_observation(
+                "Stop",
+                "",
+                &foreign_nested
+            )
+            .unwrap()
+            .is_none());
+            let after = SessionRuntimeState::load(path).unwrap();
+            assert_eq!(
+                after.last_completed_hook_event_at,
+                completed.last_completed_hook_event_at
+            );
+            assert_eq!(
+                after.last_completed_hook_outcome,
+                completed.last_completed_hook_outcome
+            );
+        });
+    }
+
+    #[test]
+    fn managed_browser_nested_cwd_doctor_audits_and_repairs_the_current_git_worktree() {
+        with_source(|input, _, _, _| {
+            let nested = input.worktree_root.join("src/deep");
+            fs::create_dir_all(&nested).unwrap();
+            let mut nested_input = input.clone();
+            nested_input.worktree_root = nested.clone();
+            assert_eq!(
+                read_managed_browser_preflight(&nested_input).result,
+                PreflightResult::Proceed
+            );
+
+            fs::remove_file(input.worktree_root.join(".claude/settings.local.json")).unwrap();
+            let mut env = crate::cli::env::TestEnv::new(nested.clone());
+            let (code, output) = crate::cli::run_collect(
+                &mut env,
+                crate::cli::CliCommand::Hook(crate::cli::HookCommand::Doctor {
+                    purpose: Some(HookDoctorPurpose::ManagedBrowser),
+                    runtime_state_path: None,
+                    profile_path: None,
+                    expected_hook_bin: input.expected_hook_bin.clone(),
+                    repair: true,
+                }),
+            )
+            .unwrap();
+            assert_eq!(code, 0);
+            let payload: serde_json::Value = serde_json::from_str(&output).unwrap();
+            assert_eq!(payload["preflight"]["result"], "proceed", "{payload}");
+            assert!(input
+                .worktree_root
+                .join(".claude/settings.local.json")
+                .is_file());
+            assert!(!nested.join(".claude").exists());
+
+            let foreign = input.worktree_root.join("other");
+            fs::create_dir(&foreign).unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(&foreign);
+            nested_input.worktree_root = foreign;
+            assert_eq!(
+                read_managed_browser_preflight(&nested_input).context,
+                PreflightContext::Foreign
+            );
+        });
+    }
+
+    #[test]
     fn normal_recovery_proceeds_while_legacy_health_and_failure_bytes_are_retained() {
         with_source(|input, session, _, runtime| {
             let row = failure(input, Some(&session.id), runtime.updated_at);
@@ -1909,8 +1998,13 @@ mod browser_preflight_tests {
     #[test]
     fn source_replacement_during_read_and_late_predecessor_completion_are_rejected() {
         with_source(|input, _, path, runtime| {
-            let completion =
-                super::super::runtime_state::capture_hook_completion(&input.worktree_root).unwrap();
+            let completion = super::super::runtime_state::begin_hook_observation(
+                "Stop",
+                "",
+                &input.worktree_root,
+            )
+            .unwrap()
+            .unwrap();
             let snapshot = ManagedHookFailureSnapshot::read();
             let mut reads = 0;
             let result = read_managed_browser_preflight_with(input, &snapshot, || {
@@ -1929,16 +2023,26 @@ mod browser_preflight_tests {
             let before = fs::read(path).unwrap();
             completion.record(Normal);
             assert_eq!(fs::read(path).unwrap(), before);
-            let current =
-                super::super::runtime_state::capture_hook_completion(&input.worktree_root).unwrap();
+            let current = super::super::runtime_state::begin_hook_observation(
+                "Stop",
+                "",
+                &input.worktree_root,
+            )
+            .unwrap()
+            .unwrap();
             current.record(Blocked);
             let state = SessionRuntimeState::load(path).unwrap();
             assert_eq!(state.last_completed_hook_outcome, Some(Blocked));
             assert!(state.last_completed_hook_event_at.is_some());
         });
         with_source(|input, session, path, _| {
-            let completion =
-                super::super::runtime_state::capture_hook_completion(&input.worktree_root).unwrap();
+            let completion = super::super::runtime_state::begin_hook_observation(
+                "Stop",
+                "",
+                &input.worktree_root,
+            )
+            .unwrap()
+            .unwrap();
             let snapshot = ManagedHookFailureSnapshot::read();
             let mut reads = 0;
             let result = read_managed_browser_preflight_with(input, &snapshot, || {

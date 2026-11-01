@@ -195,6 +195,8 @@ pub fn spawn_unbound_pane_with_attempt_observer(
                     gwt_agent::SessionPathState::Error(error) => return Err(error),
                 }
                 let path = gwt_agent::runtime_state_path(sessions_dir, session_id);
+                let writer = gwt_agent::session::runtime_writer_lease(&path)?;
+                let publication = gwt_agent::session::runtime_publication_lease(&path)?;
                 let mut runtime = match gwt_agent::SessionRuntimeState::load(&path) {
                     Ok(runtime) => runtime,
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -207,7 +209,7 @@ pub fn spawn_unbound_pane_with_attempt_observer(
                 runtime.host_started_at = Some(host_started_at);
                 runtime.child_pid = Some(child_pid);
                 runtime.child_started_at = Some(child_started_at);
-                runtime.save(&path)
+                writer.publish(&publication, &runtime)
             })
         })();
         if let Err(error) = observation {

@@ -497,6 +497,15 @@ pub enum HookCompletionOutcome {
     Blocked,
 }
 
+/// One observed aggregate hook invocation, independent of execution authority.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CurrentHookEventObservation {
+    pub correlation_id: String,
+    pub event: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_outcome: Option<HookCompletionOutcome>,
+}
+
 /// Lightweight runtime state updated by hook events while the PTY is alive.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionRuntimeState {
@@ -538,6 +547,9 @@ pub struct SessionRuntimeState {
     /// Missing in old sidecars; absence is never evidence of a normal outcome.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_completed_hook_outcome: Option<HookCompletionOutcome>,
+    /// Missing or pending observations never certify a completed current hook.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_hook_event: Option<CurrentHookEventObservation>,
     #[serde(default)]
     pub pending_discussion: Option<PendingDiscussionResume>,
 }
@@ -1590,6 +1602,8 @@ pub fn persist_observed_session_runtime_stopped_under_lease(
         return Ok(false);
     }
     let runtime_path = runtime_state_path_for_pid(sessions_dir, host_pid, &expected.id);
+    let writer = runtime_writer_lease(&runtime_path)?;
+    let publication = runtime_publication_lease(&runtime_path)?;
     let mut runtime = SessionRuntimeState::load(&runtime_path)?;
     if runtime.execution_identity != expected_runtime.execution_identity
         || runtime.runtime_incarnation != expected_runtime.runtime_incarnation
@@ -1604,7 +1618,7 @@ pub fn persist_observed_session_runtime_stopped_under_lease(
     runtime.status = AgentStatus::Stopped;
     runtime.updated_at = Utc::now();
     write_session_toml_atomic(&path, &serialize_session_toml(&current)?)?;
-    runtime.save(&runtime_path)?;
+    writer.publish(&publication, &runtime)?;
     Ok(true)
 }
 
@@ -2085,6 +2099,7 @@ impl SessionRuntimeState {
             active_tool_calls: None,
             last_completed_hook_event_at: None,
             last_completed_hook_outcome: None,
+            current_hook_event: None,
             pending_discussion: None,
         }
     }
@@ -2130,7 +2145,12 @@ impl SessionRuntimeState {
 
     /// Save the runtime state to a JSON sidecar file.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        let _publication = runtime_publication_lease(path)?;
+        let writer = runtime_writer_lease(path)?;
+        let publication = runtime_publication_lease(path)?;
+        writer.publish(&publication, self)
+    }
+
+    fn save_atomic(&self, path: &Path) -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -2167,12 +2187,48 @@ impl SessionRuntimeState {
     }
 }
 
+/// The existing runtime writer lock, bound to its captured sidecar path.
+pub struct RuntimeWriterLease {
+    path: PathBuf,
+    _file: File,
+}
+
+/// The existing optional shared GC lock, bound to its captured sidecar path.
+pub struct RuntimePublicationLease {
+    path: PathBuf,
+    _file: Option<File>,
+}
+
+impl RuntimeWriterLease {
+    /// Publish a non-hook snapshot without reacquiring either held lock.
+    /// An exact reaffirmation leaves raw bytes untouched; a material change
+    /// invalidates current observation while retaining declared history.
+    pub fn publish(
+        &self,
+        publication: &RuntimePublicationLease,
+        state: &SessionRuntimeState,
+    ) -> io::Result<()> {
+        if self.path != publication.path {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "runtime writer and publication paths differ",
+            ));
+        }
+        if SessionRuntimeState::load(&self.path).is_ok_and(|current| current == *state) {
+            return Ok(());
+        }
+        let mut replacement = state.clone();
+        replacement.current_hook_event = None;
+        replacement.save_atomic(&self.path)
+    }
+}
+
 /// Retain this shared lease from reading a runtime sidecar through publishing
 /// its replacement. GC takes the exclusive counterpart only during unlink.
 /// Acquire after any Session lease; paths outside the PID runtime layout have
-/// no namespace to collect and return `None`. Contention is bounded by the
+/// no namespace to collect and retain no File. Contention is bounded by the
 /// existing Session persistence wait, rather than stalling a hook indefinitely.
-pub fn runtime_publication_lease(path: &Path) -> io::Result<Option<File>> {
+pub fn runtime_publication_lease(path: &Path) -> io::Result<RuntimePublicationLease> {
     let publication = path
         .parent()
         .and_then(Path::parent)
@@ -2201,13 +2257,16 @@ pub fn runtime_publication_lease(path: &Path) -> io::Result<Option<File>> {
             }
         }
     }
-    Ok(publication)
+    Ok(RuntimePublicationLease {
+        path: path.to_path_buf(),
+        _file: publication,
+    })
 }
 
 /// Serialize one runtime sidecar's read-modify-write without waiting on the
 /// durable Session metadata lease. Acquire after any Session lease and before
 /// the shared GC publication lease. Keep lock files outside PID namespaces.
-pub fn runtime_writer_lease(path: &Path) -> io::Result<File> {
+pub fn runtime_writer_lease(path: &Path) -> io::Result<RuntimeWriterLease> {
     let filename = path.file_name().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -2243,7 +2302,10 @@ pub fn runtime_writer_lease(path: &Path) -> io::Result<File> {
         gwt_core::operation_deadline::now() + SESSION_LEASE_WAIT,
     );
     gwt_core::operation_deadline::lock_exclusive(&writer)?;
-    Ok(writer)
+    Ok(RuntimeWriterLease {
+        path: path.to_path_buf(),
+        _file: writer,
+    })
 }
 
 /// Return the JSON sidecar path for a session runtime state record.
@@ -2637,20 +2699,26 @@ pub fn persist_session_status(
     session_id: &str,
     status: AgentStatus,
 ) -> std::io::Result<()> {
-    update_session(sessions_dir, session_id, |session| {
+    validate_session_id_path_component(session_id)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    with_session_lock(sessions_dir, session_id, || {
+        let session_path = session_file_path(sessions_dir, session_id);
+        let mut session = Session::load_and_migrate(&session_path)?;
         session.update_status(status);
-        Ok(())
-    })?;
-    let runtime_path = runtime_state_path(sessions_dir, session_id);
-    let mut runtime = SessionRuntimeState::new(status);
-    if let Ok(previous) = SessionRuntimeState::load(&runtime_path) {
-        runtime.execution_identity = previous.execution_identity;
-        runtime.runtime_incarnation = previous.runtime_incarnation;
-        runtime.host_started_at = previous.host_started_at;
-        runtime.child_pid = previous.child_pid;
-        runtime.child_started_at = previous.child_started_at;
-    }
-    runtime.save(&runtime_path)
+        let runtime_path = runtime_state_path(sessions_dir, session_id);
+        let writer = runtime_writer_lease(&runtime_path)?;
+        let publication = runtime_publication_lease(&runtime_path)?;
+        let mut runtime = SessionRuntimeState::new(status);
+        if let Ok(previous) = SessionRuntimeState::load(&runtime_path) {
+            runtime.execution_identity = previous.execution_identity;
+            runtime.runtime_incarnation = previous.runtime_incarnation;
+            runtime.host_started_at = previous.host_started_at;
+            runtime.child_pid = previous.child_pid;
+            runtime.child_started_at = previous.child_started_at;
+        }
+        write_session_toml_atomic(&session_path, &serialize_session_toml(&session)?)?;
+        writer.publish(&publication, &runtime)
+    })
 }
 
 /// Persist how one session's PTY child ended (Issue #3341).
@@ -2735,8 +2803,8 @@ fn persist_session_running_state_if_execution_identity_matches_under_lease(
         return Ok(false);
     }
     let runtime_path = runtime_state_path(sessions_dir, &expected.session_id);
-    let _writer = runtime_writer_lease(&runtime_path)?;
-    let _publication = runtime_publication_lease(&runtime_path)?;
+    let writer = runtime_writer_lease(&runtime_path)?;
+    let publication = runtime_publication_lease(&runtime_path)?;
     let mut runtime = SessionRuntimeState::for_execution_process(
         AgentStatus::Running,
         expected,
@@ -2755,7 +2823,7 @@ fn persist_session_running_state_if_execution_identity_matches_under_lease(
             runtime.active_tool_calls = previous.active_tool_calls;
         }
     }
-    runtime.save(&runtime_path)?;
+    writer.publish(&publication, &runtime)?;
     Ok(true)
 }
 
@@ -2822,6 +2890,8 @@ pub fn persist_session_terminal_status_if_execution_identity_matches_under_lease
     session.update_status(status);
     let session_content = serialize_session_toml(&session)?;
     let runtime_path = runtime_state_path(sessions_dir, &expected.session_id);
+    let writer = runtime_writer_lease(&runtime_path)?;
+    let publication = runtime_publication_lease(&runtime_path)?;
     let mut runtime = SessionRuntimeState::for_execution(status, expected, runtime_incarnation);
     if let Ok(previous) = SessionRuntimeState::load(&runtime_path) {
         if previous.execution_identity.as_ref() == Some(expected)
@@ -2836,7 +2906,7 @@ pub fn persist_session_terminal_status_if_execution_identity_matches_under_lease
         &session_file_path(sessions_dir, &expected.session_id),
         &session_content,
     )?;
-    runtime.save(&runtime_path)?;
+    writer.publish(&publication, &runtime)?;
     Ok(true)
 }
 
@@ -2907,6 +2977,8 @@ pub fn persist_session_terminal_status_for_exact_runtime_under_lease(
     };
     let runtime_path =
         runtime_state_path_for_pid(sessions_dir, runtime.host_pid, &expected.session_id);
+    let writer = runtime_writer_lease(&runtime_path)?;
+    let publication = runtime_publication_lease(&runtime_path)?;
     let mut exact_runtime = match SessionRuntimeState::load(&runtime_path) {
         Ok(runtime) => runtime,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
@@ -2926,7 +2998,7 @@ pub fn persist_session_terminal_status_for_exact_runtime_under_lease(
         &session_file_path(sessions_dir, &expected.session_id),
         &session_content,
     )?;
-    exact_runtime.save(&runtime_path)?;
+    writer.publish(&publication, &exact_runtime)?;
     Ok(true)
 }
 
@@ -3033,32 +3105,56 @@ pub fn persist_session_hook_metadata_with_wait(
     project_state_root: Option<&Path>,
     wait: Duration,
 ) -> io::Result<Session> {
+    validate_session_id_path_component(session_id)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    with_session_lock_wait(sessions_dir, session_id, wait, || {
+        persist_session_hook_metadata_under_lease(
+            sessions_dir,
+            session_id,
+            event,
+            agent_session_id,
+            project_state_root,
+        )
+    })
+}
+
+/// Persist hook metadata using the caller's already-held lease for this exact
+/// Session. The caller must establish the matching path lease and validate any
+/// owned runtime correlation before calling; the thread-local check alone does
+/// not establish that match. Certification also requires the outer lease
+/// operation to succeed after this helper returns.
+pub fn persist_session_hook_metadata_under_lease(
+    sessions_dir: &Path,
+    session_id: &str,
+    event: &str,
+    agent_session_id: Option<&str>,
+    project_state_root: Option<&Path>,
+) -> io::Result<Session> {
+    require_current_thread_session_lease()?;
+    validate_session_id_path_component(session_id)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let agent_session_id = agent_session_id
         .map(str::trim)
         .filter(|agent_session_id| !agent_session_id.is_empty());
-    let update = |session: &mut Session| {
-        if let Some(agent_session_id) = agent_session_id {
-            apply_agent_session_id(session, agent_session_id);
-        }
-        if session.project_state_root.is_none() {
-            session.project_state_root = project_state_root.map(Path::to_path_buf);
-        }
-        session.record_hook_event(event);
-        Ok(())
-    };
-    if event == "SessionStart" && agent_session_id.is_some() {
-        update_session_with_wait(sessions_dir, session_id, wait, update)
+    let path = session_file_path(sessions_dir, session_id);
+    let mut session = Session::load_and_migrate(&path)?;
+    if let Some(agent_session_id) = agent_session_id {
+        apply_agent_session_id(&mut session, agent_session_id);
+    }
+    if session.project_state_root.is_none() {
+        session.project_state_root = project_state_root.map(Path::to_path_buf);
+    }
+    session.record_hook_event(event);
+    let durability = if event == "SessionStart" && agent_session_id.is_some() {
+        SessionDurability::FlushToDevice
     } else {
         // Issue #3777: liveness must not wait for the device inside the
         // UserPromptSubmit budget.
-        update_session_with_wait_and_durability(
-            sessions_dir,
-            session_id,
-            wait,
-            SessionDurability::RenameOnly,
-            update,
-        )
-    }
+        SessionDurability::RenameOnly
+    };
+    let content = serialize_session_toml(&session)?;
+    write_session_toml_atomic_with_durability(&path, &content, durability)?;
+    Ok(session)
 }
 
 /// Persist or clear a Session's Execution generation projection under the
@@ -5634,6 +5730,78 @@ display_name = "Claude Code"
         }
         wire["last_completed_hook_outcome"] = serde_json::json!("future_unknown");
         assert!(serde_json::from_value::<SessionRuntimeState>(wire).is_err());
+    }
+
+    const ISSUE_3165_RUNTIME_WITH_CURRENT: &str = r#"{
+  "status": "Idle",
+  "updated_at": "2026-11-01T00:00:02Z",
+  "last_activity_at": "2026-11-01T00:00:01Z",
+  "source_event": "Stop",
+  "active_tool_calls": [],
+  "last_completed_hook_event_at": "2026-11-01T00:00:03Z",
+  "last_completed_hook_outcome": "normal",
+  "current_hook_event": {
+    "correlation_id": "d6089768-6395-4a18-95ec-3e3b3f28d530",
+    "event": "Stop",
+    "completed_outcome": "normal"
+  },
+  "future_runtime_field": { "retained": true }
+}
+"#;
+
+    #[test]
+    fn issue_3165_runtime_neutral_save_preserves_raw_current_observation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = runtime_state_path(dir.path(), "issue-3165-current");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, ISSUE_3165_RUNTIME_WITH_CURRENT).unwrap();
+
+        let runtime = SessionRuntimeState::load(&path).unwrap();
+        runtime.save(&path).unwrap();
+
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            ISSUE_3165_RUNTIME_WITH_CURRENT.as_bytes(),
+            "an unchanged loaded snapshot must retain current evidence and unknown raw fields"
+        );
+    }
+
+    #[test]
+    fn issue_3165_runtime_unknown_current_outcome_is_rejected() {
+        let mut wire: serde_json::Value =
+            serde_json::from_str(ISSUE_3165_RUNTIME_WITH_CURRENT).unwrap();
+        wire["current_hook_event"]["completed_outcome"] = serde_json::json!("future_unknown");
+
+        assert!(
+            serde_json::from_value::<SessionRuntimeState>(wire).is_err(),
+            "an unknown current outcome must not be accepted as normal or legacy evidence"
+        );
+    }
+
+    #[test]
+    fn issue_3165_runtime_material_save_invalidates_current_and_retains_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = runtime_state_path(dir.path(), "issue-3165-current");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, ISSUE_3165_RUNTIME_WITH_CURRENT).unwrap();
+        let original: serde_json::Value =
+            serde_json::from_str(ISSUE_3165_RUNTIME_WITH_CURRENT).unwrap();
+        let mut runtime = SessionRuntimeState::load(&path).unwrap();
+
+        runtime.status = AgentStatus::Stopped;
+        runtime.save(&path).unwrap();
+
+        let saved: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["status"], "Stopped");
+        assert!(saved.get("current_hook_event").is_none());
+        assert_eq!(
+            saved["last_completed_hook_event_at"],
+            original["last_completed_hook_event_at"]
+        );
+        assert_eq!(
+            saved["last_completed_hook_outcome"],
+            original["last_completed_hook_outcome"]
+        );
     }
 
     #[test]

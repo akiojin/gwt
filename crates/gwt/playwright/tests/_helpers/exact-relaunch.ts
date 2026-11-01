@@ -145,15 +145,29 @@ const nativeHook = (event, prompt) => {
   const hooks = JSON.parse(fs.readFileSync(path.join(sourceDirectory,'.codex','hooks.json'),'utf8'));
   const input = JSON.stringify({session_id:native,hook_event_name:event,cwd:sourceDirectory,
     transcript_path:rollout,prompt,stop_hook_active:false});
+  let commands = 0;
   for (const group of hooks.hooks?.[event] ?? []) for (const hook of group.hooks ?? []) {
     if (hook.type !== 'command') continue;
     const result = cp.spawnSync('/bin/sh',['-c',hook.command],{cwd:sourceDirectory,env:process.env,
       input,encoding:'utf8',timeout:60000});
+    actorEvent('native_hook_command',{event,command_pid:result.pid,exit_status:result.status,
+      error_code:result.error?.code,stdout:result.stdout,stderr:result.stderr});
     if (result.status !== 0 || /"decision"\s*:\s*"block"/.test(result.stdout)) {
       throw new Error('Native hook refused: '+event);
     }
+    commands++;
   }
-  actorEvent('native_hook',{event});
+  if (!commands) throw new Error('Native hook command missing: '+event);
+  actorEvent('native_hook',{event,commands});
+};
+const observeRuntime = (stage, extra = {}) => {
+  const crypto = require('node:crypto');
+  const raw = fs.readFileSync(process.env.GWT_SESSION_RUNTIME_PATH);
+  const runtime = JSON.parse(raw);
+  actorEvent(stage,{runtime,runtime_sha256:crypto.createHash('sha256').update(raw).digest('hex'),
+    runtime_path:process.env.GWT_SESSION_RUNTIME_PATH,
+    runtime_binary:fs.realpathSync(process.env.GWT_BIN_PATH),
+    runtime_binary_sha256:crypto.createHash('sha256').update(fs.readFileSync(process.env.GWT_BIN_PATH)).digest('hex'),...extra});
 };
 const observe = async (read, description) => {
   const deadline = Date.now()+60000;
@@ -174,6 +188,10 @@ const actorReady = (async () => {
   }
   sourceOperation('issue.monitor.wait',{number:owner,reason:'Awaiting fixture operator',resume_condition:'Operator requests checkpoint or resumes current work'});
   nativeHook('Stop');
+  observeRuntime('normal_n1');
+  sourceOperation('execution.status');
+  sourceOperation('pane.name');
+  observeRuntime('neutral_after_n1');
   let treeChild;
   if (switching.positive && owner === switching.sourceIssueNumber) {
     fs.mkdirSync(idleDirectory,{recursive:true});
@@ -191,7 +209,9 @@ const checkpoint = async line => {
   if (!operation || checkpointed.has(operation)) return;
   checkpointed.add(operation);
   process.chdir(sourceDirectory);
+  observeRuntime('before_checkpoint_activity',{operation});
   nativeHook('UserPromptSubmit',line);
+  observeRuntime('checkpoint_activity',{operation});
   const intent = sourceOperation('issue.monitor.switch.read').intents.find(value=>value.operation_id===operation);
   if (!intent || intent.stage !== 'checkpointing') {
     sourceOperation('issue.monitor.wait',{number:switching.sourceIssueNumber,clear:true});
@@ -220,6 +240,13 @@ const checkpoint = async line => {
   sourceOperation('issue.monitor.switch.ack',{operation_id:operation,head,work_id:work.id,board_entry_id:entry.id});
   actorEvent('checkpoint_acked',{operation,head,work_id:work.id,board_entry_id:entry.id});
   sourceOperation('issue.monitor.wait',{number:switching.sourceIssueNumber,reason:'Saved checkpoint awaits switch',resume_condition:'Switch cancelled or saved work resumed'});
+  if (switching.positive) {
+    // Outside the source repository: releasing the fixture barrier changes no
+    // source bytes or ordinary terminal-input revision after the real ACK.
+    const release = path.join(process.env.HOME,'switch-stop-'+operation);
+    observeRuntime('awaiting_normal_n2',{operation,release});
+    await observe(()=>fs.existsSync(release),'fixture release for the genuine final Stop');
+  }
   // Record cwd before Stop publishes Idle: the Host may then exit this actor.
   actorEvent('checkpoint_idle',{operation});
   nativeHook('Stop');

@@ -9,10 +9,12 @@ use std::{path::Path, time::Instant};
 
 use super::{
     action_obligation_stop_check, autonomous_question_guard, board_reminder, diagnostics,
-    execution_control_stop_check, pm_loop_stop_check, skill_build_spec_stop_check,
-    skill_discussion_stop_check, skill_plan_spec_stop_check, skill_register_spec_stop_check,
-    work_event_settlement_stop_check, workflow_policy, workspace_identity, GwtSessionId,
-    HookAgentSessionId, HookError, HookOutput, IntentBoundaryEvent, RawHookEvent,
+    execution_control_stop_check, pm_loop_stop_check,
+    runtime_state::{self, HookCompletionContext},
+    skill_build_spec_stop_check, skill_discussion_stop_check, skill_plan_spec_stop_check,
+    skill_register_spec_stop_check, work_event_settlement_stop_check, workflow_policy,
+    workspace_identity, GwtSessionId, HookAgentSessionId, HookError, HookOutput,
+    IntentBoundaryEvent, RawHookEvent,
 };
 use crate::discussion_resume::{
     load_pending_goal, load_pending_goal_from_worktree_files, PendingDiscussionGoal,
@@ -27,18 +29,44 @@ pub fn handle_with_input(
     worktree_root: &Path,
     current_session: Option<&str>,
 ) -> Result<HookOutput, HookError> {
+    handle_with_input_owned(event, input, worktree_root, current_session).map(|(output, _)| output)
+}
+
+pub(crate) fn handle_with_input_owned(
+    event: &str,
+    input: &str,
+    worktree_root: &Path,
+    current_session: Option<&str>,
+) -> Result<(HookOutput, Option<HookCompletionContext>), HookError> {
     let started = Instant::now();
     #[cfg(debug_assertions)]
     mark_playwright_hook_dispatcher_entry();
     diagnostics::begin_event();
     let _deadline = enter_event_deadline(event, started);
-    let result = match event {
-        "SessionStart" => handle_session_start(event, input, worktree_root),
-        "UserPromptSubmit" => handle_user_prompt_submit(event, input, worktree_root),
-        "PreToolUse" => handle_pre_tool_use(event, input),
-        "PostToolUse" => handle_post_tool_use(event, input),
-        "Stop" => handle_stop(event, input, worktree_root, current_session),
-        other => Err(HookError::InvalidEvent(other.to_string())),
+    let mut completion = None;
+    let result = match runtime_state::begin_hook_observation(event, input, worktree_root) {
+        Ok(observed) => {
+            completion = observed;
+            match event {
+                "SessionStart" => {
+                    handle_session_start(event, input, worktree_root, &mut completion)
+                }
+                "UserPromptSubmit" => {
+                    handle_user_prompt_submit(event, input, worktree_root, &mut completion)
+                }
+                "PreToolUse" => handle_pre_tool_use(event, input, &mut completion),
+                "PostToolUse" => handle_post_tool_use(event, input, &mut completion),
+                "Stop" => handle_stop(
+                    event,
+                    input,
+                    worktree_root,
+                    current_session,
+                    &mut completion,
+                ),
+                other => Err(HookError::InvalidEvent(other.to_string())),
+            }
+        }
+        Err(error) => Err(error.handler_failure(event, "runtime-state")),
     };
     let result = result.map(|output| match IntentBoundaryEvent::from_name(event) {
         Some(intent_event) => append_pm_standing_context(
@@ -84,7 +112,7 @@ pub fn handle_with_input(
         if result.is_ok() { "ok" } else { "error" },
         diagnostics::event_metrics(additional_context_bytes),
     );
-    result
+    result.map(|output| (output, completion))
 }
 
 #[cfg(debug_assertions)]
@@ -113,9 +141,15 @@ fn handle_session_start(
     event: &str,
     input: &str,
     worktree_root: &Path,
+    completion: &mut Option<HookCompletionContext>,
 ) -> Result<HookOutput, HookError> {
     run_step(event, "runtime-state", || {
-        crate::daemon_runtime::handle_runtime_state(event, input)
+        crate::daemon_runtime::handle_runtime_state_owned_prepared(
+            event,
+            input,
+            completion.as_mut(),
+        )
+        .map(|_| ())
     })?;
     let session_start_diagnostic = run_value(event, "session-start-session-id-diagnostic", || {
         super::runtime_state::session_start_agent_session_diagnostic(input)
@@ -175,6 +209,7 @@ fn handle_user_prompt_submit(
     event: &str,
     input: &str,
     worktree_root: &Path,
+    completion: &mut Option<HookCompletionContext>,
 ) -> Result<HookOutput, HookError> {
     // PM reporting has its own settlement path; ordinary producing obligations
     // deliberately remain unarmed in this window.
@@ -224,7 +259,11 @@ fn handle_user_prompt_submit(
             .join()
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
         let prepared_session = run_step(event, "runtime-state", || {
-            crate::daemon_runtime::handle_runtime_state_prepared(event, input)
+            crate::daemon_runtime::handle_runtime_state_owned_prepared(
+                event,
+                input,
+                completion.as_mut(),
+            )
         });
         diagnostics::record_handler_duration(
             event,
@@ -546,7 +585,11 @@ fn gate_remediation_context(worktree_root: &Path) -> Option<String> {
     Some(format!("Issue Monitor requests remediation for Issue #{issue}. Continue in this same window.\nReason: {reason}\nCurrent acceptance criteria: {ids}\nRead the current owner Issue through issue.view before continuing. Address its current criteria and the failure, then verify and push the corrected head for fresh independent review. This is an automated Monitor notice, not human approval."))
 }
 
-fn handle_pre_tool_use(event: &str, input: &str) -> Result<HookOutput, HookError> {
+fn handle_pre_tool_use(
+    event: &str,
+    input: &str,
+    completion: &mut Option<HookCompletionContext>,
+) -> Result<HookOutput, HookError> {
     // Issue #3478 (FR-025): the question guard runs before every other policy.
     // A question tool call must be converted while it is still refusable — any
     // later check that returns first would let the provider open the question
@@ -564,7 +607,12 @@ fn handle_pre_tool_use(event: &str, input: &str) -> Result<HookOutput, HookError
     // policies accept it, otherwise no matching completion will arrive.
     if !matches!(output, HookOutput::PreToolUsePermission { .. }) {
         run_step(event, "runtime-state", || {
-            crate::daemon_runtime::handle_runtime_state(event, input)
+            crate::daemon_runtime::handle_runtime_state_owned_prepared(
+                event,
+                input,
+                completion.as_mut(),
+            )
+            .map(|_| ())
         })?;
         run_step(event, "forward", || {
             crate::daemon_runtime::handle_forward_for_event(event, input)
@@ -573,9 +621,18 @@ fn handle_pre_tool_use(event: &str, input: &str) -> Result<HookOutput, HookError
     Ok(output)
 }
 
-fn handle_post_tool_use(event: &str, input: &str) -> Result<HookOutput, HookError> {
+fn handle_post_tool_use(
+    event: &str,
+    input: &str,
+    completion: &mut Option<HookCompletionContext>,
+) -> Result<HookOutput, HookError> {
     run_step(event, "runtime-state", || {
-        crate::daemon_runtime::handle_runtime_state(event, input)
+        crate::daemon_runtime::handle_runtime_state_owned_prepared(
+            event,
+            input,
+            completion.as_mut(),
+        )
+        .map(|_| ())
     })?;
     run_step(event, "forward", || {
         crate::daemon_runtime::handle_forward_for_event(event, input)
@@ -591,9 +648,15 @@ fn handle_stop(
     input: &str,
     worktree_root: &Path,
     current_session: Option<&str>,
+    completion: &mut Option<HookCompletionContext>,
 ) -> Result<HookOutput, HookError> {
     run_step(event, "runtime-state", || {
-        crate::daemon_runtime::handle_runtime_state(event, input)
+        crate::daemon_runtime::handle_runtime_state_owned_prepared(
+            event,
+            input,
+            completion.as_mut(),
+        )
+        .map(|_| ())
     })?;
     run_step(event, "forward", || {
         crate::daemon_runtime::handle_forward_for_event(event, input)
@@ -706,13 +769,16 @@ fn handle_stop(
         }
         if matches!(output, HookOutput::StopBlock { .. }) {
             run_step(event, "blocked-stop-runtime-state", || {
-                crate::daemon_runtime::handle_blocked_stop_runtime_state(input)
+                crate::daemon_runtime::handle_blocked_stop_runtime_state_owned(
+                    input,
+                    completion.as_mut(),
+                )
             })?;
             return Ok(append_stop_warning(output, stop_warnings));
         }
     }
     run_step(event, "completed-stop", || {
-        super::runtime_state::record_completed_stop_from_env()
+        runtime_state::record_completed_stop_owned(completion.as_mut())
     })?;
 
     Ok(append_stop_warning(reminder, stop_warnings))
@@ -1132,7 +1198,9 @@ mod tests {
             // test-hygiene: allow-wall-clock-deadline the clock is pinned above; this hang guard never orders ACK and live publication.
             Instant::now() + HANG_GUARD,
         );
-        let result = handle_user_prompt_submit("UserPromptSubmit", &input, &repo);
+        let mut completion =
+            runtime_state::begin_hook_observation("UserPromptSubmit", &input, &repo).unwrap();
+        let result = handle_user_prompt_submit("UserPromptSubmit", &input, &repo, &mut completion);
         shutdown.send(()).unwrap();
         runtime.block_on(server).unwrap();
         result.unwrap();
@@ -2470,6 +2538,8 @@ mod tests {
         let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
         let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
 
+        let metadata_path = sessions_dir.join(format!("{session_id}.toml"));
+        let metadata = std::fs::read(&metadata_path).unwrap();
         for input in [
             serde_json::json!({
                 "tool_name": "Edit",
@@ -2515,9 +2585,10 @@ mod tests {
                 "general issue-owned work must not depend on Host binding availability: {input}"
             );
         }
+        assert_eq!(std::fs::read(&metadata_path).unwrap(), metadata);
         assert!(
-            runtime_path.exists(),
-            "removing the binding step must preserve later runtime-state handling"
+            !runtime_path.exists(),
+            "a missing bound runtime must not be recreated through legacy compatibility"
         );
     }
 

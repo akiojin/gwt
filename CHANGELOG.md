@@ -1,6 +1,123 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.147.0] - 2026-11-01
+
+### Bug Fixes
+
+- **monitor:** Sync explicit limits with agent rosters
+- **ci:** 非release macOS CIをmacos-15へ移行する
+- **gui:** Remove duplicate project capacity controls
+- **gui:** Preserve candidate clicks across focus changes
+- **mobile:** 狭画面の上部操作を収めてタッチ領域を確保する
+- **mobile:** 長文警告をスクロールして作業領域を保つ
+- **pane:** Inspection権限で割当済みの自名を取得する
+- **test:** Isolate Windows driver fixture disk policy
+- **agents:** Preserve name drafts across autosave receipts
+- **monitor:** Checkpoint前のexact source自己待ちを解消する
+- **issue-monitor:** 再起動後の復元窓へ同一Sessionのbindingを引き継ぐ
+- **agents:** 移行元の消失と破損を一貫した診断で拒否する
+- **monitor:** Linux source threadのcheckpoint自己待ちを解消する
+- **test:** Isolate and maintain FIFO fixture reservations
+- **frontend:** Serialize BigInt receiver audit labels
+- **frontend:** RAF停止時も端末の初回fitを進める
+- **agent:** Ignore foreign session tools during roster sync
+- **runtime:** Project owner purpose titles into agent windows
+- **runtime:** 承認settle期限の自己再設定を止める
+- **runtime:** Close完了通知を元のproject世代へ紐付ける
+- **runtime:** 継承名の頭文字検査と履歴記録を復元する
+- **runtime:** 診断終了後の所有者状態を保持する
+- **runtime:** 登録済み PM の異常終了後の再開を維持する
+- **runtime:** PM idle 通知でも実ターンの開始を再確認する
+- **runtime:** Preserve registered PM crash recovery
+- **runtime:** Terminal settlement を実 Monitor 経路へ揃える
+- **runtime:** 出力時の画面 capture を owner で再利用する
+- **runtime:** Native owner 移管後の GUI census 発行を止める
+- **runtime:** Monitor OFF で materialized owner を閉じない
+- **runtime:** Retain genesis receipt through native roster recovery
+- **runtime:** Fence mobile authorization through native PTY input
+- **runtime:** Retain valid monitor reservations with auto disabled
+- **runtime:** Preserve owner migration contracts
+- **terminal:** Reject missing absolute commands before spawn attempts
+- **runtime:** Keep close cleanup in its captured project
+- **runtime:** Audit producing permissions before GUI rows
+- **runtime:** Refresh live activity after native window removal
+- **runtime:** Preserve permission checks across shell transport
+- **runtime:** Reobserve activity after confirmed pane close
+- **runtime:** Retain final screen after owner retirement
+- **verify:** Explicitly unlock retired heavy leases
+- **terminal:** Snapshot跨ぎのUTF-8出力を保全する
+- **terminal:** 長いOSCのsnapshot復元で制御文脈を保つ
+- **terminal:** Retain APC context after snapshot tail overflow
+- **feedback:** Correct Windows contention and fault fixtures
+- **feedback:** Preserve manual intake when mode is unreadable
+- **hooks:** Separate browser preflight from retained diagnostics
+- **bridge:** Trace stalled work materialization probes
+- **bridge:** Preserve filtered probe correlation
+
+### Features
+
+- **agents:** 共通名簿移行の非稼働snapshotを原子的に保存する
+- **agents:** Reconcile inactive registry snapshots explicitly
+- **feedback:** Submit safe reports without prompts in auto mode
+- **feedback:** Windows workerの所有と取消境界を管理
+
+### Miscellaneous Tasks
+
+- **work:** PR #6529の配送参照を記録する
+- **work:** PR #6543 の配送参照を記録する
+- **work:** Record issue 6533 delivery evidence
+- **work:** Record mobile security design gate
+- **work:** Link mobile design delivery pull request
+- **work:** Record mobile transport conformance probes
+- **work:** Link mobile conformance delivery pull request
+- **work:** TURN connectorの適合調査を記録する
+- **work:** TURN調査のPR参照を記録する
+- **work:** Link FIFO fixture delivery PR
+- **work:** CFIT配信確認のWork記録を保存
+- **work:** 共通Agentsの完全切替計画を記録
+- **work:** プロジェクト監督移管の最終配送を記録する
+- **work:** Record project owner delivery PR
+- **work:** Link heavy lease repair PR
+- **work:** Record native feedback reader design handoff
+- **work:** Record feedback worker lifecycle design
+- **work:** Issue #6576のworker接続設計を記録
+- **work:** Record CLI-origin feedback ownership design
+
+### Refactor
+
+- **runtime:** Move project lifecycle ownership into supervisor
+
+### Testing
+
+- **frontend:** 全UI受信経路の構造監査を記録
+- **monitor:** Checkpointでlive child保持を固定する
+- **verify:** Isolate lease FIFO fixture disk policy
+- **frontend:** 新しい初回fit予約へembedded契約を整合
+- **agent:** Cover foreign tools in legacy roster migration
+- **runtime:** Align monitor fixtures with owner launch authority
+- **monitor:** 最終起動判定を実ownerのfixtureへ移す
+- **runtime:** Window操作を実ownerの完了境界へ揃える
+- **runtime:** RuntimeState hook試験を実ownerへ移す
+- **runtime:** Terminal projection を実所有者の世代へ同期する
+- **runtime:** 終了診断の対照を実所有者へ同期する
+- **runtime:** 正常終了の単一回収を実所有者で検証する
+- **runtime:** Alias 観測を正規 project context に同期する
+- **monitor:** 回答元の認証済み owner readiness を観測する
+- **runtime:** Sibling tab の非発行 canvas 検査を移管境界に合わせる
+- **runtime:** Monitor claim 拒否時の実状態を診断へ残す
+- **runtime:** Keep migrated PM and scrollback fixtures live
+- **runtime:** Preserve owner status projection contracts
+- **runtime:** Observe exact native ACK and diagnostic lifetimes
+- **runtime:** Configure the native supervisor fixture provider
+- **runtime:** Initialize board fixture tty before idle
+- **runtime:** Await fanout readiness before independent resend
+- **feedback:** Wire native worker CI and retain safe diagnostics
+- **feedback:** Cover real HTTP mutation interruption
+- **feedback:** Expose closed loopback failure state
+- **feedback:** Supply Windows loopback runtime metadata
+- **monitor:** Stabilize pending launch failure readback
+
 ## [9.146.0] - 2026-10-30
 
 ### Bug Fixes

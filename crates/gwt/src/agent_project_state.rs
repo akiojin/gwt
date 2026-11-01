@@ -2483,6 +2483,7 @@ fn probe_authenticated_work_materialization_with_binding(
             "Work materialization probe Session claim does not match the authenticated launch",
         ));
     }
+    tracing::info!(target: "gwt.work_materialization_probe", stage = "execution_validation");
     let validated = validate_current_execution_binding_authority(
         authenticated_project_root,
         authenticated_session_id,
@@ -2495,6 +2496,7 @@ fn probe_authenticated_work_materialization_with_binding(
         ));
     }
 
+    tracing::info!(target: "gwt.work_materialization_probe", stage = "target_validation");
     let target = resolve_authenticated_session_work_mutation_target(
         authenticated_project_root,
         authenticated_session_id,
@@ -2511,6 +2513,7 @@ fn probe_authenticated_work_materialization_with_binding(
             error
         }
     })?;
+    tracing::info!(target: "gwt.work_materialization_probe", stage = "validated");
     Ok(AgentWorkMaterializationProbeReceipt {
         schema_version: AGENT_WORK_MATERIALIZATION_PROBE_SCHEMA_VERSION,
         owner_number: request.owner_number,
@@ -4639,6 +4642,12 @@ fn resolve_unique_existing_work(
     worktree_identity: &Path,
     expected: SessionWorkAuthorityExpectation<'_>,
 ) -> Result<ResolvedExistingWorkAuthority> {
+    let probe_span = tracing::Span::current()
+        .metadata()
+        .is_some_and(|metadata| metadata.name() == "work_materialization_probe");
+    if probe_span {
+        tracing::info!(target: "gwt.work_materialization_probe", stage = "work_lookup");
+    }
     let current_path =
         gwt_core::paths::gwt_workspace_projection_path_for_repo_path(work_items_root);
     let projection = load_workspace_projection_from_path(&current_path)
@@ -4878,6 +4887,9 @@ fn resolve_unique_existing_work(
                 WORK_PRUNE_REMEDY,
             ));
         }
+    }
+    if probe_span {
+        tracing::info!(target: "gwt.work_materialization_probe", stage = "work_lookup_complete");
     }
     Ok(ResolvedExistingWorkAuthority {
         work_id,
@@ -9634,6 +9646,152 @@ mod tests {
                     .is_err()
             );
             assert_eq!(WorkMutationSnapshot::capture(repo, repo), before);
+        });
+    }
+
+    #[test]
+    fn work_materialization_http_probe_correlates_stages_without_mutation() {
+        with_strict_target_fixture(|repo, session| {
+            let (session, binding) = bind_session_to_current_execution(repo, session);
+            seed_work_mutation_surfaces(repo, repo);
+            seed_unique_mutation_target(repo, repo, &session, "work-http-probe");
+            let request = bound_work_materialization_probe_request(&session);
+            let before = WorkMutationSnapshot::capture(repo, repo);
+            let registry = crate::agent_capability::AgentCapabilityRegistry::default();
+            let token = registry.issue_bound(repo, &session.id, binding).unwrap();
+            let log = tempfile::NamedTempFile::new().unwrap();
+            let subscriber = tracing_subscriber::fmt()
+                .json()
+                .with_env_filter("off,gwt.work_materialization_probe=info")
+                .with_writer(log.reopen().unwrap())
+                .finish();
+            let _subscriber = tracing::subscriber::set_default(subscriber);
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let state = crate::project_transport::TransportState::new(
+                    crate::project_transport::ClientHub::default(),
+                    registry.clone(),
+                    "probe-diagnostic-host".into(),
+                    std::sync::Arc::new(|_| {}),
+                );
+                let app = crate::project_transport::agent_router(
+                    state,
+                    crate::project_transport::AccessLogSink::default(),
+                );
+                let server = tokio::spawn(async move {
+                    axum::serve(
+                        listener,
+                        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                    )
+                    .await
+                    .unwrap();
+                });
+                let url = format!("http://{address}/internal/work-materialization-probe");
+                let client = reqwest::Client::new();
+                let response = client
+                    .post(&url)
+                    .bearer_auth(&token)
+                    .json(&request)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                let receipt: AgentWorkMaterializationProbeReceipt = response.json().await.unwrap();
+                assert_eq!(receipt.work_id, "work-http-probe");
+                let response = client
+                    .post(&url)
+                    .bearer_auth("private-invalid-token")
+                    .json(&request)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+                server.abort();
+                let _ = server.await;
+            });
+            assert_eq!(WorkMutationSnapshot::capture(repo, repo), before);
+            let text = std::fs::read_to_string(log.path()).unwrap();
+            let records = text
+                .lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                .collect::<Vec<_>>();
+            for private in [
+                token.as_str(),
+                "private-invalid-token",
+                request.observation.cwd.as_str(),
+            ] {
+                assert!(
+                    !records
+                        .iter()
+                        .any(|record| json_value_contains(record, private)),
+                    "probe diagnostics must not expose private request data"
+                );
+            }
+            let stages = records
+                .iter()
+                .filter(|record| {
+                    let span = &record["span"];
+                    span["name"] == "work_materialization_probe"
+                        && record["target"] == "gwt.work_materialization_probe"
+                })
+                .map(|record| {
+                    (
+                        record["span"]["request_id"].as_str().unwrap().to_string(),
+                        record["fields"]["stage"].as_str().unwrap().to_string(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let first_id = &stages
+                .first()
+                .expect("probe request must log its entry before processing")
+                .0;
+            let successful = stages
+                .iter()
+                .filter(|(id, _)| id == first_id)
+                .map(|(_, stage)| stage.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                successful,
+                [
+                    "request",
+                    "authentication",
+                    "authenticated",
+                    "dispatch",
+                    "worker",
+                    "execution_validation",
+                    "target_validation",
+                    "work_lookup",
+                    "work_lookup_complete",
+                    "validated",
+                    "worker_complete",
+                    "reply"
+                ]
+            );
+            let rejected = stages
+                .iter()
+                .filter(|(id, _)| id != first_id)
+                .map(|(_, stage)| stage.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(rejected, ["request", "authentication", "reply"]);
+            let replies = records
+                .iter()
+                .filter(|record| record["fields"]["stage"] == "reply")
+                .collect::<Vec<_>>();
+            assert_eq!(replies.len(), 2);
+            for reply in replies {
+                let expected = if reply["span"]["request_id"] == first_id.as_str() {
+                    200
+                } else {
+                    401
+                };
+                assert_eq!(reply["fields"]["status"].as_u64(), Some(expected));
+                assert!(reply["fields"]["elapsed_ms"].as_u64().is_some());
+            }
         });
     }
 

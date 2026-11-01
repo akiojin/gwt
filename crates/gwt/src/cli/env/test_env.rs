@@ -38,6 +38,7 @@ pub struct TestEnv {
     pub repo_path: PathBuf,
     pub stdin: String,
     pub stdout: Vec<u8>,
+    pub stdout_writer: Option<Box<dyn io::Write + Send>>,
     pub stderr: Vec<u8>,
     pub files: HashMap<String, String>,
     pub target_issue_create_call_log: Vec<TargetIssueCreateCall>,
@@ -110,6 +111,7 @@ impl TestEnv {
             repo_path,
             stdin: String::new(),
             stdout: Vec::new(),
+            stdout_writer: None,
             stderr: Vec::new(),
             files: HashMap::new(),
             target_issue_create_call_log: Vec::new(),
@@ -274,7 +276,10 @@ impl CliEnv for TestEnv {
         )
     }
     fn stdout(&mut self) -> &mut dyn io::Write {
-        &mut self.stdout
+        match self.stdout_writer.as_mut() {
+            Some(writer) => writer.as_mut(),
+            None => &mut self.stdout,
+        }
     }
     fn stderr(&mut self) -> &mut dyn io::Write {
         &mut self.stderr

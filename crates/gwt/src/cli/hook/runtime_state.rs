@@ -54,6 +54,7 @@ pub(crate) fn current_hook_context(
     worktree: &Path,
 ) -> Result<(CurrentHookContext, SessionRuntimeState), HookContextError> {
     use HookContextError::{Foreign, Missing, Unreadable};
+    let worktree = gwt_core::paths::resolve_current_worktree_root(worktree);
     let id = GwtSessionId::from_env().ok_or(Missing)?;
     gwt_agent::validate_session_id_path_component(id.as_str()).map_err(|_| Foreign)?;
     let sessions = gwt_core::paths::gwt_sessions_dir();
@@ -67,7 +68,7 @@ pub(crate) fn current_hook_context(
         })?;
     if session.id != id.as_str()
         || std::fs::canonicalize(&session.worktree_path).map_err(|_| Unreadable)?
-            != std::fs::canonicalize(worktree).map_err(|_| Unreadable)?
+            != std::fs::canonicalize(&worktree).map_err(|_| Unreadable)?
     {
         return Err(Foreign);
     }
@@ -188,6 +189,18 @@ fn write_state_with_status(
     let _writer = gwt_agent::session::runtime_writer_lease(path)?;
     let _publication = gwt_agent::session::runtime_publication_lease(path)?;
     let previous = SessionRuntimeState::load(path).ok();
+    let value = event_runtime_value(previous, event, status, pending_discussion, tool_use_id)?;
+    write_hook_runtime_value(path, &value, false)?;
+    Ok(())
+}
+
+fn event_runtime_value(
+    previous: Option<SessionRuntimeState>,
+    event: &str,
+    status: &str,
+    pending_discussion: Option<PendingDiscussionResume>,
+    tool_use_id: Option<&str>,
+) -> Result<serde_json::Value, HookError> {
     let mut active_tool_calls = previous
         .as_ref()
         .and_then(|state| state.active_tool_calls.clone());
@@ -264,7 +277,15 @@ fn write_state_with_status(
             );
         }
     }
-    let bytes = serde_json::to_vec_pretty(&value)?;
+    Ok(value)
+}
+
+fn write_hook_runtime_value(
+    path: &Path,
+    value: &serde_json::Value,
+    durable: bool,
+) -> io::Result<()> {
+    let bytes = serde_json::to_vec_pretty(value).map_err(io::Error::other)?;
     // Issue #3777: this file is pure liveness for the Branches tab and every
     // hook event rewrites it, so waiting for the device buys nothing while
     // costing the prompt its budget (522ms measured on a stalled Windows
@@ -272,12 +293,63 @@ fn write_state_with_status(
     gwt_github::cache::write_atomic_with_durability(
         path,
         &bytes,
-        gwt_github::cache::Durability::RenameOnly,
+        if durable {
+            gwt_github::cache::Durability::FlushToDevice
+        } else {
+            gwt_github::cache::Durability::RenameOnly
+        },
     )?;
     Ok(())
 }
 
 /// Captured before dispatch; an old completion cannot stamp a successor runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UnboundPhysicalHookContext {
+    incarnation: u64,
+    host_started_at: u64,
+    child_pid: u32,
+    child_started_at: u64,
+    canonical_runtime_path: PathBuf,
+    canonical_worktree: PathBuf,
+}
+
+impl UnboundPhysicalHookContext {
+    fn capture(runtime: &SessionRuntimeState, path: &Path, worktree: &Path) -> Option<Self> {
+        if runtime.execution_identity.is_some() {
+            return None;
+        }
+        let incarnation = runtime.runtime_incarnation.filter(|value| *value > 0)?;
+        let host_started_at = runtime.host_started_at.filter(|value| *value > 0)?;
+        let child_pid = runtime.child_pid.filter(|value| *value > 0)?;
+        let child_started_at = runtime.child_started_at.filter(|value| *value > 0)?;
+        let host_pid = path.parent()?.file_name()?.to_str()?.parse::<u32>().ok()?;
+        if host_pid == 0
+            || crate::process::host_process_start_time(host_pid) != Some(host_started_at)
+            || crate::process::host_process_start_time(child_pid) != Some(child_started_at)
+            || (child_pid != std::process::id()
+                && !crate::process::is_descendant_of(std::process::id(), child_pid))
+        {
+            return None;
+        }
+        Some(Self {
+            incarnation,
+            host_started_at,
+            child_pid,
+            child_started_at,
+            canonical_runtime_path: std::fs::canonicalize(path).ok()?,
+            canonical_worktree: std::fs::canonicalize(worktree).ok()?,
+        })
+    }
+}
+
+fn is_legacy_hook_runtime(runtime: &SessionRuntimeState) -> bool {
+    runtime.execution_identity.is_none()
+        && runtime.runtime_incarnation.is_none()
+        && runtime.host_started_at.is_none()
+        && runtime.child_pid.is_none()
+        && runtime.child_started_at.is_none()
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct HookCompletionContext {
     sessions_dir: PathBuf,
@@ -285,9 +357,15 @@ pub(crate) struct HookCompletionContext {
     runtime_path: PathBuf,
     worktree: PathBuf,
     exact: Option<CurrentHookContext>,
+    unbound_physical: Option<UnboundPhysicalHookContext>,
+    correlation_id: Option<String>,
+    event: Option<String>,
+    initially_missing_legacy: bool,
+    can_certify_current: bool,
 }
 
 pub(crate) fn capture_hook_completion(worktree: &Path) -> Option<HookCompletionContext> {
+    let worktree = gwt_core::paths::resolve_current_worktree_root(worktree);
     let id = GwtSessionId::from_env()?;
     gwt_agent::validate_session_id_path_component(id.as_str()).ok()?;
     let path = PathBuf::from(std::env::var_os(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV)?);
@@ -299,20 +377,28 @@ pub(crate) fn capture_hook_completion(worktree: &Path) -> Option<HookCompletionC
     let session = Session::load(&sessions.join(format!("{}.toml", id.as_str()))).ok()?;
     if session.id != id.as_str()
         || std::fs::canonicalize(&session.worktree_path).ok()?
-            != std::fs::canonicalize(worktree).ok()?
+            != std::fs::canonicalize(&worktree).ok()?
     {
         return None;
     }
+    let mut initially_missing_legacy = false;
+    let mut unbound_physical = None;
     let exact = match SessionExecutionIdentity::from_session(&session).ok()? {
-        Some(_) => Some(current_hook_context(worktree).ok()?.0),
+        Some(_) => Some(current_hook_context(&worktree).ok()?.0),
         None => {
-            // Preserve #3541 for known legacy Sessions. Missing or corrupt bound
-            // identity is never downgraded to this compatibility path.
-            if path.exists() {
-                let runtime = SessionRuntimeState::load(&path).ok()?;
-                if runtime.execution_identity.is_some() || runtime.runtime_incarnation.is_some() {
-                    return None;
+            // Ordinary unbound launches retain their physical proof. Only a
+            // sidecar with no proof fields is legacy; partial proof is unknown.
+            match SessionRuntimeState::load(&path) {
+                Ok(runtime) if is_legacy_hook_runtime(&runtime) => {}
+                Ok(runtime) => {
+                    unbound_physical = Some(UnboundPhysicalHookContext::capture(
+                        &runtime, &path, &worktree,
+                    )?);
                 }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    initially_missing_legacy = true;
+                }
+                _ => return None,
             }
             None
         }
@@ -321,12 +407,171 @@ pub(crate) fn capture_hook_completion(worktree: &Path) -> Option<HookCompletionC
         sessions_dir: sessions,
         session_id: id.as_str().to_string(),
         runtime_path: path,
-        worktree: worktree.to_path_buf(),
+        worktree,
         exact,
+        unbound_physical,
+        correlation_id: None,
+        event: None,
+        initially_missing_legacy,
+        can_certify_current: false,
     })
 }
 
+/// Observe an invocation without publishing its tool lifetime or Session metadata.
+/// Invalid input is left to the original ordered handler for attribution.
+pub(crate) fn begin_hook_observation(
+    event: &str,
+    input: &str,
+    worktree: &Path,
+) -> Result<Option<HookCompletionContext>, HookError> {
+    if !matches!(
+        event,
+        "SessionStart" | "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "Stop"
+    ) {
+        return Ok(None);
+    }
+    let Ok(hook_event) = RawHookEvent::read_from_str(input) else {
+        return Ok(None);
+    };
+    let Some(mut context) = capture_hook_completion(worktree) else {
+        return Ok(None);
+    };
+    let Ok(id) = GwtSessionId::required_from_env(event) else {
+        return Ok(None);
+    };
+    context.correlation_id = Some(uuid::Uuid::new_v4().to_string());
+    context.event = Some(event.to_string());
+    let mut invoked = false;
+    let observed = gwt_agent::session::with_session_path_lease_wait(
+        &context.sessions_dir,
+        &context.session_id,
+        HOOK_SESSION_METADATA_LEASE_WAIT,
+        |state| {
+            invoked = true;
+            let gwt_agent::SessionPathState::Present(session) = state else {
+                return Ok(false);
+            };
+            let _writer = gwt_agent::session::runtime_writer_lease(&context.runtime_path)?;
+            let _publication =
+                gwt_agent::session::runtime_publication_lease(&context.runtime_path)?;
+            if !context.matches_session(&session)? {
+                return Ok(false);
+            }
+            if validated_hook_agent_session_id(event, &id, Some(&session), hook_event.as_ref())
+                .is_err()
+            {
+                return Ok(false);
+            }
+            match context.read_runtime() {
+                Ok((runtime, mut value)) => {
+                    if context.initially_missing_legacy || !context.matches_source(&runtime) {
+                        return Ok(false);
+                    }
+                    value["current_hook_event"] =
+                        serde_json::to_value(context.pending_observation())
+                            .map_err(io::Error::other)?;
+                    write_hook_runtime_value(&context.runtime_path, &value, false)?;
+                    Ok(true)
+                }
+                Err(error)
+                    if error.kind() == io::ErrorKind::NotFound
+                        && context.initially_missing_legacy =>
+                {
+                    Ok(true)
+                }
+                Err(_) => Ok(false),
+            }
+        },
+    );
+    match observed {
+        Ok(observed) => Ok(observed.then_some(context)),
+        Err(error) if !invoked => {
+            log_session_metadata_error("observe hook for", &id, &error);
+            Ok(None)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 impl HookCompletionContext {
+    fn pending_observation(&self) -> gwt_agent::session::CurrentHookEventObservation {
+        gwt_agent::session::CurrentHookEventObservation {
+            correlation_id: self.correlation_id.clone().unwrap_or_default(),
+            event: self.event.clone().unwrap_or_default(),
+            completed_outcome: None,
+        }
+    }
+
+    fn matches_session(&self, session: &Session) -> io::Result<bool> {
+        let Ok(identity) = SessionExecutionIdentity::from_session(session) else {
+            return Ok(false);
+        };
+        let worktree = std::fs::canonicalize(&session.worktree_path)?;
+        Ok(session.id == self.session_id
+            && identity.as_ref() == self.exact.as_ref().map(|context| &context.identity)
+            && worktree == std::fs::canonicalize(&self.worktree)?
+            && self
+                .unbound_physical
+                .as_ref()
+                .is_none_or(|physical| worktree == physical.canonical_worktree))
+    }
+
+    fn matches_source(&self, runtime: &SessionRuntimeState) -> bool {
+        if let Some(expected) = self.exact.as_ref() {
+            current_hook_context(&self.worktree)
+                .ok()
+                .as_ref()
+                .map(|pair| &pair.0)
+                == Some(expected)
+        } else if let Some(expected) = self.unbound_physical.as_ref() {
+            UnboundPhysicalHookContext::capture(runtime, &self.runtime_path, &self.worktree)
+                .as_ref()
+                == Some(expected)
+        } else {
+            is_legacy_hook_runtime(runtime)
+        }
+    }
+
+    fn matches_pending(&self, runtime: &SessionRuntimeState) -> bool {
+        let (Some(id), Some(event), Some(current)) = (
+            self.correlation_id.as_deref(),
+            self.event.as_deref(),
+            runtime.current_hook_event.as_ref(),
+        ) else {
+            return false;
+        };
+        uuid::Uuid::parse_str(id).is_ok_and(|id_value| {
+            id_value.get_version_num() == 4
+                && id_value.get_variant() == uuid::Variant::RFC4122
+                && id_value.to_string() == id
+        }) && current.correlation_id == id
+            && current.event == event
+            && current.completed_outcome.is_none()
+    }
+
+    fn read_runtime(&self) -> io::Result<(SessionRuntimeState, serde_json::Value)> {
+        let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&self.runtime_path)?)
+            .map_err(io::Error::other)?;
+        let runtime = serde_json::from_value(value.clone()).map_err(io::Error::other)?;
+        Ok((runtime, value))
+    }
+
+    fn owned_runtime(
+        &self,
+        session: &Session,
+    ) -> io::Result<Option<(SessionRuntimeState, serde_json::Value)>> {
+        if !self.matches_session(session)? || self.initially_missing_legacy {
+            return Ok(None);
+        }
+        let Ok((runtime, value)) = self.read_runtime() else {
+            return Ok(None);
+        };
+        Ok(
+            (self.matches_source(&runtime) && self.matches_pending(&runtime))
+                .then_some((runtime, value)),
+        )
+    }
+
     /// Keep the existing Session -> writer -> publication lock order. An
     /// unavailable observation leaves the previous pair unchanged.
     pub(crate) fn record(self, outcome: gwt_agent::session::HookCompletionOutcome) {
@@ -338,47 +583,350 @@ impl HookCompletionContext {
                 let gwt_agent::SessionPathState::Present(session) = state else {
                     return Ok(());
                 };
-                let Ok(identity) = SessionExecutionIdentity::from_session(&session) else {
-                    return Ok(());
-                };
-                if session.id != self.session_id
-                    || identity.as_ref() != self.exact.as_ref().map(|context| &context.identity)
-                    || std::fs::canonicalize(&session.worktree_path)?
-                        != std::fs::canonicalize(&self.worktree)?
-                {
-                    return Ok(());
-                }
                 let _writer = gwt_agent::session::runtime_writer_lease(&self.runtime_path)?;
                 let _publication =
                     gwt_agent::session::runtime_publication_lease(&self.runtime_path)?;
-                let mut runtime = SessionRuntimeState::load(&self.runtime_path)?;
-                if let Some(expected) = self.exact.as_ref() {
-                    if current_hook_context(&self.worktree)
-                        .ok()
-                        .as_ref()
-                        .map(|pair| &pair.0)
-                        != Some(expected)
-                    {
-                        return Ok(());
-                    }
-                } else if runtime.execution_identity.is_some()
-                    || runtime.runtime_incarnation.is_some()
-                {
+                let Some((_, mut value)) = self.owned_runtime(&session)? else {
                     return Ok(());
-                }
+                };
                 // Preserve other sidecar fields, including fields from newer
                 // producers, while publishing timestamp/outcome atomically.
-                let mut value: serde_json::Value =
-                    serde_json::from_slice(&std::fs::read(&self.runtime_path)?)?;
-                runtime.last_completed_hook_event_at = Some(Utc::now());
-                runtime.last_completed_hook_outcome = Some(outcome);
                 value["last_completed_hook_event_at"] =
-                    serde_json::to_value(runtime.last_completed_hook_event_at)?;
-                value["last_completed_hook_outcome"] = serde_json::to_value(outcome)?;
-                let bytes = serde_json::to_vec_pretty(&value)?;
-                gwt_github::cache::write_atomic(&self.runtime_path, &bytes)
+                    serde_json::to_value(Utc::now()).map_err(io::Error::other)?;
+                value["last_completed_hook_outcome"] =
+                    serde_json::to_value(outcome).map_err(io::Error::other)?;
+                if self.can_certify_current && self.exact.is_some() {
+                    value["current_hook_event"]["completed_outcome"] =
+                        serde_json::to_value(outcome).map_err(io::Error::other)?;
+                } else {
+                    value
+                        .as_object_mut()
+                        .expect("runtime object")
+                        .remove("current_hook_event");
+                }
+                write_hook_runtime_value(&self.runtime_path, &value, true)
             },
         );
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct HookRuntimePublication {
+    pub session: Option<Session>,
+    pub published: bool,
+}
+
+/// The aggregate path never falls back to the unowned RuntimeState writer.
+pub(crate) fn handle_with_input_owned(
+    event: &str,
+    input: &str,
+    completion: Option<&mut HookCompletionContext>,
+) -> Result<HookRuntimePublication, HookError> {
+    handle_with_input_owned_with(
+        event,
+        input,
+        completion,
+        gwt_agent::session::persist_session_hook_metadata_under_lease,
+        write_hook_runtime_value,
+        std::convert::identity::<OwnedRuntimeResult>,
+    )
+}
+
+type OwnedRuntimeResult = io::Result<(HookRuntimePublication, bool)>;
+
+// Keep the real lease and ordered operation intact. Private call boundaries
+// let tests observe errors after owned begin instead of refusing before it.
+fn handle_with_input_owned_with<M, P, F>(
+    event: &str,
+    input: &str,
+    completion: Option<&mut HookCompletionContext>,
+    persist_metadata: M,
+    publish_runtime: P,
+    finish_lease: F,
+) -> Result<HookRuntimePublication, HookError>
+where
+    M: FnOnce(&Path, &str, &str, Option<&str>, Option<&Path>) -> io::Result<Session>,
+    P: FnOnce(&Path, &serde_json::Value, bool) -> io::Result<()>,
+    F: FnOnce(OwnedRuntimeResult) -> OwnedRuntimeResult,
+{
+    let Some(path) = std::env::var_os(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV) else {
+        return Ok(HookRuntimePublication::default());
+    };
+    // Preserve the original runtime-step parsing and identity errors, even
+    // when observation begin could not obtain ownership.
+    let hook_event = RawHookEvent::read_from_str(input)?;
+    let id = GwtSessionId::required_from_env(event)?;
+    let path = PathBuf::from(path);
+    let sessions = sessions_dir_for_runtime_path(&path);
+    let session = timed_substage(event, "runtime-state/session-load", || {
+        // Defer normalization to the guarded metadata helper.
+        Session::load(&sessions.join(format!("{}.toml", id.as_str()))).ok()
+    });
+    let session_start_requires_persistence = event == "SessionStart"
+        && matches!(
+            resolve_hook_agent_session_id(session.as_ref(), hook_event.as_ref()),
+            HookAgentSessionId::Provided(_)
+        );
+    let status =
+        status_for_event(event).ok_or_else(|| HookError::InvalidEvent(event.to_string()))?;
+    let Some(completion) = completion else {
+        let expected =
+            validated_hook_agent_session_id(event, &id, session.as_ref(), hook_event.as_ref())?;
+        if event == "SessionStart" {
+            if let Some(expected) = expected {
+                let durable = Session::load(&sessions.join(format!("{}.toml", id.as_str()))).ok();
+                if durable.as_ref().and_then(Session::exact_resume_session_id)
+                    != Some(expected.as_str())
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        session_start_persisted_id_missing_message(id.as_str()),
+                    )
+                    .into());
+                }
+            }
+        }
+        // Keep the original runtime-step I/O diagnostics without publishing
+        // liveness for a source whose observation could not be authenticated.
+        match std::fs::File::open(&path).and_then(|mut file| file.read(&mut [0_u8; 1])) {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        return Ok(HookRuntimePublication::default());
+    };
+    if completion.runtime_path != path
+        || completion.session_id != id.as_str()
+        || completion.sessions_dir != sessions
+        || completion.event.as_deref() != Some(event)
+    {
+        completion.can_certify_current = false;
+        return Ok(HookRuntimePublication::default());
+    }
+    let captured = completion.clone();
+    completion.can_certify_current = false;
+    let mut invoked = false;
+    let result = gwt_agent::session::with_session_path_lease_wait(
+        &captured.sessions_dir,
+        &captured.session_id,
+        HOOK_SESSION_METADATA_LEASE_WAIT,
+        |state| {
+            invoked = true;
+            let gwt_agent::SessionPathState::Present(session) = state else {
+                return Ok((HookRuntimePublication::default(), false));
+            };
+            let mut session = *session;
+            let _writer = gwt_agent::session::runtime_writer_lease(&captured.runtime_path)?;
+            let _publication =
+                gwt_agent::session::runtime_publication_lease(&captured.runtime_path)?;
+            if !captured.matches_session(&session)? {
+                return Ok((HookRuntimePublication::default(), false));
+            }
+            let previous = if captured.initially_missing_legacy {
+                match std::fs::metadata(&captured.runtime_path) {
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                    _ => return Ok((HookRuntimePublication::default(), false)),
+                }
+            } else {
+                let Some((runtime, value)) = captured.owned_runtime(&session)? else {
+                    return Ok((HookRuntimePublication::default(), false));
+                };
+                Some((runtime, value))
+            };
+            let agent_session_id =
+                validated_hook_agent_session_id(event, &id, Some(&session), hook_event.as_ref())
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+            let legacy_root = session.project_state_root.is_none().then(|| {
+                crate::agent_project_state::canonical_project_state_root_for_session(
+                    &session,
+                    &session.worktree_path,
+                )
+            });
+            let sync_id = agent_session_id.as_ref().filter(|agent_id| {
+                event == "SessionStart" || agent_session_id_needs_sync(Some(&session), agent_id)
+            });
+            let persisted = timed_substage(event, "runtime-state/session-metadata", || {
+                persist_metadata(
+                    &captured.sessions_dir,
+                    &captured.session_id,
+                    event,
+                    sync_id.map(HookSessionId::as_str),
+                    legacy_root.as_deref(),
+                )
+            });
+            let metadata_saved = match persisted {
+                Ok(updated) => {
+                    session = updated;
+                    true
+                }
+                Err(error) => {
+                    log_session_metadata_error("record hook metadata for", &id, &error);
+                    if event == "SessionStart" && agent_session_id.is_some() {
+                        return Err(error);
+                    }
+                    false
+                }
+            };
+            let pending = timed_substage(event, "runtime-state/pending-resume", || {
+                load_pending_resume(&session.worktree_path).ok().flatten()
+            });
+            let mut value = event_runtime_value(
+                previous.map(|pair| pair.0),
+                event,
+                status,
+                pending,
+                hook_event.as_ref().and_then(RawHookEvent::tool_use_id),
+            )
+            .map_err(|error| io::Error::other(error.to_string()))?;
+            // A failed metadata association remains uncertified, but the
+            // owned token is needed to publish actual-output history once.
+            value["current_hook_event"] =
+                serde_json::to_value(captured.pending_observation()).map_err(io::Error::other)?;
+            timed_substage(event, "runtime-state/state-write", || {
+                publish_runtime(&captured.runtime_path, &value, false)
+            })?;
+            Ok((
+                HookRuntimePublication {
+                    session: Some(session),
+                    published: true,
+                },
+                metadata_saved,
+            ))
+        },
+    );
+    match finish_lease(result) {
+        Ok((publication, metadata_saved)) => {
+            if publication.published {
+                completion.initially_missing_legacy = false;
+            }
+            completion.can_certify_current =
+                publication.published && metadata_saved && completion.exact.is_some();
+            Ok(publication)
+        }
+        Err(error) if !invoked && !session_start_requires_persistence => {
+            log_session_metadata_error("record hook metadata for", &id, &error);
+            Ok(HookRuntimePublication::default())
+        }
+        Err(error) => {
+            completion.correlation_id = None;
+            Err(error.into())
+        }
+    }
+}
+
+pub(crate) fn record_completed_stop_owned(
+    completion: Option<&mut HookCompletionContext>,
+) -> Result<(), HookError> {
+    let Some(completion) = completion else {
+        return Ok(());
+    };
+    if completion.event.as_deref() != Some("Stop") {
+        return Ok(());
+    }
+    let captured = completion.clone();
+    let mut invoked = false;
+    let result = gwt_agent::session::with_session_path_lease_wait(
+        &captured.sessions_dir,
+        &captured.session_id,
+        HOOK_SESSION_METADATA_LEASE_WAIT,
+        |state| {
+            invoked = true;
+            let gwt_agent::SessionPathState::Present(session) = state else {
+                return Ok(false);
+            };
+            let mut session = *session;
+            let _writer = gwt_agent::session::runtime_writer_lease(&captured.runtime_path)?;
+            let _publication =
+                gwt_agent::session::runtime_publication_lease(&captured.runtime_path)?;
+            if captured.owned_runtime(&session)?.is_none() {
+                return Ok(false);
+            }
+            let expected = session.clone();
+            session.migrate_legacy_launch_args();
+            session.record_completed_stop();
+            session.save_if_unchanged_under_lease(&captured.sessions_dir, &expected)
+        },
+    );
+    match result {
+        Ok(saved) => {
+            completion.can_certify_current &= saved;
+            Ok(())
+        }
+        Err(error) => {
+            completion.can_certify_current = false;
+            if invoked {
+                completion.correlation_id = None;
+                Err(error.into())
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+pub(crate) fn record_blocked_stop_owned(
+    completion: Option<&mut HookCompletionContext>,
+) -> Result<HookRuntimePublication, HookError> {
+    let Some(completion) = completion else {
+        return Ok(HookRuntimePublication::default());
+    };
+    if completion.event.as_deref() != Some("Stop") {
+        return Ok(HookRuntimePublication::default());
+    }
+    let captured = completion.clone();
+    let mut invoked = false;
+    let result = gwt_agent::session::with_session_path_lease_wait(
+        &captured.sessions_dir,
+        &captured.session_id,
+        HOOK_SESSION_METADATA_LEASE_WAIT,
+        |state| {
+            invoked = true;
+            let gwt_agent::SessionPathState::Present(session) = state else {
+                return Ok((HookRuntimePublication::default(), false));
+            };
+            let mut session = *session;
+            let _writer = gwt_agent::session::runtime_writer_lease(&captured.runtime_path)?;
+            let _publication =
+                gwt_agent::session::runtime_publication_lease(&captured.runtime_path)?;
+            let Some((runtime, _)) = captured.owned_runtime(&session)? else {
+                return Ok((HookRuntimePublication::default(), false));
+            };
+            let expected = session.clone();
+            session.migrate_legacy_launch_args();
+            session.record_hook_status(AgentStatus::Running);
+            let saved = session.save_if_unchanged_under_lease(&captured.sessions_dir, &expected)?;
+            if !saved {
+                return Ok((HookRuntimePublication::default(), false));
+            }
+            let pending = load_pending_resume(&session.worktree_path).ok().flatten();
+            let mut value = event_runtime_value(Some(runtime), "Stop", "Running", pending, None)
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            value["current_hook_event"] =
+                serde_json::to_value(captured.pending_observation()).map_err(io::Error::other)?;
+            write_hook_runtime_value(&captured.runtime_path, &value, false)?;
+            Ok((
+                HookRuntimePublication {
+                    session: Some(session),
+                    published: true,
+                },
+                true,
+            ))
+        },
+    );
+    match result {
+        Ok((publication, saved)) => {
+            completion.can_certify_current &= saved;
+            Ok(publication)
+        }
+        Err(error) => {
+            completion.can_certify_current = false;
+            if invoked {
+                completion.correlation_id = None;
+                Err(error.into())
+            } else {
+                Ok(HookRuntimePublication::default())
+            }
+        }
     }
 }
 
@@ -391,7 +939,9 @@ fn record_hook_event_completed_from_env() {
     let Some(session) = current_session_from_env(&sessions_dir_for_runtime_path(&path)) else {
         return;
     };
-    if let Some(context) = capture_hook_completion(&session.worktree_path) {
+    if let Some(context) = begin_hook_observation("PostToolUse", "{}", &session.worktree_path)
+        .expect("owned test observation")
+    {
         context.record(gwt_agent::session::HookCompletionOutcome::Normal);
     }
 }
@@ -1022,16 +1572,31 @@ mod tests {
         write_for_event(&path, "SessionStart").unwrap();
         let ready = std::sync::Barrier::new(4);
         let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let (tools_done_tx, tools_done_rx) = std::sync::mpsc::channel();
         std::thread::scope(|scope| {
             let writer = gwt_agent::session::runtime_writer_lease(&path).unwrap();
+            let mut completion_wait = Some(tools_done_rx);
             for id in [Some("a"), Some("b"), None] {
                 let (path, ready, done) = (&path, &ready, done_tx.clone());
+                let tools_done = tools_done_tx.clone();
+                let completion_wait = if id.is_none() {
+                    completion_wait.take()
+                } else {
+                    None
+                };
                 scope.spawn(move || {
                     ready.wait();
                     if let Some(id) = id {
                         write_state_with_status(path, "PreToolUse", "Running", None, Some(id))
                             .unwrap();
+                        tools_done.send(()).unwrap();
                     } else {
+                        // Raw publications invalidate earlier observations.
+                        // Begin this completion only after both raw writers.
+                        let completion_wait = completion_wait.unwrap();
+                        for _ in 0..2 {
+                            completion_wait.recv().unwrap();
+                        }
                         record_hook_event_completed_from_env();
                     }
                     done.send(()).unwrap();
@@ -1594,6 +2159,492 @@ mod tests {
         assert!(loaded.last_completed_stop_at.is_some());
         assert_eq!(serde_json::to_string(&loaded.status).unwrap(), "\"Idle\"");
         assert!(!loaded.should_mark_interrupted_from_lifecycle());
+    }
+
+    fn with_legacy_observation(test: impl FnOnce(&Path, &Path, &Path)) {
+        let _lock = env_lock();
+        let mut env = EnvGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(dir.path());
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let session = Session::new(&worktree, "work/observation", AgentId::ClaudeCode);
+        session.save(&sessions).unwrap();
+        let path = gwt_agent::runtime_state_path(&sessions, &session.id);
+        let mut runtime = SessionRuntimeState::new(AgentStatus::Idle);
+        runtime.source_event = Some("Stop".into());
+        runtime.last_completed_hook_event_at = Some(Utc::now());
+        runtime.last_completed_hook_outcome =
+            Some(gwt_agent::session::HookCompletionOutcome::Normal);
+        runtime.save(&path).unwrap();
+        env.set(GWT_SESSION_ID_ENV, &session.id);
+        env.set(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV, path.as_os_str());
+        test(
+            &worktree,
+            &sessions.join(format!("{}.toml", session.id)),
+            &path,
+        );
+    }
+
+    // Reuse the existing observation fixture and the real-process Bound seed
+    // used by hook_exit_codes_test, rather than introducing native authority.
+    fn with_bound_observation(test: impl FnOnce(&Path, &Path, &Path)) {
+        with_legacy_observation(|worktree, session_path, path| {
+            let mut session = Session::load(session_path).unwrap();
+            session.agent_session_id = Some("provider-failure-3165".into());
+            session.project_state_root = Some(worktree.to_path_buf());
+            session.repo_hash = Some("repo-stop-3165".into());
+            session.linked_issue_number = Some(3165);
+            session
+                .set_execution_binding(Some(gwt_agent::SessionExecutionBinding {
+                    schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+                    session_id: session.id.clone(),
+                    repo_hash: "repo-stop-3165".into(),
+                    owner_kind: "issue".into(),
+                    owner_number: 3165,
+                    identity: gwt_agent::ExecutionBindingIdentity {
+                        generation_id: "generation-stop-3165".into(),
+                        binding_id: "binding-stop-3165".into(),
+                        ledger_head_hash: "head-stop-3165".into(),
+                    },
+                    capability_generation: 3,
+                }))
+                .unwrap();
+            session.save(session_path.parent().unwrap()).unwrap();
+            let identity = SessionExecutionIdentity::from_session(&session)
+                .unwrap()
+                .unwrap();
+            let pid = std::process::id();
+            let birth = crate::process::host_process_start_time(pid).unwrap();
+            SessionRuntimeState::for_execution_process(
+                AgentStatus::Running,
+                &identity,
+                41,
+                birth,
+                pid,
+                birth,
+            )
+            .save(path)
+            .unwrap();
+            test(worktree, session_path, path);
+        });
+    }
+
+    fn begin_bound_failure_observation(worktree: &Path, path: &Path) -> HookCompletionContext {
+        let receipt = begin_hook_observation(
+            "PostToolUse",
+            r#"{"session_id":"provider-failure-3165"}"#,
+            worktree,
+        )
+        .unwrap()
+        .expect("actual owned begin must succeed before failure");
+        let runtime = SessionRuntimeState::load(path).unwrap();
+        assert!(receipt.exact.is_some());
+        assert!(receipt.matches_source(&runtime));
+        assert!(receipt.matches_pending(&runtime));
+        assert!(!receipt.can_certify_current);
+        assert!(runtime.last_completed_hook_event_at.is_none());
+        assert!(runtime.last_completed_hook_outcome.is_none());
+        receipt
+    }
+
+    #[test]
+    fn owned_metadata_read_failure_keeps_pending_until_history_only_completion() {
+        with_bound_observation(|worktree, session_path, path| {
+            use gwt_agent::session::HookCompletionOutcome::Normal;
+            use std::cell::Cell;
+            let mut receipt = begin_bound_failure_observation(worktree, path);
+            let correlation = receipt.correlation_id.clone();
+            let session_bytes = std::fs::read(session_path).unwrap();
+            let metadata_calls = Cell::new(0);
+            let publication_calls = Cell::new(0);
+            let metadata_error = Cell::new(None);
+            let published = handle_with_input_owned_with(
+                "PostToolUse",
+                r#"{"session_id":"provider-failure-3165"}"#,
+                Some(&mut receipt),
+                |sessions, id, event, provider, project| {
+                    metadata_calls.set(metadata_calls.get() + 1);
+                    let backup = session_path.with_extension("metadata-failure-backup");
+                    std::fs::rename(session_path, &backup).unwrap();
+                    std::fs::create_dir(session_path).unwrap();
+                    // Real helper read I/O failure after successful owned source
+                    // validation. This is not a simulated atomic-write failure.
+                    let result = gwt_agent::session::persist_session_hook_metadata_under_lease(
+                        sessions, id, event, provider, project,
+                    );
+                    metadata_error.set(result.as_ref().err().map(io::Error::kind));
+                    std::fs::remove_dir(session_path).unwrap();
+                    std::fs::rename(backup, session_path).unwrap();
+                    result
+                },
+                |path, value, durable| {
+                    publication_calls.set(publication_calls.get() + 1);
+                    write_hook_runtime_value(path, value, durable)
+                },
+                std::convert::identity::<OwnedRuntimeResult>,
+            )
+            .unwrap();
+            assert!(metadata_error.get().is_some());
+            assert!(published.published);
+            assert_eq!(metadata_calls.get(), 1);
+            assert_eq!(publication_calls.get(), 1);
+            assert_eq!(std::fs::read(session_path).unwrap(), session_bytes);
+            let pending = SessionRuntimeState::load(path).unwrap();
+            assert_eq!(receipt.correlation_id, correlation);
+            assert!(receipt.matches_source(&pending));
+            assert!(receipt.matches_pending(&pending));
+            assert!(!receipt.can_certify_current);
+            assert!(pending.last_completed_hook_event_at.is_none());
+            // Exercise the actual completion guard as an output-success
+            // boundary; protocol delivery itself has separate real-sink tests.
+            let replay = receipt.clone();
+            receipt.record(Normal);
+            let completed = std::fs::read(path).unwrap();
+            let state = SessionRuntimeState::load(path).unwrap();
+            assert!(state.last_completed_hook_event_at.is_some());
+            assert_eq!(state.last_completed_hook_outcome, Some(Normal));
+            assert!(state.current_hook_event.is_none());
+            replay.record(Normal);
+            assert_eq!(std::fs::read(path).unwrap(), completed);
+            assert_eq!(std::fs::read(session_path).unwrap(), session_bytes);
+        });
+    }
+
+    #[test]
+    fn owned_runtime_rename_failure_discards_receipt_after_metadata_commit() {
+        with_bound_observation(|worktree, session_path, path| {
+            use std::cell::Cell;
+            let mut receipt = begin_bound_failure_observation(worktree, path);
+            let pending_bytes = std::fs::read(path).unwrap();
+            let metadata_calls = Cell::new(0);
+            let publication_calls = Cell::new(0);
+            let publication_error = Cell::new(None);
+            let result = handle_with_input_owned_with(
+                "PostToolUse",
+                r#"{"session_id":"provider-failure-3165"}"#,
+                Some(&mut receipt),
+                |sessions, id, event, provider, project| {
+                    metadata_calls.set(metadata_calls.get() + 1);
+                    gwt_agent::session::persist_session_hook_metadata_under_lease(
+                        sessions, id, event, provider, project,
+                    )
+                },
+                |path, value, durable| {
+                    publication_calls.set(publication_calls.get() + 1);
+                    std::fs::remove_file(path).unwrap();
+                    std::fs::create_dir(path).unwrap();
+                    // Real atomic rename-to-directory error, after the real
+                    // metadata commit; no chmod assumption under Linux root.
+                    let result = write_hook_runtime_value(path, value, durable);
+                    publication_error.set(result.as_ref().err().map(io::Error::kind));
+                    result
+                },
+                std::convert::identity::<OwnedRuntimeResult>,
+            );
+            assert!(result.is_err());
+            assert!(publication_error.get().is_some());
+            assert_eq!(metadata_calls.get(), 1);
+            assert_eq!(publication_calls.get(), 1);
+            assert_eq!(
+                Session::load(session_path)
+                    .unwrap()
+                    .last_hook_event
+                    .as_deref(),
+                Some("PostToolUse")
+            );
+            assert!(!receipt.can_certify_current);
+            assert!(receipt.correlation_id.is_none());
+            std::fs::remove_dir(path).unwrap();
+            std::fs::write(path, &pending_bytes).unwrap();
+            // Restore a valid, writable pending endpoint so rejection cannot
+            // pass merely because the publication destination is unreadable.
+            assert!(current_hook_context(worktree).is_ok());
+            receipt.record(gwt_agent::session::HookCompletionOutcome::Normal);
+            assert_eq!(std::fs::read(path).unwrap(), pending_bytes);
+        });
+    }
+
+    #[test]
+    fn owned_outer_result_failure_discards_successful_callback_without_retry() {
+        with_bound_observation(|worktree, session_path, path| {
+            use std::cell::Cell;
+            let mut receipt = begin_bound_failure_observation(worktree, path);
+            let metadata_calls = Cell::new(0);
+            let publication_calls = Cell::new(0);
+            let result_calls = Cell::new(0);
+            let result = handle_with_input_owned_with(
+                "PostToolUse",
+                r#"{"session_id":"provider-failure-3165"}"#,
+                Some(&mut receipt),
+                |sessions, id, event, provider, project| {
+                    metadata_calls.set(metadata_calls.get() + 1);
+                    gwt_agent::session::persist_session_hook_metadata_under_lease(
+                        sessions, id, event, provider, project,
+                    )
+                },
+                |path, value, durable| {
+                    publication_calls.set(publication_calls.get() + 1);
+                    write_hook_runtime_value(path, value, durable)
+                },
+                |result| {
+                    result_calls.set(result_calls.get() + 1);
+                    let (publication, metadata_saved) =
+                        result.expect("real callback and lease operation must have succeeded");
+                    assert!(publication.published);
+                    assert!(metadata_saved);
+                    // Controlled outer-result uncertainty after the actual
+                    // callback. This does not claim a real OS unlock failure.
+                    Err(io::Error::other(
+                        "controlled post-callback outer result failure",
+                    ))
+                },
+            );
+            assert!(result.is_err());
+            assert_eq!(metadata_calls.get(), 1);
+            assert_eq!(publication_calls.get(), 1);
+            assert_eq!(result_calls.get(), 1);
+            assert_eq!(
+                Session::load(session_path)
+                    .unwrap()
+                    .last_hook_event
+                    .as_deref(),
+                Some("PostToolUse")
+            );
+            let pending = SessionRuntimeState::load(path).unwrap();
+            assert!(current_hook_context(worktree).is_ok());
+            assert!(pending.current_hook_event.is_some());
+            assert!(pending
+                .current_hook_event
+                .unwrap()
+                .completed_outcome
+                .is_none());
+            assert!(!receipt.can_certify_current);
+            assert!(receipt.correlation_id.is_none());
+            let runtime_bytes = std::fs::read(path).unwrap();
+            let session_bytes = std::fs::read(session_path).unwrap();
+            receipt.record(gwt_agent::session::HookCompletionOutcome::Normal);
+            assert_eq!(std::fs::read(path).unwrap(), runtime_bytes);
+            assert_eq!(std::fs::read(session_path).unwrap(), session_bytes);
+        });
+    }
+
+    #[test]
+    fn owned_unbound_physical_observation_updates_metadata_without_certification() {
+        with_legacy_observation(|worktree, session_path, path| {
+            let pid = std::process::id();
+            let birth = crate::process::host_process_start_time(pid).unwrap();
+            let mut runtime = SessionRuntimeState::load(path).unwrap();
+            runtime.runtime_incarnation = Some(1);
+            runtime.host_started_at = Some(birth);
+            runtime.child_pid = Some(pid);
+            runtime.child_started_at = Some(birth);
+            runtime.save(path).unwrap();
+            let input = r#"{"session_id":"provider-regular-unbound"}"#;
+            let mut receipt = begin_hook_observation("SessionStart", input, worktree)
+                .unwrap()
+                .expect("ordinary unbound launches retain owned liveness updates");
+            assert!(
+                handle_with_input_owned("SessionStart", input, Some(&mut receipt))
+                    .unwrap()
+                    .published
+            );
+            assert_eq!(
+                Session::load(session_path)
+                    .unwrap()
+                    .exact_resume_session_id(),
+                Some("provider-regular-unbound")
+            );
+            let mut predecessor = receipt.clone();
+            receipt.record(gwt_agent::session::HookCompletionOutcome::Normal);
+            let completed = SessionRuntimeState::load(path).unwrap();
+            assert!(completed.execution_identity.is_none());
+            assert!(completed.current_hook_event.is_none());
+            assert_eq!(completed.runtime_incarnation, Some(1));
+            assert_eq!(completed.child_pid, Some(pid));
+            assert_eq!(
+                completed.last_completed_hook_outcome,
+                Some(gwt_agent::session::HookCompletionOutcome::Normal)
+            );
+            let mut replacement = completed;
+            replacement.runtime_incarnation = Some(2);
+            replacement.save(path).unwrap();
+            let mut next = begin_hook_observation("Stop", input, worktree)
+                .unwrap()
+                .unwrap();
+            assert!(
+                handle_with_input_owned("Stop", input, Some(&mut next))
+                    .unwrap()
+                    .published
+            );
+            let runtime_bytes = std::fs::read(path).unwrap();
+            let session_bytes = std::fs::read(session_path).unwrap();
+            assert!(
+                !handle_with_input_owned(
+                    "SessionStart",
+                    r#"{"session_id":"stale-unbound-provider"}"#,
+                    Some(&mut predecessor),
+                )
+                .unwrap()
+                .published
+            );
+            predecessor.record(gwt_agent::session::HookCompletionOutcome::Normal);
+            assert_eq!(std::fs::read(path).unwrap(), runtime_bytes);
+            assert_eq!(std::fs::read(session_path).unwrap(), session_bytes);
+        });
+    }
+
+    #[test]
+    fn early_refusal_observation_preserves_lifetime_and_completes_history_only_once() {
+        with_legacy_observation(|worktree, session_path, path| {
+            use gwt_agent::session::HookCompletionOutcome::{Blocked, Normal};
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            value["future_field"] = serde_json::json!({"retained": true});
+            write_hook_runtime_value(path, &value, false).unwrap();
+            let before = std::fs::read(path).unwrap();
+            let metadata = std::fs::read(session_path).unwrap();
+            assert!(begin_hook_observation("PreToolUse", "{", worktree)
+                .unwrap()
+                .is_none());
+            assert!(
+                !handle_with_input_owned("Stop", "{}", None)
+                    .unwrap()
+                    .published
+            );
+            capture_hook_completion(worktree).unwrap().record(Normal);
+            assert_eq!(std::fs::read(path).unwrap(), before);
+            let receipt = begin_hook_observation("PreToolUse", "{}", worktree)
+                .unwrap()
+                .unwrap();
+            let pending: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            let mut unchanged = pending.clone();
+            unchanged
+                .as_object_mut()
+                .unwrap()
+                .remove("current_hook_event");
+            assert_eq!(unchanged, value);
+            assert_eq!(pending["current_hook_event"]["event"], "PreToolUse");
+            assert!(pending["current_hook_event"]
+                .get("completed_outcome")
+                .is_none());
+            let replay = receipt.clone();
+            receipt.record(Blocked);
+            let completed = std::fs::read(path).unwrap();
+            let state = SessionRuntimeState::load(path).unwrap();
+            assert_eq!(state.status, AgentStatus::Idle);
+            assert_eq!(state.last_completed_hook_outcome, Some(Blocked));
+            assert!(state.current_hook_event.is_none());
+            replay.record(Normal);
+            assert_eq!(std::fs::read(path).unwrap(), completed);
+            assert_eq!(std::fs::read(session_path).unwrap(), metadata);
+        });
+    }
+
+    #[test]
+    fn stale_same_status_receipt_cannot_mutate_successor_session_or_runtime() {
+        with_legacy_observation(|worktree, session_path, path| {
+            use gwt_agent::session::HookCompletionOutcome::Normal;
+            let mut first = begin_hook_observation("Stop", "{}", worktree)
+                .unwrap()
+                .unwrap();
+            assert!(
+                handle_with_input_owned("Stop", r#"{"session_id":"first"}"#, Some(&mut first))
+                    .unwrap()
+                    .published
+            );
+            let mut next = begin_hook_observation("Stop", "{}", worktree)
+                .unwrap()
+                .unwrap();
+            assert!(
+                handle_with_input_owned("Stop", r#"{"session_id":"next"}"#, Some(&mut next))
+                    .unwrap()
+                    .published
+            );
+            let runtime = std::fs::read(path).unwrap();
+            let metadata = std::fs::read(session_path).unwrap();
+            assert!(
+                !handle_with_input_owned("Stop", r#"{"session_id":"stale"}"#, Some(&mut first))
+                    .unwrap()
+                    .published
+            );
+            record_completed_stop_owned(Some(&mut first)).unwrap();
+            assert!(
+                !record_blocked_stop_owned(Some(&mut first))
+                    .unwrap()
+                    .published
+            );
+            first.record(Normal);
+            assert_eq!(std::fs::read(path).unwrap(), runtime);
+            assert_eq!(std::fs::read(session_path).unwrap(), metadata);
+            assert_eq!(
+                Session::load(session_path)
+                    .unwrap()
+                    .exact_resume_session_id(),
+                Some("next")
+            );
+            record_completed_stop_owned(Some(&mut next)).unwrap();
+            assert!(Session::load(session_path)
+                .unwrap()
+                .last_completed_stop_at
+                .is_some());
+            next.record(Normal);
+            let completed = SessionRuntimeState::load(path).unwrap();
+            assert!(
+                completed.current_hook_event.is_none(),
+                "legacy never certifies current Normal"
+            );
+            assert_eq!(completed.last_completed_hook_outcome, Some(Normal));
+        });
+    }
+
+    #[test]
+    fn deferred_legacy_bind_requires_still_missing_and_never_recreates_a_bound_record() {
+        with_legacy_observation(|worktree, session_path, path| {
+            std::fs::remove_file(path).unwrap();
+            let mut first = begin_hook_observation("Stop", "{}", worktree)
+                .unwrap()
+                .unwrap();
+            assert!(!path.exists());
+            SessionRuntimeState::new(AgentStatus::Running)
+                .save(path)
+                .unwrap();
+            let runtime = std::fs::read(path).unwrap();
+            let metadata = std::fs::read(session_path).unwrap();
+            assert!(
+                !handle_with_input_owned("Stop", "{}", Some(&mut first))
+                    .unwrap()
+                    .published
+            );
+            assert_eq!(std::fs::read(path).unwrap(), runtime);
+            assert_eq!(std::fs::read(session_path).unwrap(), metadata);
+            std::fs::remove_file(path).unwrap();
+            let mut next = begin_hook_observation("Stop", "{}", worktree)
+                .unwrap()
+                .unwrap();
+            assert!(
+                handle_with_input_owned("Stop", "{}", Some(&mut next))
+                    .unwrap()
+                    .published
+            );
+            assert!(SessionRuntimeState::load(path)
+                .unwrap()
+                .current_hook_event
+                .is_some());
+            std::fs::remove_file(path).unwrap();
+            let metadata = std::fs::read(session_path).unwrap();
+            assert!(
+                !handle_with_input_owned("Stop", "{}", Some(&mut next))
+                    .unwrap()
+                    .published
+            );
+            record_completed_stop_owned(Some(&mut next)).unwrap();
+            next.record(gwt_agent::session::HookCompletionOutcome::Normal);
+            assert!(!path.exists());
+            assert_eq!(std::fs::read(session_path).unwrap(), metadata);
+        });
     }
 
     #[test]

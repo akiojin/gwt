@@ -270,7 +270,23 @@ fn current_switch_runtime(
         &expected.session_id,
     ))?;
     Ok(runtime.status == gwt_agent::AgentStatus::Idle
-        && expected.matches_runtime(&expected.session_id, expected.host_pid, &runtime))
+        && expected.matches_runtime(&expected.session_id, expected.host_pid, &runtime)
+        && has_current_completed_normal_stop(&runtime))
+}
+
+fn has_current_completed_normal_stop(runtime: &gwt_agent::SessionRuntimeState) -> bool {
+    runtime.source_event.as_deref() == Some("Stop")
+        && runtime.current_hook_event.as_ref().is_some_and(|current| {
+            current.event == "Stop"
+                && current.completed_outcome
+                    == Some(gwt_agent::session::HookCompletionOutcome::Normal)
+                && uuid::Uuid::parse_str(&current.correlation_id).is_ok_and(|correlation| {
+                    !correlation.is_nil()
+                        && correlation.get_version() == Some(uuid::Version::Random)
+                        && correlation.get_variant() == uuid::Variant::RFC4122
+                        && correlation.hyphenated().to_string() == current.correlation_id
+                })
+        })
 }
 
 fn exact_writer_is_current(
@@ -481,6 +497,8 @@ fn drive_switch(
             }
         };
         if intent.stage == Requested {
+            let physical_submit_accepted = std::cell::Cell::new(false);
+            let response_grace = std::cell::Cell::new(None);
             let delivered =
                 gwt::cli::execution_state::with_current_active_session_execution_identity_lease(
                     sessions,
@@ -527,8 +545,12 @@ fn drive_switch(
                                 if !exact_writer_is_current(writers, intent, entry) {
                                     return Err("Source writer changed after checkpoint body delivery".into());
                                 }
-                                return reservation.write_input_authorized(bytes, |commit| commit(&mut || {}))
+                                let result = reservation.write_input_authorized(bytes, |commit| commit(&mut || {}))
                                     .map_err(|error| error.to_string());
+                                if result.is_ok() {
+                                    physical_submit_accepted.set(true);
+                                }
+                                return result;
                             }
                             gwt::try_mutate_issue_monitor_prefs(&path, |prefs| {
                                 if prefs.agent_switch_intents.get(&intent.request.operation_id) != Some(expected)
@@ -542,10 +564,25 @@ fn drive_switch(
                                 body_committed = true;
                                 Ok(())
                             }).map(|_| ()).map_err(|error| error.to_string())
-                        }, std::thread::sleep, || Ok(false)).map_err(switch_io)?;
+                        }, |duration| {
+                            if physical_submit_accepted.get() {
+                                // Switch has its own durable ACK. Let the
+                                // source acquire this Session for its genuine
+                                // UserPromptSubmit during the response grace.
+                                response_grace.set(Some(duration));
+                            } else {
+                                std::thread::sleep(duration);
+                            }
+                        }, || Ok(false)).map_err(switch_io)?;
                         Ok(())
                     },
-                )?;
+                );
+            // Keep the reservation and the full grace, including when a
+            // post-callback lease error makes the delivery result uncertain.
+            if let Some(duration) = response_grace.get() {
+                std::thread::sleep(duration);
+            }
+            let delivered = delivered?;
             delivered.ok_or_else(|| {
                 switch_io("Source authority changed before checkpoint delivery")
             })??;
@@ -725,6 +762,67 @@ fn drive_switch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn current_normal_stop_requires_its_own_completed_observation() {
+        use gwt_agent::session::{CurrentHookEventObservation, HookCompletionOutcome};
+
+        let mut runtime = gwt_agent::SessionRuntimeState::from_hook_event("Stop").unwrap();
+        runtime.last_completed_hook_event_at = Some(runtime.updated_at);
+        runtime.last_completed_hook_outcome = Some(HookCompletionOutcome::Normal);
+        assert!(!has_current_completed_normal_stop(&runtime));
+
+        runtime.current_hook_event = Some(CurrentHookEventObservation {
+            correlation_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+            event: "Stop".into(),
+            completed_outcome: None,
+        });
+        assert!(!has_current_completed_normal_stop(&runtime));
+        runtime
+            .current_hook_event
+            .as_mut()
+            .unwrap()
+            .completed_outcome = Some(HookCompletionOutcome::Blocked);
+        assert!(!has_current_completed_normal_stop(&runtime));
+        runtime
+            .current_hook_event
+            .as_mut()
+            .unwrap()
+            .completed_outcome = Some(HookCompletionOutcome::Normal);
+        assert!(has_current_completed_normal_stop(&runtime));
+
+        runtime.source_event = Some("PostToolUse".into());
+        assert!(!has_current_completed_normal_stop(&runtime));
+        runtime.source_event = Some("Stop".into());
+        runtime.current_hook_event.as_mut().unwrap().event = "PreToolUse".into();
+        assert!(!has_current_completed_normal_stop(&runtime));
+    }
+
+    #[test]
+    fn current_normal_stop_requires_a_canonical_v4_correlation() {
+        use gwt_agent::session::{CurrentHookEventObservation, HookCompletionOutcome};
+
+        let mut runtime = gwt_agent::SessionRuntimeState::from_hook_event("Stop").unwrap();
+        runtime.current_hook_event = Some(CurrentHookEventObservation {
+            correlation_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+            event: "Stop".into(),
+            completed_outcome: Some(HookCompletionOutcome::Normal),
+        });
+        assert!(has_current_completed_normal_stop(&runtime));
+        for correlation in [
+            "not-a-uuid",
+            "00000000-0000-0000-0000-000000000000",
+            "aaaaaaaa-aaaa-1aaa-8aaa-aaaaaaaaaaaa",
+            "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
+            "aaaaaaaa-aaaa-4aaa-0aaa-aaaaaaaaaaaa",
+        ] {
+            runtime.current_hook_event.as_mut().unwrap().correlation_id = correlation.into();
+            assert!(
+                !has_current_completed_normal_stop(&runtime),
+                "{correlation}"
+            );
+        }
+    }
 
     #[test]
     fn an_exact_live_host_is_not_an_abandoned_switch_request() {
