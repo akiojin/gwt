@@ -598,7 +598,20 @@ pub(super) fn collect(project_root: &Path) -> FleetReport {
             }
         }
     }
-    let mut system = System::new();
+    let mut system = match System::new() {
+        Ok(system) => system,
+        Err(error) => {
+            sources.push(source("processes", "unavailable", Some(error.to_string())));
+            let mut entries = correlate_inventory(Vec::new(), panes, sessions, &monitor);
+            enrich_delivery(&project_root, &monitor, &mut entries);
+            return FleetReport {
+                project_root,
+                observed_at: chrono::Utc::now().to_rfc3339(),
+                sources,
+                entries,
+            };
+        }
+    };
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
         true,

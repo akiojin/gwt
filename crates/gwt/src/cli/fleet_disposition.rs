@@ -357,14 +357,17 @@ fn terminate_orphan_process_tree(row: &Value, target: &FleetTarget) -> Result<Va
     let start = target
         .started_at
         .ok_or("orphan target requires started_at")?;
-    if pid == std::process::id() || crate::process::is_descendant_of(std::process::id(), pid) {
+    if pid == std::process::id()
+        || crate::process::is_descendant_of(std::process::id(), pid)
+            .map_err(|error| format!("PM process ancestry unavailable: {error}"))?
+    {
         return Err("the calling PM process tree is protected".into());
     }
     let expected_cwd = row["process"]["cwd"]
         .as_str()
         .ok_or("orphan cwd unavailable")?;
     let root = BoundOrphanProcess::capture(pid, start)?;
-    let mut system = System::new();
+    let mut system = System::new().map_err(|error| error.to_string())?;
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
         true,
@@ -408,7 +411,7 @@ fn terminate_orphan_process_tree(row: &Value, target: &FleetTarget) -> Result<Va
             let snapshot = system.process(sysinfo::Pid::from_u32(child))?;
             if crate::process::host_process_start_epoch_secs(child) != Some(snapshot.start_time())
                 || crate::process::host_process_start_time(pid) != Some(start)
-                || !crate::process::is_descendant_of(child, pid)
+                || !crate::process::is_descendant_of(child, pid).unwrap_or(false)
             {
                 return None;
             }
@@ -423,7 +426,7 @@ fn terminate_orphan_process_tree(row: &Value, target: &FleetTarget) -> Result<Va
         }
         if *child != pid
             && (crate::process::host_process_start_time(pid) != Some(start)
-                || !crate::process::is_descendant_of(*child, pid))
+                || !crate::process::is_descendant_of(*child, pid).unwrap_or(false))
         {
             failures.push(*child);
             continue;

@@ -535,6 +535,9 @@ impl OwnerMonitorScanGate {
             .blocked
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Publish non-idle before exposing the first scan entry. The daemon
+        // may not have reached its end-of-turn idle notification yet.
+        self.publish_idle(false);
         self.entered.fetch_add(1, Ordering::AcqRel);
         self.arrived.notify_waiters();
         while *blocked {
@@ -564,7 +567,9 @@ impl OwnerMonitorScanGate {
             let changed = self.idle_changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            if self.idle.load(Ordering::Acquire) {
+            // Heartbeats can publish idle before the initial scan binds the
+            // source repository. Only a completed scan makes claims usable.
+            if self.count() > 0 && self.idle.load(Ordering::Acquire) {
                 return;
             }
             changed.await;
@@ -588,6 +593,22 @@ impl OwnerMonitorScanGate {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = false;
         self.released.notify_all();
     }
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn monitor_fixture_idle_waits_for_initial_scan() {
+    use futures_util::FutureExt;
+
+    let gate = OwnerMonitorScanGate::default();
+    // The initial heartbeat can report idle before the scan binds the source.
+    gate.publish_idle(true);
+    let mut waiting = Box::pin(gate.wait_idle());
+    assert!(waiting.as_mut().now_or_never().is_none());
+    gate.observe();
+    assert!(waiting.as_mut().now_or_never().is_none());
+    gate.publish_idle(true);
+    waiting.await;
 }
 
 fn acquire_daemon_startup_lease(

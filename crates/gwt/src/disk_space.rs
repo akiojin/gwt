@@ -104,6 +104,7 @@ pub(crate) fn volume_id(path: &Path) -> std::io::Result<String> {
     {
         let path = path.to_string_lossy().to_lowercase();
         sysinfo::Disks::new_with_refreshed_list()
+            .map_err(std::io::Error::other)?
             .iter()
             .map(|disk| disk.mount_point().to_string_lossy().to_lowercase())
             .filter(|mount| Path::new(&path).starts_with(Path::new(mount)))
