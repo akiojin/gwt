@@ -54,6 +54,10 @@ use crate::runtime_daemon_events::{
 /// [`publish_event_with_timeout`].
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(200);
 
+/// Normal controls keep the hot-path default; outcome fixtures may pin it.
+const ISSUE_MONITOR_CONTROL_BUDGET: gwt_core::deadline_budget::DeadlineBudget =
+    gwt_core::deadline_budget::DeadlineBudget::new("ISSUE_MONITOR_CONTROL", DEFAULT_TIMEOUT);
+
 /// Durable controls wait for the daemon's actual commit. Outcome fixtures pin
 /// this incidental budget explicitly; production still gets five seconds.
 pub const DURABLE_ISSUE_MONITOR_CONTROL_BUDGET: gwt_core::deadline_budget::DeadlineBudget =
@@ -184,7 +188,11 @@ pub fn publish_issue_monitor_control(
     project_root: &Path,
     payload: Value,
 ) -> Result<(), IssueMonitorControlPublishError> {
-    publish_issue_monitor_control_with_timeout(project_root, payload, DEFAULT_TIMEOUT)
+    publish_issue_monitor_control_with_timeout(
+        project_root,
+        payload,
+        ISSUE_MONITOR_CONTROL_BUDGET.resolve(),
+    )
 }
 
 /// Publish a durable command from a CLI or background worker. These callers
