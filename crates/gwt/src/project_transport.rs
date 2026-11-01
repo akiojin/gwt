@@ -38,6 +38,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use tracing::Instrument;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1481,7 +1482,26 @@ pub async fn access_log_middleware(
     let user_agent = user_agent.flatten();
 
     let started = Instant::now();
-    let response = next.run(request).await;
+    let response = if path == "/internal/work-materialization-probe" {
+        // The access record below exists only after a reply. Keep entry and
+        // progress observable even when a probe never produces that reply.
+        let span = tracing::info_span!("work_materialization_probe", request_id = %Uuid::new_v4());
+        async {
+            tracing::info!(target: "gwt.work_materialization_probe", stage = "request");
+            let response = next.run(request).await;
+            tracing::info!(
+                target: "gwt.work_materialization_probe",
+                stage = "reply",
+                status = response.status().as_u16(),
+                elapsed_ms = started.elapsed().as_millis() as u64,
+            );
+            response
+        }
+        .instrument(span)
+        .await
+    } else {
+        next.run(request).await
+    };
     let elapsed_ms = started.elapsed().as_millis() as u64;
     let status = response.status().as_u16();
 
@@ -1779,6 +1799,7 @@ async fn work_materialization_probe_handler(
     State(state): State<TransportState>,
     Json(request): Json<AgentWorkMaterializationProbeRequest>,
 ) -> Response {
+    tracing::info!(target: "gwt.work_materialization_probe", stage = "authentication");
     let Some(principal) = agent_capability_principal(&headers, &state) else {
         return workspace_update_error_response(
             StatusCode::UNAUTHORIZED,
@@ -1794,15 +1815,35 @@ async fn work_materialization_probe_handler(
             "work_materialization_probe_requires_active_execution_authority",
         );
     };
+    tracing::info!(
+        target: "gwt.work_materialization_probe",
+        stage = "authenticated",
+        gwt_session_id = principal.session_id(),
+        owner_number = execution_binding.owner_number,
+    );
     let project_root = principal.canonical_project_root().to_path_buf();
     let session_id = principal.session_id().to_string();
+    let span = tracing::Span::current();
+    let dispatcher = tracing::dispatcher::get_default(Clone::clone);
+    tracing::info!(target: "gwt.work_materialization_probe", stage = "dispatch");
     let result = tokio::task::spawn_blocking(move || {
-        crate::probe_bound_authenticated_work_materialization(
-            &project_root,
-            &session_id,
-            &execution_binding,
-            request,
-        )
+        tracing::dispatcher::with_default(&dispatcher, || {
+            span.in_scope(|| {
+                tracing::info!(target: "gwt.work_materialization_probe", stage = "worker");
+                let result = crate::probe_bound_authenticated_work_materialization(
+                    &project_root,
+                    &session_id,
+                    &execution_binding,
+                    request,
+                );
+                tracing::info!(
+                    target: "gwt.work_materialization_probe",
+                    stage = "worker_complete",
+                    success = result.is_ok(),
+                );
+                result
+            })
+        })
     })
     .await;
 
