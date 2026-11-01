@@ -4754,6 +4754,7 @@ impl OwnerState {
             let output_id = id.clone();
             let output_operation_id = operation_id.clone();
             let mut purpose_title = None;
+            let mut manual_successor_prepared = false;
             let result = manual_stop_result
                 .map_err(AgentLaunchError::from)
                 .and_then(|()| {
@@ -4773,7 +4774,7 @@ impl OwnerState {
                     expected_registry_row
                         .as_ref()
                         .map_err(|error| AgentLaunchError::from(error.clone()))?;
-                    super::continuation::prepare_manual_successor_before_pane(
+                    let preparation = super::continuation::prepare_manual_successor_before_pane(
                         &root,
                         &sessions_dir,
                         Some(&issuer),
@@ -4787,8 +4788,12 @@ impl OwnerState {
                             .map_err(AgentLaunchError::from)?,
                             None => false,
                         },
-                    )
-                    .map_err(AgentLaunchError::from)?;
+                    );
+                    manual_successor_prepared = matches!(
+                        &config.execution_intent,
+                        gwt_agent::ExecutionLaunchIntent::PreparedManualSuccessor(_)
+                    );
+                    preparation.map_err(AgentLaunchError::from)?;
                     let host_project_roots = super::installation::owner_host_project_roots(&root)
                         .map_err(AgentLaunchError::from)?;
                     let mut admitted = super::installation::prepare_owner_agent_admission(
@@ -5224,6 +5229,16 @@ impl OwnerState {
                         .is_some_and(|restore| restore.refusal.is_some())
                     && result.is_err()
                     && input.failed_launch.is_none());
+            let unproved_manual_cleanup = manual_successor_prepared
+                && !input.current.load(Ordering::Acquire)
+                && result.is_err()
+                && materialized_snapshot.is_none()
+                && input.failure_session.is_none()
+                && input.failed_launch.is_none()
+                && !input.physical_spawn_started
+                && input.pending_fresh_execution.is_none()
+                && input.pending_continue_work.is_none();
+            let cancelled_cleanup = cancelled_cleanup && !unproved_manual_cleanup;
             if let Err(error) = &result {
                 let source = restore
                     .as_ref()
