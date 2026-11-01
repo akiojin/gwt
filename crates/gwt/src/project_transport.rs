@@ -1485,7 +1485,11 @@ pub async fn access_log_middleware(
     let response = if path == "/internal/work-materialization-probe" {
         // The access record below exists only after a reply. Keep entry and
         // progress observable even when a probe never produces that reply.
-        let span = tracing::info_span!("work_materialization_probe", request_id = %Uuid::new_v4());
+        let span = tracing::info_span!(
+            target: "gwt.work_materialization_probe",
+            "work_materialization_probe",
+            request_id = %Uuid::new_v4()
+        );
         async {
             tracing::info!(target: "gwt.work_materialization_probe", stage = "request");
             let response = next.run(request).await;

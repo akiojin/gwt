@@ -4646,7 +4646,7 @@ fn resolve_unique_existing_work(
         .metadata()
         .is_some_and(|metadata| metadata.name() == "work_materialization_probe");
     if probe_span {
-        tracing::info!(target: "gwt.work_authority", stage = "work_lookup");
+        tracing::info!(target: "gwt.work_materialization_probe", stage = "work_lookup");
     }
     let current_path =
         gwt_core::paths::gwt_workspace_projection_path_for_repo_path(work_items_root);
@@ -4889,7 +4889,7 @@ fn resolve_unique_existing_work(
         }
     }
     if probe_span {
-        tracing::info!(target: "gwt.work_authority", stage = "work_lookup_complete");
+        tracing::info!(target: "gwt.work_materialization_probe", stage = "work_lookup_complete");
     }
     Ok(ResolvedExistingWorkAuthority {
         work_id,
@@ -9662,7 +9662,7 @@ mod tests {
             let log = tempfile::NamedTempFile::new().unwrap();
             let subscriber = tracing_subscriber::fmt()
                 .json()
-                .with_max_level(tracing::Level::INFO)
+                .with_env_filter("off,gwt.work_materialization_probe=info")
                 .with_writer(log.reopen().unwrap())
                 .finish();
             let _subscriber = tracing::subscriber::set_default(subscriber);
@@ -9737,10 +9737,7 @@ mod tests {
                 .filter(|record| {
                     let span = &record["span"];
                     span["name"] == "work_materialization_probe"
-                        && matches!(
-                            record["target"].as_str(),
-                            Some("gwt.work_materialization_probe" | "gwt.work_authority")
-                        )
+                        && record["target"] == "gwt.work_materialization_probe"
                 })
                 .map(|record| {
                     (
@@ -9781,6 +9778,20 @@ mod tests {
                 .map(|(_, stage)| stage.as_str())
                 .collect::<Vec<_>>();
             assert_eq!(rejected, ["request", "authentication", "reply"]);
+            let replies = records
+                .iter()
+                .filter(|record| record["fields"]["stage"] == "reply")
+                .collect::<Vec<_>>();
+            assert_eq!(replies.len(), 2);
+            for reply in replies {
+                let expected = if reply["span"]["request_id"] == first_id.as_str() {
+                    200
+                } else {
+                    401
+                };
+                assert_eq!(reply["fields"]["status"].as_u64(), Some(expected));
+                assert!(reply["fields"]["elapsed_ms"].as_u64().is_some());
+            }
         });
     }
 

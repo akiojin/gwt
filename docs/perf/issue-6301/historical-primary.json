@@ -4,7 +4,7 @@
   "generation_id": "gen-b6c811e958941a649289a7c1",
   "evidence": [
     {
-      "path": "C:\\Users\\AkioJinsenji秦泉寺章夫\\.gwt\\logs\\gwt.log.2026-10-31",
+      "path": "<HOME>\\.gwt\\logs\\gwt.log.2026-10-31",
       "sha256": "66d11c2a3b55ac416e6a21b599fae694a5fad307bfc466ee53a33b79e26ff316",
       "records": [
         {
@@ -261,7 +261,7 @@
       ]
     },
     {
-      "path": "C:\\Users\\AkioJinsenji秦泉寺章夫\\.gwt\\logs\\errors\\errors.2026-10-31.jsonl",
+      "path": "<HOME>\\.gwt\\logs\\errors\\errors.2026-10-31.jsonl",
       "sha256": "7d91946f5cd7100c5deff28264099c216fb11137e37c29b40c606b3bcf96e172",
       "records": [
         {
@@ -304,7 +304,7 @@
             },
             "repo_hash": "99a8660247f5bc49",
             "context": {
-              "binary": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Programs\\GWT\\gwtd.exe",
+              "binary": "<HOME>\\AppData\\Local\\Programs\\GWT\\gwtd.exe",
               "bridge_reason": "transport_failure",
               "endpoint": "http://127.0.0.1:61764/internal/workspace-update",
               "operation": "workspace.update",
@@ -433,7 +433,7 @@
       ]
     },
     {
-      "path": "C:\\Users\\AkioJinsenji秦泉寺章夫\\.gwt\\logs\\perf\\perf-2026-10-31.jsonl",
+      "path": "<HOME>\\.gwt\\logs\\perf\\perf-2026-10-31.jsonl",
       "sha256": "bb78ff9a6033f9276cbe1e9bcc85b80aa095b4f19ebdc8800952880cd7b6ad64",
       "records": [
         {
