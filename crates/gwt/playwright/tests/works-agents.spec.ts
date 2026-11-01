@@ -254,6 +254,42 @@ test.describe("Works and Agents approved baseline", () => {
     });
     await expect(workRow(page, "pm-window").locator(".work-tail > .terminal-text-preview")).toHaveText("Project supervision\nReviewing current work\nWaiting for agent updates");
     await expect(workRow(page, "agent-two").locator(".work-tail > .terminal-text-preview")).toHaveText("Reading the assigned issue\nChanges saved\nWaiting for input");
+    await page.evaluate(() => {
+      const target = document.querySelector('.works-surface:not(.works-surface--preview)')!;
+      const row = target.querySelector('[data-window-id="agent-one"].work-row')!;
+      const probe = { active: true, frames: 0, empty: [] as string[], row,
+        output: row.querySelector(".terminal-text-preview"),
+        terminal: target.querySelector('.work-runtime-cache[data-window-id="agent-one"] .xterm') };
+      (window as any).__worksReactivationProbe = probe;
+      const sample = () => {
+        if (!probe.active) return;
+        if ((target as HTMLElement).getClientRects().length && !(target as HTMLElement).hidden) {
+          probe.frames++;
+          const current = target.querySelector('[data-window-id="agent-one"].work-row');
+          if (!current?.textContent?.includes("Aster")
+            || !current.querySelector(".terminal-text-preview")?.textContent?.includes("final line")) probe.empty.push("missing live output");
+        }
+        requestAnimationFrame(sample);
+      };
+      requestAnimationFrame(sample);
+    });
+    for (let turn = 0; turn < 3; turn++) {
+      await openRail(page, "agents");
+      await openRail(page, "works");
+      await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    }
+    const continuity = await page.evaluate(() => {
+      const probe = (window as any).__worksReactivationProbe; probe.active = false;
+      const target = document.querySelector('.works-surface:not(.works-surface--preview)')!;
+      return { frames: probe.frames, empty: probe.empty,
+        sameRow: target.querySelector('[data-window-id="agent-one"].work-row') === probe.row,
+        sameOutput: target.querySelector('[data-window-id="agent-one"] .terminal-text-preview') === probe.output,
+        sameTerminal: target.querySelector('.work-runtime-cache[data-window-id="agent-one"] .xterm') === probe.terminal };
+    });
+    expect(continuity.frames).toBeGreaterThan(0);
+    expect(continuity.empty).toEqual([]);
+    expect(continuity.sameRow && continuity.sameOutput && continuity.sameTerminal).toBe(true);
+    await info.attach("works-reactivation-frames", { body: JSON.stringify(continuity), contentType: "application/json" });
     await page.screenshot({ path: info.outputPath("works-approved-list.png") });
 
     await workRow(page, "agent-one").focus(); await page.keyboard.press("Enter");

@@ -2049,6 +2049,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
                   windowId,
                   shouldFocus: false,
                   shouldPersistGeometry: persist,
+                  syncGeometryOnGridChange: true,
+                  allowFastPath: true,
+                  pendingOutputCount: terminalOutputBatcher.pendingCount(windowId),
+                  hasPendingRefresh: runtime.viewportRefreshPending === true
+                    || terminalViewportRefreshScheduler?.hasPending?.(windowId) === true,
                   sendGeometry,
                 }),
             });
@@ -5560,7 +5565,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
               if (worksSurface.isVisible(id)) {
                 terminalOutputBatcher.schedulePending(id);
                 completeInitialFitHandshake(id);
-                scheduleTerminalFit(id, true);
+                scheduleTerminalFit(id, terminalMap.get(id)?.viewportRefreshPending === true);
               }
             }
           });

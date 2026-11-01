@@ -2359,6 +2359,16 @@ test("app.js wires the reflow controller for resize, transition, and predicate",
     /runTerminalFitRequest\(\{[\s\S]*?persist,[\s\S]*?canFit:[\s\S]*?markPending:[\s\S]*?clearPending:[\s\S]*?viewportRefreshPending = false[\s\S]*?activate:[\s\S]*?runTerminalActivationSequence\(\{/,
     "fitTerminal must settle pending state after persisted hidden, failed, and successful fits",
   );
+  assert.ok(/allowFastPath:\s*true/.test(fitTerminalSource)
+    && /syncGeometryOnGridChange:\s*true/.test(fitTerminalSource)
+    && /pendingOutputCount:/.test(fitTerminalSource)
+    && /hasPendingRefresh:/.test(fitTerminalSource),
+  "ordinary fit must use the tested same-grid path with pending-work and geometry guards");
+  const worksLayoutSource = appSource.slice(appSource.indexOf("onLayout: () => {"),
+    appSource.indexOf("worksSurface.element.hidden = true"));
+  assert.ok(!/scheduleTerminalFit\(id,\s*true\)/.test(worksLayoutSource)
+    && /viewportRefreshPending\s*===\s*true/.test(worksLayoutSource),
+  "Works activation must reserve forced geometry for pending authoritative refresh");
   assert.doesNotMatch(
     fitTerminalSource,
     /sendGeometry\(windowId,\s*runtime\.terminal\.cols,\s*runtime\.terminal\.rows\)/,
