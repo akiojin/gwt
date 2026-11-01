@@ -52,6 +52,8 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
         .runtime
         .active_agent_sessions
         .insert(window_id.clone(), old_session);
+    seed_owner_fixture_roster(&fixture.project_root, 8);
+    configure_owner_fixture_tools(&fixture.project_root, &["codex", "pane-contract-fixture"]);
     insert_test_pane_runtime(&mut fixture.runtime, &window_id);
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
     let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
@@ -104,8 +106,6 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
         },
     ))
     .unwrap();
-    seed_owner_fixture_roster(&fixture.project_root, 8);
-    configure_owner_fixture_tools(&fixture.project_root, &["codex", "pane-contract-fixture"]);
     let mut operator_config = pane_control_tests::control_launch_config(&fixture.project_root, 42);
     operator_config.linked_issue_number = None;
     operator_config.explicit_follow_up = false;
