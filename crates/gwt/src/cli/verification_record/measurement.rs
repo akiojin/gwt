@@ -221,7 +221,8 @@ fn sample(
     elapsed: Duration,
     preflight: bool,
 ) -> Result<Option<String>, String> {
-    let mut system = System::new();
+    let mut system = System::new()
+        .map_err(|error| format!("measurement process observation unavailable: {error}"))?;
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
         true,

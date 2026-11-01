@@ -10,6 +10,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import { gotoLiveGwt, readLiveHubCatalog, sendLiveGwtEvent, withLiveGwtBackendLock } from "./_helpers/live-gwt";
+import { startManagedBrowserSource } from "./_helpers/managed-browser-source";
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
 const HOME = process.env.GWT_PLAYWRIGHT_CHECK_HOME ?? "";
@@ -26,7 +27,10 @@ test.skip(!BASE || !HOME, "requires a browser-check checkout and fresh HOME");
 test.use({ headless: false, viewport: { width: 1440, height: 960 } });
 test.setTimeout(240_000);
 
-test.beforeAll(async () => {
+let managedSource: Awaited<ReturnType<typeof startManagedBrowserSource>> | undefined;
+
+test.beforeAll(async ({ browser }, info) => {
+  test.setTimeout(240_000);
   // The owner reads this fixture's canonical mapping, never the caller's verdict.
   await appendFile(join(HOME, ".gwt/config.toml"), `
 [tools.customCodingAgents.supervisor-isolation-fixture]
@@ -35,6 +39,15 @@ agentType = "path"
 command = ${JSON.stringify(SHELL)}
 skipPermissionsArgs = ${JSON.stringify(SHELL_ARGS)}
 `);
+  managedSource = await startManagedBrowserSource(browser, info);
+});
+
+test.afterAll(async () => {
+  test.setTimeout(240_000);
+  const failures: unknown[] = [];
+  try { await managedSource?.postAudit(); } catch (error) { failures.push(error); }
+  try { await managedSource?.stop(); } catch (error) { failures.push(error); }
+  if (failures.length) throw new AggregateError(failures, "managed source post/cleanup failed:\n" + failures.map(String).join("\n").slice(0, 16384));
 });
 
 function isolatedEnv() {

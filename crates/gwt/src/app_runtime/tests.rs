@@ -6902,9 +6902,50 @@ fn drain_owner_launch_fixtures(
 fn spawn_owner_codex_fixture(
     runtime: &mut AppRuntime,
     tab_id: &str,
-    mut config: gwt_agent::LaunchConfig,
+    config: gwt_agent::LaunchConfig,
     expected_title: Option<&str>,
 ) -> String {
+    let wait_for_fixture_ready = config.command == config.agent_id.command();
+    let (window_id, mut output) =
+        spawn_owner_codex_fixture_with_output(runtime, tab_id, config, expected_title);
+    if wait_for_fixture_ready {
+        let pane = owner_runtime_probe(runtime, &window_id);
+        owner_fixture_block_on(async {
+            // test-hygiene: allow-wall-clock-deadline Bounds a missing native startup event; processed owner output, not elapsed time, establishes readiness.
+            tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+                loop {
+                    if let gwt::project_runtime::events::OwnerEvent::Output {
+                        id,
+                        incarnation,
+                        screen,
+                        ..
+                    } = output.recv().await.expect("native fixture output")
+                    {
+                        if id == pane.id
+                            && incarnation == pane.incarnation
+                            && screen.contains("GWT_PM_FIXTURE_READY")
+                        {
+                            break;
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("owner processed native fixture startup before synthetic screens");
+        });
+    }
+    window_id
+}
+
+fn spawn_owner_codex_fixture_with_output(
+    runtime: &mut AppRuntime,
+    tab_id: &str,
+    mut config: gwt_agent::LaunchConfig,
+    expected_title: Option<&str>,
+) -> (
+    String,
+    tokio::sync::broadcast::Receiver<gwt::project_runtime::events::OwnerEvent>,
+) {
     let root = runtime.tab(tab_id).unwrap().project_root.clone();
     pane_control_tests::control_init_repo(&root);
     config
@@ -6933,6 +6974,7 @@ fn spawn_owner_codex_fixture(
         .unwrap()
         .clone();
     let owner = project_owner_fixture(runtime, &window_id);
+    let output = owner.subscribe();
     drain_queued_blocking_tasks(&tasks);
     let completion = take_remote_owner_launch_completion(match &runtime.proxy {
         AppEventProxy::Stub(events) => events,
@@ -6971,7 +7013,7 @@ fn spawn_owner_codex_fixture(
     state.project_owner_identity = client.identity().cloned();
     runtime.handle_remote_owner_launch_complete(completion);
     assert!(runtime.active_agent_sessions.contains_key(&window_id));
-    window_id
+    (window_id, output)
 }
 
 fn owner_fixture_agent_command(
@@ -7357,6 +7399,23 @@ fn owner_monitor_fixture_with_prefs(
     )
     .unwrap();
     configure_owner_fixture_start_gate(&owner);
+    // Reserve a source scan, or join the exact scan the daemon already owns.
+    // Strict admission publishes non-idle before either reply, avoiding a
+    // stale initial idle observation on the ordinary control retry path.
+    if let Err(error) = gwt::daemon_publisher::publish_durable_issue_monitor_control(
+        &root,
+        gwt::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({"scan_now_if_idle":{}}),
+            std::process::id(),
+        ),
+    ) {
+        assert_eq!(
+            error.to_string(),
+            gwt::runtime_daemon_events::ISSUE_MONITOR_CONTROL_SCAN_ALREADY_IN_FLIGHT_ERROR,
+            "the actual initial source scan must be reserved or already running"
+        );
+    }
     owner_fixture_block_on(owner.wait_monitor_idle()).unwrap();
     (root, owner, delivery_id)
 }
@@ -7939,9 +7998,31 @@ fn approval_settle_runtime() -> (
         .branch("work/approval")
         .linked_issue_number(42)
         .build();
-    let window_id = spawn_owner_codex_fixture(&mut runtime, "tab-1", config, None);
+    let (window_id, mut output) =
+        spawn_owner_codex_fixture_with_output(&mut runtime, "tab-1", config, None);
     let owner = project_owner_fixture(&mut runtime, &window_id);
     let pane = owner_runtime_probe(&runtime, &window_id);
+    owner_fixture_block_on(async {
+        // Subscribe before launch and join the real owner's startup frame before
+        // injecting approval screens; a later real frame uses the actor's clock.
+        // test-hygiene: allow-wall-clock-deadline This only bounds the native startup output/IPC join; the approval policy uses its unchanged injected clocks.
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if matches!(
+                    output.recv().await.unwrap(),
+                    gwt::project_runtime::events::OwnerEvent::Output {
+                        id, incarnation, screen, ..
+                    } if id == pane.id
+                        && incarnation == pane.incarnation
+                        && screen.contains("GWT_PM_FIXTURE_READY")
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("actual owner-applied provider startup output");
+    });
     let hook = owner_runtime_status_event(&owner, &pane, "running", "PreToolUse");
     let context = runtime.project_context("tab-1").unwrap();
     let identity = owner.client().identity().unwrap().clone();
@@ -8150,6 +8231,14 @@ impl IssueClient for PermissionDeniedCreateIssueClient {
 
 fn assert_ack_preserves_failed_window_replacement(test_root: &Path, restart_existing_id: bool) {
     use gwt::project_runtime::events::OwnerCommand;
+    // This fixture verifies the committed ACK and replacement identity, not
+    // whether the serialized daemon can persist it in five wall-clock seconds.
+    let _control_budget = ScopedEnvVar::set(
+        "GWT_TEST_BUDGET_DURABLE_ISSUE_MONITOR_CONTROL_MS",
+        gwt_core::deadline_budget::HANG_GUARD
+            .as_millis()
+            .to_string(),
+    );
     let _home = ScopedEnvVar::set("HOME", test_root);
     let _userprofile = ScopedEnvVar::set("USERPROFILE", test_root);
     let _codex_home = ScopedEnvVar::set("CODEX_HOME", test_root.join(".codex"));
@@ -8164,12 +8253,26 @@ fn assert_ack_preserves_failed_window_replacement(test_root: &Path, restart_exis
         false,
     );
     let repo = fixture.project_root.clone();
+    // Seed historical failure before the daemon starts. Adding it later is a
+    // new terminal failure and correctly revokes the manual reservation.
+    let mut windows = fixture.runtime.tab("tab-1").unwrap().workspace.clone();
+    windows.add_window(WindowPreset::Agent); // The pending source launch.
+    let expected_failed_id = windows.next_window_id_preview(WindowPreset::Agent);
+    let failed_owner_id = format!(
+        "{}::{expected_failed_id}",
+        gwt_core::paths::project_scope_hash(&repo)
+    );
     // Auto remains OFF. This case models an explicitly reserved manual
     // launch awaiting its ACK, not an unreserved launch after revocation.
     gwt::try_mutate_issue_monitor_prefs(
         &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
         |prefs| {
             assert!(!prefs.enabled);
+            prefs.failed_issues.push(gwt::IssueMonitorFailedIssue {
+                issue_number: 3165,
+                message: "previous pane failed".into(),
+                window_id: Some(failed_owner_id.clone()),
+            });
             prefs
                 .launching_issues
                 .push(gwt::IssueMonitorLaunchingIssue {
@@ -8194,23 +8297,12 @@ fn assert_ack_preserves_failed_window_replacement(test_root: &Path, restart_exis
         .workspace
         .add_window(WindowPreset::Agent);
     let failed_raw_id = failed_window.id;
+    assert_eq!(failed_raw_id, expected_failed_id);
     let failed_id = combined_window_id("tab-1", &failed_raw_id);
     runtime.register_window("tab-1", &failed_raw_id);
-    let failed_owner_id = owner.pane_id(&failed_raw_id);
+    assert_eq!(owner.pane_id(&failed_raw_id), failed_owner_id);
     // The persisted failure names the former occupant. It cannot authorize
     // deleting the actual Issue #43 Session that now reuses this pane ID.
-    gwt::try_mutate_issue_monitor_prefs(
-        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
-        |prefs| {
-            prefs.failed_issues.push(gwt::IssueMonitorFailedIssue {
-                issue_number: 3165,
-                message: "previous pane failed".into(),
-                window_id: Some(failed_owner_id.clone()),
-            });
-            Ok(())
-        },
-    )
-    .unwrap();
     let launch_replacement = || {
         let receipt = owner_fixture_block_on(owner.command(OwnerCommand::LaunchAgent {
             id: failed_owner_id.clone(),

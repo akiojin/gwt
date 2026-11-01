@@ -937,7 +937,18 @@ fn holder_is_self(
 impl HolderDiagnostics {
     fn read(status: &HeavyLeaseStatus, caller_target: Option<&str>) -> Self {
         use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
-        let mut system = System::new();
+        let Ok(mut system) = System::new() else {
+            return Self {
+                exe: None,
+                cwd: None,
+                has_live_children: None,
+                self_hold: holder_is_self(
+                    status,
+                    caller_target,
+                    std::env::var("GWT_SESSION_ID").ok().as_deref(),
+                ),
+            };
+        };
         system.refresh_processes_specifics(
             ProcessesToUpdate::All,
             true,
@@ -1233,17 +1244,21 @@ fn status_for_lease(lease_id: &str) -> Result<Option<LeaseStatusSnapshot>, SpecO
 pub(super) fn open_coordinator() -> Result<IndexCoordinator, SpecOpsError> {
     let settings = gwt_config::Settings::load()
         .map_err(|err| unexpected(format!("verification configuration invalid: {err}")))?;
-    let capacity = settings.verification.slots.map_or_else(
-        || {
-            let mut host = sysinfo::System::new();
+    let capacity = match settings.verification.slots {
+        None => {
+            let mut host = sysinfo::System::new().map_err(|error| {
+                unexpected(format!(
+                    "verification host observation unavailable: {error}"
+                ))
+            })?;
             host.refresh_memory();
             automatic_slot_capacity(
                 std::thread::available_parallelism().map_or(1, usize::from),
                 host.total_memory(),
             )
-        },
-        |slots| usize::from(slots.get()),
-    );
+        }
+        Some(slots) => usize::from(slots.get()),
+    };
     IndexCoordinator::open_verification(verification_coordinator_root(), capacity)
         .map_err(|err| unexpected(format!("verification lease coordinator unavailable: {err}")))
 }
@@ -1433,14 +1448,15 @@ pub(super) fn command_disk_budgets(
 fn command_disk_budgets_with_inventory(
     paths: &[PathBuf],
     settings: &gwt_config::Settings,
-    _disk_inventory: impl FnOnce() -> sysinfo::Disks,
+    _disk_inventory: impl FnOnce() -> Result<sysinfo::Disks, sysinfo::Error>,
 ) -> Result<Vec<gwt_core::index_coordinator::VerificationDiskBudget>, String> {
     let bytes = settings
         .verification
         .disk_budget_bytes
         .unwrap_or(DEFAULT_VERIFICATION_DISK_BUDGET_BYTES);
     #[cfg(not(unix))]
-    let disks = _disk_inventory();
+    let disks = _disk_inventory()
+        .map_err(|error| format!("verification disk observation unavailable: {error}"))?;
     let mut budgets: Vec<gwt_core::index_coordinator::VerificationDiskBudget> = Vec::new();
     for path in paths {
         let mut probe = path.clone();
