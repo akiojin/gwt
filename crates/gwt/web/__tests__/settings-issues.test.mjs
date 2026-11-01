@@ -195,7 +195,7 @@ test("AC-6: Issues Settings exposes explanations for launch, refill and targetin
   load("renderIssuesSettingsPanel")(panel, { project: { project_root: "/A" },
     status: { max_active_agents: 4, max_active_agents_override: null }, send: message => sent.push(message) });
   for (const [name, meaning] of [
-    ["Autonomous", /human approval/i], ["Monitoring", /monitoring/i],
+    ["Autonomous", /human approval.*structured gwt feedback.*without.*dialog.*free text.*capacity.*GH_TOKEN.*GitHub CLI.*unsent/i], ["Monitoring", /monitoring/i],
     ["Auto-refill", /automatically.*queue/i], ["Refill limit", /0.*disables/i],
     ["Allowed labels", /matching issues/i],
   ]) {

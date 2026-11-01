@@ -6115,6 +6115,18 @@ pub(crate) fn caller_has_verification_authority(worktree: &Path, session_id: &st
     snapshot_verification_caller_authority(worktree, session_id).is_ok()
 }
 
+/// Doctor needs positive bound evidence; the native verification gate also
+/// accepts legacy unbound callers. Reuse its validation without changing it.
+pub(crate) fn caller_has_current_bound_verification_authority(
+    worktree: &Path,
+    expected: &gwt_agent::SessionExecutionBinding,
+) -> bool {
+    snapshot_verification_caller_authority(worktree, &expected.session_id).is_ok_and(|authority| {
+        authority.execution_binding.is_some()
+            && authority.session_binding.as_ref() == Some(expected)
+    })
+}
+
 fn snapshot_verification_caller_authority(
     worktree: &Path,
     session_id: &str,

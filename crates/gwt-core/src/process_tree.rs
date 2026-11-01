@@ -399,6 +399,22 @@ mod windows_job {
             resume_suspended_process_threads(process_id)
         }
 
+        /// Assign an exactly owned suspended child without reopening its PID.
+        /// The caller retains the child and resumes its exact primary thread
+        /// only after this succeeds. This method never takes handle ownership.
+        pub fn assign_suspended_handle(
+            &mut self,
+            process: std::os::windows::io::BorrowedHandle<'_>,
+        ) -> Result<(), WindowsJobError> {
+            use std::os::windows::io::AsRawHandle;
+
+            let job = self.handle.expect("live Windows Job handle");
+            // SAFETY: the borrowed process and owned Job remain live for this
+            // call. A newly created process handle has assignment rights.
+            unsafe { AssignProcessToJobObject(job, HANDLE(process.as_raw_handle())) }
+                .map_err(|source| operation_error("AssignProcessToJobObject", source))
+        }
+
         /// Configure a hard CPU cap (1..=100 percent of total machine CPU
         /// time) for every process in the Job. Kill-on-close stays armed; the
         /// two limits live in different information classes.
@@ -875,6 +891,19 @@ mod tests {
         // short deadline-bounded commands past their budget.
         assert!(!resume.contains(concat!("CreateToolhelp32", "Snapshot")));
         assert!(!resume.contains(concat!("Thread32", "First")));
+    }
+
+    #[test]
+    fn windows_job_exact_assignment_uses_the_borrowed_process_handle() {
+        let source = include_str!("process_tree.rs");
+        let assign = source
+            .split("\n        pub fn assign_suspended_handle(")
+            .nth(1)
+            .and_then(|tail| tail.split("/// Configure a hard CPU cap").next())
+            .expect("exact suspended assignment entry");
+        assert!(assign.contains("AssignProcessToJobObject"));
+        assert!(!assign.contains("OpenProcess"));
+        assert!(!assign.contains("ResumeThread"));
     }
 
     #[test]
