@@ -8,7 +8,7 @@ use crate::cli::{LinkedPrSummary, PrChecksSummary, PrReview, PrReviewThread};
 
 pub(crate) struct StdoutCaptureEnv<'a, E: CliEnv> {
     pub(crate) inner: &'a mut E,
-    pub(crate) stdout: &'a mut Vec<u8>,
+    pub(crate) stdout: &'a mut dyn io::Write,
 }
 
 impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
@@ -70,6 +70,12 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
     }
     fn spawn_feedback_worker(&mut self, id: &str) -> io::Result<()> {
         self.inner.spawn_feedback_worker(id)
+    }
+    fn deliver_auto_feedback(
+        &mut self,
+        snapshot: &gwt_core::feedback::auto_report::SafeAutoSnapshot,
+    ) -> Result<u64, gwt_core::feedback::auto_report::AutoReason> {
+        self.inner.deliver_auto_feedback(snapshot)
     }
 
     fn stdout(&mut self) -> &mut dyn io::Write {

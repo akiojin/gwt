@@ -104,7 +104,13 @@ pub(super) fn dispatch_input<E: CliEnv>(
     let parsed = match parse(input) {
         Ok(parsed) => parsed,
         Err(err) => {
-            let _ = writeln!(env.stderr(), "{prog}: {err}");
+            if super::feedback::safe_intake_required(env.repo_path()) {
+                // A malformed envelope cannot reliably identify its operation.
+                // Never echo serde's caller-controlled keys/values in Auto.
+                let _ = writeln!(env.stderr(), "{prog}: invalid JSON envelope");
+            } else {
+                let _ = writeln!(env.stderr(), "{prog}: {err}");
+            }
             return 2;
         }
     };
@@ -2350,8 +2356,22 @@ fn hook_health(params: &Map<String, Value>) -> Result<CliCommand, CliParseError>
 }
 
 fn hook_doctor(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
+    let purpose = match optional_string(params, "purpose")?.as_deref() {
+        None => None,
+        Some("managed_browser") => Some(super::hook::health::HookDoctorPurpose::ManagedBrowser),
+        Some(_) => {
+            return Err(CliParseError::InvalidJson(
+                "unknown hook.doctor purpose".to_string(),
+            ))
+        }
+    };
+    let runtime_state_path = optional_path(params, "runtime_state_path")?;
+    if purpose.is_some() && runtime_state_path.is_some() {
+        return Err(CliParseError::InvalidJson("managed_browser resolves the current source internally; runtime_state_path is not accepted".to_string()));
+    }
     Ok(CliCommand::Hook(HookCommand::Doctor {
-        runtime_state_path: optional_path(params, "runtime_state_path")?,
+        purpose,
+        runtime_state_path,
         profile_path: optional_path(params, "profile_path")?,
         expected_hook_bin: optional_string(params, "expected_hook_bin")?,
         repair: optional_bool(params, "repair")?.unwrap_or(false),
@@ -3011,6 +3031,62 @@ fn verification_quarantine_requests(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn auto_feedback_parse_diagnostics_do_not_echo_unknown_secrets() {
+        let _guard = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = tempfile::tempdir().unwrap();
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(repo.path()),
+            &crate::IssueMonitorPrefs {
+                autonomous_mode: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let base = serde_json::json!({"operation":"feedback.create","params":{
+            "title":"ignored", "kind":"bug", "operation":"workspace.update",
+            "refusal":"ignored", "reproduction":"ignored"
+        }});
+        for scenario in ["unknown_key", "unknown_kind", "wrong_type", "broken_json"] {
+            let mut observations = Vec::new();
+            for secret in ["unmarked confidential phrase", "未知の情報えひも"] {
+                let mut input = base.clone();
+                match scenario {
+                    "unknown_key" => input["params"][secret] = serde_json::json!(secret),
+                    "unknown_kind" => input["params"]["kind"] = serde_json::json!(secret),
+                    "wrong_type" => input["params"]["labels"] = serde_json::json!(secret),
+                    _ => {}
+                }
+                let input = if scenario == "broken_json" {
+                    format!("{{\"operation\":\"feedback.create\",\"params\":{{\"{secret}\"")
+                } else {
+                    input.to_string()
+                };
+                let mut env = crate::cli::TestEnv::new(repo.path().join("cache"));
+                env.repo_path = repo.path().to_path_buf();
+                assert_ne!(crate::cli::dispatch_json_input(&mut env, "gwtd", &input), 0);
+                let output = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&env.stdout),
+                    String::from_utf8_lossy(&env.stderr)
+                );
+                assert!(
+                    !output.contains(secret),
+                    "{scenario}: diagnostic exposed raw input"
+                );
+                observations.push(output);
+            }
+            assert_eq!(
+                observations[0], observations[1],
+                "{scenario}: secret changed diagnostics"
+            );
+        }
+    }
+
     #[test]
     fn feedback_create_accepts_structured_evidence() {
         let input = serde_json::json!({"schema_version":1,"operation":"feedback.create","params":{
@@ -6759,6 +6835,25 @@ mod tests {
             err("issue.monitor.priority.set", json!({})),
             CliParseError::MissingFlag("issue_numbers")
         ));
+    }
+
+    #[test]
+    fn managed_browser_doctor_accepts_only_internal_current_source_resolution() {
+        assert!(matches!(
+            ok("hook.doctor", json!({"purpose":"managed_browser"})),
+            CliCommand::Hook(HookCommand::Doctor {
+                purpose: Some(super::super::hook::health::HookDoctorPurpose::ManagedBrowser),
+                ..
+            })
+        ));
+        for params in [
+            json!({"purpose":"unknown"}),
+            json!({"purpose":"managed_browser","runtime_state_path":"/arbitrary/runtime.json"}),
+            json!({"purpose":"managed_browser","session_id":"self-reported"}),
+            json!({"purpose":"managed_browser","authority_hash":"self-reported"}),
+        ] {
+            let _ = err("hook.doctor", params);
+        }
     }
 
     #[test]

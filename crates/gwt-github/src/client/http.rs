@@ -562,6 +562,16 @@ const GRAPHQL_BUDGET_ARGS: [&str; 2] = ["api", "graphql"];
 const REST_BUDGET_ARGS: [&str; 2] = ["api", "repos"];
 
 impl HttpIssueClient<ReqwestTransport> {
+    /// Unattended callers must not enter gh's UI-capable keyring fallback.
+    /// Use only credentials already supplied to this process; never start a
+    /// login, credential helper, browser or OS secret-store unlock operation.
+    pub fn from_noninteractive_env(owner: &str, repo: &str) -> Result<Self, ApiError> {
+        let token = noninteractive_token(|name| std::env::var(name).ok())?;
+        let transport =
+            ReqwestTransport::new().map_err(|error| ApiError::Network(error.to_string()))?;
+        Ok(Self::with_transport(transport, token, owner, repo).with_global_budget())
+    }
+
     const OWNER_ENV_KEYS: [&'static str; 4] = [
         "GWT_OWNER_GITHUB_TEST_MODE",
         "GWT_OWNER_GITHUB_REST_BASE",
@@ -1966,6 +1976,16 @@ fn resolve_gh_token() -> Result<String, ApiError> {
     Ok(token)
 }
 
+fn noninteractive_token(
+    mut lookup: impl FnMut(&'static str) -> Option<String>,
+) -> Result<String, ApiError> {
+    ["GH_TOKEN", "GITHUB_TOKEN"]
+        .into_iter()
+        .filter_map(&mut lookup)
+        .find(|token| !token.trim().is_empty())
+        .ok_or(ApiError::Unauthorized)
+}
+
 fn resolve_gh_token_with_deadline(deadline: &ResolutionDeadline) -> Result<String, ApiError> {
     deadline.remaining("gh auth token")?;
     let hub = gwt_core::process_console::global();
@@ -1998,6 +2018,34 @@ fn resolve_gh_token_with_deadline(deadline: &ResolutionDeadline) -> Result<Strin
 
 #[cfg(test)]
 mod transport_tests {
+    #[test]
+    fn unattended_auth_uses_only_existing_environment_credentials() {
+        let mut consulted = Vec::new();
+        assert!(matches!(
+            super::noninteractive_token(|name| {
+                consulted.push(name);
+                None
+            }),
+            Err(crate::client::ApiError::Unauthorized)
+        ));
+        assert_eq!(consulted, ["GH_TOKEN", "GITHUB_TOKEN"]);
+        assert_eq!(
+            super::noninteractive_token(
+                |name| (name == "GITHUB_TOKEN").then(|| "dummy-fallback".into())
+            )
+            .unwrap(),
+            "dummy-fallback"
+        );
+        assert_eq!(
+            super::noninteractive_token(|name| {
+                assert_eq!(name, "GH_TOKEN", "preferred token needs no fallback");
+                Some("dummy-preferred".into())
+            })
+            .unwrap(),
+            "dummy-preferred"
+        );
+    }
+
     #[cfg(unix)]
     use std::{ffi::OsString, sync::Mutex};
     use std::{

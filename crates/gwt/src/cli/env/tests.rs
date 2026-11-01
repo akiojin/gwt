@@ -1236,6 +1236,25 @@ fn dispatch_json_envelope_hook_health_returns_managed_health_json() {
 }
 
 #[test]
+fn hook_doctor_managed_browser_fails_closed_without_current_source() {
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempfile::tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join(".gwt"));
+    let _session = crate::cli::test_support::ScopedEnvVar::unset("GWT_SESSION_ID");
+    let mut env = TestEnv::new(temp.path().to_path_buf());
+    env.stdin = serde_json::json!({"schema_version":1, "operation":"hook.doctor", "params":{"purpose":"managed_browser"}}).to_string();
+    assert_eq!(dispatch(&mut env, &["gwtd".to_string()]), 0);
+    let envelope: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
+    let doctor: serde_json::Value =
+        serde_json::from_str(envelope["output"].as_str().unwrap()).unwrap();
+    assert_eq!(doctor["preflight"]["result"], "unknown");
+    assert_eq!(doctor["preflight"]["context"], "missing");
+    assert!(doctor["health"].is_object());
+}
+
+#[test]
 fn hook_doctor_reports_codex_trust_command_mismatch_without_registering_it() {
     let _env_lock = crate::env_test_lock()
         .lock()
