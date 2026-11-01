@@ -2087,6 +2087,45 @@ fn managed_hook_health_retains_failure_evidence_after_a_later_success() {
     );
 }
 
+#[test]
+fn managed_hook_completion_distinguishes_a_policy_denial_from_normal_output() {
+    use gwt::cli::{dispatch, TestEnv};
+    use gwt_agent::{runtime_state_path, AgentId, Session};
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().unwrap();
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path().join(".gwt"));
+    let worktree = home.path().join("repo");
+    fs::create_dir(&worktree).unwrap();
+    let session = Session::new(&worktree, "work/issue-6622", AgentId::ClaudeCode);
+    let sessions = gwt_core::paths::gwt_sessions_dir();
+    session.save(&sessions).unwrap();
+    let runtime = runtime_state_path(&sessions, &session.id);
+    gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running)
+        .save(&runtime)
+        .unwrap();
+    let _session = ScopedEnvVar::set("GWT_SESSION_ID", &session.id);
+    let _runtime = ScopedEnvVar::set("GWT_SESSION_RUNTIME_PATH", &runtime);
+    let _forward = ScopedEnvVar::remove("GWT_HOOK_FORWARD_URL");
+    for (command, exit, outcome) in [
+        ("gh issue edit 1 --title blocked", 2, "blocked"),
+        ("pwd", 0, "normal"),
+    ] {
+        let mut env = TestEnv::new(worktree.clone());
+        env.stdin = json!({"tool_name":"Bash", "tool_input":{"command":command}, "cwd":worktree})
+            .to_string();
+        let code = dispatch(
+            &mut env,
+            &["gwtd", "hook", "event", "PreToolUse"].map(str::to_string),
+        );
+        assert_eq!(code, exit, "{}", String::from_utf8_lossy(&env.stderr));
+        let wire: serde_json::Value = serde_json::from_slice(&fs::read(&runtime).unwrap()).unwrap();
+        assert_eq!(wire["last_completed_hook_outcome"], outcome);
+        assert!(wire["last_completed_hook_event_at"].is_string());
+    }
+}
+
 // Issue #4370: the Active Work projection reads hook health once per Work row
 // and used to re-audit every worktree's managed hook surface on every build.
 // The surface audit is now reused across snapshots until the surface changes.
