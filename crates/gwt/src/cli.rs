@@ -211,6 +211,7 @@ pub enum HookCommand {
     },
     /// `hook.doctor` — managed hook health projection with optional repair.
     Doctor {
+        purpose: Option<hook::health::HookDoctorPurpose>,
         runtime_state_path: Option<PathBuf>,
         profile_path: Option<PathBuf>,
         expected_hook_bin: Option<String>,
@@ -585,7 +586,7 @@ pub(crate) fn run_collect<E: CliEnv>(
                     inner: env,
                     stdout: &mut hook_stdout,
                 };
-                hook::run_hook(&mut capture, &name, &rest)?
+                hook::collect_daemon_hook(&mut capture, &name, &rest)?
             };
             out.push_str(&String::from_utf8_lossy(&hook_stdout));
             return Ok((code, out));
@@ -597,7 +598,7 @@ pub(crate) fn run_collect<E: CliEnv>(
                     inner: env,
                     stdout: &mut hook_stdout,
                 };
-                hook::run_daemon_hook(&mut capture, &name, &rest)?
+                hook::collect_daemon_hook(&mut capture, &name, &rest)?
             };
             out.push_str(&String::from_utf8_lossy(&hook_stdout));
             return Ok((code, out));
@@ -623,6 +624,7 @@ pub(crate) fn run_collect<E: CliEnv>(
             0
         }
         CliCommand::Hook(HookCommand::Doctor {
+            purpose,
             runtime_state_path,
             profile_path,
             expected_hook_bin,
@@ -651,9 +653,12 @@ pub(crate) fn run_collect<E: CliEnv>(
             if let Some(bin) = expected_hook_bin {
                 input = input.with_expected_hook_bin(bin);
             }
+            if purpose.is_some() && input.expected_hook_bin.is_none() {
+                input = input.with_expected_hook_bin(managed_hook_bin.clone());
+            }
             let mut health = hook::health::read_managed_hook_health(&input);
             hook::append_codex_trust_health_for_doctor(&input, &mut health);
-            let payload = serde_json::json!({
+            let mut payload = serde_json::json!({
                 "managed_hook_bin": managed_hook_bin,
                 "repair_writer": repair.as_ref().map(|_| serde_json::json!({
                     "pid": std::process::id(),
@@ -663,6 +668,11 @@ pub(crate) fn run_collect<E: CliEnv>(
                 "repair_guarantee": "Regenerates managed hook configuration; trust registration and launch success require separate verification.",
                 "health": health,
             });
+            if purpose == Some(hook::health::HookDoctorPurpose::ManagedBrowser) {
+                payload["preflight"] =
+                    serde_json::to_value(hook::health::read_managed_browser_preflight(&input))
+                        .map_err(serde_as_api_error)?;
+            }
             out.push_str(&serde_json::to_string_pretty(&payload).map_err(serde_as_api_error)?);
             out.push('\n');
             0
@@ -699,6 +709,16 @@ pub(crate) fn run_collect<E: CliEnv>(
 }
 
 pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError> {
+    let cmd = match cmd {
+        CliCommand::Hook(
+            HookCommand::Run { name, rest } | HookCommand::InternalDaemon { name, rest },
+        ) => {
+            // Completion means delivery to the actual protocol sink, not to
+            // run_collect's intermediate buffer.
+            return hook::run_daemon_hook(env, &name, &rest);
+        }
+        other => other,
+    };
     let (code, out) = run_collect(env, cmd)?;
     env.stdout()
         .write_all(out.as_bytes())
