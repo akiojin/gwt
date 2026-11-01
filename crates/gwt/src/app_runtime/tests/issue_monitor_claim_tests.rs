@@ -7,6 +7,10 @@ fn commit_issue_monitor_preparations(
     recorded: &Arc<Mutex<Vec<UserEvent>>>,
 ) -> Vec<OutboundEvent> {
     let mut events = Vec::new();
+    let observe_competing_first = runtime.issue_monitor_materializer_id == "gui-a"
+        && std::thread::current().name().is_some_and(|name| name == "app_runtime::tests::issue_monitor_claim_tests::competing_issue_monitor_subscribers_materialize_one_durable_delivery");
+    let mut owner_completion_seen = false;
+    let mut runtime_outcome_seen = false;
     // Dispatch facts and the actual owner's launch reply, leaving the separate
     // delivery ACK transaction queued for the caller's phase assertions.
     loop {
@@ -30,7 +34,67 @@ fn commit_issue_monitor_preparations(
                     events.extend(runtime.handle_issue_monitor_launch_prepared(*prepared));
                 }
                 Some(UserEvent::RemoteOwnerLaunchComplete(completion)) => {
+                    let observation = observe_competing_first.then(|| {
+                        use crate::app_runtime::RemoteOwnerLaunchOutcome as Outcome;
+                        let (outcome, detail) = match &completion.result {
+                            Err(error) => ("rpc_pipeline_error", error.as_str()),
+                            Ok(Outcome::Runtime(..)) => ("runtime", ""),
+                            Ok(Outcome::RetainedManualFailure(failure)) => ("retained_manual_failure", failure.detail.as_str()),
+                            Ok(Outcome::MonitorFailureClosed { detail }) => ("monitor_failure_closed", detail.as_str()),
+                            Ok(Outcome::CompensatedFailure(failure)) => ("compensated_failure", failure.error.as_str()),
+                            Ok(Outcome::Failed { failure, .. }) => ("failed", failure.detail.as_str()),
+                            Ok(Outcome::DiagnosticClosed { detail, .. }) => ("diagnostic_closed", detail.as_deref().unwrap_or_default()),
+                            Ok(Outcome::NaturallyClosed { .. }) => ("naturally_closed", ""),
+                        };
+                        let lower = detail.to_ascii_lowercase();
+                        let (client_unresolved, client_ok, client_err, identity_present, owner_identity_matches) = {
+                            let client = completion.client_cell.lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            let identity = client.as_ref().and_then(|client| client.as_ref().ok())
+                                .and_then(|client| client.identity());
+                            (client.is_none(), client.as_ref().is_some_and(Result::is_ok),
+                                client.as_ref().is_some_and(Result::is_err), identity.is_some(),
+                                identity.is_some_and(|identity| runtime.project_state(&completion.context)
+                                    .and_then(|state| state.project_owner_identity.as_ref())
+                                    .is_none_or(|accepted| accepted == identity)))
+                        };
+                        let pending = runtime.pending_launch_completions.get(&completion.window_id);
+                        let facts = serde_json::json!({
+                            "outcome": outcome,
+                            "failure_kind": gwt::issue_monitor::MonitorFailureKind::classify(detail).slug(),
+                            "has_detail": !detail.is_empty(),
+                            "admission_stale": detail.contains(gwt::project_runtime::installation::ISSUE_MONITOR_SPAWN_ADMISSION_STALE),
+                            "capacity_occupied": lower.contains("roster capacity is occupied"),
+                            "no_idle_member": lower.contains("no idle agent member"),
+                            "codex_config_lock": lower.contains("codex") && lower.contains("config") && lower.contains("lock"),
+                            "timeout": lower.contains("timeout") || lower.contains("timed out") || lower.contains("deadline"),
+                            "cleanup_pending": lower.contains("cleanup") || lower.contains("reconciliation"),
+                            "client_unresolved": client_unresolved, "client_ok": client_ok, "client_err": client_err,
+                            "identity_present": identity_present, "accepted_owner_absent_or_matches_client": owner_identity_matches,
+                            "context_current": runtime.project_context_is_current(&completion.context),
+                            "generation_current": runtime.window_lifecycle_generations.lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .get(&completion.window_id).copied() == Some(completion.generation),
+                            "window_project_matches": runtime.project_key_for_window(&completion.window_id) == Some(&completion.context.project_key),
+                            "pending_exists": pending.is_some(),
+                            "pending_generation_matches": pending.is_some_and(|pending| pending.generation == completion.generation),
+                            "pending_operation_matches": pending.is_some_and(|pending| pending.operation_id == completion.operation_id),
+                            "pending_pane_matches": pending.is_some_and(|pending| pending.owner_pane_id == completion.owner_pane_id),
+                            "pending_current": pending.is_some_and(|pending| pending.current.load(Ordering::Acquire)),
+                        });
+                        owner_completion_seen = true;
+                        runtime_outcome_seen = matches!(&completion.result, Ok(Outcome::Runtime(..)));
+                        // Capture before consume, but preserve the original GUI
+                        // processing and cleanup for every actual outcome.
+                        (completion.window_id.clone(), runtime_outcome_seen, facts)
+                    });
                     events.extend(runtime.handle_remote_owner_launch_complete(*completion));
+                    if let Some((window, was_runtime, facts)) = observation {
+                        let installed = runtime.runtimes.contains_key(&window);
+                        if !was_runtime || !installed {
+                            eprintln!("competing_owner_result_after_handler runtime_outcome={was_runtime} gui_projection_installed={installed} facts={facts}");
+                        }
+                    }
                 }
                 None => break,
                 _ => unreachable!("matched Monitor launch completion"),
@@ -39,6 +103,9 @@ fn commit_issue_monitor_preparations(
         if runtime.issue_monitor_launch_preparations.is_empty()
             && runtime.pending_launch_completions.is_empty()
         {
+            if observe_competing_first && runtime.runtimes.is_empty() {
+                eprintln!("competing_missing_projection_phase owner_completion_seen={owner_completion_seen} runtime_outcome_seen={runtime_outcome_seen}");
+            }
             return events;
         }
     }
@@ -7833,7 +7900,32 @@ fn competing_issue_monitor_subscribers_materialize_one_durable_delivery() {
         .runtimes
         .keys()
         .next()
-        .expect("first owner projection")
+        .unwrap_or_else(|| {
+            let failures = first.iter().filter_map(|event| {
+                let (kind, detail) = match &event.event {
+                    BackendEvent::TerminalStatus { detail, .. } => ("terminal_status", detail.as_deref().unwrap_or_default()),
+                    BackendEvent::IssueMonitorLaunchFailed { message, .. } => ("monitor_launch_failed", message.as_str()),
+                    BackendEvent::IssueMonitorToast { message, .. } => ("monitor_toast", message.as_str()),
+                    BackendEvent::LaunchWizardOpenError { message, .. } => ("wizard_error", message.as_str()),
+                    _ => return None,
+                };
+                let lower = detail.to_ascii_lowercase();
+                Some(serde_json::json!({
+                    "event": kind,
+                    "failure_kind": gwt::issue_monitor::MonitorFailureKind::classify(detail).slug(),
+                    "has_detail": !detail.is_empty(),
+                    "admission_stale": detail.contains(gwt::project_runtime::installation::ISSUE_MONITOR_SPAWN_ADMISSION_STALE),
+                    "codex_config_lock": lower.contains("codex") && lower.contains("config") && lower.contains("lock"),
+                    "timeout": lower.contains("timeout") || lower.contains("timed out") || lower.contains("deadline"),
+                    "cleanup_pending": lower.contains("cleanup") || lower.contains("reconciliation"),
+                }))
+            }).collect::<Vec<_>>();
+            let rejection_count = fixture.recorded_events.lock().unwrap().iter().filter(|event| {
+                matches!(recorded_project_payload(event), UserEvent::IssueMonitorPreflightRejected(_))
+            }).count();
+            panic!("first owner projection; safe_failures={failures:?}; preparation_count={} pending_count={} preflight_rejection_count={rejection_count}",
+                runtime_a.issue_monitor_launch_preparations.len(), runtime_a.pending_launch_completions.len());
+        })
         .clone();
     let pane = owner_runtime_probe(runtime_a, &window_id);
     let session = pane.session.as_ref().unwrap();
