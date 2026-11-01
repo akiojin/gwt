@@ -2695,7 +2695,7 @@ fn fresh_execution_generic_close_aborts_candidate_in_background() {
     runtime.blocking_tasks = spawner;
     let baseline = runtime.window_scoped_state_entry_count();
     let root_pid = sysinfo::Pid::from_u32(std::process::id());
-    let mut system = sysinfo::System::new();
+    let mut system = sysinfo::System::new().expect("initialize test process observation");
     let mut rss_bytes = Vec::new();
     use gwt::project_runtime::{events::OwnerCommand, launch_payload::ManualSuccessorChoice};
     for round in 0..5 {

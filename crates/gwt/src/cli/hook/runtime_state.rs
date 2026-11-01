@@ -108,7 +108,7 @@ pub(crate) fn current_hook_context(
         || crate::process::host_process_start_time(host_pid) != Some(host_started_at)
         || crate::process::host_process_start_time(child_pid) != Some(child_started_at)
         || (child_pid != std::process::id()
-            && !crate::process::is_descendant_of(std::process::id(), child_pid))
+            && !crate::process::is_descendant_of(std::process::id(), child_pid).unwrap_or(false))
     {
         return Err(Foreign);
     }

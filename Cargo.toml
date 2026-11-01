@@ -113,7 +113,7 @@ which = "8"
 dunce = "1"
 
 # System information
-sysinfo = { version = "0.39", default-features = false, features = ["system"] }
+sysinfo = { version = "0.40", default-features = false, features = ["system"] }
 
 # File system watcher (gwt-spec issue)
 notify = "8"
