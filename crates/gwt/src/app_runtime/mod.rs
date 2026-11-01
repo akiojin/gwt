@@ -10045,6 +10045,7 @@ impl AppRuntime {
                 .filter(|lease| {
                     lease.owner.as_ref().is_some_and(|owner| {
                         gwt::process::is_descendant_of(owner.pid, std::process::id())
+                            .unwrap_or(true)
                     })
                 })
                 .and_then(|lease| lease.lease_id)
@@ -13851,7 +13852,10 @@ fn work_branches_with_live_processes(targets: &[WorkBranchScanTarget]) -> HashSe
         return HashSet::new();
     }
 
-    let mut system = System::new();
+    let Ok(mut system) = System::new() else {
+        // An unavailable census cannot authorize collection of any worktree.
+        return worktrees.into_iter().map(|(branch, _)| branch).collect();
+    };
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
         true,

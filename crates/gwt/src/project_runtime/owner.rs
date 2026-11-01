@@ -10589,7 +10589,7 @@ pub(crate) fn close_runtime(
                 &runtime.project_root,
                 snapshot,
                 &std::collections::BTreeSet::from([snapshot.project_tab_id.clone()]),
-                std::time::Duration::from_secs(5),
+                crate::daemon_publisher::DURABLE_ISSUE_MONITOR_CONTROL_BUDGET.resolve(),
             );
         match publication {
             Err(error) if error.allows_local_fallback() => {
