@@ -7217,6 +7217,7 @@ fn issue_5642_materializing_replay_preserves_the_unconsumed_initial_launch() {
         super::super::IssueMonitorLaunchDeliveryState::Materializing {
             window_id,
             started_at,
+            ..
         } => {
             // test-hygiene: allow-wall-clock-deadline inject an elapsed TTL without sleeping; worker completion determines replay ordering.
             *started_at = Instant::now() - Duration::from_secs(61);
@@ -7477,6 +7478,7 @@ fn durable_issue_monitor_delivery_preserves_live_materializer_and_replays_after_
             super::super::IssueMonitorLaunchDeliveryState::Materializing {
                 window_id: "tab-1::missing-materializer".into(),
                 started_at: Instant::now(),
+                accepted_owner: None,
             },
         );
         let mut replay = prepare_monitor_relaunch(
@@ -7493,6 +7495,17 @@ fn durable_issue_monitor_delivery_preserves_live_materializer_and_replays_after_
             completion.result.as_ref().map(std::mem::discriminant)
         );
         let window_id = completion.window_id.clone();
+        if let Ok(super::super::RemoteOwnerLaunchOutcome::Runtime(snapshot, session)) =
+            &completion.result
+        {
+            replay.extend(fixture.runtime.install_remote_owner_projection(
+                &context,
+                &window_id,
+                client.clone(),
+                snapshot.clone(),
+                session.clone(),
+            ));
+        }
         replay.extend(
             fixture
                 .runtime
@@ -7586,6 +7599,7 @@ fn durable_issue_monitor_delivery_preserves_live_materializer_and_replays_after_
             super::super::IssueMonitorLaunchDeliveryState::Materializing {
                 window_id: live_id,
                 started_at,
+                ..
             } => {
                 assert_eq!(live_id, &window_id);
                 *started_at = Instant::now() - Duration::from_secs(61);
@@ -7683,6 +7697,85 @@ fn durable_issue_monitor_delivery_preserves_live_materializer_and_replays_after_
                 && delivery.materializer_id.as_deref() == Some(identity.host_instance_id.as_str())),
         "GuiLifetime drain preserves the same unacknowledged durable delivery"
     );
+    fixture
+        .runtime
+        .apply_owner_window_removed_projection(&context, &live_window_id);
+    let delivery_before = fixture.runtime.issue_monitor_launch_deliveries[&delivery_id].clone();
+    let rows_before: Vec<_> = fixture.runtime.tabs[0]
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .map(|row| row.id.clone())
+        .collect();
+    let previous_identity = fixture
+        .runtime
+        .project_state(&context)
+        .unwrap()
+        .project_owner_identity
+        .clone();
+    let previous_spawner = fixture.runtime.blocking_tasks.clone();
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    let no_rebuild: Result<(), &str> = (|| {
+        for cached_identity in [Some(identity.clone()), None] {
+            fixture
+                .runtime
+                .project_state_mut(&context)
+                .unwrap()
+                .project_owner_identity = cached_identity;
+            fixture
+                .runtime
+                .auto_launch_issue_monitor_delivery_events_for_project(
+                    &repo,
+                    3165,
+                    LinkedIssueKind::Spec,
+                    Some(delivery_id.clone()),
+                    gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+                );
+            if !queued.lock().unwrap().is_empty() {
+                return Err(
+                    "production admission queued fresh preparation for an accepted delivery",
+                );
+            }
+            fixture.runtime.auto_launch_issue_monitor_delivery_events(
+                &context,
+                3165,
+                LinkedIssueKind::Spec,
+                Some(delivery_id.clone()),
+                gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+            );
+            if !queued.lock().unwrap().is_empty() {
+                return Err("apply admission queued a new owner launch for an accepted delivery");
+            }
+            let rows: Vec<_> = fixture.runtime.tabs[0]
+                .workspace
+                .persisted()
+                .windows
+                .iter()
+                .map(|row| row.id.clone())
+                .collect();
+            if rows != rows_before {
+                return Err("accepted delivery created or replaced a GUI row");
+            }
+            if fixture
+                .runtime
+                .issue_monitor_launch_deliveries
+                .get(&delivery_id)
+                != Some(&delivery_before)
+            {
+                return Err("accepted delivery replaced its original local state");
+            }
+        }
+        Ok(())
+    })();
+    fixture.runtime.blocking_tasks = previous_spawner;
+    fixture
+        .runtime
+        .project_state_mut(&context)
+        .unwrap()
+        .project_owner_identity = previous_identity;
+    assert!(no_rebuild.is_ok(), "{}", no_rebuild.unwrap_err());
     let owner = start_monitor_relaunch_owner(&mut fixture, false);
     let replacement = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         assert_ne!(owner.client().identity().unwrap(), &identity);
