@@ -567,7 +567,7 @@ fn check_tail(file: &mut File) -> Result<()> {
         file.seek(SeekFrom::End(-1))?;
         let mut byte = [0];
         file.read_exact(&mut byte)?;
-        if byte != [b'\n'] {
+        if byte != *b"\n" {
             return invalid("incomplete PM report record (missing newline); preserve journal and recover explicitly");
         }
     }
