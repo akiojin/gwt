@@ -717,13 +717,17 @@ fn embedded_web_terminal_runtime_buffers_writes_until_initial_fit_handshake() {
     // cols/rows) get written into xterm's default 80×24 grid and
     // stay layout-locked there until the next manual resize.
     let html = frontend_bundle_source();
-    // The rAF must dispatch to completeInitialFitHandshake — keeping
-    // the handshake idempotent and gated on real layout (see helper
+    // The initial-fit reservation must dispatch to completeInitialFitHandshake,
+    // including when rAF stalls, keeping the handshake gated on real layout (see helper
     // below). Works caches keep a layout box while hidden; ordinary hidden
     // windows still wait for reveal. Inlining replay before fit would
     // defeat the deferredWrites buffer (CodeRabbit PR #2693 concern).
     let create_runtime_handshake = regex::Regex::new(
-            r#"(?s)isReady: false,\s*deferredWrites: \[\],[\s\S]*?handshakeAttempts: 0,[\s\S]*?\};\s*terminalMap\.set\(windowId, runtime\);\s*decoderMap\.set\(windowId, new TextDecoder\(\)\);[\s\S]*?requestAnimationFrame\(\(\) => completeInitialFitHandshake\(windowId\)\);"#,
+            r#"(?s)isReady: false,\s*deferredWrites: \[\],[\s\S]*?handshakeAttempts: 0,[\s\S]*?\};\s*terminalMap\.set\(windowId, runtime\);\s*decoderMap\.set\(windowId, new TextDecoder\(\)\);[\s\S]*?scheduleInitialFitHandshake\(windowId\);\s*return runtime;"#,
+        )
+        .expect("valid regex");
+    let scheduled_handshake = regex::Regex::new(
+            r#"(?s)function scheduleInitialFitHandshake\(windowId\) \{[\s\S]*?runtime\.initialFitCancel = scheduleTerminalInitialFit\(\(\) => \{\s*runtime\.initialFitCancel = null;\s*if \(terminalMap\.get\(windowId\) === runtime\) completeInitialFitHandshake\(windowId\);"#,
         )
         .expect("valid regex");
     // The helper must (a) bail on hidden windows outside the measurable
@@ -751,6 +755,10 @@ fn embedded_web_terminal_runtime_buffers_writes_until_initial_fit_handshake() {
     assert!(
             create_runtime_handshake.is_match(html),
             "expected createTerminalRuntime to dispatch its initial-fit handshake through completeInitialFitHandshake instead of inlining the replay (FR-057, CodeRabbit fix)",
+        );
+    assert!(
+            scheduled_handshake.is_match(html),
+            "expected the frame/timer reservation to dispatch the initial-fit handshake only for the current runtime (Issue #5016 CFIT)",
         );
     assert!(
             handshake_helper.is_match(html),

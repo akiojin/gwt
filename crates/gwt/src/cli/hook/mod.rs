@@ -345,10 +345,41 @@ fn parked_owner_issue() -> Option<u64> {
         .then_some(issue)
 }
 
+fn serialize_completed_hook_output(
+    output: &HookOutput,
+    writer: &mut dyn std::io::Write,
+) -> Result<gwt_agent::session::HookCompletionOutcome, HookError> {
+    use gwt_agent::session::HookCompletionOutcome;
+    output.serialize_to(writer)?;
+    Ok(match output {
+        HookOutput::PreToolUsePermission { .. } | HookOutput::StopBlock { .. } => {
+            HookCompletionOutcome::Blocked
+        }
+        _ => HookCompletionOutcome::Normal,
+    })
+}
+
 pub fn run_daemon_hook<E: CliEnv>(
     env: &mut E,
     name: &str,
     rest: &[String],
+) -> Result<i32, SpecOpsError> {
+    run_daemon_hook_inner(env, name, rest, true)
+}
+
+pub(crate) fn collect_daemon_hook<E: CliEnv>(
+    env: &mut E,
+    name: &str,
+    rest: &[String],
+) -> Result<i32, SpecOpsError> {
+    run_daemon_hook_inner(env, name, rest, false)
+}
+
+fn run_daemon_hook_inner<E: CliEnv>(
+    env: &mut E,
+    name: &str,
+    rest: &[String],
+    publish_completion: bool,
 ) -> Result<i32, SpecOpsError> {
     use crate::cli::hook::{
         block_bash_policy, event_dispatcher, known_workarounds, provider_event, runtime_state,
@@ -363,21 +394,32 @@ pub fn run_daemon_hook<E: CliEnv>(
     let stdin = env.read_stdin().map_err(io_as_api_error)?;
 
     fn emit_hook_output<E: CliEnv>(env: &mut E, output: &HookOutput) -> i32 {
-        write_hook_output(env, output).unwrap_or_else(|code| code)
+        write_hook_output(env, output)
+            .map(|(code, _)| code)
+            .unwrap_or_else(|code| code)
     }
     /// Issue #3541: an event only counts as completed once its protocol
     /// output has been written, so stamp the runtime state on `Ok` only.
-    fn emit_event_output<E: CliEnv>(env: &mut E, output: &HookOutput) -> i32 {
+    fn emit_event_output<E: CliEnv>(
+        env: &mut E,
+        output: &HookOutput,
+        completion: Option<runtime_state::HookCompletionContext>,
+    ) -> i32 {
         match write_hook_output(env, output) {
-            Ok(code) => {
-                runtime_state::record_hook_event_completed_from_env();
+            Ok((code, outcome)) => {
+                if let Some(completion) = completion {
+                    completion.record(outcome);
+                }
                 code
             }
             Err(code) => code,
         }
     }
     /// `Ok(exit_code)` when the envelope reached stdout, `Err(1)` otherwise.
-    fn write_hook_output<E: CliEnv>(env: &mut E, output: &HookOutput) -> Result<i32, i32> {
+    fn write_hook_output<E: CliEnv>(
+        env: &mut E,
+        output: &HookOutput,
+    ) -> Result<(i32, gwt_agent::session::HookCompletionOutcome), i32> {
         // Issue #4542: denials are constructed in a dozen gates but serialized
         // only here, so the known-workaround advisory attaches once and every
         // present and future gate inherits it. It is fail-open by construction:
@@ -386,8 +428,8 @@ pub fn run_daemon_hook<E: CliEnv>(
         // an error or a stall.
         let repo_root = env.repo_path().to_path_buf();
         let output = &known_workarounds::augment_denial(&repo_root, output.clone());
-        match output.serialize_to(env.stdout()) {
-            Ok(()) => {
+        match serialize_completed_hook_output(output, env.stdout()) {
+            Ok(outcome) => {
                 if let HookOutput::PreToolUsePermission { deny_reason, .. } = output {
                     // Grok's gate-hook runner uses exit 2 for denial but reads
                     // the user-visible reason from stderr's first line rather
@@ -409,7 +451,7 @@ pub fn run_daemon_hook<E: CliEnv>(
                     };
                     let _ = writeln!(env.stderr(), "{grok_reason}");
                 }
-                Ok(output.exit_code())
+                Ok((output.exit_code(), outcome))
             }
             Err(err) => {
                 let _ = writeln!(env.stderr(), "gwtd hook: failed to serialize output: {err}");
@@ -490,6 +532,11 @@ pub fn run_daemon_hook<E: CliEnv>(
                 return Ok(2);
             };
             let cwd = env.repo_path().to_path_buf();
+            let completion = if publish_completion {
+                runtime_state::capture_hook_completion(&cwd)
+            } else {
+                None
+            };
             let current_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
             let dispatch_result = event_dispatcher::handle_with_input(
                 event,
@@ -498,7 +545,7 @@ pub fn run_daemon_hook<E: CliEnv>(
                 current_session.as_deref(),
             );
             match dispatch_result {
-                Ok(output) => Ok(emit_event_output(env, &output)),
+                Ok(output) => Ok(emit_event_output(env, &output, completion)),
                 Err(err) => Ok(emit_event_error(env, name, event, &err)),
             }
         }
@@ -518,6 +565,11 @@ pub fn run_daemon_hook<E: CliEnv>(
                 return Ok(2);
             };
             let cwd = env.repo_path().to_path_buf();
+            let completion = if publish_completion {
+                runtime_state::capture_hook_completion(&cwd)
+            } else {
+                None
+            };
             let current_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
             let dispatch_result = provider_event::handle_with_input(
                 provider,
@@ -527,7 +579,7 @@ pub fn run_daemon_hook<E: CliEnv>(
                 current_session.as_deref(),
             );
             match dispatch_result {
-                Ok(output) => Ok(emit_event_output(env, &output)),
+                Ok(output) => Ok(emit_event_output(env, &output, completion)),
                 Err(err) => Ok(emit_event_error(
                     env,
                     name,
@@ -837,6 +889,161 @@ fn default_codex_config_path() -> Option<std::path::PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    fn with_delivery_source(test: impl FnOnce(&std::path::Path, &std::path::Path)) {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let root = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(root.path().join("home"));
+        let worktree = root.path().join("repo");
+        std::fs::create_dir(&worktree).unwrap();
+        let session = gwt_agent::Session::new(&worktree, "fixture", gwt_agent::AgentId::ClaudeCode);
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        session.save(&sessions).unwrap();
+        let runtime = gwt_agent::runtime_state_path(&sessions, &session.id);
+        gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running)
+            .save(&runtime)
+            .unwrap();
+        let _sid = gwt_core::test_support::ScopedEnvVar::set("GWT_SESSION_ID", &session.id);
+        let _runtime =
+            gwt_core::test_support::ScopedEnvVar::set("GWT_SESSION_RUNTIME_PATH", &runtime);
+        test(&worktree, &runtime);
+    }
+
+    #[test]
+    fn real_protocol_stdout_failure_does_not_publish_completion() {
+        with_delivery_source(|worktree, runtime| {
+            let mut env = crate::cli::TestEnv::new(worktree.to_path_buf());
+            env.stdin = serde_json::json!({"tool_name":"Bash","tool_input":{"command":"gh issue edit 1 --title blocked"}}).to_string();
+            struct BrokenPipe;
+            impl std::io::Write for BrokenPipe {
+                fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "fixture stdout closed",
+                    ))
+                }
+                fn flush(&mut self) -> std::io::Result<()> {
+                    Ok(())
+                }
+            }
+            let mut sink = BrokenPipe;
+            let mut failing = crate::cli::env::StdoutCaptureEnv {
+                inner: &mut env,
+                stdout: &mut sink,
+            };
+            assert_eq!(
+                crate::cli::dispatch(
+                    &mut failing,
+                    &["gwtd", "hook", "event", "PreToolUse"].map(str::to_string)
+                ),
+                1
+            );
+            let state = gwt_agent::SessionRuntimeState::load(runtime).unwrap();
+            assert!(state.last_completed_hook_event_at.is_none());
+            assert!(state.last_completed_hook_outcome.is_none());
+        });
+    }
+
+    #[test]
+    fn collecting_protocol_bytes_alone_does_not_publish_completion() {
+        with_delivery_source(|worktree, runtime| {
+            let mut env = crate::cli::TestEnv::new(worktree.to_path_buf());
+            env.stdin = serde_json::json!({"tool_name":"Bash","tool_input":{"command":"gh issue edit 1 --title blocked"}}).to_string();
+            let (code, output) = crate::cli::run_collect(
+                &mut env,
+                crate::cli::CliCommand::Hook(crate::cli::HookCommand::InternalDaemon {
+                    name: "event".into(),
+                    rest: vec!["PreToolUse".into()],
+                }),
+            )
+            .unwrap();
+            assert_eq!(code, 2);
+            assert!(output.contains("permissionDecision"));
+            let state = gwt_agent::SessionRuntimeState::load(runtime).unwrap();
+            assert!(state.last_completed_hook_event_at.is_none());
+            assert!(state.last_completed_hook_outcome.is_none());
+        });
+    }
+
+    #[test]
+    fn handler_failure_leaves_a_writable_source_without_completion() {
+        with_delivery_source(|worktree, runtime| {
+            assert!(super::runtime_state::capture_hook_completion(worktree).is_some());
+            let before = std::fs::read(runtime).unwrap();
+            let mut env = crate::cli::TestEnv::new(worktree.to_path_buf());
+            env.stdin = "{".into();
+            assert_eq!(
+                crate::cli::dispatch(
+                    &mut env,
+                    &["gwtd", "hook", "event", "PostToolUse"].map(str::to_string)
+                ),
+                1
+            );
+            assert!(String::from_utf8_lossy(&env.stderr).contains("PostToolUse/runtime-state"));
+            assert_eq!(std::fs::read(runtime).unwrap(), before);
+            // The unchanged bytes are meaningful even though this destination
+            // could have accepted an erroneous completion write.
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(runtime)
+                .unwrap();
+        });
+    }
+
+    #[test]
+    fn completion_outcome_uses_actual_protocol_output_and_requires_successful_serialization() {
+        use super::{serialize_completed_hook_output, HookOutput};
+        use gwt_agent::session::HookCompletionOutcome::{Blocked, Normal};
+        for (output, expected, exit) in [
+            (HookOutput::Silent, Normal, 0),
+            (HookOutput::SystemMessage("context".into()), Normal, 0),
+            (
+                HookOutput::PreToolUseAdditionalContext("context".into()),
+                Normal,
+                0,
+            ),
+            (
+                HookOutput::StopBlock {
+                    reason: "continue".into(),
+                },
+                Blocked,
+                0,
+            ),
+            (
+                HookOutput::PreToolUsePermission {
+                    summary: "deny".into(),
+                    detail: "detail".into(),
+                    deny_reason: "deny".into(),
+                },
+                Blocked,
+                2,
+            ),
+        ] {
+            assert_eq!(output.exit_code(), exit);
+            assert_eq!(
+                serialize_completed_hook_output(&output, &mut Vec::new()).unwrap(),
+                expected
+            );
+        }
+        struct RejectOutput;
+        impl std::io::Write for RejectOutput {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("fixture serialization failure"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        assert!(serialize_completed_hook_output(
+            &HookOutput::StopBlock {
+                reason: "continue".into()
+            },
+            &mut RejectOutput
+        )
+        .is_err());
+    }
+
     // -------------------------------------------------------------------
     // SPEC-1942 SC-025 follow-up: hook-family helper tests relocated
     // from cli.rs. Shared test infrastructure (ScopedEnvVar,

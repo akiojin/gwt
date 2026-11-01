@@ -553,7 +553,6 @@ crates/gwt/src/runtime_gc.rs|namespace_gc_runs_at_startup_periodically_and_stops
 crates/gwt/src/runtime_gc.rs|namespace_gc_runs_at_startup_periodically_and_stops_with_owner|events.recv_timeout(Duration::from_secs(30)).expect()|2
 crates/gwt/src/start_work.rs|launch_agent_base_branch_stops_hanging_git_at_operation_deadline|assert!(started.elapsed()<std::time::Duration::from_millis(1_500),,started.elapsed())|1
 crates/gwt/tests/ci_apt_lock_contract_test.rs|a_held_lock_fails_fast_with_contention_reason|assert!(elapsed.as_secs()<30,)|1
-crates/gwt/tests/daemon_logging_test.rs|issue_5644_daemon_start_persists_scan_stage_and_total_timings|assert!(Instant::now()<deadline,,log.display())|1
 crates/gwt/tests/daemon_logging_test.rs|issue_5644_daemon_start_persists_scan_stage_and_total_timings|letdeadline=Instant::now()+Duration::from_secs(30)|1
 crates/gwt/tests/daemon_project_root_test.rs|run_envelope|Ok(Some(_))=>break,Ok(None)ifInstant::now()>=deadline=>|1
 crates/gwt/tests/daemon_project_root_test.rs|run_envelope|letdeadline=Instant::now()+COMMAND_TIMEOUT|1

@@ -6,11 +6,12 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
 import type { TestInfo } from "@playwright/test";
-import { startExactRelaunchFixture, writeFixtureNodeCommand } from "./exact-relaunch";
+import { startExactRelaunchFixture, writeFixtureNodeCommand, type ExactRelaunchSetup } from "./exact-relaunch";
 
 /** Real monitor, claims, materialization and PTY; GitHub and provider are local recorders. */
 export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
   targetIssueNumber?: 44; switching?: boolean; positive?: boolean; terminalConvergence?: boolean; autonomousMode?: boolean;
+  prepare?: ExactRelaunchSetup["prepare"];
 } = {}) {
   const windows = process.platform === "win32";
   const comments: { id: number; body: string; updated_at: string }[] = [];
@@ -249,6 +250,7 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
         await mkdir(join(project, ".codex"), { recursive: true });
         await writeFile(join(project, ".codex/hooks.json"), "{}");
         auditHooks(project, true);
+        await options.prepare?.({ home, bin, project, env });
       },
     });
   } catch (error) {
