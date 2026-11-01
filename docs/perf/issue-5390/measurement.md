@@ -373,3 +373,44 @@ verification, headed dark/light checks, required CI and base inclusion belong
 to the delivery record. The initial discovery fanout timeout, installed
 rollout, PM20s availability, parent CPU/RSS and real fleet 60-minute/four-hour
 acceptance remain unproven.
+
+## Empty execution observation (2026-11-01)
+
+`read_execution_observations` used to collect the Session/OS inventory and
+Git worktree list even when its input contained no Issues. Its eventual map
+was always empty. Return that empty map before collecting those inputs; keep
+the existing timing, nonempty diagnosis and caller's process-held-set update.
+No deadline, cache, scheduler, schema or effect authority changes.
+
+The focused regression failed with one Git spawn versus zero expected, then
+passed after the three-line guard. Existing stopped-holder/reaper recovery
+and blocked/dead-host release regressions also passed. The test directly
+counts Git; source review establishes the census is skipped before the worker
+is constructed.
+
+The identical temporary native probe called the read-only function twelve
+times against the real `E:/llmlb` and Session store. Before: 3463.9462ms total
+wall time and 3.40625 probe CPU seconds. After: 0.0407ms and no observed CPU
+ticks. The first before call was 938.4819ms; subsequent calls benefited from
+warm process-local caches. These are probe-process measurements, excluding
+child Git CPU, startup and the rest of the scan. Zero ticks means below the
+observed resolution of `GetProcessTimes` for this short loop.
+
+`empty-execution-observation.json` preserves the probe source, identical source
+hash, executable hashes, per-call results, RED/GREEN output and limitations.
+The baseline executable preceded the test-only addition; its recorded worktree
+source hash includes that regression. The fixed library adds the guard.
+The temporary example was removed after measurement.
+
+Installed PID 38952 still consumed 51.265625 CPU seconds over 30.0667689 wall
+seconds, about 1.705 cores. Sampled native stacks had no product symbols.
+Recent execution-observation logs mix projects and daemon processes, omit
+owner counts, and include nested stages. Neither those wall times nor this
+empty-input probe proves a reduction in production GUI CPU or fleet budgets.
+
+The managed-browser preflight returned `unknown` with `ledger_unavailable`
+and `completion_missing` despite a current context and converged target.
+Feedback Issue #6635 records the complete output. PM ruling `db103f30` directs
+backend canonical verification first, followed by the original headed gate
+after Issue #6622 is delivered. Parent AC-1/2/3 and overall delivery remain
+unproven; this record does not replace headed, required CI or base inclusion.

@@ -503,6 +503,9 @@ pub fn read_execution_observations(
     issue_numbers: &[u64],
 ) -> BTreeMap<u64, crate::issue_monitor::IssueMonitorExecutionObservation> {
     let _timing = IssueMonitorScanTiming::start("execution-observation");
+    if issue_numbers.is_empty() {
+        return BTreeMap::new();
+    }
     let deadline = gwt_core::operation_deadline::current();
     let span = tracing::Span::current();
     #[cfg(test)]
@@ -3866,6 +3869,20 @@ pub(crate) mod tests {
         let mut monitor = crate::IssueMonitorState::with_prefs(config, prefs);
         monitor.set_source_repository(Some(("example", "project")));
         monitor
+    }
+
+    #[test]
+    fn empty_execution_observations_skip_runtime_and_git_reads() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let git_spawns = gwt_core::process::thread_git_spawn_count();
+
+        assert!(read_execution_observations(home.path(), &[]).is_empty());
+        assert_eq!(
+            gwt_core::process::thread_git_spawn_count() - git_spawns,
+            0,
+            "no owners means no runtime census or worktree lookup is needed"
+        );
     }
 
     #[test]
