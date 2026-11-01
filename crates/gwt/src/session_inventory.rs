@@ -219,6 +219,9 @@ fn finish_machine_inventory(
     resources: &MachineProcessResources,
 ) -> MachineSessionInventory {
     inventory.uncertainties.retain(|uncertainty| {
+        if resources.observation_error.is_some() {
+            return true;
+        }
         if !uncertainty.reason.starts_with("session_unreadable:") {
             return true;
         }
@@ -256,6 +259,7 @@ fn finish_machine_inventory(
 
 #[derive(Default)]
 struct MachineProcessResources {
+    observation_error: Option<String>,
     memory: BTreeMap<u32, u64>,
     reviews: BTreeSet<u32>,
     scalar_identities: BTreeMap<u32, u64>,
@@ -481,14 +485,22 @@ fn capture_process_resources(
     candidates: &[RuntimeCandidate],
     inventory: &SessionInventory,
     measure_resources: bool,
-    snapshot: Option<sysinfo::System>,
+    snapshot: Option<Result<sysinfo::System, sysinfo::Error>>,
 ) -> MachineProcessResources {
     if candidates.is_empty() && inventory.uncertainties.is_empty() {
         return MachineProcessResources::default();
     }
     // Read process state after the sidecars so a newly published child is not
     // compared with an OS snapshot taken before it was spawned.
-    let system = snapshot.unwrap_or_else(process_snapshot);
+    let system = match snapshot.unwrap_or_else(process_snapshot) {
+        Ok(system) => system,
+        Err(error) => {
+            return MachineProcessResources {
+                observation_error: Some(error.to_string()),
+                ..MachineProcessResources::default()
+            };
+        }
+    };
     capture_process_resources_with_system(candidates, inventory, measure_resources, &system)
 }
 
@@ -549,8 +561,11 @@ fn capture_process_resources_with_system(
         .collect::<BTreeMap<_, _>>();
     // Resource refreshes retain old values on access failure. Keep those probes
     // transient so an earlier positive RSS/environment never survives a tick.
-    let mut scalar_system = System::new();
-    if !legacy_children.is_empty() {
+    let mut scalar_system = System::new().ok();
+    if let Some(scalar_system) = scalar_system
+        .as_mut()
+        .filter(|_| !legacy_children.is_empty())
+    {
         scalar_system.refresh_processes_specifics(
             ProcessesToUpdate::Some(&legacy_children),
             true,
@@ -564,8 +579,12 @@ fn capture_process_resources_with_system(
         .iter()
         .map(|(pid, process)| (pid.as_u32(), process.start_time()))
         .collect::<BTreeMap<_, _>>();
-    let legacy_processes =
-        legacy_process_observations(system, &scalar_system, &legacy_hosts, &legacy_identities);
+    let legacy_processes = legacy_process_observations(
+        system,
+        scalar_system.as_ref(),
+        &legacy_hosts,
+        &legacy_identities,
+    );
     // Identity comes from the per-process start token, not the wall-clock
     // start time, which moves with the boot time on Linux (Issue #5089).
     // Only the PIDs a candidate can name are read.
@@ -596,7 +615,7 @@ fn capture_process_resources_with_system(
         })
         .collect::<BTreeMap<_, _>>();
     let mut resources = MachineProcessResources::default();
-    if measure_resources {
+    if let Some(scalar_system) = scalar_system.as_mut().filter(|_| measure_resources) {
         // Only named PTY identities are queried for resource/role scalars.
         let pids = named
             .iter()
@@ -629,7 +648,8 @@ fn capture_process_resources_with_system(
             }
         }
     }
-    let boot_epoch = System::boot_time();
+    // An unavailable boot epoch cannot prove that a runtime predates this boot.
+    let boot_epoch = System::boot_time().unwrap_or_default();
     let tokens_are_epoch = cfg!(not(target_os = "linux"));
     resources.processes = epochs.clone();
     resources.processes.extend(processes);
@@ -646,6 +666,14 @@ fn observe_candidate_resources(
     resources: &MachineProcessResources,
     require_host_absence: bool,
 ) {
+    if let Some(error) = &resources.observation_error {
+        inventory.uncertain(
+            Path::new("runtime"),
+            None,
+            format!("process_snapshot_unavailable: {error}"),
+        );
+        return;
+    }
     let candidates = candidates
         .into_iter()
         .filter(|candidate| {
@@ -690,16 +718,16 @@ fn observe_candidate_resources(
     );
 }
 
-fn process_snapshot() -> sysinfo::System {
+fn process_snapshot() -> Result<sysinfo::System, sysinfo::Error> {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
-    let mut system = System::new();
+    let mut system = System::new()?;
     system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
-    system
+    Ok(system)
 }
 
 fn legacy_process_observations(
     system: &sysinfo::System,
-    scalar_system: &sysinfo::System,
+    scalar_system: Option<&sysinfo::System>,
     legacy_hosts: &BTreeSet<u32>,
     legacy_identities: &BTreeMap<u32, u64>,
 ) -> Vec<LegacyProcessObservation> {
@@ -717,11 +745,13 @@ fn legacy_process_observations(
                 .get(&pid.as_u32())
                 .copied()
                 .unwrap_or_default();
-            let scalar = scalar_system.process(*pid).filter(|scalar| {
-                started_at > 0
-                    && crate::process::snapshot_process_start_identity(pid.as_u32(), scalar)
-                        == started_at
-            });
+            let scalar = scalar_system
+                .and_then(|system| system.process(*pid))
+                .filter(|scalar| {
+                    started_at > 0
+                        && crate::process::snapshot_process_start_identity(pid.as_u32(), scalar)
+                            == started_at
+                });
             let session_id = scalar
                 .and_then(|scalar| {
                     scalar
@@ -894,7 +924,7 @@ fn read_candidates_scope_with_snapshot(
     sessions_dir: &Path,
     session_id: Option<&str>,
     inventory: &mut SessionInventory,
-    snapshot: &mut Option<sysinfo::System>,
+    snapshot: &mut Option<Result<sysinfo::System, sysinfo::Error>>,
 ) -> Vec<RuntimeCandidate> {
     let mut process_evidence = None;
     read_candidates_with_liveness(
@@ -913,8 +943,10 @@ fn read_candidates_scope_with_snapshot(
             // PIDs too: a Host can spawn a child and exit after the snapshot
             // but before its direct probe. Never collect environments.
             let (observed, pids) = process_evidence.get_or_insert_with(|| {
-                let system = snapshot.get_or_insert_with(process_snapshot);
-                process_liveness_evidence(system)
+                match snapshot.get_or_insert_with(process_snapshot) {
+                    Ok(system) => process_liveness_evidence(system),
+                    Err(_) => (false, BTreeSet::new()),
+                }
             });
             !*observed || pids.contains(&host_pid)
         },
@@ -1331,6 +1363,37 @@ mod tests {
     }
 
     #[test]
+    fn process_snapshot_creation_failure_is_uncertain_instead_of_absent() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        save_runtime(
+            &sessions,
+            temp.path(),
+            temp.path(),
+            "held",
+            Some((123, 456)),
+        );
+        let mut inventory = SessionInventory::default();
+        let candidates =
+            read_candidates_with_liveness(None, &sessions, None, &mut inventory, |_, _| true);
+        assert_eq!(candidates.len(), 1);
+        let resources = capture_process_resources(
+            &candidates,
+            &inventory,
+            false,
+            Some(Err(sysinfo::Error::Unsupported)),
+        );
+        observe_candidate_resources(candidates, &mut inventory, &resources, true);
+        assert!(inventory.sessions.is_empty());
+        assert!(
+            inventory.uncertainties.iter().any(|row| {
+                row.session_id.is_none() && row.reason.starts_with("process_snapshot_unavailable:")
+            }),
+            "a failed process census must not authorize absence-based recovery"
+        );
+    }
+
+    #[test]
     fn project_census_keeps_scopes_and_uncertainties_without_rereading_the_tick() {
         let temp = tempfile::tempdir().unwrap();
         let sessions = temp.path().join("sessions");
@@ -1544,7 +1607,7 @@ mod tests {
             std::fs::write(path, &json).unwrap();
         }
         let pid = sysinfo::Pid::from_u32(std::process::id());
-        let mut system = System::new();
+        let mut system = System::new().unwrap();
         let mut cpu_ms = || {
             system.refresh_processes_specifics(
                 ProcessesToUpdate::Some(&[pid]),
@@ -1630,7 +1693,7 @@ mod tests {
         for id in ["first", "later"] {
             save_runtime(&sessions, temp.path(), temp.path(), id, None);
         }
-        let mut system = sysinfo::System::new();
+        let mut system = sysinfo::System::new().unwrap();
         let mut refreshes = 0;
         let inventory =
             observe_machine_sessions_with_system_refresh(&sessions, &mut system, |_| {
@@ -2223,7 +2286,7 @@ mod tests {
     fn legacy_snapshot_presence_survives_unavailable_scalar_observation() {
         use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
         let pid = sysinfo::Pid::from_u32(std::process::id());
-        let mut system = System::new();
+        let mut system = System::new().unwrap();
         system.refresh_processes_specifics(
             ProcessesToUpdate::Some(&[pid]),
             true,
@@ -2233,12 +2296,8 @@ mod tests {
         let parent = process.parent().expect("current process parent").as_u32();
         let started_at = crate::process::snapshot_process_start_identity(pid.as_u32(), process);
         let identities = BTreeMap::from([(pid.as_u32(), started_at)]);
-        let rows = legacy_process_observations(
-            &system,
-            &System::new(),
-            &BTreeSet::from([parent]),
-            &identities,
-        );
+        let rows =
+            legacy_process_observations(&system, None, &BTreeSet::from([parent]), &identities);
         assert_eq!(
             rows.len(),
             1,

@@ -71,7 +71,13 @@ pub fn observe_agent_switch_checkpoint_cwd(
 
 fn observe_cwd(worktree: &Path, source: Option<(u32, u64)>) -> AgentSwitchCwdObservation {
     use sysinfo::{Pid, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System, UpdateKind};
-    let mut system = System::new();
+    let Ok(mut system) = System::new() else {
+        return AgentSwitchCwdObservation {
+            matching_pids: Vec::new(),
+            unknown_pids: Vec::new(),
+            complete: false,
+        };
+    };
     let enumerated_count = system.refresh_processes_specifics(
         ProcessesToUpdate::All,
         true,
@@ -79,8 +85,7 @@ fn observe_cwd(worktree: &Path, source: Option<(u32, u64)>) -> AgentSwitchCwdObs
     );
     // sysinfo can enumerate a PID but omit its inaccessible process record.
     // Missing records or an unsupported/failed census cannot prove quiescence.
-    let supported_with_self =
-        sysinfo::IS_SUPPORTED_SYSTEM && system.process(Pid::from_u32(std::process::id())).is_some();
+    let supported_with_self = system.process(Pid::from_u32(std::process::id())).is_some();
     // Linux exposes a process's own threads as additional census entries.
     // Authenticate the root before using its same-snapshot task membership;
     // children and unrelated threads must keep blocking the checkpoint.

@@ -2840,6 +2840,7 @@ fn native_grok_answer_holder(
         "cwd":session.worktree_path,
     })
     .to_string();
+    let mut readiness = owner.subscribe();
     pane.with_agent_environment(|| {
         let _ready_nonce = pane.pending_fresh_execution.as_ref().map(|pending| {
             ScopedEnvVar::set(
@@ -2850,7 +2851,39 @@ fn native_grok_answer_holder(
         gwt::daemon_runtime::handle_runtime_state("SessionStart", &hook).unwrap();
         gwt::daemon_runtime::handle_forward_for_event("SessionStart", &hook).unwrap();
     });
-    if pane.pending_fresh_execution.is_some() {
+    // Avoid a competing Prepared request while SessionStart promotes the
+    // holder; retain the positive HTTP resend after its exact commit settles.
+    if let Some(pending) = pane.pending_fresh_execution.as_ref() {
+        owner_fixture_block_on(async {
+            // test-hygiene: allow-wall-clock-deadline Bounds an actual SessionStart worker hang; the exact owner assertions establish completion before the positive HTTP resend.
+            tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+                loop {
+                    let active = owner
+                        .probe(&pane.id, pane.incarnation)
+                        .await
+                        .expect("Grok runtime");
+                    assert!(
+                        active.current.load(Ordering::Acquire),
+                        "revoked Grok holder"
+                    );
+                    let active_session = active.session.as_ref().expect("Grok Session");
+                    assert!(active_session.id == session.id, "changed Grok Session");
+                    if active.readiness_watch.is_none()
+                        && !active.readiness_inflight
+                        && active.pending_fresh_execution.is_none()
+                    {
+                        let grant = active.grant.as_ref().expect("Grok grant");
+                        assert!(active.issuer.grant_is_current(grant));
+                        let binding = grant.principal().active_execution_binding();
+                        assert!(binding == Some(&pending.binding), "changed Active binding");
+                        break;
+                    }
+                    readiness.recv().await.expect("owner readiness progress");
+                }
+            })
+            .await
+            .expect("Grok SessionStart must complete readiness");
+        });
         authenticate_monitor_owner_readiness(&owner, &pane);
     }
     owner_fixture_block_on(owner.command(gwt::project_runtime::events::OwnerCommand::Health))
@@ -2919,6 +2952,12 @@ fn app_runtime_answered_handoff_continues_the_exact_live_holder() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _control_budget = ScopedEnvVar::set(
+        "GWT_TEST_BUDGET_DURABLE_ISSUE_MONITOR_CONTROL_MS",
+        gwt_core::deadline_budget::HANG_GUARD
+            .as_millis()
+            .to_string(),
+    );
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -3183,6 +3222,12 @@ fn app_runtime_failed_live_handoff_delivery_keeps_the_answer_pending() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _control_budget = ScopedEnvVar::set(
+        "GWT_TEST_BUDGET_DURABLE_ISSUE_MONITOR_CONTROL_MS",
+        gwt_core::deadline_budget::HANG_GUARD
+            .as_millis()
+            .to_string(),
+    );
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
