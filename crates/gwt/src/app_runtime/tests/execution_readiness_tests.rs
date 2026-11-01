@@ -1407,6 +1407,27 @@ fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
                 gwt::MonitorInboxState::AgentFailed
             );
         }
+        let identity = fixture.owner.client().identity().unwrap().clone();
+        let census_key = format!("{}:{}", identity.pid, identity.host_started_at);
+        fixture.executor.block_on(async {
+            // test-hygiene: allow-wall-clock-deadline Bounds the actual independent empty-host census publication before a raw prefs no-op assertion, not a guessed delay.
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    fixture.owner.wait_monitor_idle().await.unwrap();
+                    let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+                    if prefs
+                        .monitor_runtime_counts
+                        .get(&census_key)
+                        .is_some_and(|census| census.counts.is_empty() && census.windows.is_empty())
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the exact empty host census must be durable before the stale ACK baseline");
+        });
         let before = fs::read(&prefs_path).unwrap();
         assert!(
             fixture
@@ -1427,7 +1448,7 @@ fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
         assert_eq!(
             fs::read(&prefs_path).unwrap(),
             before,
-            "failure replay cannot spend another attempt or erase its reason"
+            "{failure}: failure replay cannot spend another attempt or erase its reason"
         );
         if failure == "replacement" {
             let root = fixture
