@@ -125,6 +125,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         runTerminalActivationSequence,
         runTerminalFitRequest,
         runTerminalRevealActivation,
+        scheduleTerminalInitialFit,
         takeTerminalActivationIntent,
         viewportEligibleForRefresh,
       } from "/terminal-viewport-reflow.js";
@@ -1987,9 +1988,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // must verify the container has a real layout box before flipping
       // `isReady` true, otherwise fit resolves against a 0-sized parent
       // and the deferredWrites flush into xterm's default 80×24 grid.
-      // 60 frames at the default 60Hz cap retries to ~1 s, after which we
-      // fall through so a permanently 0-size window can not pin Claude
-      // Code output forever.
+      // Bound retries even when only the 100ms readiness fallback advances.
+      // A later reveal can retry a window whose layout was unavailable.
       const HANDSHAKE_RETRY_LIMIT = 60;
 
       function terminalContainerHasLayoutBox(windowId) {
@@ -2008,12 +2008,21 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       function retryInitialFitHandshake(windowId, runtime, reason) {
         runtime.handshakeAttempts = (runtime.handshakeAttempts || 0) + 1;
         if (runtime.handshakeAttempts <= HANDSHAKE_RETRY_LIMIT) {
-          requestAnimationFrame(() => completeInitialFitHandshake(windowId));
+          scheduleInitialFitHandshake(windowId);
           return;
         }
         console.warn(
           `[gwt] terminal ${windowId} initial-fit handshake gave up after ${HANDSHAKE_RETRY_LIMIT} attempts; ${reason}.`,
         );
+      }
+
+      function scheduleInitialFitHandshake(windowId) {
+        const runtime = terminalMap.get(windowId);
+        if (!runtime || runtime.isReady || runtime.initialFitCancel) return;
+        runtime.initialFitCancel = scheduleTerminalInitialFit(() => {
+          runtime.initialFitCancel = null;
+          if (terminalMap.get(windowId) === runtime) completeInitialFitHandshake(windowId);
+        });
       }
 
       function fitTerminal(windowId, persist = false) {
@@ -2231,6 +2240,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         if (!runtime) {
           return;
         }
+        scheduleInitialFitHandshake(windowId);
         runtime.pendingActivationIntent = mergeTerminalActivationIntent(
           runtime.pendingActivationIntent,
           { shouldPersistGeometry, reason },
@@ -3018,12 +3028,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           runtime.terminal,
           { readOnly },
         );
+        // Reparenting is a reveal even when Agents never selects this window.
+        scheduleInitialFitHandshake(windowId);
         requestAnimationFrame(() => {
-          // SPEC-3671: a runtime created inside a hidden host never completed its
-          // initial fit handshake, and nothing else retries it for a window that is
-          // never revealed in Agents. Reparenting into a laid-out container IS
-          // the reveal, so retry the handshake here; it is idempotent once ready.
-          completeInitialFitHandshake(windowId);
           scheduleTerminalFit(windowId, true);
         });
         return runtime;
@@ -3077,6 +3084,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           { readOnly: options.readOnly === true },
         );
         const cleanup = () => {
+          runtime.initialFitCancel?.();
           terminalMap.get(windowId)?.containerBindingsCleanup?.();
           viewportRefreshCleanup();
         };
@@ -3118,10 +3126,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           cleanup,
           viewportRefreshPending: false,
           activationFrame: null,
+          initialFitCancel: null,
           pendingActivationIntent: null,
           // SPEC-2008 Phase 26.A / FR-057: initial fit handshake state.
           // `isReady` flips to `true` AFTER the first
-          // runTerminalActivationSequence has run inside the rAF below,
+          // runTerminalActivationSequence has resolved real dimensions,
           // i.e. after xterm has reached its real cols/rows. Until then,
           // all writeOutput / replaceTerminalSnapshot calls are captured
           // in deferredWrites / pendingSnapshotMap so the bytes are not
@@ -3182,10 +3191,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         // handshake. The handshake only completes once the runtime's
         // element is actually visible — see completeInitialFitHandshake.
         // If the window was created in a hidden state (e.g. inactive
-        // tab group member), the rAF below runs but is a no-op; the
+        // tab group member), the attempt runs but is a no-op; the
         // handshake then completes on the next hidden → visible
         // transition via scheduleTerminalFocusActivation.
-        requestAnimationFrame(() => completeInitialFitHandshake(windowId));
+        scheduleInitialFitHandshake(windowId);
 
         return runtime;
       }
@@ -3256,6 +3265,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         }
         runtime.handshakeAttempts = 0;
         runtime.isReady = true;
+        runtime.initialFitCancel?.();
+        runtime.initialFitCancel = null;
         startupMetrics.onTerminalReady(windowId, runtime);
 
         if (pendingSnapshotMap.has(windowId)) {
@@ -5536,16 +5547,23 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           focusWindowLocally(id);
           terminalMap.get(id)?.terminal.focus();
         },
-        onLayout: () => requestAnimationFrame(() => {
-          if (!worksHost) return;
-          for (const id of terminalMap.keys()) {
-            if (worksSurface.isVisible(id)) {
-              terminalOutputBatcher.schedulePending(id);
-              completeInitialFitHandshake(id);
-              scheduleTerminalFit(id, true);
+        onLayout: () => {
+          if (worksHost) {
+            for (const id of terminalMap.keys()) {
+              if (worksSurface.isVisible(id)) scheduleInitialFitHandshake(id);
             }
           }
-        }),
+          requestAnimationFrame(() => {
+            if (!worksHost) return;
+            for (const id of terminalMap.keys()) {
+              if (worksSurface.isVisible(id)) {
+                terminalOutputBatcher.schedulePending(id);
+                completeInitialFitHandshake(id);
+                scheduleTerminalFit(id, true);
+              }
+            }
+          });
+        },
       });
       worksSurface.element.hidden = true;
       document.querySelector(".surface-area").appendChild(worksSurface.element);

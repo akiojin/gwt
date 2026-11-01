@@ -8472,6 +8472,27 @@ fn app_runtime_issue_monitor_pending_launch_error_marks_issue_row_failed() {
             Some(&delivery.delivery_id) == fixture.delivery_id.as_ref()
                 && delivery.materializer_window_id.as_deref() == Some(pane.id.as_str())
         }));
+        owner_fixture_block_on(async {
+            // test-hygiene: allow-wall-clock-deadline Bounds the real reconciler's census publication; exact pane membership, not elapsed time, establishes completion.
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    let prefs = gwt::load_issue_monitor_prefs(
+                        &gwt::issue_monitor_prefs_path_for_repo_path(&root),
+                    )
+                    .unwrap();
+                    if prefs.monitor_runtime_counts.values().any(|census| {
+                        census.host_pid == std::process::id()
+                            && census.windows.get(&pane.id) == Some(&issue)
+                    }) {
+                        break;
+                    }
+                    owner.command(OwnerCommand::Health).await.unwrap();
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("actual pending child must be counted before injecting its failure");
+        });
         let session = pane.session.as_ref().unwrap();
         let mut hook = runtime_hook_state("error", &session.id);
         hook.project_root = Some(root.display().to_string());
@@ -8504,14 +8525,10 @@ fn app_runtime_issue_monitor_pending_launch_error_marks_issue_row_failed() {
             .expect("actual pending launch failure must commit before GUI readback");
         });
         let monitor = owner_monitor_read(&root, issue);
-        let mut events = fixture
-            .runtime
-            .issue_monitor_daemon_status_events(&root, Box::new(monitor.status_view()));
-        events.extend(fixture.runtime.issue_monitor_daemon_inbox_events(
+        fixture.runtime.issue_monitor_daemon_inbox_events(
             &root,
             monitor.inbox_view_at(&Utc::now().to_rfc3339()),
-        ));
-        events
+        )
     }));
     let closed = owner_fixture_block_on(owner.command(OwnerCommand::Close {
         id: pane.id.clone(),
@@ -8543,7 +8560,7 @@ fn app_runtime_issue_monitor_pending_launch_error_marks_issue_row_failed() {
             .expect("drained pending error owner")
             .shutdown(),
     );
-    let events = observed.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    let mut events = observed.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
     settled.expect("all exact pending-error retirements settled");
     let retired = retired.expect("actual owner retirement inventory");
     for phase in ["panes", "pending", "closing", "reconciliation"] {
@@ -8559,6 +8576,14 @@ fn app_runtime_issue_monitor_pending_launch_error_marks_issue_row_failed() {
     assert!(exact_runtime_absent && session_absent && tree_reaped,
         "an already retired child needs exact Session, owner and tree absence proof; close={closed:?}; inventory={retired}");
     assert!(reaped.unwrap().is_some());
+    // Failure history precedes physical retirement. Owner shutdown drains the
+    // runtime reconciler, so only this fresh snapshot can prove the slot is free.
+    let monitor = owner_monitor_read(&root, issue);
+    events.extend(
+        fixture
+            .runtime
+            .issue_monitor_daemon_status_events(&root, Box::new(monitor.status_view())),
+    );
     let status = events
         .iter()
         .find_map(|event| match &event.event {
