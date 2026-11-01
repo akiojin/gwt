@@ -5394,6 +5394,31 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
     prefs.issue_tiers.get_mut(&3165).unwrap().floor = 0;
     gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed delivery tiers");
     let owner = start_monitor_relaunch_owner(&mut fixture, false);
+    gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        let base = prefs.launch_profile_pool()[0].clone();
+        let profiles = prefs
+            .agent_roster
+            .as_ref()
+            .unwrap()
+            .members
+            .iter()
+            .filter(|member| member.enabled && member.agent_id.as_deref() == Some("codex"))
+            .take(2)
+            .map(|member| {
+                let mut profile = base.clone();
+                profile.agent_member_id = Some(member.agent_member_id.clone());
+                profile
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            profiles.len(),
+            2,
+            "the Monitor and unrelated inspection each select a person"
+        );
+        prefs.set_launch_profile_pool(profiles);
+        Ok(())
+    })
+    .expect("select the actual registered people before launch preparation");
     let runtime = &mut fixture.runtime;
     let recorded = &fixture.recorded_events;
     let (launch_spawner, launch_tasks) = BlockingTaskSpawner::queued();
@@ -5537,13 +5562,43 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
         .base_branch("develop")
         .build();
     let newer_owner_id = owner.pane_id(&newer_window.id);
+    let monitor_member_id = pane
+        .session
+        .as_ref()
+        .unwrap()
+        .agent_member_id
+        .as_deref()
+        .expect("the Monitor's registered person");
+    let inspection_member_id = pending_before_ack
+        .launch_profile_pool()
+        .into_iter()
+        .find(|profile| {
+            profile.agent_id == "codex"
+                && profile.agent_member_id.as_deref() != Some(monitor_member_id)
+                && pending_before_ack
+                    .agent_roster
+                    .as_ref()
+                    .unwrap()
+                    .members
+                    .iter()
+                    .any(|member| {
+                        Some(&member.agent_member_id) == profile.agent_member_id.as_ref()
+                            && member.enabled
+                            && member.assignment.is_none()
+                    })
+        })
+        .and_then(|profile| profile.agent_member_id)
+        .expect("a distinct registered idle inspection person");
     let newer_receipt = owner_fixture_block_on(owner.command(
         gwt::project_runtime::events::OwnerCommand::LaunchAgent {
             id: newer_owner_id.clone(),
             operation_id: "durable-delivery-newer-inspection".into(),
             tab_id: gwt_core::paths::project_scope_hash(&repo).to_string(),
             config: Box::new(inspection_config.clone()),
-            metadata: Box::default(),
+            metadata: Box::new(gwt::project_runtime::launch_payload::OwnerLaunchMetadata {
+                selected_agent_member_id: Some(inspection_member_id),
+                ..Default::default()
+            }),
             cols: 80,
             rows: 24,
         },
@@ -5758,6 +5813,7 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
         .unwrap()
         .agent_roster;
     gwt::save_issue_monitor_prefs(&prefs_path, &pending_after_replacement).unwrap();
+    let pending_after_replacement = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
     let disk_before_stale_ack =
         gwt::load_workspace_state(&gwt::workspace_state_path(&repo)).unwrap();
     let stale_owner_ack = owner_fixture_block_on(owner.command(
@@ -5967,18 +6023,43 @@ fn assert_expired_launch_ack_cleanup(
     });
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&root);
     let expired = if disabled_monitor {
-        gwt::daemon_publisher::publish_durable_issue_monitor_control(
+        let before = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+        assert!(before.enabled);
+        let pending = before
+            .pending_launch_deliveries
+            .iter()
+            .find(|pending| Some(&pending.delivery_id) == delivery_id.as_ref())
+            .expect("the exact paused materializer delivery before Monitor OFF");
+        assert_eq!(pending.issue_number, 42);
+        assert_eq!(pending.materializer_window_id.as_deref(), Some(id.as_str()));
+        assert_eq!(captured.id, id);
+        let publication = gwt::daemon_publisher::publish_durable_issue_monitor_control(
             &root,
             gwt::runtime_daemon_events::issue_monitor_payload(
                 "control",
                 serde_json::json!({"config_set":{"enabled":false}}),
                 std::process::id(),
             ),
-        )
-        .unwrap();
+        );
+        assert!(
+            matches!(
+                &publication,
+                Ok(())
+                    | Err(
+                        gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
+                            _
+                        )
+                    )
+            ),
+            "Monitor OFF publication failed: {publication:?}"
+        );
+        // Receipt uncertainty may follow delivery. Require the canonical commit
+        // before releasing the materializer; never replay or write a fallback.
         let disabled = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
-        assert!(!disabled.enabled);
-        assert!(disabled.pending_launch_deliveries.is_empty());
+        assert!(
+            !disabled.enabled && disabled.pending_launch_deliveries.is_empty(),
+            "Monitor OFF must be committed before the late ACK: {publication:?}"
+        );
         Some(disabled)
     } else if conflicting_owner {
         gwt::daemon_publisher::publish_durable_issue_monitor_control(
@@ -6219,6 +6300,7 @@ fn issue_5289_launch_worker_finishes_while_pm_prefs_lock_is_held() {
     fs::create_dir_all(&root).unwrap();
     init_repo_with_initial_commit(&root);
     seed_owner_fixture_roster(&root, 8);
+    configure_owner_fixture_tools(&root, &["pane-contract-fixture"]);
     let owner = owner_fixture_block_on(
         gwt::project_runtime::test_support::ProjectOwnerHarness::start(&root),
     )
@@ -8431,9 +8513,25 @@ fn app_runtime_issue_monitor_pending_launch_error_marks_issue_row_failed() {
     let observed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         assert!(pane.pending_fresh_execution.is_some());
         assert!(pane.pty.try_wait().unwrap().is_none());
-        let pending =
-            gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&root))
-                .unwrap();
+        let pending = owner_fixture_block_on(async {
+            // test-hygiene: allow-wall-clock-deadline Bounds the actual physical census before the hook; a pending delivery alone does not prove process accounting.
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    let prefs = gwt::load_issue_monitor_prefs(
+                        &gwt::issue_monitor_prefs_path_for_repo_path(&root),
+                    ).unwrap();
+                    if prefs.monitor_runtime_counts
+                        .get(&format!("{}:{}", identity.pid, identity.host_started_at))
+                        .is_some_and(|census| census.counts.get(&issue) == Some(&1)
+                            && census.windows.get(&pane.id) == Some(&issue))
+                    {
+                        break prefs;
+                    }
+                    owner.command(OwnerCommand::Health).await.unwrap();
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("the exact pending physical pane must enter the authoritative census before its hook error")
+        });
         assert!(!pending.launch_confirmations.contains_key(&issue));
         assert!(pending.pending_launch_deliveries.iter().any(|delivery| {
             Some(&delivery.delivery_id) == fixture.delivery_id.as_ref()
@@ -8470,6 +8568,13 @@ fn app_runtime_issue_monitor_pending_launch_error_marks_issue_row_failed() {
             .await
             .expect("actual pending launch failure must commit before GUI readback");
         });
+        let live = owner_fixture_block_on(owner.probe(&pane.id, pane.incarnation)).unwrap();
+        assert_eq!(live.session.as_ref().unwrap().id, session.id);
+        assert!(Arc::ptr_eq(&live.pty, &pane.pty));
+        assert!(
+            live.pty.try_wait().unwrap().is_none(),
+            "a pending launch hook error does not prove physical exit"
+        );
         let monitor = owner_monitor_read(&root, issue);
         let mut events = fixture
             .runtime
@@ -8533,7 +8638,11 @@ fn app_runtime_issue_monitor_pending_launch_error_marks_issue_row_failed() {
             _ => None,
         })
         .expect("issue monitor status");
-    assert_eq!(status.state, "idle");
+    assert_eq!(
+        status.state, "active",
+        "the pre-cleanup snapshot still accounts for the proven live physical pane"
+    );
+    assert_eq!(status.active_count, 1);
     assert_eq!(
         status.last_error.as_deref(),
         Some(format!("issue #{issue}: Stop-block hit an error").as_str())

@@ -2850,8 +2850,42 @@ fn native_grok_answer_holder(
         gwt::daemon_runtime::handle_runtime_state("SessionStart", &hook).unwrap();
         gwt::daemon_runtime::handle_forward_for_event("SessionStart", &hook).unwrap();
     });
-    if pane.pending_fresh_execution.is_some() {
-        authenticate_monitor_owner_readiness(&owner, &pane);
+    if let Some(pending) = &pane.pending_fresh_execution {
+        // The protected SessionStart already started readiness. Observe that
+        // exact job instead of racing a second request across bearer promotion.
+        owner_fixture_block_on(async {
+            // test-hygiene: allow-wall-clock-deadline Bounds the original protected readiness job; identity and canonical publication establish success.
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    let current = owner.probe(&pane.id, pane.incarnation).await.unwrap();
+                    assert!(current.current.load(std::sync::atomic::Ordering::Acquire));
+                    assert!(Arc::ptr_eq(&current.pty, &pane.pty));
+                    assert_eq!(current.pty.process_id(), pane.pty.process_id());
+                    assert!(current.pty.try_wait().unwrap().is_none());
+                    assert_eq!(current.session.as_ref().unwrap().id, session.id);
+                    if current.pending_fresh_execution.is_none() {
+                        let grant = current.grant.as_ref().unwrap();
+                        assert!(current.issuer.grant_is_current(grant));
+                        assert_eq!(
+                            grant.principal().active_execution_binding(),
+                            Some(&pending.binding)
+                        );
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        });
+        assert_eq!(
+            gwt::cli::execution_state::current_execution_binding(
+                &pending.worktree_path,
+                pending.owner,
+            )
+            .unwrap(),
+            Some(pending.binding.identity.clone())
+        );
     }
     owner_fixture_block_on(owner.command(gwt::project_runtime::events::OwnerCommand::Health))
         .unwrap();
@@ -2979,15 +3013,29 @@ fn app_runtime_answered_handoff_continues_the_exact_live_holder() {
         .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
             &fixture.recorded_events,
         ));
-    // Both the outer facts callback and the nested answer adapter emit their
-    // own verified telemetry job; only the remaining task is the owner RPC.
-    run_queued_monitor_gui_diagnostics(&queued_tasks, &[2, 1]);
-    assert_eq!(queued_tasks.lock().expect("queued tasks").len(), 1);
+    // Complete existing freshness revalidation before holding the actual answer RPC.
+    while !fixture.runtime.issue_monitor_launch_preparations.is_empty() {
+        drain_queued_blocking_tasks(&queued_tasks);
+        fixture
+            .runtime
+            .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+                &fixture.recorded_events,
+            ));
+    }
     assert!(matches!(
         fixture.runtime.issue_monitor_launch_deliveries.get(&delivery_id),
         Some(super::super::IssueMonitorLaunchDeliveryState::Materializing { window_id, .. })
             if window_id == &holder_window_id
     ));
+    let diagnostics = (1..queued_tasks.lock().unwrap().len())
+        .rev()
+        .collect::<Vec<_>>();
+    run_queued_monitor_gui_diagnostics(&queued_tasks, &diagnostics);
+    assert_eq!(
+        queued_tasks.lock().expect("queued tasks").len(),
+        1,
+        "only the exact holder's answer RPC remains held",
+    );
     let before_owner = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
         &fixture.project_root,
     ))
@@ -3232,7 +3280,29 @@ fn app_runtime_failed_live_handoff_delivery_keeps_the_answer_pending() {
         .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
             &fixture.recorded_events,
         ));
-    run_queued_monitor_gui_diagnostics(&queued_tasks, &[2, 1]);
+    // Complete existing freshness revalidation before holding the actual answer RPC.
+    while !fixture.runtime.issue_monitor_launch_preparations.is_empty() {
+        drain_queued_blocking_tasks(&queued_tasks);
+        fixture
+            .runtime
+            .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+                &fixture.recorded_events,
+            ));
+    }
+    assert!(
+        matches!(fixture.runtime.issue_monitor_launch_deliveries.get(&delivery_id),
+        Some(super::super::IssueMonitorLaunchDeliveryState::Materializing { window_id, .. })
+            if window_id == &holder_window_id)
+    );
+    let diagnostics = (1..queued_tasks.lock().unwrap().len())
+        .rev()
+        .collect::<Vec<_>>();
+    run_queued_monitor_gui_diagnostics(&queued_tasks, &diagnostics);
+    assert_eq!(
+        queued_tasks.lock().unwrap().len(),
+        1,
+        "only the exact holder's answer RPC remains held"
+    );
     // Apply the real GUI canvas before the held answer RPC. An unobserved
     // canvas must not make a claim pass merely because it ran first.
     let context = fixture.runtime.test_context();
@@ -3426,7 +3496,18 @@ fn app_runtime_failed_live_handoff_delivery_keeps_the_answer_pending() {
         .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
             &fixture.recorded_events,
         ));
-    run_queued_monitor_gui_diagnostics(&retry_tasks, &[2, 1]);
+    while !fixture.runtime.issue_monitor_launch_preparations.is_empty() {
+        drain_queued_blocking_tasks(&retry_tasks);
+        fixture
+            .runtime
+            .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+                &fixture.recorded_events,
+            ));
+    }
+    let diagnostics = (1..retry_tasks.lock().unwrap().len())
+        .rev()
+        .collect::<Vec<_>>();
+    run_queued_monitor_gui_diagnostics(&retry_tasks, &diagnostics);
     assert_eq!(
         retry_tasks.lock().unwrap().len(),
         1,
@@ -4671,6 +4752,35 @@ fn app_runtime_monitor_launch_preflight_refuses_unauthenticated_provider() {
     let codex_home = PathBuf::from(std::env::var_os("CODEX_HOME").expect("CODEX_HOME is isolated"));
     assert!(!codex_home.join("auth.json").exists());
     let owner = start_monitor_relaunch_owner(&mut fixture, false);
+    let (_, unrelated_member_id) = gwt::try_mutate_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root),
+        |prefs| {
+            let base = prefs.launch_profile_pool()[0].clone();
+            let profiles = prefs
+                .agent_roster
+                .as_ref()
+                .unwrap()
+                .members
+                .iter()
+                .filter(|member| member.enabled && member.agent_id.as_deref() == Some("codex"))
+                .take(2)
+                .map(|member| {
+                    let mut profile = base.clone();
+                    profile.agent_member_id = Some(member.agent_member_id.clone());
+                    profile
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                profiles.len(),
+                2,
+                "the pending Monitor and unrelated Work each select a person"
+            );
+            let unrelated = profiles[1].agent_member_id.clone().unwrap();
+            prefs.set_launch_profile_pool(profiles);
+            Ok(unrelated)
+        },
+    )
+    .expect("select both registered people before the source scan and facts capture");
     gwt::daemon_publisher::publish_durable_issue_monitor_control(
         &fixture.project_root,
         gwt::runtime_daemon_events::issue_monitor_payload(
@@ -4721,8 +4831,50 @@ fn app_runtime_monitor_launch_preflight_refuses_unauthenticated_provider() {
         .build();
     unrelated_config.linked_issue_number = Some(3166);
     unrelated_config.explicit_follow_up = true;
-    let unrelated =
-        pane_control_tests::control_owner_launch(&owner, "unrelated-continue", unrelated_config);
+    let unrelated_id = owner.pane_id("unrelated-continue");
+    let unrelated_receipt = owner_fixture_block_on(owner.command(
+        gwt::project_runtime::events::OwnerCommand::LaunchAgent {
+            id: unrelated_id.clone(),
+            operation_id: format!("unrelated-before-rejection-{}", uuid::Uuid::new_v4()),
+            tab_id: unrelated_id.split_once("::").unwrap().0.into(),
+            config: Box::new(unrelated_config),
+            metadata: Box::new(gwt::project_runtime::launch_payload::OwnerLaunchMetadata {
+                selected_agent_member_id: Some(unrelated_member_id.clone()),
+                ..Default::default()
+            }),
+            cols: 80,
+            rows: 24,
+        },
+    ))
+    .unwrap();
+    let unrelated = owner_fixture_block_on(owner.probe(
+        &unrelated_id,
+        unrelated_receipt["incarnation"].as_u64().unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(
+        unrelated.session.as_ref().unwrap().id,
+        unrelated_receipt["session_id"]
+    );
+    assert_eq!(
+        unrelated
+            .session
+            .as_ref()
+            .unwrap()
+            .agent_member_id
+            .as_deref(),
+        Some(unrelated_member_id.as_str())
+    );
+    assert!(unrelated
+        .session
+        .as_ref()
+        .unwrap()
+        .execution_binding
+        .is_some());
+    assert!(
+        unrelated.grant.is_some(),
+        "the production owner must issue the request capability"
+    );
     if unrelated.pending_fresh_execution.is_some() {
         authenticate_monitor_owner_readiness(&owner, &unrelated);
     }
@@ -4841,13 +4993,29 @@ fn app_runtime_monitor_launch_preflight_refuses_unauthenticated_provider() {
         .clone();
     // An actual profile edit makes the captured read-only expectation stale.
     // The owner's refusal must leave the delivery pending and the GUI retryable.
-    let mut changed_prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
-    let original_profiles = changed_prefs.launch_profile_pool();
-    let mut changed_profiles = original_profiles.clone();
-    changed_profiles[0].reasoning = Some("low".into());
-    assert_ne!(changed_profiles, original_profiles);
-    changed_prefs.set_launch_profile_pool(changed_profiles);
-    gwt::save_issue_monitor_prefs(&prefs_path, &changed_prefs).unwrap();
+    let original_profiles = gwt::load_issue_monitor_prefs(&prefs_path)
+        .unwrap()
+        .launch_profile_pool();
+    gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        let mut changed_profiles = prefs.launch_profile_pool();
+        assert_eq!(changed_profiles, original_profiles);
+        changed_profiles[0].reasoning = Some("low".into());
+        assert_ne!(changed_profiles, original_profiles);
+        prefs.set_launch_profile_pool(changed_profiles);
+        Ok(())
+    })
+    .unwrap();
+    let changed_prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+    assert_eq!(
+        changed_prefs
+            .launch_profile
+            .as_ref()
+            .unwrap()
+            .reasoning
+            .as_deref(),
+        Some("low")
+    );
+    assert_ne!(changed_prefs.launch_profile_pool(), original_profiles);
     let changed_bytes = fs::read(&prefs_path).unwrap();
     fixture
         .runtime
@@ -4873,9 +5041,17 @@ fn app_runtime_monitor_launch_preflight_refuses_unauthenticated_provider() {
     .unwrap();
     assert_eq!(unchanged["panes"], inventory_before["panes"]);
     assert_eq!(unchanged["pending"], inventory_before["pending"]);
-    let mut restored_prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
-    restored_prefs.set_launch_profile_pool(original_profiles);
-    gwt::save_issue_monitor_prefs(&prefs_path, &restored_prefs).unwrap();
+    gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        prefs.set_launch_profile_pool(original_profiles.clone());
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        gwt::load_issue_monitor_prefs(&prefs_path)
+            .unwrap()
+            .launch_profile_pool(),
+        original_profiles
+    );
     fixture
         .runtime
         .auto_launch_issue_monitor_delivery_events_for_project(

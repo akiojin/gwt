@@ -422,6 +422,23 @@ pub fn is_active() -> io::Result<bool> {
     load().map(|registry| registry.is_some_and(|registry| registry.phase == RegistryPhase::Active))
 }
 
+/// The existing shared configuration revision, without acquiring writer locks.
+/// Project runtime commits advance the durable generation independently.
+pub(crate) fn active_settings_revision(prefs_path: &Path) -> io::Result<Option<u64>> {
+    if source_key(prefs_path).is_none() {
+        return Ok(None);
+    }
+    let Some(registry) = load()? else {
+        return Ok(None);
+    };
+    if registry.phase != RegistryPhase::Active {
+        return Err(invalid(
+            "Agent registry is prepared; inspect agent.registry.status and reconcile",
+        ));
+    }
+    Ok(Some(settings_revision(&registry)))
+}
+
 pub fn resolve_member_id_in_source(source: &ProjectKey, observed_id: &str) -> io::Result<String> {
     SessionMemberSnapshot::load()?.resolve_member_id(source, observed_id)
 }
@@ -1846,12 +1863,23 @@ mod tests {
 
     #[test]
     fn project_only_commits_do_not_invalidate_global_configuration_observations() {
+        use crate::project_runtime::installation::IssueMonitorPrefsStamp;
+
         let _lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(home.path());
         let (root, a_path, _) = source();
+        let absent_root = home.path().join("project-without-mirror");
+        fs::create_dir_all(&absent_root).unwrap();
+        let absent_path = crate::issue_monitor_prefs_path_for_repo_path(&absent_root);
+        let before_active = IssueMonitorPrefsStamp::read(&absent_path).unwrap();
+        assert!(before_active.is_none());
+        assert!(IssueMonitorPrefsStamp::matches_current(
+            before_active.as_ref(),
+            &absent_path
+        ));
         let b_root = home.path().join("project-b");
         fs::create_dir_all(&b_root).unwrap();
         let b_path = crate::issue_monitor_prefs_path_for_repo_path(&b_root);
@@ -1862,10 +1890,43 @@ mod tests {
         )
         .unwrap();
         ensure_active_for_project(&root).unwrap();
+        crate::try_mutate_issue_monitor_prefs(&a_path, |prefs| {
+            let id = prefs.agent_roster.as_ref().unwrap().members[0]
+                .agent_member_id
+                .clone();
+            prefs.set_launch_profile_pool(vec![serde_json::from_value(serde_json::json!({
+                "agent_id": "codex", "agent_member_id": id, "model": "observed-core"
+            }))
+            .unwrap()]);
+            Ok(())
+        })
+        .unwrap();
         let before = crate::load_issue_monitor_prefs(&a_path).unwrap();
+        let stamp = IssueMonitorPrefsStamp::read(&a_path).unwrap();
+        let mirror = fs::read(&a_path).unwrap();
+        let absent_stamp = IssueMonitorPrefsStamp::read(&absent_path).unwrap();
+        assert!(
+            absent_stamp.is_some(),
+            "Active shared settings must be retained without a project mirror"
+        );
+        assert!(IssueMonitorPrefsStamp::matches_current(
+            absent_stamp.as_ref(),
+            &absent_path
+        ));
+        assert!(
+            !IssueMonitorPrefsStamp::matches_current(before_active.as_ref(), &absent_path),
+            "registry activation must stale an absent legacy snapshot"
+        );
         let durable_generation = status(None).unwrap().registry_revision;
         crate::try_mutate_issue_monitor_prefs(&b_path, |prefs| {
             prefs.merged_issues.push(77);
+            prefs.pending_launch_deliveries.push(serde_json::from_value(serde_json::json!({
+                "delivery_id": "launch:runtime-reservation", "issue_number": 78,
+                "branch_name": "work/issue-78", "linked_issue_kind": crate::LinkedIssueKind::Issue,
+                "claim_id": "claim-runtime", "materializer_id": "runtime-materializer",
+                "materializer_pid": std::process::id(), "created_at": "2026-10-31T00:00:00Z"
+            })).unwrap());
+            prefs.last_scan_at = Some("2026-10-31T00:00:00Z".into());
             Ok(())
         })
         .unwrap();
@@ -1883,6 +1944,44 @@ mod tests {
             status(None).unwrap().registry_revision > durable_generation,
             "the durable commit generation still advances for exact replay and recovery CAS"
         );
+        assert!(
+            IssueMonitorPrefsStamp::matches_current(stamp.as_ref(), &a_path),
+            "another project's runtime reservation must not stale launch settings"
+        );
+        assert!(
+            IssueMonitorPrefsStamp::matches_current(absent_stamp.as_ref(), &absent_path),
+            "runtime commits must preserve the shared-settings absence snapshot"
+        );
+        crate::try_mutate_issue_monitor_prefs(&a_path, |prefs| {
+            let mut profiles = prefs.launch_profile_pool();
+            profiles[0].model = Some("changed-core".into());
+            prefs.set_launch_profile_pool(profiles);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&a_path)
+                .unwrap()
+                .launch_profile_pool()[0]
+                .model
+                .as_deref(),
+            Some("changed-core")
+        );
+        assert_eq!(
+            fs::read(&a_path).unwrap(),
+            mirror,
+            "shared core edits leave the execution mirror unchanged"
+        );
+        assert!(
+            !IssueMonitorPrefsStamp::matches_current(stamp.as_ref(), &a_path),
+            "a shared saved-core change must stale prepared launch settings"
+        );
+        assert!(
+            !IssueMonitorPrefsStamp::matches_current(absent_stamp.as_ref(), &absent_path),
+            "a core edit must stale a missing-mirror snapshot"
+        );
+        let absent_stamp = IssueMonitorPrefsStamp::read(&absent_path).unwrap();
+        let stamp = IssueMonitorPrefsStamp::read(&a_path).unwrap();
         let id = after.agent_roster.as_ref().unwrap().members[0]
             .agent_member_id
             .clone();
@@ -1902,6 +2001,33 @@ mod tests {
                 .config_token(),
             before.config_token(),
             "an actual global edit must invalidate the observation"
+        );
+        assert_eq!(fs::read(&a_path).unwrap(), mirror);
+        assert!(
+            !IssueMonitorPrefsStamp::matches_current(stamp.as_ref(), &a_path),
+            "a shared roster edit must stale prepared launch settings"
+        );
+        assert!(
+            !IssueMonitorPrefsStamp::matches_current(absent_stamp.as_ref(), &absent_path),
+            "a roster edit must stale a missing-mirror snapshot"
+        );
+        let absent_stamp = IssueMonitorPrefsStamp::read(&absent_path).unwrap();
+        let settings_before_mirror = crate::load_issue_monitor_prefs(&a_path)
+            .unwrap()
+            .agent_registry_revision;
+        assert!(!absent_path.exists());
+        ensure_active_for_project(&absent_root).unwrap();
+        assert!(absent_path.exists());
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&a_path)
+                .unwrap()
+                .agent_registry_revision,
+            settings_before_mirror,
+            "enrolling the empty mirror must not change shared settings"
+        );
+        assert!(
+            !IssueMonitorPrefsStamp::matches_current(absent_stamp.as_ref(), &absent_path),
+            "a new project mirror must stale the captured absence"
         );
     }
 

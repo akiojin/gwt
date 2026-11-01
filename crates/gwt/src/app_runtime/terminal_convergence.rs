@@ -121,7 +121,11 @@ pub(crate) fn settle_issue_monitor_terminal_delivery_in_background(
             }),
             std::process::id(),
         );
-        gwt::daemon_publisher::publish_issue_monitor_control(project_root, payload)
+        gwt::daemon_publisher::publish_issue_monitor_control_with_timeout(
+            project_root,
+            payload,
+            commit_timeout,
+        )
     };
     match publication {
         Ok(()) => Ok(()),

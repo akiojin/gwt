@@ -425,6 +425,10 @@ mod tests {
         let _io = io.enter();
         let temp = tempdir().unwrap();
         let _gwt_home = ScopedGwtHome::set(temp.path());
+        // Prepare the producing people before the shell owner activates the
+        // shared registry; both live Sessions remain in the same machine scope.
+        let (mut agent_app, agent_probe, agent_window) =
+            super::super::tests::owner_browser_input_fixture(temp.path());
         std::fs::create_dir_all(temp.path().join("project")).unwrap();
         let mut workspace = gwt::WindowRegistry::from_persisted(gwt::empty_workspace_state());
         workspace.add_window(gwt::WindowPreset::Shell);
@@ -897,10 +901,7 @@ mod tests {
         );
         let after_revoke = probe.pty.ordinary_input_revision();
 
-        // Reuse the existing producing-owner fixture to replace a real Agent
-        // Session at the same native pane address, rather than inventing ids.
-        let (mut agent_app, agent_probe, agent_window) =
-            super::super::tests::owner_browser_input_fixture(temp.path());
+        // Replace the real Agent Session at the same native pane address.
         let agent_owner = agent_app
             .test_project_owners
             .values()

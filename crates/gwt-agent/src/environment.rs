@@ -27,6 +27,9 @@ const INHERITED_LAUNCH_ENV_KEYS: &[&str] = &[
     "CLAUDE_CODE_SESSION_ID",
     "CLAUDE_CODE_SESSION_ATTENDED",
     CODEX_THREAD_ID_ENV,
+    "GWT_AGENT_MEMBER_ID",
+    "GWT_AGENT_RESERVATION_ID",
+    "GWT_AGENT_NAME",
     GWT_BIN_PATH_ENV,
     GWT_CONTINUE_WORK_READY_NONCE_ENV,
     GWT_HOOK_FORWARD_TOKEN_ENV,
@@ -1101,6 +1104,15 @@ mod tests {
             ("PATH".to_string(), "/usr/bin".to_string()),
             ("KEEP".to_string(), "base".to_string()),
             ("SECRET".to_string(), "old".to_string()),
+            (
+                "GWT_AGENT_MEMBER_ID".to_string(),
+                "parent-member".to_string(),
+            ),
+            (
+                "GWT_AGENT_RESERVATION_ID".to_string(),
+                "parent-reservation".to_string(),
+            ),
+            ("GWT_AGENT_NAME".to_string(), "Parent Agent".to_string()),
         ];
         let launch_env = LaunchEnvironment::from_active_profile_with_base(&config_path, base_env)
             .unwrap()
@@ -1108,6 +1120,15 @@ mod tests {
         let mut env_vars = HashMap::from([
             ("PATH".to_string(), "/explicit/bin".to_string()),
             ("EXPLICIT".to_string(), "1".to_string()),
+            (
+                "GWT_AGENT_MEMBER_ID".to_string(),
+                "child-member".to_string(),
+            ),
+            (
+                "GWT_AGENT_RESERVATION_ID".to_string(),
+                "child-reservation".to_string(),
+            ),
+            ("GWT_AGENT_NAME".to_string(), "Child Agent".to_string()),
             (
                 "GWT_PROJECT_ROOT".to_string(),
                 "/tmp/stale-root".to_string(),
@@ -1128,6 +1149,18 @@ mod tests {
             Some("/tmp/new-root")
         );
         assert!(!env_vars.contains_key("SECRET"));
+        assert_eq!(
+            env_vars.get("GWT_AGENT_MEMBER_ID").map(String::as_str),
+            Some("child-member")
+        );
+        assert_eq!(
+            env_vars.get("GWT_AGENT_RESERVATION_ID").map(String::as_str),
+            Some("child-reservation")
+        );
+        assert_eq!(
+            env_vars.get("GWT_AGENT_NAME").map(String::as_str),
+            Some("Child Agent")
+        );
         assert_eq!(
             remove_env,
             expected_launch_remove_env(&["EXPLICIT_REMOVE", "SECRET"])
@@ -1399,6 +1432,15 @@ mod tests {
                 "ws://127.0.0.1:45123/ws".to_string(),
             ),
             (GWT_PROJECT_ROOT_ENV.to_string(), "/old/project".to_string()),
+            (
+                "GWT_AGENT_MEMBER_ID".to_string(),
+                "parent-member".to_string(),
+            ),
+            (
+                "GWT_AGENT_RESERVATION_ID".to_string(),
+                "parent-reservation".to_string(),
+            ),
+            ("GWT_AGENT_NAME".to_string(), "Parent Agent".to_string()),
         ]);
 
         let path_entries = env
@@ -1412,6 +1454,9 @@ mod tests {
         assert!(!env.contains_key(GWT_HOOK_FORWARD_TOKEN_ENV));
         assert!(!env.contains_key(GWT_PANE_WS_URL_ENV));
         assert!(!env.contains_key(GWT_PROJECT_ROOT_ENV));
+        assert!(!env.contains_key("GWT_AGENT_MEMBER_ID"));
+        assert!(!env.contains_key("GWT_AGENT_RESERVATION_ID"));
+        assert!(!env.contains_key("GWT_AGENT_NAME"));
     }
 
     #[cfg(windows)]
@@ -1501,14 +1546,20 @@ mod tests {
 
     #[test]
     fn launch_environment_removes_parent_launch_scope_from_the_spawn_contract() {
+        let identity_keys = [
+            "GWT_AGENT_MEMBER_ID",
+            "GWT_AGENT_RESERVATION_ID",
+            "GWT_AGENT_NAME",
+        ];
         let base_env = INHERITED_LAUNCH_ENV_KEYS
             .iter()
+            .chain(identity_keys.iter())
             .map(|key| ((*key).to_string(), format!("parent-{key}")))
             .collect::<Vec<_>>();
 
         let (env, remove_env) = LaunchEnvironment::from_base_env(base_env).into_parts();
 
-        for key in INHERITED_LAUNCH_ENV_KEYS {
+        for key in INHERITED_LAUNCH_ENV_KEYS.iter().chain(identity_keys.iter()) {
             assert!(
                 !env.contains_key(*key),
                 "parent launch-scoped value must not remain in explicit env: {key}"

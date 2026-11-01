@@ -2911,9 +2911,6 @@ fn restored_autonomous_session_uses_manual_route_only_for_user_requested_restart
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
-    let _home = ScopedEnvVar::set("HOME", temp.path());
-    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let _gwt_home = ScopedGwtHome::set(temp.path());
     for (origin, expected_route) in [
         (
             super::super::startup::RestoreOrigin::Automatic,
@@ -2925,6 +2922,9 @@ fn restored_autonomous_session_uses_manual_route_only_for_user_requested_restart
         ),
     ] {
         let case_root = temp.path().join(format!("{origin:?}"));
+        let _home = ScopedEnvVar::set("HOME", &case_root);
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", &case_root);
+        let _gwt_home = ScopedGwtHome::set(&case_root);
         let repo = case_root.join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         init_repo_with_initial_commit(&repo);

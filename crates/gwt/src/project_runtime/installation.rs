@@ -1477,28 +1477,41 @@ fn issue_monitor_prefs_admission_map(
 /// Metadata is read before the content, so an unchanged metadata pair always
 /// still describes the digested bytes; a metadata change falls back to the
 /// content digest so observation-only rewrites keep prepared facts current.
+/// Shared roster/core changes use their existing settings revision because
+/// those values are deliberately absent from the project execution mirror.
+/// An Active source without a mirror still retains that shared revision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IssueMonitorPrefsStamp {
-    metadata: (u64, std::time::SystemTime),
-    content: [u8; 32],
+    metadata: Option<(u64, std::time::SystemTime)>,
+    agent_settings_revision: Option<u64>,
+    content: Option<[u8; 32]>,
     keys: std::collections::BTreeMap<String, [u8; 32]>,
 }
 
 impl IssueMonitorPrefsStamp {
     pub fn read(path: &Path) -> std::io::Result<Option<Self>> {
+        let agent_settings_revision = crate::agent_registry::active_settings_revision(path)?;
         let metadata = match std::fs::metadata(path) {
-            Ok(metadata) => (metadata.len(), metadata.modified()?),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Ok(metadata) => Some((metadata.len(), metadata.modified()?)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(error),
         };
-        let bytes = match std::fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        let (content, keys) = match std::fs::read(path) {
+            Ok(bytes) => {
+                let (content, keys) = issue_monitor_prefs_digests(&bytes);
+                (Some(content), keys)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                (None, Default::default())
+            }
             Err(error) => return Err(error),
         };
-        let (content, keys) = issue_monitor_prefs_digests(&bytes);
+        if content.is_none() && agent_settings_revision.is_none() {
+            return Ok(None);
+        }
         Ok(Some(Self {
-            metadata,
+            metadata: if content.is_some() { metadata } else { None },
+            agent_settings_revision,
             content,
             keys,
         }))
@@ -1507,39 +1520,64 @@ impl IssueMonitorPrefsStamp {
     /// Issue #6096 diagnostics: the admission-relevant top-level keys whose
     /// content differs between `expected` and the current file.
     pub fn changed_keys(expected: Option<&Self>, path: &Path) -> Vec<String> {
+        let expected_settings_revision = expected.and_then(|stamp| stamp.agent_settings_revision);
         let current = std::fs::read(path)
             .map(|bytes| issue_monitor_prefs_digests(&bytes).1)
             .unwrap_or_default();
         let empty = std::collections::BTreeMap::new();
         let expected = expected.map_or(&empty, |stamp| &stamp.keys);
-        expected
+        let mut changed = expected
             .keys()
             .chain(current.keys())
             .filter(|key| expected.get(*key) != current.get(*key))
             .cloned()
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect()
+            .collect::<std::collections::BTreeSet<_>>();
+        if !crate::agent_registry::active_settings_revision(path)
+            .is_ok_and(|current| current == expected_settings_revision)
+        {
+            changed.insert("agent_registry_revision".to_string());
+        }
+        changed.into_iter().collect()
     }
 
-    /// True when `path` still carries the same admission-relevant content.
-    /// Unchanged metadata needs no read; otherwise compare the digest.
+    /// True when the project content and shared settings remain current.
+    /// Unchanged project metadata needs no project-content read.
     pub fn matches_current(expected: Option<&Self>, path: &Path) -> bool {
+        let settings_revision = match crate::agent_registry::active_settings_revision(path) {
+            Ok(revision) => revision,
+            Err(_) => return false,
+        };
         let metadata = std::fs::metadata(path);
         let Some(expected) = expected else {
-            return matches!(
-                metadata,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound
-            );
+            return settings_revision.is_none()
+                && matches!(
+                    metadata,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound
+                );
         };
-        let unchanged_metadata = metadata.is_ok_and(|metadata| {
-            metadata
-                .modified()
-                .is_ok_and(|modified| (metadata.len(), modified) == expected.metadata)
-        });
+        if settings_revision != expected.agent_settings_revision {
+            return false;
+        }
+        let unchanged_metadata = match metadata {
+            Ok(metadata) => {
+                expected.content.is_some()
+                    && metadata
+                        .modified()
+                        .is_ok_and(|modified| Some((metadata.len(), modified)) == expected.metadata)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                expected.content.is_none()
+            }
+            Err(_) => false,
+        };
         unchanged_metadata
-            || std::fs::read(path)
-                .is_ok_and(|bytes| issue_monitor_prefs_content_digest(&bytes) == expected.content)
+            || match std::fs::read(path) {
+                Ok(bytes) => Some(issue_monitor_prefs_content_digest(&bytes)) == expected.content,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    expected.content.is_none()
+                }
+                Err(_) => false,
+            }
     }
 }
 
@@ -2081,6 +2119,33 @@ impl IssueMonitorSpawnAdmissionInput {
             decision_revalidated: false,
         })
     }
+}
+
+fn ensure_owner_monitor_admission_current(
+    prepared: &mut PreparedIssueMonitorSpawnAdmission,
+    host_project_roots: &[PathBuf],
+    target_branch: &str,
+    issue_link_cache_dir: &Path,
+) -> Result<(), String> {
+    if prepared.is_current(host_project_roots) {
+        return Ok(());
+    }
+    if !prepared.can_revalidate(host_project_roots) {
+        return Err(ISSUE_MONITOR_SPAWN_ADMISSION_STALE.into());
+    }
+    let refreshed = IssueMonitorSpawnAdmissionInput {
+        project_root: prepared.project_root.clone(),
+        host_project_roots: host_project_roots.to_vec(),
+        issue_number: prepared.issue_number,
+        target_branch: target_branch.into(),
+        issue_link_cache_dir: issue_link_cache_dir.into(),
+    }
+    .refresh(prepared)?;
+    if !refreshed.is_current(host_project_roots) {
+        return Err(ISSUE_MONITOR_SPAWN_ADMISSION_STALE.into());
+    }
+    *prepared = refreshed;
+    Ok(())
 }
 
 pub(super) fn prepare_issue_monitor_spawn_capacity(
@@ -2709,9 +2774,12 @@ pub(crate) fn prepare_owner_agent_admission(
             .as_ref()
             .is_some_and(|feedback| feedback.issue_monitor_review_dispatch);
         let prepared = prepared.as_mut().expect("Monitor admission");
-        if !prepared.is_current(input.host_project_roots) {
-            return Err(ISSUE_MONITOR_SPAWN_ADMISSION_STALE.into());
-        }
+        ensure_owner_monitor_admission_current(
+            prepared,
+            input.host_project_roots,
+            config.branch.as_deref().unwrap_or_default(),
+            input.issue_link_cache_dir,
+        )?;
         let now = chrono::Utc::now().to_rfc3339();
         let monitor = &mut prepared.monitor;
         if !review_dispatch
@@ -3958,5 +4026,124 @@ pub fn issue_monitor_delivery_marker_result(
     match (committed, unknown) {
         (false, Some(error)) => Err(error),
         _ => Ok(committed),
+    }
+}
+
+#[cfg(test)]
+mod owner_admission_tests {
+    use super::*;
+    use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+
+    #[test]
+    fn owner_admission_refreshes_same_decision_but_preserves_the_target_fence() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let _gwt_home = ScopedGwtHome::set(temp.path());
+        let _clock =
+            gwt_core::operation_deadline::ScopedOperationClock::set(std::time::Instant::now());
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec![
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "init",
+            ],
+        ] {
+            let output = gwt_core::process::hidden_command("git")
+                .current_dir(&repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let repo = dunce::canonicalize(repo).unwrap();
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        crate::machine_agent_settings::set(
+            Some(8),
+            crate::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+            "2026-11-01T00:00:00Z",
+        )
+        .unwrap();
+        let input = IssueMonitorSpawnAdmissionInput {
+            project_root: repo.clone(),
+            host_project_roots: vec![repo],
+            issue_number: 43,
+            target_branch: "work/issue-43".into(),
+            issue_link_cache_dir: temp.path().join("links"),
+        };
+        let mut prepared = input.prepare().unwrap();
+        assert!(
+            prepared.is_current(&input.host_project_roots),
+            "baseline must be current"
+        );
+        let original_decision = prepared.decision.clone();
+        let original_purpose = prepared.purpose_title.clone();
+        let mut prefs = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+        prefs.priority_order = vec![7];
+        crate::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        assert!(!prepared.is_current(&input.host_project_roots));
+        assert!(prepared.can_revalidate(&input.host_project_roots));
+        let unchanged_bytes = std::fs::read(&prefs_path).unwrap();
+
+        ensure_owner_monitor_admission_current(
+            &mut prepared,
+            &input.host_project_roots,
+            &input.target_branch,
+            &input.issue_link_cache_dir,
+        )
+        .expect("owner must retain the same decision after unrelated target prefs churn");
+        assert!(prepared.is_current(&input.host_project_roots));
+        assert_eq!(prepared.decision, original_decision);
+        assert_eq!(prepared.purpose_title, original_purpose);
+        assert_eq!(std::fs::read(&prefs_path).unwrap(), unchanged_bytes);
+
+        prefs.open_pr_observations.insert(
+            43,
+            crate::issue_monitor::IssueMonitorOpenPrObservation {
+                observed_at: "2026-11-01T00:00:00Z".into(),
+                hold: Some(crate::issue_monitor::IssueMonitorOpenPrHold {
+                    pr_number: 99,
+                    lifecycle: "open".into(),
+                }),
+            },
+        );
+        crate::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        assert!(!prepared.can_revalidate(&input.host_project_roots));
+        let held_bytes = std::fs::read(&prefs_path).unwrap();
+        assert_eq!(
+            ensure_owner_monitor_admission_current(
+                &mut prepared,
+                &input.host_project_roots,
+                &input.target_branch,
+                &input.issue_link_cache_dir,
+            ),
+            Err(ISSUE_MONITOR_SPAWN_ADMISSION_STALE.into())
+        );
+        assert_eq!(std::fs::read(&prefs_path).unwrap(), held_bytes);
     }
 }

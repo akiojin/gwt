@@ -3316,7 +3316,12 @@ fn issue_monitor_final_spawn_reads_fresh_shared_auto_capacity() {
         })
         .collect();
     prefs_before_typed.set_launch_profile_pool(profiles);
-    assert_eq!(after, prefs_before_typed);
+    // First registration advances snapshot metadata; every persisted setting
+    // outside the explicitly asserted roster must still match the original.
+    assert_eq!(
+        serde_json::to_value(&after).unwrap(),
+        serde_json::to_value(&prefs_before_typed).unwrap()
+    );
     assert_eq!(
         gwt::machine_agent_settings::load().unwrap(),
         Some(machine_policy_before)
@@ -3491,7 +3496,12 @@ fn issue_monitor_final_spawn_preserves_live_wait_and_exempts_review() {
                 })
                 .collect();
             prefs_before_typed.set_launch_profile_pool(profiles);
-            assert_eq!(after, prefs_before_typed);
+            // The new common generation is read metadata, while the complete
+            // persisted project settings remain covered by this comparison.
+            assert_eq!(
+                serde_json::to_value(&after).unwrap(),
+                serde_json::to_value(&prefs_before_typed).unwrap()
+            );
         } else {
             assert_eq!(
                 prefs_after, prefs_before,
@@ -3773,6 +3783,7 @@ fn assert_genesis_receipt_cleanup_failure(close_before_enqueue: bool, close_befo
     fs::create_dir_all(&repo).unwrap();
     init_repo_with_initial_commit(&repo);
     seed_owner_fixture_roster(&repo, 8);
+    configure_owner_fixture_tools(&repo, &["pane-contract-fixture"]);
     let executor = tokio::runtime::Runtime::new().unwrap();
     let owner = Arc::new(executor.block_on(production_owner_fixture(&repo)));
     let mut runtime = sample_runtime(

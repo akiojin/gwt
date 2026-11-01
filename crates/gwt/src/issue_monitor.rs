@@ -7224,7 +7224,21 @@ pub(crate) fn acquire_issue_monitor_daemon_lease(
     let authority_path = issue_monitor_authority_lock_path(prefs_path);
     let mut stage = "prefs lock acquisition";
     let mut lock_path = &prefs_lock_path;
-    with_issue_monitor_prefs_lock(prefs_path, |_registry| {
+    if let Some(parent) = prefs_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .map_err(|error| daemon_lease_lock_error(stage, lock_path, error))?;
+    }
+    // Reservation does not read or mutate prefs, recovery fences, or the registry.
+    // Keep the stable prefs -> authority lock order for concurrent startup/probes.
+    let prefs_lock = gwt_core::operation_deadline::NamedFileLock::acquire(
+        &prefs_lock_path,
+        "issue_monitor_prefs",
+    )
+    .map_err(|error| daemon_lease_lock_error(stage, lock_path, error))?;
+    let result = (|| {
         stage = "authority lock open";
         lock_path = &authority_path;
         let authority_lock = fs::OpenOptions::new()
@@ -7252,7 +7266,13 @@ pub(crate) fn acquire_issue_monitor_daemon_lease(
         Ok(IssueMonitorAuthorityLease {
             lock: authority_lock,
         })
-    })
+    })();
+    let unlock_result = prefs_lock.unlock();
+    match (result, unlock_result) {
+        (Ok(lease), Ok(())) => Ok(lease),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+    }
     .map_err(|error| daemon_lease_lock_error(stage, lock_path, error))
 }
 
@@ -19688,6 +19708,16 @@ impl IssueMonitorState {
         window_id: impl Into<String>,
         delivery_id: Option<&str>,
     ) -> bool {
+        self.complete_active_launch_delivery_at(issue_number, window_id, delivery_id, None)
+    }
+
+    pub(crate) fn complete_active_launch_delivery_at(
+        &mut self,
+        issue_number: u64,
+        window_id: impl Into<String>,
+        delivery_id: Option<&str>,
+        confirmed_at: Option<&str>,
+    ) -> bool {
         let window_id = window_id.into();
         // A delivery ACK confirms its pane; replacing a running launch first
         // requires the ordinary stop/retry transition to revoke that binding.
@@ -19738,7 +19768,7 @@ impl IssueMonitorState {
             window_id,
             launched_claim_id,
             consumed_delivery_id,
-            None,
+            confirmed_at,
         ) {
             return false;
         }
@@ -20054,7 +20084,9 @@ impl IssueMonitorState {
         // the autonomous path. Every launch needs it — an agent that stalls
         // without autonomous mode stalls just as silently — and this is the
         // one place every launch is confirmed.
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let now = confirmed_at.map(str::to_string).unwrap_or_else(|| {
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        });
         self.record_autonomous_heartbeat(issue_number, &now);
         true
     }
@@ -23459,12 +23491,21 @@ impl IssueMonitorState {
         target: &IssueMonitorStopTarget,
         classification: IssueMonitorFailureClass,
     ) -> Option<u64> {
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        self.requeue_exact_window_classified_at(target, classification, &now)
+    }
+
+    pub(crate) fn requeue_exact_window_classified_at(
+        &mut self,
+        target: &IssueMonitorStopTarget,
+        classification: IssueMonitorFailureClass,
+        now: &str,
+    ) -> Option<u64> {
         let window_id = self
             .resolve_exact_launch(target, StopIdentityMatch::Exact)
             .ok()
             .flatten()?;
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        self.requeue_window_classified_at(&window_id, classification, &now)
+        self.requeue_window_classified_at(&window_id, classification, now)
             .filter(|issue_number| *issue_number == target.issue_number)
     }
 
@@ -43493,8 +43534,42 @@ mod tests {
     #[test]
     fn current_authority_fence_rejects_a_second_owner_until_the_lease_is_dropped() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let prefs_path = temp.path().join("issue-monitor.json");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let prefs_path = gwt_core::paths::gwt_projects_dir()
+            .join("0123456789abcdef/project-state/issue-monitor.json");
         save_issue_monitor_prefs(&prefs_path, &IssueMonitorPrefs::default()).expect("seed prefs");
+        {
+            // Reserving this project lease must not depend on the shared writer.
+            let registry_lock_path = crate::agent_registry::path().with_extension("lock");
+            fs::create_dir_all(registry_lock_path.parent().unwrap()).unwrap();
+            let _registry = gwt_core::operation_deadline::NamedFileLock::acquire(
+                &registry_lock_path,
+                "test withheld shared Agent registry",
+            )
+            .unwrap();
+            let start = std::time::Instant::now();
+            let expiry = start + std::time::Duration::from_secs(1);
+            let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(start);
+            let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(expiry);
+            let expired_clock = std::rc::Rc::new(std::cell::RefCell::new(None));
+            let on_contention = expired_clock.clone();
+            let _contention = gwt_core::operation_deadline::ScopedNamedLockContentionObserver::set(
+                &registry_lock_path,
+                move || {
+                    on_contention.replace(Some(
+                        gwt_core::operation_deadline::ScopedOperationClock::set(expiry),
+                    ));
+                },
+            );
+            let reserved = acquire_issue_monitor_daemon_lease(&prefs_path)
+                .expect("lease reservation must not acquire the shared Agent registry writer");
+            assert!(
+                expired_clock.borrow().is_none(),
+                "lease reservation must not contend on the shared Agent registry"
+            );
+            assert!(issue_monitor_daemon_lease_is_held(&prefs_path).unwrap());
+            drop(reserved);
+        }
         let first = IssueMonitorAuthorityFence::current_process();
         let (_, first_lease) =
             establish_issue_monitor_authority_fence(&prefs_path, &first, |_| false)
@@ -53199,11 +53274,11 @@ mod tests {
             Some(AutonomousPhase::Implementing)
         );
         assert_eq!(review_hold_of(&monitor, 41), Some(hold.reason.clone()));
-        assert!(
-            monitor
-                .stuck_autonomous_issues("2026-09-07T06:00:00Z")
-                .is_empty(),
-            "a held review is a PR waiting for a slot, not a stalled implementation"
+        // Only Issue #41 has a review hold; the independently stale Issue #42 stays detectable.
+        assert_eq!(
+            monitor.stuck_autonomous_issues("2026-09-07T06:00:00Z"),
+            vec![42],
+            "the held review waits for a slot while the other stale implementation remains detectable"
         );
 
         // Raising the cap admits the dispatch and clears the hold.

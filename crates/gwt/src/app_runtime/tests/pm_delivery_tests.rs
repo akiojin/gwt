@@ -574,9 +574,19 @@ fn authenticated_pm_send_recovers_the_same_operation_after_dropped_submit() {
         &format!("{body}\r"),
         Some(responder),
     );
-    assert!(matches!(result.blocking_recv().unwrap(),
+    let recovered_result = result.blocking_recv().unwrap();
+    let status_reason = match &recovered_result {
+        BackendEvent::PmMessageSendResult { status, reason, .. } => {
+            Some((status.as_str(), reason.as_deref()))
+        }
+        _ => None,
+    };
+    assert!(
+        matches!(&recovered_result,
         BackendEvent::PmMessageSendResult { status, reason: Some(reason), .. }
-            if status == "unconfirmed" && reason.contains("Further calls are readback-only")));
+            if status == "unconfirmed" && reason.contains("Further calls are readback-only")),
+        "same-operation submit recovery status/reason: {status_reason:?}"
+    );
     assert!(
         recovery_cancellation.cancel(),
         "the bounded recovery must reach its input commit"
