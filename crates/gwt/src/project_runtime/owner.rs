@@ -58,6 +58,7 @@ pub(crate) struct WindowRuntime {
     rollback_monitor_failure: Option<(super::monitor::MonitorLaunch, String)>,
     member_cleanup: Option<(gwt_agent::Session, String)>,
     detail: Option<String>,
+    ordinary_error_detail: Option<super::runtime_events::OrdinaryAgentErrorDetail>,
     last_output_at: Option<String>,
     pub(crate) pty: Arc<PtyHandle>,
     pub(crate) incarnation: u64,
@@ -2041,6 +2042,7 @@ impl OwnerState {
                 child_started_at,
                 current,
                 detail: None,
+                ordinary_error_detail: None,
                 last_output_at: None,
                 pty,
                 pane,
@@ -6252,7 +6254,7 @@ impl OwnerState {
         &mut self,
         id: String,
         incarnation: u64,
-        runtime: Box<WindowRuntime>,
+        mut runtime: Box<WindowRuntime>,
         cause: CloseCause,
         result: Result<(), String>,
     ) {
@@ -6296,6 +6298,24 @@ impl OwnerState {
                     screen_seq: pane.output_seq(),
                 }
             });
+            if matches!(cause, CloseCause::DiagnosticExit)
+                && runtime.pty_status == crate::WindowProcessStatus::Error
+                && Self::runtime_status(&runtime) == crate::WindowProcessStatus::Error
+            {
+                if let (Some(frame), Some(agent), Some(context)) = (
+                    final_screen.as_ref(),
+                    runtime.agent.as_ref(),
+                    runtime.ordinary_error_detail.as_ref(),
+                ) {
+                    if let Some(detail) = context.promote(
+                        &frame.screen,
+                        Some(&agent.active.agent_id),
+                        runtime.policy.released_quota_notice.as_ref(),
+                    ) {
+                        runtime.detail = Some(detail);
+                    }
+                }
+            }
             if let Some(frame) = final_screen.as_ref() {
                 use base64::Engine;
                 self.dispatch_project(
@@ -9177,6 +9197,7 @@ impl OwnerState {
             runtime._initial_prompt_file = None;
         }
         runtime.detail = outcome.detail.clone();
+        runtime.ordinary_error_detail = outcome.ordinary_error_detail;
         let pm_generic_crash = pm_generic_crash && outcome.quota_hold.is_none();
         let retire = pm_generic_crash
             || outcome.auto_close
@@ -11551,6 +11572,7 @@ mod tests {
             child_started_at: None,
             current: Arc::new(AtomicBool::new(true)),
             detail: None,
+            ordinary_error_detail: None,
             last_output_at: None,
             pty: pane.shared_pty(),
             incarnation: 1,
@@ -12339,6 +12361,7 @@ mod drop_tests {
             rollback_monitor_failure: None,
             member_cleanup: None,
             detail: None,
+            ordinary_error_detail: None,
             last_output_at: None,
             pty: pty.clone(),
             incarnation: 1,
