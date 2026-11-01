@@ -303,11 +303,10 @@ fn journal_transaction_rolls_back_partial_sync_and_readback_failures() {
             },
         );
         assert!(result.is_err(), "{phase}");
-        assert_eq!(
-            fs::read(&path).unwrap(),
-            before,
-            "{phase} restores original bytes"
-        );
+        file.seek(SeekFrom::Start(0)).unwrap();
+        let mut restored = Vec::new();
+        file.read_to_end(&mut restored).unwrap();
+        assert_eq!(restored, before, "{phase} restores original bytes");
     }
     drop(file);
     assert_eq!(load_report_journal(&repo).unwrap().receipts.len(), 1);
