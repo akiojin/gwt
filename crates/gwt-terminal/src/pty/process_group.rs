@@ -427,7 +427,30 @@ mod imp {
 
     #[cfg(target_os = "linux")]
     fn native_process(pid: libc::pid_t) -> Result<Option<NativeProcess>, String> {
-        native_process_from_stat(pid, std::fs::read(format!("/proc/{pid}/stat")))
+        native_process_with_stat_reader(pid, || std::fs::read(format!("/proc/{pid}/stat")))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn native_process_with_stat_reader(
+        pid: libc::pid_t,
+        mut read_stat: impl FnMut() -> std::io::Result<Vec<u8>>,
+    ) -> Result<Option<NativeProcess>, String> {
+        let Some(first) = native_process_from_stat(pid, read_stat())? else {
+            return Ok(None);
+        };
+        if first.session_id >= 0 {
+            return Ok(Some(first));
+        }
+        // A non-leader exec can transiently expose a negative SID in procfs.
+        // Re-observe once; SID zero retains its ordinary namespace meaning.
+        // Keep the first birth identity so attachment cannot adopt a reused PID.
+        let current = native_process_from_stat(pid, read_stat())?;
+        if current.is_some_and(|process| process.session_id < 0 || !first.same_identity(&process)) {
+            return Err(format!(
+                "observe PTY session process {pid}: unstable session identity after re-observation"
+            ));
+        }
+        Ok(current)
     }
 
     #[cfg(target_os = "linux")]
@@ -484,22 +507,69 @@ mod imp {
                 .is_none(),
             "a dead record must not enter root/session identity validation"
         );
+
+        // A non-leader exec exposed Z/-1, then the same live PID/SID/start.
+        // Unlike X, the transient Z record does not prove disappearance.
+        let transient = String::from_utf8(stat.to_vec())
+            .unwrap()
+            .replace("43551 (sleep) X", "105 (gate) Z")
+            .replace("11274543", "5188179");
+        let stable = transient.replace(" Z 0 -1 -1 ", " S 0 105 105 ");
+        let captured = native_process_from_stat(105, Ok(stable.as_bytes().to_vec()))
+            .unwrap()
+            .unwrap();
+        let mut reads = [transient.as_bytes(), stable.as_bytes()].into_iter();
+        let current = native_process_with_stat_reader(105, || {
+            Ok(reads.next().expect("at most two stat reads").to_vec())
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(current.session_id, captured.session_id);
+        assert!(captured.same_identity(&current));
+
+        let mut reads = [transient.as_bytes(); 2].into_iter();
+        assert!(native_process_with_stat_reader(105, || {
+            Ok(reads.next().expect("at most two stat reads").to_vec())
+        })
+        .is_err());
+        assert!(
+            reads.next().is_none(),
+            "persistent invalid SID fails closed"
+        );
+
+        let replaced = stable.replace("5188179", "5188180");
+        let mut reads = [transient.as_bytes(), replaced.as_bytes()].into_iter();
+        assert!(
+            native_process_with_stat_reader(105, || Ok(reads.next().unwrap().to_vec())).is_err(),
+            "a changed birth identity must not be adopted after an unstable read"
+        );
+
+        let unmapped = stable.replace(" S 0 105 105 ", " S 0 105 0 ");
+        let mut reads = std::iter::once(unmapped.as_bytes());
+        let current = native_process_with_stat_reader(105, || {
+            Ok(reads.next().expect("SID zero is not retried").to_vec())
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(current.session_id, 0);
     }
 
     #[cfg(all(test, target_os = "linux"))]
     #[test]
     fn native_process_stat_distinguishes_disappearance_from_observation_failure() {
         for code in [libc::ENOENT, libc::ESRCH] {
-            let result =
-                native_process_from_stat(4242, Err(std::io::Error::from_raw_os_error(code)));
+            let result = native_process_with_stat_reader(4242, || {
+                Err(std::io::Error::from_raw_os_error(code))
+            });
             assert!(
                 result.unwrap().is_none(),
                 "process disappeared: errno {code}"
             );
         }
         for code in [libc::EACCES, libc::EPERM, libc::EIO] {
-            let result =
-                native_process_from_stat(4242, Err(std::io::Error::from_raw_os_error(code)));
+            let result = native_process_with_stat_reader(4242, || {
+                Err(std::io::Error::from_raw_os_error(code))
+            });
             assert!(
                 result.is_err(),
                 "observation failure must remain an error: errno {code}"

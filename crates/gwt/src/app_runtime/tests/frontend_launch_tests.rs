@@ -2777,3 +2777,110 @@ fn app_runtime_issue_monitor_tracks_launched_window_id_for_issue_preview() {
         "an off-canvas preview must still resolve back to its Issue number"
     );
 }
+
+#[test]
+fn owner_launch_failure_does_not_reconstruct_the_failed_delivery() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("failed-owner-delivery");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "failed-launch",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Starting,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let now = Utc::now().to_rfc3339();
+    let mut monitor = test_monitor_with_prefs(
+        gwt::IssueMonitorConfig {
+            enabled: true,
+            max_active: 8,
+            ..Default::default()
+        },
+        gwt::IssueMonitorPrefs {
+            enabled: true,
+            max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
+            max_active_agents: 8,
+            ..Default::default()
+        },
+    );
+    monitor.terminal_queue_push(&[4735], "operator", &now);
+    monitor.record_candidate(owner_monitor_issue(4735));
+    assert!(monitor.apply_confirmed_claim(
+        4735,
+        "claim-original-error",
+        "fixture-pm/session",
+        "effect-original-error",
+        &now,
+    ));
+    let delivery_id = monitor.prefs().pending_launch_deliveries[0]
+        .delivery_id
+        .clone();
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+    let prefs_before = fs::read(&prefs_path).unwrap();
+    let window_id = combined_window_id("tab-1", "failed-launch");
+    let mut feedback = issue_monitor_feedback(4735);
+    feedback.issue_monitor_delivery_id = Some(delivery_id.clone());
+    feedback.issue_monitor_project_root = Some(repo.clone());
+    feedback.issue_monitor_session_mode = Some(gwt_agent::SessionMode::Resume);
+    runtime
+        .pending_launch_feedback_contexts
+        .insert(window_id.clone(), feedback);
+    runtime.issue_monitor_launch_deliveries.insert(
+        delivery_id.clone(),
+        super::super::IssueMonitorLaunchDeliveryState::Materializing {
+            window_id: window_id.clone(),
+            // test-hygiene: allow-wall-clock-deadline exercise elapsed placeholder recovery without sleeping; the error projection establishes ordering.
+            started_at: Instant::now() - Duration::from_secs(61),
+            accepted_owner: None,
+        },
+    );
+    let reason = "original owner launch failed; exact cleanup remains pending";
+    let events = runtime.apply_owner_terminal_launch_projection(
+        &runtime.test_context(),
+        &window_id,
+        None,
+        None,
+        WindowProcessStatus::Error,
+        Some(reason.into()),
+    );
+    assert!(events.iter().any(|event| matches!(&event.event,
+        BackendEvent::TerminalStatus { id, status, detail, .. }
+            if id == &window_id && *status == WindowProcessStatus::Error
+                && detail.as_deref() == Some(reason)
+    )));
+    let failed = runtime.issue_monitor_launch_deliveries[&delivery_id].clone();
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let replay = runtime.auto_launch_issue_monitor_delivery_events_for_project(
+        &repo,
+        4735,
+        LinkedIssueKind::Issue,
+        Some(delivery_id.clone()),
+        gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+    );
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        0,
+        "a failed immutable operation must not prepare a different launch after its placeholder TTL",
+    );
+    assert!(matches!(&failed,
+        super::super::IssueMonitorLaunchDeliveryState::LaunchFailed { message, session_mode, .. }
+            if message == reason && *session_mode == gwt_agent::SessionMode::Resume
+    ));
+    assert_eq!(
+        runtime.issue_monitor_launch_deliveries[&delivery_id],
+        failed
+    );
+    assert!(replay.iter().any(|event| matches!(&event.event,
+        BackendEvent::IssueMonitorToast { message, .. } if message == reason
+    )));
+    assert_eq!(fs::read(&prefs_path).unwrap(), prefs_before);
+}

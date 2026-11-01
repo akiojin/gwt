@@ -151,9 +151,23 @@ fn classify_resume_writer_conflict(
 /// plain exit detail and the final screen tail. Pure so the classification is
 /// unit-testable without a PTY.
 pub fn compose_agent_error_detail(base: Option<String>, tail: Option<&str>) -> Option<String> {
+    tagged_agent_error_detail(base, tail).0
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AgentErrorDetailKind {
+    Generic,
+    RecognizedActionable,
+}
+
+fn tagged_agent_error_detail(
+    base: Option<String>,
+    tail: Option<&str>,
+) -> (Option<String>, AgentErrorDetailKind) {
+    use AgentErrorDetailKind::{Generic, RecognizedActionable};
     let tail = tail.map(str::trim).filter(|tail| !tail.is_empty());
     let Some(tail) = tail else {
-        return base;
+        return (base, Generic);
     };
     // Issue #3490: several Codex agents initializing the shared `~/.codex`
     // state directory at once lose the SQLite race, and the provider's answer
@@ -163,22 +177,28 @@ pub fn compose_agent_error_detail(base: Option<String>, tail: Option<&str>) -> O
     // transient-retry hint, so the Issue Monitor requeues without spending an
     // attempt on host contention.
     if gwt_agent::is_codex_shared_state_lock_failure(tail) {
-        return Some(gwt_agent::codex_shared_state_lock_detail());
+        return (
+            Some(gwt_agent::codex_shared_state_lock_detail()),
+            RecognizedActionable,
+        );
     }
     let sandbox_error =
         "Could not read Windows sandbox configuration and requirements from the app server.";
     if tail.contains(sandbox_error) {
-        return Some(format!(
-            "Agent startup failed: {sandbox_error}; {}",
-            gwt_agent::TRANSIENT_LAUNCH_RETRY_HINT
-        ));
+        return (
+            Some(format!(
+                "Agent startup failed: {sandbox_error}; {}",
+                gwt_agent::TRANSIENT_LAUNCH_RETRY_HINT
+            )),
+            RecognizedActionable,
+        );
     }
     // Issue #4445: an npm shim whose target executable was renamed away by the
     // provider's auto-update reports a localized shell message and a bare exit
     // status. The path it could not find is the whole diagnosis, and it is at
     // the head of the tail, so it is named before truncation can drop it.
     if let Some(named) = gwt_agent::missing_launcher_binary_detail(tail) {
-        return Some(named);
+        return (Some(named), RecognizedActionable);
     }
     let tail: String = if tail.chars().count() > AGENT_ERROR_TAIL_MAX_CHARS {
         let mut truncated: String = tail.chars().take(AGENT_ERROR_TAIL_MAX_CHARS).collect();
@@ -188,15 +208,63 @@ pub fn compose_agent_error_detail(base: Option<String>, tail: Option<&str>) -> O
         tail.to_string()
     };
     if tail.contains(EXACT_RESUME_FAILURE_SIGNATURE) {
-        return Some(
-            "Exact session restore failed. The agent no longer has this conversation; \
+        return (
+            Some(
+                "Exact session restore failed. The agent no longer has this conversation; \
              use Continue work to start a new conversation with handoff context."
-                .to_string(),
+                    .to_string(),
+            ),
+            RecognizedActionable,
         );
     }
-    match base {
+    let detail = match base {
         Some(base) if !base.is_empty() => Some(format!("{base} — last output: {tail}")),
         _ => Some(format!("Agent exited — last output: {tail}")),
+    };
+    (detail, Generic)
+}
+
+pub(crate) struct OrdinaryAgentErrorDetail {
+    base_detail: Option<String>,
+    observed_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl OrdinaryAgentErrorDetail {
+    /// Refine display text only; the first exit's policy and Monitor audit remain authoritative.
+    pub(crate) fn promote(
+        &self,
+        final_screen: &str,
+        agent_id: Option<&str>,
+        released_quota_notice: Option<&gwt_core::usage::ProviderLimitNotice>,
+    ) -> Option<String> {
+        if crate::window_state::approval_prompt_fingerprint(
+            approval_provider(agent_id),
+            final_screen,
+        )
+        .is_some()
+        {
+            return None;
+        }
+        let haystack = format!(
+            "{}\n{}",
+            self.base_detail.as_deref().unwrap_or_default(),
+            final_screen
+        );
+        if gwt_core::usage::detect_provider_limit_notice(
+            &haystack,
+            &self.observed_at.with_timezone(&chrono::Local),
+        )
+        .filter(|notice| notice.provider == quota_provider(agent_id))
+        .filter(|notice| released_quota_notice != Some(notice))
+        .is_some()
+        {
+            return None;
+        }
+        let tail = screen_tail_text(final_screen, 3, " ");
+        let (detail, kind) = tagged_agent_error_detail(self.base_detail.clone(), tail.as_deref());
+        (kind == AgentErrorDetailKind::RecognizedActionable)
+            .then_some(detail)
+            .flatten()
     }
 }
 
@@ -361,6 +429,7 @@ pub struct ExitPolicyOutcome {
     pub keep_recovery: bool,
     pub quota_hold: Option<crate::IssueMonitorFailure>,
     pub clear_hook: bool,
+    pub(crate) ordinary_error_detail: Option<OrdinaryAgentErrorDetail>,
 }
 
 pub fn approval_provider(agent_id: Option<&str>) -> crate::window_state::ApprovalPromptProvider {
@@ -460,6 +529,7 @@ pub fn classify_exit(
                 .hook_state
                 .is_some_and(crate::window_state::is_live_agent_hook_state)
                 || state.recoverable_error));
+    let mut ordinary_error_detail = None;
     if let Some((notice, _)) = &quota_match {
         detail = Some(gwt_core::usage::describe_provider_limit_notice(
             notice,
@@ -469,7 +539,15 @@ pub fn classify_exit(
         let tail = input
             .final_screen
             .and_then(|screen| screen_tail_text(screen, 3, " "));
-        detail = compose_agent_error_detail(detail, tail.as_deref());
+        let context = OrdinaryAgentErrorDetail {
+            base_detail: detail.clone(),
+            observed_at: input.now,
+        };
+        let (composed, kind) = tagged_agent_error_detail(detail, tail.as_deref());
+        detail = composed;
+        if kind == AgentErrorDetailKind::Generic {
+            ordinary_error_detail = Some(context);
+        }
     }
     let clear_hook = input.raw_status == Error;
     let status = composed_policy_status(
@@ -498,6 +576,7 @@ pub fn classify_exit(
         keep_recovery,
         quota_hold: state.quota_hold.clone(),
         clear_hook,
+        ordinary_error_detail,
     }
 }
 
@@ -699,6 +778,94 @@ pub fn release_policy_quota(
 #[cfg(test)]
 mod tests {
     use crate as gwt;
+
+    #[test]
+    fn late_agent_detail_promotes_only_new_actionable_output_from_the_original_base() {
+        use super::{classify_exit, ExitPolicyInput, RuntimePolicyState};
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-22T09:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let input = |screen| ExitPolicyInput {
+            window_id: "owner::agent",
+            preset: crate::WindowPreset::Agent,
+            agent_id: Some("codex"),
+            has_agent_session: true,
+            raw_status: crate::WindowProcessStatus::Error,
+            hook_state: None,
+            exit_confirmed: true,
+            exact_incarnation: true,
+            detail: Some("Process exited with status 1".into()),
+            final_screen: Some(screen),
+            accounts: &[],
+            now,
+        };
+        let initial = classify_exit(&mut RuntimePolicyState::default(), input("partial output"));
+        let context = initial
+            .ordinary_error_detail
+            .expect("ordinary generic exit");
+        assert_eq!(
+            context.base_detail.as_deref(),
+            Some("Process exited with status 1")
+        );
+        assert_eq!(context.observed_at, now);
+        assert_eq!(
+            initial.detail.as_deref(),
+            Some("Process exited with status 1 — last output: partial output")
+        );
+        assert!(context.promote("", Some("codex"), None).is_none());
+        assert!(context
+            .promote("more generic output", Some("codex"), None)
+            .is_none());
+        let promoted = context
+            .promote(super::EXACT_RESUME_FAILURE_SIGNATURE, Some("codex"), None)
+            .expect("new actionable diagnosis");
+        assert_eq!(
+            Some(promoted.clone()),
+            super::compose_agent_error_detail(None, Some(super::EXACT_RESUME_FAILURE_SIGNATURE))
+        );
+        assert!(!promoted.contains("partial output"));
+        assert!(!promoted.contains("last output:"));
+        let recognized = classify_exit(
+            &mut RuntimePolicyState::default(),
+            input(super::EXACT_RESUME_FAILURE_SIGNATURE),
+        );
+        assert!(recognized.ordinary_error_detail.is_none());
+    }
+
+    #[test]
+    fn late_agent_detail_respects_approval_and_own_quota_at_the_captured_time() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-22T09:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let context = super::OrdinaryAgentErrorDetail {
+            base_detail: Some("Process exited with status 1".into()),
+            observed_at: now,
+        };
+        let approval = format!(
+            "Would you like to run the following command?\n\n  cargo test\n\n\
+             › 1. Yes, proceed\n  2. No, and tell Codex what to do differently\n\n\
+             {}\nPress enter to confirm or esc to cancel",
+            super::EXACT_RESUME_FAILURE_SIGNATURE
+        );
+        let tail = super::screen_tail_text(&approval, 3, " ");
+        assert!(matches!(
+            super::tagged_agent_error_detail(None, tail.as_deref()).1,
+            super::AgentErrorDetailKind::RecognizedActionable
+        ));
+        assert!(context.promote(&approval, Some("codex"), None).is_none());
+        let quota = "Claude usage limit reached. Your limit will reset at 3pm.";
+        let screen = format!("{}\n{quota}", super::EXACT_RESUME_FAILURE_SIGNATURE);
+        let released = gwt_core::usage::detect_provider_limit_notice(
+            quota,
+            &now.with_timezone(&chrono::Local),
+        )
+        .expect("existing relative reset fixture");
+        assert!(context.promote(&screen, Some("claude"), None).is_none());
+        assert!(context.promote(&screen, Some("codex"), None).is_some());
+        assert!(context
+            .promote(&screen, Some("claude"), Some(&released))
+            .is_some());
+    }
 
     #[test]
     fn exit_policy_does_not_relatch_released_quota_but_keeps_a_fresh_refusal() {
