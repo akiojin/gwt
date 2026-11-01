@@ -127,6 +127,44 @@ test("Status strip excludes missing usage values from its summary", async () => 
   assert.equal(summary.dataset.severity, undefined);
 });
 
+test("Claude status summary uses shared windows while Codex keeps all windows", async () => {
+  const { applyProviderUsage } = await importOperatorShell();
+  const { document } = parseHTML(
+    "<html><body><button id='op-strip-usage'></button></body></html>",
+  );
+  const modelWindows = ["fable_weekly", "opus_weekly", "sonnet_weekly"].map(
+    (kind) => ({ kind, used_percent: 100 }),
+  );
+  const account = { provider: "claude_code", state: { kind: "ok" }, limit_reached: false };
+  const cases = [
+    {
+      windows: [...modelWindows, { kind: "five_hour", used_percent: 29 }, { kind: "weekly", used_percent: 12 }],
+      value: "CC 29%", severity: "normal",
+    },
+    {
+      windows: [...modelWindows, { kind: "five_hour", used_percent: 12 }, { kind: "weekly", used_percent: 96 }],
+      value: "CC 96%", severity: "danger",
+    },
+    { windows: modelWindows, value: "CC —", severity: undefined },
+  ];
+  for (const { windows, value, severity } of cases) {
+    applyProviderUsage(document, { accounts: [{ ...account, windows }] });
+    const summary = document.querySelector('[data-provider="claude_code"]');
+    assert.equal(summary.textContent.trim(), value);
+    assert.equal(summary.dataset.severity, severity);
+    assert.equal(summary.dataset.limit, undefined);
+    assert.doesNotMatch(document.getElementById("op-strip-usage").title, /limit reached/);
+  }
+
+  applyProviderUsage(document, {
+    accounts: [{ provider: "codex", state: { kind: "ok" }, windows: [
+      { kind: "weekly", used_percent: 29 },
+      { kind: "code_review_weekly", used_percent: 100 },
+    ] }],
+  });
+  assert.equal(document.querySelector('[data-provider="codex"]').textContent.trim(), "CX 100%");
+});
+
 test("Status strip classifies usage at the 80 and 95 percent boundaries", async () => {
   const { applyProviderUsage } = await importOperatorShell();
   const { document } = parseHTML(

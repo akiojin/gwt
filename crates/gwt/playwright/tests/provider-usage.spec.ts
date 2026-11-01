@@ -300,7 +300,7 @@ test.describe("Provider usage status summary", () => {
     const extraUsage = { is_enabled: true, used_credits: 1610, monthly_limit: 2000,
       utilization: 80.5, currency: "USD", disabled_reason: null };
     await emitProviderUsage(page, [{ ...account, extra_usage: extraUsage }]);
-    await expect(strip).toContainText("CC 0%");
+    await expect(strip).toContainText("CC —");
     // Keep the detail open through updates without depending on the native
     // pointer staying over the trigger in a headed browser.
     await page.mouse.move(0, 0);
@@ -338,6 +338,47 @@ test.describe("Provider usage status summary", () => {
       await expect(credits).toHaveCount(0);
       await expect(fable.locator(".op-usage-win__pct")).toHaveText("0%");
     }
+    expect(errors).toEqual([]);
+  });
+
+  test("keeps full Claude model windows separate from account limits (Issue #6638)", async ({ page }, info) => {
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    if (!liveUrl) await installEmbeddedRoutes(page);
+    await installProviderUsageBackend(page);
+    await page.goto(liveUrl || APP_URL);
+    const account = {
+      provider: "claude_code", state: { kind: "ok" }, limit_reached: false,
+      windows: [
+        { kind: "weekly", used_percent: 96 },
+        { kind: "fable_weekly", used_percent: 100, resets_at: "2031-01-02T03:04:05Z" },
+      ],
+    };
+    await emitProviderUsage(page, [account]);
+    const strip = page.locator("#op-strip-usage");
+    await expect(strip).toContainText("CC 96%");
+    await expect(strip).not.toHaveAttribute("data-limit", "true");
+    await page.mouse.move(0, 0);
+    await strip.focus();
+    await strip.press("ArrowDown");
+    const popover = page.locator("#provider-usage-popover");
+    await expect(popover).toBeFocused();
+    const card = popover.locator('.op-usage-card[data-provider="claude_code"]');
+    await expect(card).toContainText(/Weekly\s*96%/);
+    await expect(card).toContainText(/Fable weekly\s*100%/);
+    await expect(card.locator(".op-usage-card__limit")).toHaveCount(0);
+    await expect(card.locator(".op-usage-win").filter({ hasText: "Fable weekly" })
+      .locator(".op-usage-win__reset")).not.toBeEmpty();
+    await expect(page.locator("html")).toHaveAttribute("data-theme",
+      info.project.name.includes("light") ? "light" : "dark");
+    await page.screenshot({ path: info.outputPath("claude-model-limit.png"), fullPage: true });
+
+    await emitProviderUsage(page, [{ ...account, limit_reached: true,
+      windows: [{ kind: "five_hour", used_percent: 100 }, ...account.windows] }]);
+    await expect(strip).toContainText("CC 100%");
+    await expect(card.locator(".op-usage-card__limit")).toHaveText("Limit reached");
+    await expect(card).toContainText(/Fable weekly\s*100%/);
     expect(errors).toEqual([]);
   });
 
