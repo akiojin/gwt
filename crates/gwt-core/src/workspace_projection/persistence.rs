@@ -3087,6 +3087,74 @@ pub fn emit_workspace_terminal_event_for_resolved_work_target(
     )
 }
 
+/// Hold the assignment/Work locks while confirming one exact Done Work and
+/// running unrelated bookkeeping. Unlike terminalization ConfirmOnly, this
+/// never recovers, quarantines, publishes, or repairs Workspace state.
+pub fn with_exact_workspace_done_read_only<T>(
+    target: &SessionBoundWorkspaceTerminalTarget,
+    expected_work_id: &str,
+    operation: impl FnOnce() -> T,
+) -> Result<T> {
+    validate_session_bound_target_identity_shape(target)?;
+    if expected_work_id.trim().is_empty()
+        || session_bound_owner_is_blank(target.owner.as_deref())
+        || target.agent_id.trim().is_empty()
+    {
+        return Err(GwtError::Other(
+            "exact Done confirmation requires complete Work authority".into(),
+        ));
+    }
+    let current_path = gwt_workspace_projection_path_for_repo_path(&target.project_state_root);
+    let works_path = gwt_workspace_work_items_path_for_repo_path(&target.project_state_root);
+    let lock_targets = vec![
+        current_path.with_file_name("works.json"),
+        works_path.clone(),
+    ];
+    with_workspace_work_items_locks(&lock_targets, || {
+        let mut markers = vec![
+            pending_workspace_state_transaction_path(&current_path),
+            pending_workspace_state_transaction_path_for_work_items(&works_path),
+        ];
+        markers.extend(discover_pending_workspace_state_transaction_coordinators(
+            &lock_targets,
+        )?);
+        for marker in markers {
+            if marker.try_exists()? {
+                return Err(GwtError::Other("exact Done confirmation refuses a pending Workspace transaction; resolve it through canonical Workspace recovery before retrying".into()));
+            }
+        }
+        let projection = load_workspace_projection_from_path(&current_path)?.ok_or_else(|| {
+            GwtError::Other("exact Done confirmation requires the current assignment".into())
+        })?;
+        let works = load_workspace_work_items_from_path(&works_path)?.ok_or_else(|| {
+            GwtError::Other("exact Done confirmation requires canonical WorkItems".into())
+        })?;
+        if !matches!(resolve_session_bound_terminal_target_locked(
+            &projection, &works, target, Some(expected_work_id),
+        )?, LockedSessionBoundTerminalTarget::Existing(id) if id == expected_work_id)
+        {
+            return Err(GwtError::Other(
+                "exact Done Work assignment changed before confirmation".into(),
+            ));
+        }
+        let item = works
+            .work_items
+            .iter()
+            .find(|work| work.id == expected_work_id)
+            .ok_or_else(|| GwtError::Other("exact Done Work is missing".into()))?;
+        if item.status_category != WorkspaceStatusCategory::Done || item.discarded {
+            return Err(GwtError::Other(
+                "exact Work is not unambiguously Done".into(),
+            ));
+        }
+        validate_exact_work_machine_local_close_events_read_only(
+            item,
+            &gwt_workspace_work_events_closed_path_for_repo_path(&target.project_state_root),
+        )?;
+        Ok(operation())
+    })
+}
+
 /// Whether an exact-Work compatibility continuation may create the requested
 /// terminal event or may only confirm an already-terminal canonical Work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

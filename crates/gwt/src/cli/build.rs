@@ -611,6 +611,20 @@ fn run_after_quarantine_precheck<E: CliEnv>(
             return Ok(1);
         }
     }
+    match abort_blocked_done_build(env, &action, out) {
+        Ok(Some(code)) => return Ok(code),
+        Ok(None) => {}
+        Err(error) => {
+            let session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).unwrap_or_default();
+            let error = crate::cli::execution_state::terminal_recovery_refusal(
+                env.repo_path(),
+                session.trim(),
+                &error,
+            );
+            out.push_str(&format!("{VERB}: Done Work build cleanup refused: {error}; inspect JSON operation `execution.status` and its recovery_probes before retrying\n"));
+            return Ok(1);
+        }
+    }
     let recovered_orphan = missing_build_work_recovery_identity(env, &action);
     if let Err(error) = if recovered_orphan.is_some() {
         Ok(())
@@ -729,6 +743,120 @@ fn run_after_quarantine_precheck<E: CliEnv>(
         }
     }
     Ok(code)
+}
+
+/// A Blocked execution may retain delivered Work. End only its own exact build
+/// lifecycle, keeping the normal global -> owner -> Session leases through save.
+fn abort_blocked_done_build<E: CliEnv>(
+    env: &mut E,
+    action: &SkillStateAction,
+    out: &mut String,
+) -> Result<Option<i32>, String> {
+    let SkillStateAction::Abort { spec, reason } = action else {
+        return Ok(None);
+    };
+    let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).unwrap_or_default();
+    let session_id = session_id.trim();
+    let Some(state) = gwt_core::skill_state::load(env.repo_path(), SKILL_NAME)
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(None);
+    };
+    if !state.active
+        || state.owner_spec != Some(*spec)
+        || session_id.is_empty()
+        || state.session_id != session_id
+    {
+        return Ok(None);
+    }
+    let Some(authority) = crate::agent_project_state::snapshot_blocked_done_build_abort_authority(
+        env.repo_path(),
+        session_id,
+        *spec,
+    )
+    .map_err(|error| error.to_string())?
+    else {
+        return Ok(None);
+    };
+    if reason
+        .as_deref()
+        .is_none_or(|reason| reason.trim().is_empty())
+    {
+        return Err("Blocked Done Work build cleanup requires a non-empty reason".into());
+    }
+    finalize_blocked_done_build(env, action, out, &state, &authority).map(Some)
+}
+
+fn finalize_blocked_done_build<E: CliEnv>(
+    env: &mut E,
+    action: &SkillStateAction,
+    out: &mut String,
+    snapshot: &gwt_core::skill_state::SkillState,
+    authority: &crate::agent_project_state::BlockedDoneBuildAbortAuthority,
+) -> Result<i32, String> {
+    let SkillStateAction::Abort {
+        spec,
+        reason: Some(reason),
+    } = action
+    else {
+        return Err("Done Work cleanup requires Abort and a non-empty reason".into());
+    };
+    if reason.trim().is_empty() {
+        return Err("Done Work cleanup requires a non-empty reason".into());
+    }
+    let finalized = crate::cli::execution_state::with_blocked_build_abort_session_execution_identity_global_lease(
+        &gwt_core::paths::gwt_sessions_dir(),
+        &authority.identity,
+        |_| {
+            let current_state = gwt_core::skill_state::load(env.repo_path(), SKILL_NAME)
+                .map_err(|error| error.to_string())?;
+            if current_state.as_ref() != Some(snapshot) {
+                return Err("build lifecycle changed before cleanup; inspect execution.status".to_string());
+            }
+            // Recheck runtime fields omitted from SessionExecutionIdentity as
+            // well as the exact Work while all identity leases remain held.
+            let current = crate::agent_project_state::snapshot_blocked_done_build_abort_authority(
+                env.repo_path(),
+                &authority.identity.session_id,
+                *spec,
+            ).map_err(|error| error.to_string())?;
+            if current.as_ref() != Some(authority) {
+                return Err("Done Work authority changed before build cleanup".to_string());
+            }
+            let finalize = || {
+                let mut result = String::new();
+                let code = skill_state_runtime::run(
+                    env, action.clone(), SKILL_NAME, SKILL_DISPLAY, VERB, &mut result,
+                ).map_err(|error| error.to_string())?;
+                if code != 0 {
+                    out.push_str(&result);
+                    out.push_str("build: cleanup result is unconfirmed; inspect JSON operation `execution.status` and the build lifecycle state before deciding whether to retry\n");
+                    return Ok(code);
+                }
+                let expected = gwt_core::skill_state::SkillState {
+                    active: false,
+                    phase: Some(format!("aborted: {reason}")),
+                    ..snapshot.clone()
+                };
+                let saved = gwt_core::skill_state::load(env.repo_path(), SKILL_NAME)
+                    .map_err(|error| format!("build cleanup result is unconfirmed: {error}; inspect execution.status before retrying"))?;
+                if saved.as_ref() != Some(&expected) {
+                    return Err("build cleanup result is unconfirmed; inspect execution.status before retrying".to_string());
+                }
+                out.push_str(&result);
+                out.push_str("build: canonical Work remains Done; execution and verification history preserved\n");
+                Ok(code)
+            };
+            gwt_core::workspace_projection::with_exact_workspace_done_read_only(
+                &authority.target,
+                &authority.work_id,
+                finalize,
+            ).map_err(|error| error.to_string())?
+        },
+    ).map_err(|error| error.to_string())?;
+    finalized.ok_or_else(|| {
+        "Blocked build cleanup authority changed; inspect execution.status".to_string()
+    })?
 }
 
 /// An old build is bookkeeping, not the new Session's Work. Abort only that
@@ -1845,6 +1973,24 @@ mod tests {
                 binding,
                 work_id,
             }
+        }
+
+        fn blocked_with_done_work() -> Self {
+            let fixture = Self::new();
+            let mut projection =
+                gwt_core::workspace_projection::load_workspace_projection(&fixture.git.repo)
+                    .unwrap()
+                    .unwrap();
+            projection.agents[0].title_summary = Some("Finish blocked build bookkeeping".into());
+            projection.agents[0].current_focus = Some("Keep canonical Done Work".into());
+            gwt_core::workspace_projection::save_workspace_projection(
+                &fixture.git.repo,
+                &projection,
+            )
+            .unwrap();
+            fixture.terminalize_canonical_done();
+            fixture.settle_execution_blocked();
+            fixture
         }
 
         fn terminalize_canonical_done(&self) {
@@ -3254,6 +3400,461 @@ format_version: Some(1),
         assert_build_still_active(&complete_fixture.git);
         assert!(!complete_fixture.canonical_work().is_terminal());
         complete_server.assert_no_request();
+    }
+
+    #[test]
+    fn blocked_done_build_abort_finalizes_only_skill_and_preserves_history() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = BoundTerminalFixture::blocked_with_done_work();
+        let mut original = gwt_core::skill_state::load(&fixture.git.repo, SKILL_NAME)
+            .unwrap()
+            .unwrap();
+        original.phase = Some("red".into());
+        original.start_evidence = Some(gwt_core::skill_state::SkillStartEvidence {
+            reason: "retain original start evidence".into(),
+            work_id: fixture.work_id.clone(),
+        });
+        gwt_core::skill_state::save(&fixture.git.repo, SKILL_NAME, &original).unwrap();
+        let (failed, _) = crate::cli::verification_record::run_verification(
+            &fixture.git.repo,
+            &fixture.session.id,
+            &["git rev-parse --verify refs/heads/missing-verification-fixture".into()],
+        )
+        .unwrap();
+        assert!(!failed.all_passed);
+        let history_paths = [
+            crate::cli::execution_state::state_path(&fixture.git.repo),
+            crate::cli::verification_record::state_path(&fixture.git.repo),
+            crate::issue_monitor_prefs_path_for_repo_path(&fixture.git.repo),
+            gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&fixture.git.repo),
+            gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&fixture.git.repo),
+            gwt_core::paths::gwt_workspace_work_events_path_for_repo_path(&fixture.git.repo),
+            gwt_core::paths::gwt_workspace_work_events_closed_path_for_repo_path(&fixture.git.repo),
+        ];
+        let before = history_paths.iter().map(std::fs::read).collect::<Vec<_>>();
+        let server = TerminalBridgeServer::start(
+            StatusCode::OK,
+            terminal_receipt(crate::AgentWorkTerminalizationOutcome::AlreadyMatching),
+        );
+        with_terminal_bridge_env(&fixture, &server, |_| {
+            let mut env = crate::cli::TestEnv::new(fixture.git.repo.clone());
+            let (code, output) = crate::cli::run_collect(
+                &mut env,
+                crate::cli::CliCommand::Build(SkillStateAction::Abort {
+                    spec: 3327,
+                    reason: Some("verification failed; keep delivered Work".into()),
+                }),
+            )
+            .unwrap();
+            assert_eq!(code, 0, "{output}");
+            let ended = gwt_core::skill_state::load(&fixture.git.repo, SKILL_NAME)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                ended,
+                gwt_core::skill_state::SkillState {
+                    active: false,
+                    phase: Some("aborted: verification failed; keep delivered Work".into()),
+                    ..original
+                }
+            );
+            assert!(matches!(
+                crate::cli::hook::skill_build_spec_stop_check::handle_with_input(
+                    &fixture.git.repo,
+                    "{}",
+                    Some(&fixture.session.id),
+                ),
+                crate::cli::hook::HookOutput::Silent
+            ));
+            let skill_path = gwt_core::skill_state::state_path(&fixture.git.repo, SKILL_NAME);
+            let finalized = std::fs::read(&skill_path).unwrap();
+            let (code, output) = crate::cli::run_collect(
+                &mut env,
+                crate::cli::CliCommand::Build(SkillStateAction::Abort {
+                    spec: 3327,
+                    reason: Some("replay must preserve the original reason".into()),
+                }),
+            )
+            .unwrap();
+            assert_eq!(code, 0, "{output}");
+            assert_eq!(std::fs::read(&skill_path).unwrap(), finalized);
+        });
+        for (path, original) in history_paths.iter().zip(before) {
+            assert_eq!(
+                std::fs::read(path).ok(),
+                original.ok(),
+                "{}",
+                path.display()
+            );
+        }
+        assert!(fixture.canonical_work().is_terminal());
+        assert!(!fixture.canonical_work().discarded);
+        server.assert_no_request();
+        server.assert_no_abort_request();
+    }
+
+    #[test]
+    fn blocked_done_build_abort_probe_describes_skill_only_recovery() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = BoundTerminalFixture::blocked_with_done_work();
+        let diagnosis =
+            crate::cli::execution_state::diagnose(&fixture.git.repo, Some(&fixture.session.id));
+        let probe = diagnosis
+            .recovery_probes
+            .iter()
+            .find(|probe| probe.operation == "build.abort")
+            .unwrap();
+        assert_eq!(
+            probe.state,
+            crate::cli::governance::RecoveryProbeState::Available
+        );
+        assert_eq!(
+            probe.governance.target_state.as_deref(),
+            Some("build_inactive")
+        );
+        let reason = probe.reason.as_deref().unwrap();
+        for expected in ["Blocked", "Done", "active build", "non-empty reason"] {
+            assert!(reason.contains(expected), "{reason}");
+        }
+        assert!(matches!(
+            crate::cli::hook::skill_build_spec_stop_check::handle_with_input(
+                &fixture.git.repo,
+                "{}",
+                Some(&fixture.session.id),
+            ),
+            crate::cli::hook::HookOutput::StopBlock { .. }
+        ));
+    }
+
+    #[test]
+    fn blocked_done_build_abort_refuses_invalid_authority_without_writes() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        for invalid in [
+            "active_done",
+            "completed_done",
+            "blank_reason",
+            "ambiguous",
+            "foreign_owner",
+            "foreign_session",
+            "foreign_project",
+            "foreign_worktree",
+            "stale_generation",
+            "missing_work",
+            "unreadable_work",
+            "unprojected_discard",
+            "pending_transaction",
+        ] {
+            let fixture = if matches!(invalid, "active_done" | "completed_done") {
+                let fixture = BoundTerminalFixture::new();
+                fixture.terminalize_canonical_done();
+                if invalid == "completed_done" {
+                    let active = gwt_core::skill_state::load(&fixture.git.repo, SKILL_NAME)
+                        .unwrap()
+                        .unwrap();
+                    crate::cli::execution_state::settle(
+                        &fixture.git.repo,
+                        &fixture.session.id,
+                        crate::cli::execution_state::ExecutionSettlement::Completed,
+                    )
+                    .unwrap();
+                    // Model stranded active bookkeeping after completion.
+                    gwt_core::skill_state::save(&fixture.git.repo, SKILL_NAME, &active).unwrap();
+                }
+                fixture
+            } else {
+                BoundTerminalFixture::blocked_with_done_work()
+            };
+            let works_path =
+                gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&fixture.git.repo);
+            let mut works =
+                gwt_core::workspace_projection::load_workspace_work_items(&fixture.git.repo)
+                    .unwrap()
+                    .unwrap();
+            let mut session = fixture.session.clone();
+            match invalid {
+                "ambiguous" => works.work_items[0].discarded = true,
+                "foreign_owner" => works.work_items[0].owner = Some("Issue #9999".into()),
+                "foreign_session" => works.work_items[0].agents[0].session_id = "foreign".into(),
+                "foreign_project" => session.project_state_root = Some(home.path().to_path_buf()),
+                "foreign_worktree" => session.worktree_path = home.path().to_path_buf(),
+                "stale_generation" => {
+                    session
+                        .execution_binding
+                        .as_mut()
+                        .unwrap()
+                        .identity
+                        .generation_id = "foreign-generation".into()
+                }
+                "missing_work" => works.work_items.clear(),
+                _ => {}
+            }
+            session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+            gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
+                &works_path,
+                &works,
+            )
+            .unwrap();
+            if invalid == "unreadable_work" {
+                std::fs::write(&works_path, "invalid Work projection").unwrap();
+            }
+            let close_path = gwt_core::paths::gwt_workspace_work_events_closed_path_for_repo_path(
+                &fixture.git.repo,
+            );
+            let pending_path =
+                gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&fixture.git.repo)
+                    .with_file_name("pending-state-transaction.json");
+            if invalid == "unprojected_discard" {
+                let event = gwt_core::workspace_projection::WorkEvent::new(
+                    gwt_core::workspace_projection::WorkEventKind::Discard,
+                    &fixture.work_id,
+                    chrono::Utc::now(),
+                );
+                let mut file = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&close_path)
+                    .unwrap();
+                writeln!(file, "{}", serde_json::to_string(&event).unwrap()).unwrap();
+            }
+            if invalid == "pending_transaction" {
+                std::fs::write(&pending_path, "unconfirmed pending Workspace transaction").unwrap();
+            }
+            let paths = [
+                works_path,
+                gwt_core::skill_state::state_path(&fixture.git.repo, SKILL_NAME),
+                crate::cli::execution_state::state_path(&fixture.git.repo),
+            ];
+            let close_before = std::fs::read(&close_path).unwrap();
+            let pending_before = std::fs::read(&pending_path).ok();
+            let before = paths
+                .iter()
+                .map(|path| std::fs::read(path).unwrap())
+                .collect::<Vec<_>>();
+            let server = TerminalBridgeServer::start(
+                StatusCode::OK,
+                terminal_receipt(crate::AgentWorkTerminalizationOutcome::AlreadyMatching),
+            );
+            let (code, output) = with_terminal_bridge_env(&fixture, &server, |_| {
+                let mut env = crate::cli::TestEnv::new(fixture.git.repo.clone());
+                crate::cli::run_collect(
+                    &mut env,
+                    crate::cli::CliCommand::Build(SkillStateAction::Abort {
+                        spec: 3327,
+                        reason: Some(
+                            if invalid == "blank_reason" {
+                                " "
+                            } else {
+                                "keep Done"
+                            }
+                            .into(),
+                        ),
+                    }),
+                )
+                .unwrap()
+            });
+            assert_ne!(code, 0, "{invalid}: {output}");
+            for (path, bytes) in paths.iter().zip(before) {
+                assert_eq!(
+                    std::fs::read(path).unwrap(),
+                    bytes,
+                    "{invalid}: {}",
+                    path.display()
+                );
+            }
+            assert_eq!(
+                std::fs::read(&close_path).unwrap(),
+                close_before,
+                "{invalid}"
+            );
+            assert_eq!(
+                std::fs::read(&pending_path).ok(),
+                pending_before,
+                "{invalid}"
+            );
+            server.assert_no_request();
+            server.assert_no_abort_request();
+        }
+    }
+
+    #[test]
+    fn blocked_done_build_abort_rechecks_skill_and_session_under_lease() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        for mutation in ["skill", "capability", "runtime"] {
+            let fixture = BoundTerminalFixture::blocked_with_done_work();
+            let repo = fixture.git.repo.clone();
+            let session_id = fixture.session.id.clone();
+            let mut next = gwt_core::skill_state::load(&repo, SKILL_NAME)
+                .unwrap()
+                .unwrap();
+            next.phase = Some("successor phase must survive".into());
+            let expected = next.clone();
+            crate::cli::trusted_store::set_write_lease_acquired_hook(move || {
+                if mutation == "capability" {
+                    gwt_agent::rotate_session_execution_capability(
+                        &gwt_core::paths::gwt_sessions_dir(),
+                        &session_id,
+                    )
+                    .unwrap();
+                } else if mutation == "runtime" {
+                    let sessions = gwt_core::paths::gwt_sessions_dir();
+                    let mut session =
+                        gwt_agent::Session::load(&sessions.join(format!("{session_id}.toml")))
+                            .unwrap();
+                    session.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+                    session.save(&sessions).unwrap();
+                } else {
+                    gwt_core::skill_state::save(&repo, SKILL_NAME, &next).unwrap();
+                }
+            });
+            let server = TerminalBridgeServer::start(
+                StatusCode::OK,
+                terminal_receipt(crate::AgentWorkTerminalizationOutcome::AlreadyMatching),
+            );
+            let (code, output) = with_terminal_bridge_env(&fixture, &server, |_| {
+                let mut env = crate::cli::TestEnv::new(fixture.git.repo.clone());
+                let mut out = String::new();
+                let code = run(
+                    &mut env,
+                    SkillStateAction::Abort {
+                        spec: 3327,
+                        reason: Some("stale abort".into()),
+                    },
+                    &mut out,
+                )
+                .unwrap();
+                (code, out)
+            });
+            assert_ne!(code, 0, "{output}");
+            let state = gwt_core::skill_state::load(&fixture.git.repo, SKILL_NAME)
+                .unwrap()
+                .unwrap();
+            assert!(state.active);
+            if mutation == "skill" {
+                assert_eq!(state, expected);
+            }
+            assert!(!fixture.canonical_work().discarded);
+            server.assert_no_request();
+            server.assert_no_abort_request();
+        }
+    }
+
+    #[test]
+    fn blocked_done_build_abort_never_finalizes_a_new_generation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = BoundTerminalFixture::blocked_with_done_work();
+        let authority = crate::agent_project_state::snapshot_blocked_done_build_abort_authority(
+            &fixture.git.repo,
+            &fixture.session.id,
+            3327,
+        )
+        .unwrap()
+        .unwrap();
+        let old = gwt_core::skill_state::load(&fixture.git.repo, SKILL_NAME)
+            .unwrap()
+            .unwrap();
+        let successor = launch_build_successor(&fixture, true);
+        let next = gwt_core::skill_state::SkillState {
+            session_id: successor,
+            phase: Some("red".into()),
+            ..old.clone()
+        };
+        gwt_core::skill_state::save(&fixture.git.repo, SKILL_NAME, &next).unwrap();
+        let execution = crate::cli::execution_state::record_contents(&fixture.git.repo).unwrap();
+        let mut env = crate::cli::TestEnv::new(fixture.git.repo.clone());
+        let result = finalize_blocked_done_build(
+            &mut env,
+            &SkillStateAction::Abort {
+                spec: 3327,
+                reason: Some("stale generation cleanup".into()),
+            },
+            &mut String::new(),
+            &old,
+            &authority,
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            gwt_core::skill_state::load(&fixture.git.repo, SKILL_NAME).unwrap(),
+            Some(next)
+        );
+        assert_eq!(
+            crate::cli::execution_state::record_contents(&fixture.git.repo).unwrap(),
+            execution
+        );
+        assert!(!fixture.canonical_work().discarded);
+    }
+
+    #[test]
+    fn blocked_done_build_abort_reports_save_failure_without_terminal_mutation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = BoundTerminalFixture::blocked_with_done_work();
+        let skill_path = gwt_core::skill_state::state_path(&fixture.git.repo, SKILL_NAME);
+        let permissions = std::fs::metadata(&skill_path).unwrap().permissions();
+        let mut readonly = permissions.clone();
+        readonly.set_readonly(true);
+        std::fs::set_permissions(&skill_path, readonly).unwrap();
+        let before = std::fs::read(&skill_path).unwrap();
+        let execution = crate::cli::execution_state::record_contents(&fixture.git.repo).unwrap();
+        let work = fixture.canonical_work();
+        let server = TerminalBridgeServer::start(
+            StatusCode::OK,
+            terminal_receipt(crate::AgentWorkTerminalizationOutcome::AlreadyMatching),
+        );
+        let (code, output) = with_terminal_bridge_env(&fixture, &server, |_| {
+            let mut env = crate::cli::TestEnv::new(fixture.git.repo.clone());
+            let mut out = String::new();
+            let code = run(
+                &mut env,
+                SkillStateAction::Abort {
+                    spec: 3327,
+                    reason: Some("cannot save bookkeeping".into()),
+                },
+                &mut out,
+            )
+            .unwrap();
+            (code, out)
+        });
+        std::fs::set_permissions(&skill_path, permissions).unwrap();
+        assert_ne!(code, 0, "{output}");
+        assert!(output.contains("finalize failed"), "{output}");
+        assert!(output.contains("execution.status"), "{output}");
+        assert!(output.contains("unconfirmed"), "{output}");
+        assert_eq!(std::fs::read(&skill_path).unwrap(), before);
+        assert_eq!(
+            crate::cli::execution_state::record_contents(&fixture.git.repo).unwrap(),
+            execution
+        );
+        assert_eq!(fixture.canonical_work(), work);
+        server.assert_no_request();
+        server.assert_no_abort_request();
     }
 
     #[test]

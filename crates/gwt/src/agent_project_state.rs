@@ -3271,6 +3271,117 @@ pub(crate) enum BoundTerminalCompatibilityDisposition {
 }
 
 #[derive(Clone, PartialEq, Eq)]
+pub(crate) struct BlockedDoneBuildAbortAuthority {
+    pub(crate) identity: gwt_agent::SessionExecutionIdentity,
+    pub(crate) target: gwt_core::workspace_projection::SessionBoundWorkspaceTerminalTarget,
+    pub(crate) work_id: String,
+}
+
+/// Read-only proof for ending build bookkeeping while retaining an exact Done
+/// Work. This grants no terminalization authority and never requests Discarded.
+pub(crate) fn snapshot_blocked_done_build_abort_authority(
+    invocation_cwd: &Path,
+    session_id: &str,
+    owner_number: u64,
+) -> Result<Option<BlockedDoneBuildAbortAuthority>> {
+    use crate::cli::execution_state::{self, ExecutionControlStatus};
+    let Some(record) = execution_state::load(invocation_cwd)? else {
+        return Ok(None);
+    };
+    if record.status != ExecutionControlStatus::Blocked {
+        return Ok(None);
+    }
+    if !execution_state::integrity_ok(&record)
+        || record.owner_number != owner_number
+        || record.primary_session_id != session_id
+    {
+        return Err(mutation_error(
+            "Blocked build cleanup requires the exact current execution owner and Session",
+        ));
+    }
+    let Some(ValidatedWorkspaceEnsureSession::Host(recovery)) =
+        validated_workspace_recovery_session_with_terminal_kind(
+            invocation_cwd,
+            session_id,
+            Some(AgentWorkTerminalKind::Discarded),
+        )?
+    else {
+        return Err(mutation_error(
+            "Blocked build cleanup requires an exact bound Host Session",
+        ));
+    };
+    if recovery.session.runtime_target != LaunchRuntimeTarget::Host
+        || recovery.session.docker_runtime_binding.is_some()
+    {
+        return Err(mutation_error(
+            "Blocked build cleanup has a foreign runtime binding",
+        ));
+    }
+    let identity = gwt_agent::SessionExecutionIdentity::from_session(&recovery.session)
+        .map_err(mutation_error)?
+        .ok_or_else(|| {
+            mutation_error("Blocked build cleanup requires a durable execution binding")
+        })?;
+    let owner = execution_owner_from_session_binding(&identity.execution_binding)
+        .map_err(mutation_error)?;
+    if owner.number != owner_number
+        || !execution_state::blocked_build_abort_execution_binding_matches(
+            &identity.worktree_path,
+            owner,
+            session_id,
+            &identity.execution_binding.identity,
+        )?
+    {
+        return Err(mutation_error(
+            "Blocked build cleanup requires the current generation and same active build",
+        ));
+    }
+    let (owner, agent_id) =
+        durable_session_work_authority(&recovery.session, recovery.branch_authority)?;
+    let work = resolve_unique_existing_work(
+        &recovery.project_state_root,
+        &recovery.work_event_root,
+        session_id,
+        &recovery.branch_identity,
+        &recovery.worktree_identity,
+        SessionWorkAuthorityExpectation {
+            owner: owner.as_deref(),
+            agent_id: &agent_id,
+            require_single_session_assignment: true,
+            allow_terminal: true,
+            require_exclusive_container: true,
+        },
+    )?;
+    if work.done && work.discarded {
+        return Err(mutation_error(
+            "canonical Work has ambiguous Done and Discarded terminal state",
+        ));
+    }
+    if !work.done {
+        return Ok(None);
+    }
+    let target = gwt_core::workspace_projection::SessionBoundWorkspaceTerminalTarget {
+        project_state_root: recovery.project_state_root,
+        work_event_root: recovery.work_event_root,
+        session_id: session_id.to_string(),
+        branch_identity: recovery.branch_identity,
+        worktree_identity: recovery.worktree_identity,
+        owner,
+        agent_id,
+    };
+    gwt_core::workspace_projection::with_exact_workspace_done_read_only(
+        &target,
+        &work.work_id,
+        || (),
+    )?;
+    Ok(Some(BlockedDoneBuildAbortAuthority {
+        identity,
+        target,
+        work_id: work.work_id,
+    }))
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct BoundTerminalCompatibilityAuthority {
     identity: gwt_agent::SessionExecutionIdentity,
     project_state_root: PathBuf,
