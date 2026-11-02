@@ -299,6 +299,44 @@ test("Works telemetry refresh preserves the terminal host without requesting lay
   f.surface.dispose();
 });
 
+test("Works reuses unchanged sparklines but redraws changed buckets and shared scales", async () => {
+  const values = () => Array(30).fill(1);
+  const telemetry = { fleet_tokens_per_minute: values(), by_window: {
+    one: { tokens_per_minute: values() }, pm: { tokens_per_minute: values() },
+  } };
+  const f = await fixture(telemetry);
+  const graphs = [...f.surface.element.querySelectorAll("svg")];
+  const mounts = f.mounts.length, layouts = f.layouts.length;
+  let clears = 0, nodes = 0;
+  const create = f.document.createElementNS.bind(f.document);
+  f.document.createElementNS = (...args) => { nodes++; return create(...args); };
+  for (const graph of graphs) {
+    const replace = graph.replaceChildren.bind(graph);
+    graph.replaceChildren = (...args) => { clears++; return replace(...args); };
+  }
+  for (let tick = 0; tick < 20; tick++) {
+    telemetry.fleet_tokens_per_minute = values();
+    telemetry.by_window.one.tokens_per_minute = values();
+    telemetry.by_window.pm.tokens_per_minute = values();
+    f.activityModel.update(state => ({ ...state, snapshot: { observed_at: tick } }));
+    f.flush();
+  }
+  assert.deepEqual({ clears, nodes, mounts: f.mounts.length - mounts, layouts: f.layouts.length - layouts, pending: f.frames.size },
+    { clears: 0, nodes: 0, mounts: 0, layouts: 0, pending: 0 }, "same data must not rebuild the SVG trees");
+  const row = id => f.surface.element.querySelector(`[data-window-id="${id}"] svg`);
+  const beforeOne = row("one").innerHTML, beforePm = row("pm").innerHTML;
+  telemetry.by_window.one.tokens_per_minute[0] = 2;
+  f.surface.sync(false);
+  assert.notEqual(row("one").innerHTML, beforeOne, "changed measurements redraw");
+  assert.notEqual(row("pm").innerHTML, beforePm, "an unchanged row follows the shared scale");
+  assert.equal(clears, 2, "the fleet graph is independent of the row scale");
+  telemetry.by_window.one.tokens_per_minute[0] = null;
+  f.surface.sync(false);
+  assert.equal(row("one").dataset.knownCount, "29", "missing buckets remain visible as gaps");
+  assert.equal(row("one").querySelectorAll("circle").length, 29);
+  f.surface.dispose();
+});
+
 test("Works does not reclaim a terminal while its surface is hidden", async () => {
   const f = await fixture(); f.surface.openWork("one");
   const external = f.document.createElement("aside"); f.document.querySelector("main").append(external);

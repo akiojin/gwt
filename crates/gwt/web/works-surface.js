@@ -25,16 +25,19 @@ function currentWorks(catalog, activity, roster) {
   }).sort((a, b) => Number(!!b.assignment.is_pm) - Number(!!a.assignment.is_pm) || order(a) - order(b));
 }
 
+const sparkStates = new WeakMap();
 function drawSpark(document, svg, input, maximum) {
   const values = Array.from({ length: 30 }, (_, index) => finite(input?.[index]) ? Math.max(0, input[index]) : null);
   const known = values.filter(finite);
+  const max = Math.max(1, maximum || 0, ...known);
+  const previous = sparkStates.get(svg);
+  if (previous?.maximum === max && previous.values.every((value, index) => value === values[index])) return;
   svg.replaceChildren();
   svg.setAttribute("viewBox", "0 0 300 56");
   svg.setAttribute("preserveAspectRatio", "none");
   svg.setAttribute("role", "img");
   svg.setAttribute("aria-label", `Tokens per minute, last 30 minutes: ${known.length} measured minutes, ${30 - known.length} unavailable`);
   svg.dataset.knownCount = String(known.length);
-  const max = Math.max(1, maximum || 0, ...known);
   let points = [];
   const append = () => {
     if (!points.length) return;
@@ -52,6 +55,7 @@ function drawSpark(document, svg, input, maximum) {
     svg.append(dot);
   });
   append();
+  sparkStates.set(svg, { values, maximum: max });
 }
 
 export function createWorksSurface({ document, windowCatalogModel, activityModel, rosterModel, windowDisplayTitle, systemSettingsModel,
