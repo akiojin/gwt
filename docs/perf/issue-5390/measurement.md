@@ -457,3 +457,22 @@ verification, Ready PR, required CI/coverage and fetched base inclusion.
 Coverage is unmeasured for this slice; it is not a threshold failure.
 User Verification Result: n/a (autonomous).
 Agent Visual Check: not run (canonical environment admission refused).
+
+### Private RPC cause slice (2026-11-02)
+
+The actual private client reproduced a shared-connection lifetime failure:
+dropping runtime A after another caller's request reused its idle connection
+aborted that caller's send. The single regression was RED with the generic
+private command send error, then GREEN after disabling idle connection
+retention for this client. Existing project-runtime tests passed 56/56.
+The same inert native fixture with 1/2/12 concurrent command callers changed
+from one failed reused connection in every case to zero failed requests,
+without increasing server request counts. These are not genuine Agent counts.
+The backend-first canonical record `vrr-d833d31fddff43a7bb2e36aad4cf2f13`
+passed 13/13 commands, including 101 Rust tests and strict workspace Clippy.
+It covers the dirty fix before this checkpoint commit, with no headed passes;
+the current doctor still reports `ledger_unavailable`.
+See [the scoped measurements and limits](rpc-runtime-lifetime.md) and
+[the evidence artifact](rpc-runtime-lifetime.json). Historical notifications,
+installed rollout, original EO3/EO4, final verification and delivery remain
+unproven; this controlled repair is not a parent CPU/fleet acceptance result.
