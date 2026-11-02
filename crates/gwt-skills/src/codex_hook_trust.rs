@@ -4804,6 +4804,10 @@ trust_level = "trusted"
         let repo = dir.path().join("repo");
         fs::create_dir_all(&repo).unwrap();
         git(&repo, &["init", "-q", "--initial-branch=develop"]);
+        // Keep detached maintenance from pruning a worktree while its
+        // initial administrative files are still being created.
+        git(&repo, &["config", "maintenance.auto", "false"]);
+        git(&repo, &["config", "gc.auto", "0"]);
         git(&repo, &["config", "user.email", "test@example.com"]);
         git(&repo, &["config", "user.name", "Test"]);
         git(&repo, &["commit", "--allow-empty", "-qm", "fixture"]);
