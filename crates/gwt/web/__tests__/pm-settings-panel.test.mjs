@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
 
+import { createMemberTuningModel } from "../agent-activity-model.js";
 import { createPmSettingsPanel } from "../pm-settings-panel.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -27,6 +28,7 @@ const appJs = readFileSync(resolve(here, "../app.js"), "utf8");
 const operatorShellJs = readFileSync(resolve(here, "../operator-shell.js"), "utf8");
 
 const RUNNING_STATUS = {
+  project_key: "project", configured_member_id: "pm-member", profile_revision: "profile-token",
   available: true,
   auto_start: true,
   configured_agent_id: "claude",
@@ -54,29 +56,20 @@ const GROK_RUNNING_STATUS = {
   running_reasoning: "high",
 };
 
-const GROK_COMMON_EFFORTS = [
-  "",
-  "none",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-];
-
 function fixture({ confirmAnswer = true, mounts = 1 } = {}) {
   const { document } = parseHTML(html);
   document.getElementById("pm-settings-panel")?.remove();
   const sent = [];
-  const confirmed = [];
+  const confirmed = [], openedMembers = [], reloaded = [];
   const frames = new Set();
   const flush = () => {
     const callbacks = [...frames];
     frames.clear();
     callbacks.forEach(callback => callback());
   };
+  const tuningController = createMemberTuningModel("project", { onSave: event => sent.push(event), scheduleFrame: callback => { frames.add(callback); return () => frames.delete(callback); } });
   const panel = createPmSettingsPanel({
+    projectKey: "project", tuningController, onOpenMember: memberId => openedMembers.push(memberId), onReloadProfile: () => reloaded.push(true),
     document,
     scheduleFrame(callback) { frames.add(callback); return () => frames.delete(callback); },
     send: (event) => sent.push(event),
@@ -97,7 +90,7 @@ function fixture({ confirmAnswer = true, mounts = 1 } = {}) {
   const applyStatus = panel.applyStatus.bind(panel);
   // Existing interaction assertions observe a completed display frame.
   panel.applyStatus = status => { applyStatus(status); flush(); };
-  return { document, sent, confirmed, panel, views, applyStatus, frames, flush };
+  return { document, sent, confirmed, panel, views, applyStatus, frames, flush, tuningController, openedMembers, reloaded };
 }
 
 function changeEvent(document) {
@@ -135,33 +128,15 @@ function assertIntervalError(view, copyPattern) {
   assert.doesNotMatch(error.textContent, /[\u3040-\u30ff\u3400-\u9fff]/);
 }
 
-/** Select `value` the way the DOM stores a selection (option-level), then fire
- *  the change the user's click would. */
-function chooseAgent(document, select, value) {
-  const option = select.querySelector(`option[value="${value}"]`);
-  assert.ok(option, `option ${value} must exist`);
-  option.selected = true;
-  select.dispatchEvent(changeEvent(document));
-}
-
 test("FR-132: Settings mount は英語の PM controls と shared primitives を使う", () => {
   const { views } = fixture();
   const view = views[0];
 
   assert.ok(view.querySelector(".settings-section"));
-  const agent = required(view, '[data-role="pm-agent-select"]');
-  const model = required(view, '[data-role="pm-model-input"]');
-  const effort = required(view, '[data-role="pm-effort-select"]');
   const interval = required(view, '[data-role="pm-loop-interval"]');
   const autoStart = required(view, '[data-role="pm-auto-start"]');
-  assert.ok(agent.classList.contains("settings-select"));
-  assert.ok(model.classList.contains("settings-input"));
-  assert.ok(effort.classList.contains("settings-select"));
   assert.ok(interval.classList.contains("settings-input"));
   assert.ok(autoStart.classList.contains("settings-checkbox"));
-  assert.match(accessibleName(view, agent), /Agent/i);
-  assert.match(accessibleName(view, model), /Model/i);
-  assert.match(accessibleName(view, effort), /Effort/i);
   assert.match(accessibleName(view, interval), /Loop interval/i);
   assert.match(accessibleName(view, autoStart), /Auto start/i);
   assert.doesNotMatch(
@@ -178,8 +153,7 @@ test("AC-6: PM Settings explains existing controls on focus and hover without ac
   for (const [role, meaning] of [
     ["pm-autonomy-status", /coordination.*Issue Monitor/i],
     ["pm-pause-toggle", /keeping the Project Manager available/i],
-    ["pm-agent-select", /after restart/i], ["pm-model-input", /after restart/i],
-    ["pm-effort-select", /after restart/i], ["pm-loop-interval", /Minimum: 10 seconds/i],
+    ["pm-loop-interval", /Minimum: 10 seconds/i],
     ["pm-auto-start", /automatically.*opens/i], ["pm-restart", /new conversation/i],
   ]) {
     const control = required(view, `[data-role="${role}"]`);
@@ -292,7 +266,7 @@ test("FR-132: late and existing mounts share the latest frame snapshot while act
   });
   assert.equal(required(views[0], '[data-role="pm-loop-interval"]').value, "60",
     "received updates must wait for the display frame");
-  assert.equal(frames.size, 1, "a burst reserves one frame for every mount");
+  assert.equal(frames.size, 1, "PM operational status reserves one frame for every mount");
 
   const lateView = document.createElement("section");
   lateView.className = "settings-panel";
@@ -306,11 +280,8 @@ test("FR-132: late and existing mounts share the latest frame snapshot while act
 
   for (const view of views) {
     assert.equal(required(view, '[data-role="pm-auto-start"]').checked, false);
-    assert.equal(required(view, '[data-role="pm-agent-select"]').value, "codex");
-    assert.equal(
-      required(view, '[data-role="pm-model-input"]').value,
-      "gpt-5.1-codex-max",
-    );
+    assert.match(required(view, '[data-role="pm-configured-profile"]').textContent, /Codex/);
+    assert.match(required(view, '[data-role="pm-configured-profile"]').textContent, /gpt-5.1-codex-max/);
     assert.equal(required(view, '[data-role="pm-loop-interval"]').value, "42");
   }
 
@@ -363,11 +334,8 @@ test("FR-132: active-project status replacement updates every mount without leak
   });
 
   for (const view of views) {
-    assert.equal(required(view, '[data-role="pm-agent-select"]').value, "codex");
-    assert.equal(
-      required(view, '[data-role="pm-model-input"]').value,
-      "gpt-5.1-codex-max",
-    );
+    assert.match(required(view, '[data-role="pm-configured-profile"]').textContent, /Codex/);
+    assert.match(required(view, '[data-role="pm-configured-profile"]').textContent, /gpt-5.1-codex-max/);
     assert.equal(required(view, '[data-role="pm-loop-interval"]').value, "75");
     assert.doesNotMatch(view.textContent, /claude-opus-4-1/);
   }
@@ -389,175 +357,13 @@ test("FR-026: Running as は稼働中エージェントを名乗る", () => {
   );
 });
 
-test("FR-026: agent select は pm_status の選択肢から作られ set_pm_launch_profile を送る", () => {
-  const { document, sent, panel } = fixture();
-  panel.applyStatus(RUNNING_STATUS);
-
-  const select = document.querySelector('[data-role="pm-agent-select"]');
-  assert.ok(select, "agent select が必要");
-  assert.deepEqual(
-    [...select.querySelectorAll("option")].map((option) => option.value),
-    ["claude", "codex", "grok"],
-    "選択肢は backend の agent_options だけ",
-  );
-  assert.equal(select.value, "claude", "現在の設定値が選択されている");
-
-  chooseAgent(document, select, "codex");
-
-  assert.deepEqual(sent.at(-1), {
-    kind: "set_pm_launch_profile",
-    agent_id: "codex",
-    model: null,
-    reasoning: null,
-  });
-});
-
-test("FR-120: Grok Build を Agent/Model/Effort の同一プロファイルとして送る", () => {
-  const { document, sent, panel } = fixture();
-  panel.applyStatus({
-    ...GROK_RUNNING_STATUS,
-    configured_agent_id: "codex",
-    configured_model: "gpt-5.6-sol",
-    configured_reasoning: "xhigh",
-    running_agent_id: "codex",
-    running_model: "gpt-5.6-sol",
-    running_reasoning: "xhigh",
-  });
-
-  const select = document.querySelector('[data-role="pm-agent-select"]');
-  assert.equal(
-    select.querySelector('option[value="grok"]')?.textContent,
-    "Grok Build",
-    "backend が投影した Grok Build を canonical label で選べる",
-  );
-
-  chooseAgent(document, select, "grok");
-
-  assert.deepEqual(sent.at(-1), {
-    kind: "set_pm_launch_profile",
-    agent_id: "grok",
-    model: "gpt-5.6-sol",
-    reasoning: "xhigh",
-  });
-});
-
-test("FR-120: model の変更も reasoning を保った full profile event に載る", () => {
-  const { document, sent, panel } = fixture();
-  panel.applyStatus({
-    ...RUNNING_STATUS,
-    configured_agent_id: "codex",
-    configured_reasoning: "high",
-  });
-
-  const model = document.querySelector('[data-role="pm-model-input"]');
-  assert.ok(model, "model の入力が必要");
-  model.value = "gpt-5.1-codex-max";
-  model.dispatchEvent(changeEvent(document));
-
-  assert.deepEqual(sent.at(-1), {
-    kind: "set_pm_launch_profile",
-    agent_id: "codex",
-    model: "gpt-5.1-codex-max",
-    reasoning: "high",
-  });
-});
-
-test("FR-120: agent 固有 catalog と保存済み未列挙 effort を full profile event で保持する", () => {
-  const { document, sent, panel } = fixture();
-  panel.applyStatus({
-    ...RUNNING_STATUS,
-    configured_agent_id: "codex",
-    configured_model: "gpt-5.6-sol",
-    configured_reasoning: "provider-experimental",
-  });
-
-  const effort = document.querySelector('[data-role="pm-effort-select"]');
-  const values = [...effort.querySelectorAll("option")].map((option) => option.value);
-  assert.ok(values.includes("ultra"), "Codex catalog は ultra を含む");
-  assert.ok(!values.includes("none"), "Grok 固有 none を Codex に提示しない");
-  assert.ok(!values.includes("minimal"), "Grok 固有 minimal を Codex に提示しない");
-  assert.equal(
-    effort.value,
-    "provider-experimental",
-    "未列挙の保存値も current option として表現する",
-  );
-
-  const model = document.querySelector('[data-role="pm-model-input"]');
-  model.value = "gpt-5.6-sol-next";
-  model.dispatchEvent(changeEvent(document));
-
-  assert.deepEqual(sent.at(-1), {
-    kind: "set_pm_launch_profile",
-    agent_id: "codex",
-    model: "gpt-5.6-sol-next",
-    reasoning: "provider-experimental",
-  });
-
-  panel.applyStatus({
-    ...RUNNING_STATUS,
-    configured_agent_id: "claude",
-    configured_reasoning: "xhigh",
-  });
-  assert.equal(
-    document.querySelector('[data-role="pm-effort-select"]').value,
-    "xhigh",
-    "Claude の union catalog でも xhigh を新規選択・保持できる",
-  );
-});
-
-test("FR-120: Effort は Auto と公式 common values を持ち同じ full profile event を送る", () => {
-  const { document, sent, panel } = fixture();
-  panel.applyStatus(GROK_RUNNING_STATUS);
-
-  const effort = document.querySelector('[data-role="pm-effort-select"]');
-  assert.ok(effort, "PM 設定に Effort control が必要");
-  assert.equal(
-    effort.closest("label")?.querySelector(".settings-label")?.textContent,
-    "Effort",
-    "ユーザー向けラベルは Effort とする",
-  );
-  assert.deepEqual(
-    [...effort.querySelectorAll("option")].map((option) => option.value),
-    GROK_COMMON_EFFORTS,
-    "Auto は空値、残りは Grok CLI の common effort values",
-  );
-  assert.match(
-    effort.querySelector('option[value=""]')?.textContent || "",
-    /Auto/i,
-    "空値は provider default を保つ Auto と表示する",
-  );
-  assert.equal(effort.value, "high", "configured reasoning を Effort に反映する");
-
-  const xhigh = effort.querySelector('option[value="xhigh"]');
-  assert.ok(xhigh, "xhigh option が必要");
-  xhigh.selected = true;
-  effort.dispatchEvent(changeEvent(document));
-
-  assert.deepEqual(sent.at(-1), {
-    kind: "set_pm_launch_profile",
-    agent_id: "grok",
-    model: "team/grok-code-fast",
-    reasoning: "xhigh",
-  });
-});
-
-test("FR-120: Effort の Auto は reasoning null として full profile event を送る", () => {
-  const { document, sent, panel } = fixture();
-  panel.applyStatus(GROK_RUNNING_STATUS);
-
-  const effort = document.querySelector('[data-role="pm-effort-select"]');
-  assert.ok(effort, "PM 設定に Effort control が必要");
-  const auto = effort.querySelector('option[value=""]');
-  assert.ok(auto, "Auto option が必要");
-  auto.selected = true;
-  effort.dispatchEvent(changeEvent(document));
-
-  assert.deepEqual(sent.at(-1), {
-    kind: "set_pm_launch_profile",
-    agent_id: "grok",
-    model: "team/grok-code-fast",
-    reasoning: null,
-  });
+test("PM status preserves unlisted saved profile facts without mounting another editor", () => {
+  const { document, sent, panel, tuningController } = fixture();
+  panel.applyStatus({ ...GROK_RUNNING_STATUS, configured_reasoning: "provider-experimental" });
+  const profile = document.querySelector('[data-role="pm-configured-profile"]').textContent;
+  assert.match(profile, /team\/grok-code-fast/); assert.match(profile, /provider-experimental/);
+  assert.equal(tuningController.model.read().targets["pm:pm-member"].draft.reasoning, "provider-experimental");
+  assert.equal(Boolean(document.querySelector('[data-member-tuning-field]')), false); assert.equal(sent.length, 0);
 });
 
 test("FR-121: Running as は稼働中の agent/model/effort を configured 値と分けて表示する", () => {
@@ -579,16 +385,8 @@ test("FR-121: Running as は稼働中の agent/model/effort を configured 値�
   );
   assert.match(running.textContent, /medium/i, "running effort を表示する");
 
-  assert.equal(
-    document.querySelector('[data-role="pm-model-input"]').value,
-    "team/grok-code-quality",
-    "編集欄は configured model を表示する",
-  );
-  assert.equal(
-    document.querySelector('[data-role="pm-effort-select"]').value,
-    "max",
-    "編集欄は configured effort を表示する",
-  );
+  assert.match(document.querySelector('[data-role="pm-configured-profile"]').textContent, /team\/grok-code-quality.*max/);
+
 });
 
 test("FR-026: Auto start トグルは set_pm_auto_start を送る", () => {
@@ -680,11 +478,7 @@ test("FR-132: unavailable project clears and disables every PM editor mount", ()
       required(view, '[data-role="pm-running-as"]').textContent,
       /unavailable/i,
     );
-    assert.equal(
-      required(view, '[data-role="pm-agent-select"]').querySelectorAll("option").length,
-      0,
-    );
-    assert.equal(required(view, '[data-role="pm-model-input"]').value, "");
+    assert.match(required(view, '[data-role="pm-configured-profile"]').textContent, /unavailable/i);
     assert.equal(required(view, '[data-role="pm-loop-interval"]').value, "60");
     for (const control of view.querySelectorAll("input, select, button")) {
       assert.equal(control.disabled, true);
@@ -879,4 +673,42 @@ test("FR-132: app owns one controller and applies pm_status to it", () => {
 test("FR-132: command palette exposes the pm-settings command", () => {
   assert.match(operatorShellJs, /id: "pm-settings"/);
   assert.match(appJs, /case "pm-settings":[\s\S]{0,320}return;/);
+});
+
+
+test("PM Settings routes its known member to Agents without sending a profile write", () => {
+  const { document, sent, panel, openedMembers } = fixture(); panel.applyStatus(RUNNING_STATUS);
+  document.querySelector('[data-role="pm-open-member"]').click();
+  assert.deepEqual(openedMembers, ["pm-member"]); assert.equal(sent.length, 0);
+});
+
+test("foreign PM status routes to its project before editing and cannot send through the current socket", () => {
+  const { document, sent, panel } = fixture(); panel.applyStatus({ ...RUNNING_STATUS, project_key: 'foreign' });
+  assert.equal(document.querySelector('[data-role="pm-open-member"]').disabled, true);
+  document.querySelector('[data-role="pm-auto-start"]').dispatchEvent(changeEvent(document));
+  document.querySelector('[data-role="pm-pause-toggle"]').click();
+  assert.equal(sent.length, 0);
+});
+
+test("unknown PM status disables shared profile authority, preserves the draft and offers explicit reload", () => {
+  const { document, sent, panel, tuningController: c, reloaded } = fixture(); panel.applyStatus(RUNNING_STATUS);
+  c.editTuning("pm", "pm-member", { model: "unfinished" });
+  panel.applyStatus({ ...RUNNING_STATUS, configured_member_id: null, profile_revision: null, configured_agent_id: null });
+  const target = c.model.read().targets["pm:pm-member"];
+  assert.equal(target.draft.model, "unfinished"); assert.equal(target.available, false);
+  assert.match(document.querySelector('[data-role="pm-configured-profile"]').textContent, /unavailable/i);
+  document.querySelector('[data-role="pm-reload-profile"]').click(); assert.deepEqual(reloaded, [true]);
+  c.editTuning("pm", "pm-member", { model: "unsafe" }); assert.equal(sent.length, 1);
+});
+
+test("PM pending change includes member identity even when tool/model/reasoning match", () => {
+  const { document, panel } = fixture(); panel.applyStatus({ ...RUNNING_STATUS, running_member_id: 'previous-pm' });
+  assert.equal(document.querySelector('[data-role="pm-pending-chip"]').hidden, false);
+});
+
+test("PM Settings keeps operational controls and routes profile editing to Agents", () => {
+  const { document, panel } = fixture(); panel.applyStatus(RUNNING_STATUS);
+  assert.equal(Boolean(document.querySelector('[data-member-tuning-field]')), false);
+  assert.ok(document.querySelector('[data-role="pm-open-member"]'));
+  for (const role of ['pm-running-as', 'pm-pending-chip', 'pm-auto-start', 'pm-pause-toggle', 'pm-loop-interval', 'pm-restart']) assert.ok(document.querySelector(`[data-role="${role}"]`));
 });

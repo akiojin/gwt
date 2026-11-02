@@ -543,7 +543,7 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(roster(page).locator(".roster-count")).toHaveText("3");
     await expect(roster(page).locator(".roster-capacity-value")).toHaveText("3");
     const mutations = (await sent(page)).filter(message => message.kind === "agent_roster" && message.action.kind !== "read");
-    expect(mutations.map(message => [message.action, message.expected_revision])).toEqual([[{ kind: "add", agent_id: "codex", name: "Dahlia" }, 3], [{ kind: "rest", member_id: "m-added" }, 4]]);
+    expect(mutations.map(message => [message.action, message.expected_revision])).toEqual([[{ kind: "add", agent_id: "codex", name: "Dahlia", pm_eligible: false }, 3], [{ kind: "rest", member_id: "m-added" }, 4]]);
     expect(await page.evaluate(() => (window as any).__worksAgentsFixture.rejectedRevisions)).toEqual([]);
     expect(await page.evaluate(() => (window as any).__worksAgentsFixture.members.find(member => member.agent_member_id === "m-added").enabled)).toBe(false);
     const resting = roster(page).locator('.roster-row[data-member-id="m-added"]');
@@ -753,6 +753,41 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(plan(5004).getByRole("button", { name: "Reassign issue #5004", exact: true })).toBeInViewport();
     await page.screenshot({ path: info.outputPath("agents-plans-400.png") });
   });
+  test("shared member and PM tuning retain identity, history and narrow layout", async ({ page }, info) => {
+    await openRail(page, "agents");
+    await roster(page).locator('.roster-row[data-member-id="m-idle"]').click();
+    const detail = roster(page).locator('.roster-detail');
+    await detail.locator('[data-member-tuning-field="model"]').fill("unlisted-implementation");
+    await expect(detail.locator('[data-member-tuning-status]')).toHaveText("Saved");
+    let writes = (await sent(page)).filter(message => message.kind === "agent_roster" && message.action.kind === "set_tuning");
+    expect(writes).toHaveLength(1); expect(writes[0].action.member_id).toBe("m-idle");
+    expect(writes[0].action).not.toHaveProperty("agent_id"); expect(writes[0]).not.toHaveProperty("expected_revision");
+    await detail.locator('[data-action="pm-eligible"]').check();
+    await expect(detail.locator('[data-action="select-pm"]')).toBeEnabled();
+    await detail.locator('[data-action="select-pm"]').click();
+    await expect(detail.locator('[data-action="select-pm"]')).toHaveText("Configured Project Manager");
+    await expect(roster(page).locator('.roster-row[data-member-id="m-idle"]')).toContainText("Project Manager");
+    await expect(detail.locator('[data-action="rest"]')).toBeDisabled();
+    await detail.locator('[aria-label="Display name"]').fill("Cedar PM");
+    await expect(detail.locator('.roster-name-status')).toHaveText("Saved");
+    await detail.locator('[data-member-tuning-field="model"]').fill("opusplan");
+    await expect(detail.locator('[data-member-tuning-status]')).toHaveText("Saved");
+    const pmWrites = (await sent(page)).filter(message => message.kind === "set_pm_launch_profile");
+    expect(pmWrites).toHaveLength(1); expect(pmWrites[0]).toMatchObject({ project_key: APP_PROJECT_KEY, member_id: "m-idle", model: "opusplan" });
+    expect(pmWrites[0].expected_profile_revision).toBeTruthy(); expect(pmWrites[0].request_id).toBeTruthy();
+    await page.evaluate(() => (window as any).__worksAgentsFixture.pmUnknown());
+    await expect(detail.locator('[data-member-tuning-field="model"]')).toBeDisabled();
+    await expect(detail.locator('[data-member-tuning-field="model"]')).toHaveValue("opusplan");
+    await detail.locator('[data-action="reload-tuning"]').click();
+    await expect(detail.locator('[data-member-tuning-field="model"]')).toBeEnabled();
+    await expect(detail.locator('.roster-history').filter({ hasText: "Assignment history" })).toBeVisible();
+    await page.setViewportSize({ width: 400, height: 1000 });
+    await expectNoHorizontalOverflow(page, ".agents-surface:not([hidden]):not(.agents-surface--preview)");
+    await detail.locator('[data-member-tuning-field="reasoning"]').scrollIntoViewIfNeeded();
+    await expect(detail.locator('[data-member-tuning-field="reasoning"]')).toBeInViewport();
+    await page.screenshot({ path: info.outputPath("agents-shared-pm-tuning-400.png") });
+  });
+
 });
 
 async function installWorksAgentsBackend(page: Page) {
@@ -782,6 +817,17 @@ async function installWorksAgentsBackend(page: Page) {
       { agent_member_id: "m-two", agent_id: "claude", name: "Birch", enabled: true, created_at: "2026-10-20T00:00:00Z", last_issue_number: 4001, last_spec_number: null, assignment: assignment("s-two", 4001), provider: "Claude", model: "Fixture model", issue_count: null, landed_count: null, active_seconds: null, tokens: null, history: [] },
       { agent_member_id: "m-idle", agent_id: "codex", name: "Cedar", enabled: true, created_at: "2026-10-20T00:00:00Z", last_issue_number: null, last_spec_number: null, assignment: null, provider: null, model: null, issue_count: null, landed_count: null, active_seconds: null, tokens: null, history: [] },
     ];
+    for (const member of members) {
+      member.saved_implementation_core ||= { agent_id: member.agent_id, model: member.saved_manual_profile?.model || null, reasoning: null, version: null, fast_mode: false };
+      member.saved_implementation_core_revision ||= `core-${member.agent_member_id}-1`;
+    }
+    let pmMemberId: string | null = null, pmProfileRevision = 1;
+    let pmProfile = { agent_id: "claude", model: null as string | null, reasoning: null as string | null };
+    const pmStatus = () => ({ kind: "pm_status", project_key: projectKey, configured_member_id: pmMemberId,
+      configured_member_name: members.find(member => member.agent_member_id === pmMemberId)?.name,
+      profile_revision: `pm-${pmProfileRevision}`, configured_agent_id: pmProfile.agent_id, configured_model: pmProfile.model,
+      configured_reasoning: pmProfile.reasoning, running_agent_id: "claude", running_model: "running-model", running_reasoning: "high", is_running: true, available: true, paused: false, auto_start: true, loop_interval_secs: 60,
+      agent_options: [{ id: "claude", name: "Claude Code" }, { id: "codex", name: "Codex" }] });
     // Fixture-only backing storage models backend persistence across page reload.
     let worksPreviewLines = Number(sessionStorage.getItem("fixture:works-preview-lines") || 3);
     let revision = savedRoster?.revision ?? 3, activityRevision = 0;
@@ -801,7 +847,7 @@ async function installWorksAgentsBackend(page: Page) {
     ];
     let socket: FixtureWebSocket;
     const workspace = () => ({ kind: "workspace_state", workspace: { app_version: "playwright", active_tab_id: "tab-works", recent_projects: [], tabs: [{ id: "tab-works", title: "Works Agents Fixture", project_root: "/fixture", project_key: projectKey, kind: "git", workspace: { windows, viewport: { x: 0, y: 0, zoom: 1 } } }] } });
-    const rosterSnapshot = () => ({ kind: "agent_roster", roster: { project_key: projectKey, revision, members, capacity: members.filter(member => member.enabled).length, recommended_capacity: 6, past_complete: true, past_contributors: [{ session_id: "s-earlier", name: "Earlier author", kind: "implementation", issue_numbers: [4000], first_posted_at: "2026-10-20T00:00:00Z", last_posted_at: "2026-10-20T02:00:00Z", post_count: 4 }], by_session: Object.fromEntries(agents.map(agent => [agent.session_id, { branch: `work/${agent.window_id}`, ahead_of_develop: 0, model: "Fixture model", provider: agent.is_pm || agent.session_id === "s-two" ? "Claude" : "Codex", last_action: "Fixture observation", elapsed_seconds: 120, warning_count: 0 }])), error: null } });
+    const rosterSnapshot = () => ({ kind: "agent_roster", roster: { project_key: projectKey, revision, revision_decimal: String(revision), members, capacity: members.filter(member => member.enabled).length, recommended_capacity: 6, past_complete: true, past_contributors: [{ session_id: "s-earlier", name: "Earlier author", kind: "implementation", issue_numbers: [4000], first_posted_at: "2026-10-20T00:00:00Z", last_posted_at: "2026-10-20T02:00:00Z", post_count: 4 }], by_session: Object.fromEntries(agents.map(agent => [agent.session_id, { branch: `work/${agent.window_id}`, ahead_of_develop: 0, model: "Fixture model", provider: agent.is_pm || agent.session_id === "s-two" ? "Claude" : "Codex", last_action: "Fixture observation", elapsed_seconds: 120, warning_count: 0 }])), error: null } });
     const applyRename = (message: any) => {
       const member = members.find(member => member.agent_member_id === message.action.member_id);
       const name = message.action.name.trim();
@@ -855,17 +901,35 @@ async function installWorksAgentsBackend(page: Page) {
           { id: "codex", name: "Codex", installed: true }, { id: "claude", name: "Claude Code", installed: true },
         ] });
         if (message.kind === "list_custom_agents") this.emit({ kind: "custom_agent_list", agents: [] });
+        if (message.kind === "set_pm_launch_profile") {
+          const success = message.project_key === projectKey && message.member_id === pmMemberId && message.expected_profile_revision === `pm-${pmProfileRevision}`;
+          if (success) { pmProfile = { agent_id: message.agent_id, model: message.model, reasoning: message.reasoning }; pmProfileRevision++; }
+          this.emit({ kind: "pm_launch_profile_result", project_key: projectKey, member_id: message.member_id, request_id: message.request_id, success, retryable: true,
+            profile_revision: `pm-${pmProfileRevision}`, profile: pmProfile, message: success ? null : "Profile changed" }); this.emit(pmStatus());
+        }
         if (message.kind === "agent_roster") {
+          if (message.action.kind === "set_tuning") {
+            const member = members.find(member => member.agent_member_id === message.action.member_id);
+            if (!member || member.saved_implementation_core_revision !== message.action.expected_core_revision) {
+              this.emit({ kind: "agent_roster_error", project_key: projectKey, request_id: message.request_id, message: "Core changed" }); return;
+            }
+            member.saved_implementation_core = { ...member.saved_implementation_core, model: message.action.model, reasoning: message.action.reasoning };
+            revision++; member.saved_implementation_core_revision = `core-${member.agent_member_id}-${revision}`;
+            this.emit({ ...rosterSnapshot(), request_id: message.request_id }); return;
+          }
           if (message.action.kind === "rename") {
             if (deferredRename) pendingRename = message;
             else applyRename(message);
             return;
           }
           if (message.action.kind !== "read" && message.expected_revision !== revision) { rejectedRevisions.push(message); this.emit(rosterSnapshot()); return; }
-          if (message.action.kind === "add") { members.push({ agent_member_id: "m-added", agent_id: message.action.agent_id, name: message.action.name, enabled: true, created_at: "2026-10-25T00:00:00Z", last_issue_number: null, last_spec_number: null, assignment: null, provider: null, model: null, history: [], issue_count: 0, landed_count: 0, active_seconds: 0, tokens: 0 }); revision++; }
+          if (message.action.kind === "set_pm_eligibility") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member) { member.pm_eligible = message.action.eligible; revision++; } }
+          if (message.action.kind === "select_pm") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member?.pm_eligible && member.enabled && !member.assignment) { pmMemberId = member.agent_member_id; member.is_pm = true; member.pm_project_key = projectKey; revision++; this.emit(pmStatus()); } }
+          if (message.action.kind === "add") { members.push({ agent_member_id: "m-added", agent_id: message.action.agent_id, name: message.action.name, pm_eligible: message.action.pm_eligible === true, enabled: true, created_at: "2026-10-25T00:00:00Z", last_issue_number: null, last_spec_number: null, assignment: null, provider: null, model: null, history: [], issue_count: 0, landed_count: 0, active_seconds: 0, tokens: 0 }); revision++; }
           if (message.action.kind === "rest") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member) { member.enabled = false; revision++; } }
           if (message.action.kind !== "read") sessionStorage.setItem("fixture:works-roster", JSON.stringify({ members, revision }));
-          this.emit(rosterSnapshot());
+          this.emit({ ...rosterSnapshot(), request_id: message.request_id });
+          if (message.action.kind === "read" && pmMemberId) this.emit(pmStatus());
         }
         if (message.kind === "agent_schedule") {
           if (message.action.kind === "read") this.emit(scheduleSnapshot());
@@ -879,6 +943,7 @@ async function installWorksAgentsBackend(page: Page) {
     Object.defineProperty(window, "WebSocket", { configurable: true, value: FixtureWebSocket });
     (window as any).__worksAgentsFixture = {
       sent: sentMessages, members, rejectedRevisions, rejectedScheduleRevisions,
+      pmUnknown() { socket.emit({ ...pmStatus(), profile_revision: null, configured_agent_id: null }); },
       deferRename() { deferredRename = true; },
       releaseRename() { const message = pendingRename; pendingRename = null; if (message) applyRename(message); },
       replayRename() { if (firstRenameReceipt) socket.emit(firstRenameReceipt); },

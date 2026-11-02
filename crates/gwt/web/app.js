@@ -1,6 +1,7 @@
+import { createLaunchOperationId } from "/launch-pending-controller.js";
 import { createCloseProjectController } from "/close-project-confirm-modal.js";
 import { createUiStateStore } from "/ui-state-store.js";
-import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleModel, createAgentSwitchModel, selectWorksTelemetry } from "/agent-activity-model.js";
+import { createAgentActivityModel, createAgentRosterModel, createMemberTuningModel, createAgentScheduleModel, createAgentSwitchModel, selectWorksTelemetry } from "/agent-activity-model.js";
       import { Terminal } from "/assets/xterm/xterm.mjs";
       import { FitAddon } from "/assets/xterm/addon-fit.mjs";
       // SPEC-3064 Phase 3 (E7): the migration-modal / project-clone-modal /
@@ -425,12 +426,15 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       const routeProjectKey = parseFrontendRoute(window.location.pathname).projectKey;
       const { model: agentActivityModel, applyAgentActivitySnapshot, clearAgentActivity } = createAgentActivityModel(routeProjectKey);
       const { model: rosterModel, applyAgentRosterSnapshot, applyAgentRosterError, applyAgentRosterUsage,
-        editAgentMemberName, retryAgentMemberName, clearAgentRosterRename } = createAgentRosterModel(routeProjectKey, {
+        editAgentMemberName, retryAgentMemberName, clearAgentRosterRename, beginAgentRosterRequest } = createAgentRosterModel(routeProjectKey, {
         onRename: request => {
           if (send(request) !== "sent") applyAgentRosterError({ project_key: routeProjectKey,
             request_id: request.request_id, message: "Name could not be sent. Retry when connected." });
         },
       });
+      const tuningController = createMemberTuningModel(routeProjectKey, { onSave: request => {
+        if (send(request) !== "sent") throw new Error("Profile could not be sent");
+      } });
       const { model: scheduleModel, applyAgentScheduleSnapshot, applyAgentScheduleError,
         beginAgentScheduleRequest, clearAgentSchedule } = createAgentScheduleModel(routeProjectKey);
       const { model: switchModel, beginAgentSwitchRequest, applyAgentSwitchSnapshot, applyAgentSwitchError, clearAgentSwitch } = createAgentSwitchModel(routeProjectKey);
@@ -903,7 +907,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         // Revisioned names and switches belong to this live connection.
         // Never replay an unacknowledged write after reconnect.
         if ((message.kind === "agent_switch" && message.action.kind !== "read") ||
-            (message.kind === "agent_roster" && message.action.kind === "rename")) {
+            (message.kind === "agent_roster" && message.action.kind !== "read") || message.kind === "set_pm_launch_profile") {
           if (!socket || socket.readyState !== WebSocket.OPEN || socketProjectKey !== activeProjectKey()) return "unavailable";
           try { socket.send(JSON.stringify(message)); return "sent"; } catch (_err) { return "unavailable"; }
         }
@@ -1159,7 +1163,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       });
 
       function setConnectionState(connected) {
-        if (!connected) { clearAgentActivity(); clearAgentSchedule(); clearAgentSwitch(); clearAgentRosterRename(); }
+        if (!connected) { clearAgentActivity(); clearAgentSchedule(); clearAgentSwitch(); clearAgentRosterRename(); tuningController.disconnectTuning(); }
         connectionOverlay.setConnected(connected);
         handleLaunchWizardTransportChange(connected);
         // SPEC #3170 AS-17.2: disconnect invalidates every silent semantic
@@ -3931,8 +3935,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // The controller is created before Settings so pm_status may hydrate its
       // shared snapshot before the first Settings window is mounted.
       const { applyStatus: applyPmSettingsReceiveEvent, ...pmSettingsPanel } = createPmSettingsPanel({
-        document,
-        send,
+        document, send, projectKey: routeProjectKey, tuningController,
+        onReloadProfile: () => requestAgentRoster(),
+        onOpenMember: memberId => { openSurface("agents"); agentsSurface.selectMember(memberId); },
+        onNavigateProject: projectKey => window.location.assign(projectUrlPath(projectKey)),
         confirm: (message) => window.confirm(message),
       });
       pmSettingsPanel.bindEntryPoints({ document });
@@ -4398,6 +4404,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         requestSupportedAgentRefresh,
         resyncSettings,
         renderSettingsWindow,
+        disposeSettingsBody,
         renderSettingsAgentList,
         renderAgentBackendsPanel,
         renderAgentBackendsPanelInAllSettingsWindows,
@@ -4416,7 +4423,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         renderUsagePanel,
         getIndexStatus,
         pmSettingsPanel,
-        rosterModel,
+        rosterModel, tuningController, onReloadProfile: () => requestAgentRoster(),
       });
 
       function ensureWindow(windowData) {
@@ -4649,7 +4656,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
                     clearBranchCleanupForWindow(windowId);
 
                     pmSettingsPanel.unmount(element.querySelector('[data-settings-panel="project-manager"]'));
-                    element.querySelector(".window-body")?.settingsExplanations?.dispose();
+                    disposeSettingsBody(element.querySelector(".window-body"));
                     element.remove();
                     windowMap.delete(windowId);
                   });
@@ -5046,12 +5053,15 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             break;
           // The backend snapshot gates only the List; both views read the catalog.
           case "agent_roster_error":
+            tuningController.applyRosterTuningError(event);
             applyAgentRosterError(event);
             break;
-          case "agent_roster":
-            applyAgentRosterSnapshot(event.roster, event.request_id);
-            refreshProfilesAfterRoster(event.roster);
+          case "agent_roster": {
+            const accepted = applyAgentRosterSnapshot(event.roster, event.request_id);
+            tuningController.applyRosterTuningSnapshot(event.roster, event.request_id, { accepted });
+            if (accepted) refreshProfilesAfterRoster(event.roster);
             break;
+          }
           case "agent_switch":
             applyAgentSwitchSnapshot(event.snapshot);
             break;
@@ -5079,6 +5089,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             applyPmWindowReceiveEvent(event);
             break;
           }
+          case "pm_launch_profile_result":
+            tuningController.applyPmTuningResult(event);
+            break;
           case "pm_status":
             // SPEC-3431 FR-026: the whole panel state arrives in one snapshot.
             applyPmSettingsReceiveEvent(event);
@@ -5603,7 +5616,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       windowCatalogModel.subscribe(state => state.catalog, () => recomputeOperatorTelemetry());
       activeWorkProjectionModel.subscribe(state => state, () => updateWorksTelemetry());
       function requestAgentRoster(action = { kind: "read" }) {
-        send({ kind: "agent_roster", action, expected_revision: action.kind === "read" ? null : rosterModel.read().revision });
+        const request = { kind: "agent_roster", project_key: routeProjectKey, request_id: createLaunchOperationId("roster"), action, expected_revision: action.kind === "read" ? null : rosterModel.read().revision };
+        if (!beginAgentRosterRequest(request)) return;
+        if (send(request) !== "sent" && action.kind !== "read") applyAgentRosterError({ project_key: routeProjectKey,
+          request_id: request.request_id, message: "Member change could not be sent. Reload members and retry when connected." });
       }
       function requestAgentSchedule(action = { kind: "read" }) {
         if (action.kind !== "read" && action.expected_roster_revision !== rosterModel.read().revision) {
@@ -5632,12 +5648,16 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         openSurface("works");
         return worksSurface.openWork(live);
       }
-      agentsSurface = createAgentsSurface({ document, rosterModel, scheduleModel, switchModel, activityModel: agentActivityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
+      agentsSurface = createAgentsSurface({ document, rosterModel, tuningController, scheduleModel, switchModel, activityModel: agentActivityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
+        onReloadProfile: () => requestAgentRoster(),
+        onSetPmEligibility: (memberId, eligible) => requestAgentRoster({ kind: "set_pm_eligibility", member_id: memberId, eligible }),
+        onSelectPm: memberId => requestAgentRoster({ kind: "select_pm", member_id: memberId }),
+        onNavigateProject: projectKey => window.location.assign(projectUrlPath(projectKey)),
         onRenameMember: editAgentMemberName,
         onRetryName: retryAgentMemberName,
-        onAddMember: (agentId, name) => {
+        onAddMember: (agentId, name, pmEligible) => {
           applyAgentRosterError({ project_key: routeProjectKey, message: null });
-          requestAgentRoster({ kind: "add", agent_id: agentId, name });
+          requestAgentRoster({ kind: "add", agent_id: agentId, name, pm_eligible: pmEligible });
         },
         onRestMember: memberId => requestAgentRoster({ kind: "rest", member_id: memberId }),
         onSwitch: requestAgentSwitch,
