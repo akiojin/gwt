@@ -414,3 +414,46 @@ Feedback Issue #6635 records the complete output. PM ruling `db103f30` directs
 backend canonical verification first, followed by the original headed gate
 after Issue #6622 is delivered. Parent AC-1/2/3 and overall delivery remain
 unproven; this record does not replace headed, required CI or base inclusion.
+
+### Resume checkpoint (2026-11-02)
+
+The previous four commits were preserved and merged with fetched develop at
+`ef7fdfe67d3a266ee8a0a3cafd7e137f935b6308`, including the delivered Issue
+#6622 source. The current managed caller now has a normal hook completion.
+Checkout `hook.doctor` reports current/converged/normal, but still returns
+`unknown` with only `ledger_unavailable`. Host diagnostics identify September
+corruption rows with November 2 read-time timestamps. This separate reader
+problem is reported to Issue #1935 and existing feedback Issue #6635; no
+ledger, completion, authority or preflight condition was changed.
+
+The existing Windows functional runner used a fabricated missing runtime and
+legacy health checks. It now runs typed managed-browser doctor checks before
+launch and after readiness. Only doctor children receive the original caller
+environment; GUI, daemon and Playwright children retain their isolation.
+Before/post preflight observations are saved without source credentials.
+The focused regression first proved missing typed evidence was accepted.
+Review also exposed PowerShell string/number and case coercion; its separate
+RED accepted a string schema. The final direct test accepts normal evidence
+and rejects seven invalid observations. Independent final review found no
+blocking issues. The twelve-Agent workload and owned-PID cleanup are retained.
+
+Canonical record `vrr-988afe482cd64d438ac4c203259836ec` belongs to the merge
+head above plus the then-uncommitted runner, before the final coercion/depth
+review fixes. Record-file SHA256:
+`6595ddecf8fdd4a1bef00c605ff2eded4f34ba5fb5a713c36ab8e52bbca106bb`.
+Ten commands passed, including strict workspace Clippy, the three selected
+regressions, hygiene, both checkout binaries and driver restoration. Before
+the headed command could start, canonical measurement admission refused:
+`ENVIRONMENT_INCOMPATIBLE: PID 37900 has unregistered ancestor gwt PID 22480; restart that GUI with the updated runtime before measuring`.
+The command exited 125 and two later commands were skipped. Overall is not
+PASS. This is environment incompatibility, with zero measured headed tests;
+the target runner did not launch a browser or GUI. The shared ancestor was
+not stopped, registered or bypassed. The later runner fixes passed their
+direct contract test and diff check, but still need fresh canonical evidence.
+
+EO3/EO4 remain incomplete pending normal runtime recovery, a successful
+current-source preflight, actual headed dark/light checks, final-head
+verification, Ready PR, required CI/coverage and fetched base inclusion.
+Coverage is unmeasured for this slice; it is not a threshold failure.
+User Verification Result: n/a (autonomous).
+Agent Visual Check: not run (canonical environment admission refused).
