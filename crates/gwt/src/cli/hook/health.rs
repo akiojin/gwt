@@ -1858,6 +1858,71 @@ mod browser_preflight_tests {
     }
 
     #[test]
+    fn historical_ledger_corruption_does_not_block_a_healthy_current_source() {
+        with_source(|input, session, _, runtime| {
+            let row = failure(input, Some(&session.id), runtime.updated_at);
+            gwt_core::error_ledger::record(row.clone()).unwrap();
+            let path = gwt_core::paths::gwt_error_ledger_dir().join("errors.2000-01-01.jsonl");
+            let bytes = b"{broken historical row}\n";
+            fs::write(&path, bytes).unwrap();
+            let modified = fs::metadata(&path).unwrap().modified().unwrap();
+            let result = read_managed_browser_preflight(input);
+            assert_eq!(result.result, PreflightResult::Proceed, "{result:?}");
+            assert_eq!(result.context, PreflightContext::Current);
+            assert_eq!(result.convergence, PreflightConvergence::Converged);
+            assert_eq!(
+                result.diagnostics,
+                vec![RetainedHookDiagnostic {
+                    id: row.id,
+                    classification: RetainedHookClassification::Recovered,
+                }]
+            );
+            assert!(gwt_core::error_ledger::list_since(None)
+                .unwrap()
+                .iter()
+                .any(|row| {
+                    row.kind == ErrorKind::LedgerCorruption
+                        && row.context["ledger_file"] == "errors.2000-01-01.jsonl"
+                }));
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            assert_eq!(fs::metadata(path).unwrap().modified().unwrap(), modified);
+        });
+    }
+
+    #[test]
+    fn current_uncertain_and_unreadable_ledger_sources_still_fail_closed() {
+        with_source(|input, _, _, _| {
+            let dir = gwt_core::paths::gwt_error_ledger_dir();
+            fs::create_dir_all(&dir).unwrap();
+            let now = chrono::Utc::now();
+            for name in [
+                format!("errors.{}.jsonl", now.date_naive()),
+                format!(
+                    "errors.{}.jsonl",
+                    (now + chrono::Duration::days(1)).date_naive()
+                ),
+                "errors.unknown.jsonl".to_string(),
+                "errors.2026-02-30.jsonl".to_string(),
+            ] {
+                let path = dir.join(&name);
+                fs::write(&path, b"{broken}\n").unwrap();
+                let result = read_managed_browser_preflight(input);
+                assert_eq!(
+                    result.result,
+                    PreflightResult::Unknown,
+                    "{name}: {result:?}"
+                );
+                assert!(result.reasons.contains(&PreflightReason::LedgerUnavailable));
+                fs::remove_file(path).unwrap();
+            }
+            fs::create_dir(dir.join("errors.unreadable.jsonl")).unwrap();
+            let result = read_managed_browser_preflight(input);
+            assert_eq!(result.result, PreflightResult::Unknown, "{result:?}");
+            assert!(result.reasons.contains(&PreflightReason::LedgerUnavailable));
+        });
+    }
+
+    #[test]
     fn blocked_missing_old_equal_and_backward_completion_cannot_proceed() {
         with_source(|input, session, path, runtime| {
             let at = runtime.last_completed_hook_event_at.unwrap();
