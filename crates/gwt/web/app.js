@@ -1796,6 +1796,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
               recent_projects: [],
             });
             if (appState.active_tab_id !== null && nextAppState.active_tab_id !== appState.active_tab_id) splitSurfaces?.close();
+            worksSurface?.prepareWorkspaceReconciliation(nextAppState);
             appState = nextAppState;
             // Rebind before rendering can emit requests for the new project.
             connectSocket();
@@ -3052,7 +3053,107 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         }
       }
 
+      function currentNativeWindow(windowId, state = appState) {
+        return (state.tabs || []).filter(tab => tab.project_key === routeProjectKey)
+          .flatMap(tab => tab.workspace?.windows || []).find(data => data.id === windowId);
+      }
+
+      function nativeSessionIdentity(windowId, identity = null) {
+        const data = currentNativeWindow(windowId);
+        return { projectKey: routeProjectKey, window_id: windowId, session_id: identity?.session_id ?? data?.session_id,
+          hostId: identity?.hostId };
+      }
+
+      function sameNativeSession(left, right) {
+        return left?.projectKey === right?.projectKey && left?.window_id === right?.window_id
+          && left?.session_id === right?.session_id
+          && (!left?.hostId || !right?.hostId || left.hostId === right.hostId);
+      }
+
+      function disposeTerminalRuntime(windowId, expectedRuntime, expectedRoot) {
+        if (terminalMap.get(windowId) !== expectedRuntime || expectedRuntime?.terminalContainer !== expectedRoot) return false;
+        if (expectedRuntime.activationFrame !== null) cancelAnimationFrame(expectedRuntime.activationFrame);
+        terminalViewportRefreshScheduler?.clear(windowId);
+        expectedRuntime.cleanup?.();
+        expectedRuntime.terminal.dispose();
+        terminalMap.delete(windowId);
+        decoderMap.delete(windowId);
+        pendingOutputMap.delete(windowId);
+        pendingSnapshotMap.delete(windowId);
+        terminalOutputBatcher.clear(windowId);
+        renderedTerminalPackets.delete(windowId);
+        removePmWindowState(windowId);
+        const previous = worksPreviousHosts.get(windowId);
+        if (previous?.runtime === expectedRuntime) worksPreviousHosts.delete(windowId);
+        return true;
+      }
+
+      function recordWorksPreviousHost(windowId, runtime, root, container, readOnly, identity) {
+        const previous = worksPreviousHosts.get(windowId);
+        if (previous && previous.runtime !== runtime) return;
+        worksPreviousHosts.set(windowId, { runtime, root, container, readOnly, identity });
+      }
+
+      function capturedWorksOwner(windowId, root, identity) {
+        const runtime = terminalMap.get(windowId), previous = worksPreviousHosts.get(windowId);
+        const entryIdentity = worksSurface?.nativeIdentity(windowId, root);
+        if (!runtime || !previous || previous.runtime !== runtime || previous.root !== root
+            || !sameNativeSession(runtime.nativeIdentity, identity) || !sameNativeSession(previous.identity, identity)
+            || !sameNativeSession(entryIdentity, identity)
+            || previous.identity?.hostId !== identity?.hostId || entryIdentity?.hostId !== identity?.hostId
+            || previous.identity?.runtime_incarnation !== identity?.runtime_incarnation
+            || entryIdentity?.runtime_incarnation !== identity?.runtime_incarnation) return null;
+        const currentRoot = runtime.terminalContainer;
+        const returned = currentRoot === previous.container && previous.container?.isConnected
+          && windowMap.get(windowId)?.contains(previous.container);
+        return currentRoot === root || returned ? { runtime, previous, currentRoot } : null;
+      }
+
+      function revokeWorksTerminal(windowId, root, identity) {
+        const owner = capturedWorksOwner(windowId, root, identity);
+        if (owner) reparentTerminalRuntime(windowId, owner.runtime, root, { readOnly: true });
+      }
+
+      function settleWorksTerminal(windowId, root, identity, cause) {
+        const owner = capturedWorksOwner(windowId, root, identity);
+        if (!owner) return;
+        const { runtime, previous, currentRoot } = owner;
+        const data = currentNativeWindow(windowId);
+        const activity = agentActivityModel.read();
+        const hostMatches = !activity.snapshot?.host_id || !identity.hostId || activity.snapshot.host_id === identity.hostId;
+        const projectMatches = !activity.snapshot?.project_key || activity.snapshot.project_key === routeProjectKey;
+        const sessionMatches = data && sameNativeSession(identity, nativeSessionIdentity(windowId));
+        const live = hostMatches && projectMatches && activity.count !== null && sessionMatches
+          && activity.agents.some(agent => agent.window_id === windowId && agent.session_id === identity.session_id
+            && agent.runtime_incarnation === identity.runtime_incarnation);
+        const validHost = previous?.runtime === runtime && previous.root === root
+          && sameNativeSession(previous.identity, identity) && sessionMatches
+          && previous.container?.isConnected && windowMap.get(windowId)?.contains(previous.container);
+        if (cause === "departure" && hostMatches && projectMatches && sessionMatches && !live) {
+          reparentTerminalRuntime(windowId, runtime, root, { readOnly: true });
+          return;
+        }
+        if (cause !== "unload" && hostMatches && projectMatches && validHost) {
+          reparentTerminalRuntime(windowId, runtime, previous.container,
+            { readOnly: cause === "departure" && live && runtime.isReady === true ? previous.readOnly : true });
+          if (cause !== "departure" && worksPreviousHosts.get(windowId) === previous) worksPreviousHosts.delete(windowId);
+          return;
+        }
+        if (cause === "departure" && hostMatches && projectMatches && (!data || (sessionMatches && !validHost))) {
+          reparentTerminalRuntime(windowId, runtime, root, { readOnly: true });
+          return;
+        }
+        if (disposeTerminalRuntime(windowId, runtime, currentRoot) && cause !== "unload" && data
+            && (!sessionMatches || !hostMatches)) requestSocketSnapshots();
+      }
+
       function createTerminalRuntime(windowId, terminalContainer, options = {}) {
+        let replacedSession = false;
+        const nativeIdentity = nativeSessionIdentity(windowId, options.identity);
+        const existing = terminalMap.get(windowId);
+        if (existing && !sameNativeSession(existing.nativeIdentity, nativeIdentity)) {
+          replacedSession = disposeTerminalRuntime(windowId, existing, existing.terminalContainer);
+        }
         if (options.readOnly && !options.nativeHost && worksHost && surfaceForWindow(workspaceWindowById(windowId)) === "works") {
           const runtime = terminalMap.get(windowId) || createTerminalRuntime(windowId, terminalContainer);
           if (runtime) {
@@ -3065,12 +3166,15 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           }
         }
         if (terminalMap.has(windowId)) {
-          return reparentTerminalRuntime(
-            windowId,
-            terminalMap.get(windowId),
-            terminalContainer,
-            options,
-          );
+          const runtime = terminalMap.get(windowId);
+          const owned = worksSurface?.nativeIdentity(windowId, runtime.terminalContainer);
+          if (owned && !options.nativeHost && runtime.terminalContainer !== terminalContainer) {
+            recordWorksPreviousHost(windowId, runtime, runtime.terminalContainer, terminalContainer, options.readOnly === true, owned);
+            reparentTerminalRuntime(windowId, runtime, runtime.terminalContainer, { readOnly: true });
+            return runtime;
+          }
+          if (options.identity?.hostId) runtime.nativeIdentity = nativeIdentity;
+          return reparentTerminalRuntime(windowId, runtime, terminalContainer, options);
         }
         const terminal = new Terminal({
           cursorBlink: true,
@@ -3131,6 +3235,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           send({ kind: "terminal_input", id: windowId, data });
         });
         const runtime = {
+          nativeIdentity,
           terminal,
           fitAddon,
           cleanup,
@@ -3205,6 +3310,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         // handshake then completes on the next hidden → visible
         // transition via scheduleTerminalFocusActivation.
         scheduleInitialFitHandshake(windowId);
+        if (replacedSession) requestSocketSnapshots();
 
         return runtime;
       }
@@ -4572,6 +4678,15 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       }
 
       function renderWorkspace(workspace) {
+        worksSurface?.prepareWorkspaceReconciliation(appState);
+        let replacedSession = false;
+        for (const [id, runtime] of terminalMap) {
+          const incoming = currentNativeWindow(id);
+          if (incoming && runtime.nativeIdentity?.session_id !== incoming.session_id) {
+            replacedSession = disposeTerminalRuntime(id, runtime, runtime.terminalContainer) || replacedSession;
+          }
+        }
+        if (replacedSession) requestSocketSnapshots();
         const wasReconciling = reconcilingWindowCatalog;
         reconcilingWindowCatalog = true;
         let result;
@@ -4615,17 +4730,17 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
                     const element = windowMap.get(windowId);
                     if (!element) return;
                     disposePmChat(windowId);
-                    removePmWindowState(windowId);
-                    renderedTerminalPackets.delete(windowId);
                     const runtime = terminalMap.get(windowId);
-                    if (runtime && runtime.activationFrame !== null) {
-                      cancelAnimationFrame(runtime.activationFrame);
+                    const retainNative = runtime && worksSurface?.retainsNativeRoot(windowId, runtime.terminalContainer, appState);
+                    if (runtime && !retainNative) disposeTerminalRuntime(windowId, runtime, runtime.terminalContainer);
+                    if (!runtime) {
+                      removePmWindowState(windowId);
+                      renderedTerminalPackets.delete(windowId);
+                      decoderMap.delete(windowId);
+                      pendingOutputMap.delete(windowId);
+                      pendingSnapshotMap.delete(windowId);
+                      terminalOutputBatcher.clear(windowId);
                     }
-                    terminalViewportRefreshScheduler?.clear(windowId);
-                    runtime?.cleanup?.();
-                    runtime?.terminal.dispose();
-                    terminalMap.delete(windowId);
-                    decoderMap.delete(windowId);
                     detailMap.delete(windowId);
                     windowRuntimeStateMap.delete(windowId);
                     windowRuntimeStateSinceMap.delete(windowId);
@@ -4643,9 +4758,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
                       return next;
                     });
                     renderedIssueWindowHeaderKeys.delete(windowId);
-                    pendingOutputMap.delete(windowId);
-                    pendingSnapshotMap.delete(windowId);
-                    terminalOutputBatcher.clear(windowId);
+
                     disposeProfileWindow(windowId);
                     branchListStateMap.delete(windowId);
                     boardStateMap.delete(windowId);
@@ -5522,12 +5635,10 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         if (host) { worksSurface.sync(); requestAgentRoster(); }
         else {
           for (const [id, previous] of worksPreviousHosts) {
-            const runtime = terminalMap.get(id);
-            if (runtime && previous.container.isConnected) {
-              reparentTerminalRuntime(id, runtime, previous.container, { readOnly: previous.readOnly });
+            if (worksPreviousHosts.get(id) === previous) {
+              settleWorksTerminal(id, previous.root, previous.identity, "departure");
             }
           }
-          worksPreviousHosts.clear();
           cleanupTextPreviews(true);
         }
         worksSurface.setPreviewHost(previewHost);
@@ -5535,6 +5646,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         requestAnimationFrame(() => renderWorkspace(activeWorkspace()));
       }
       worksSurface = createWorksSurface({
+        projectKey: routeProjectKey,
         systemSettingsModel,
         document,
         windowCatalogModel,
@@ -5545,12 +5657,16 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           ...data, status: catalog.runtimeStates[data.id] ?? data.status,
         })),
         isMounted: () => Boolean(worksHost),
+        onRevokeTerminal: revokeWorksTerminal,
+        onReleaseTerminal: settleWorksTerminal,
         mountTerminal: (id, root, options = {}) => {
           const runtime = terminalMap.get(id);
-          if (runtime && runtime.terminalContainer !== root && !worksPreviousHosts.get(id)?.container.isConnected) {
-            worksPreviousHosts.set(id, { container: runtime.terminalContainer, readOnly: runtime.readOnly });
+          if (runtime && runtime.terminalContainer !== root && !worksPreviousHosts.get(id)?.container?.isConnected) {
+            recordWorksPreviousHost(id, runtime, root, runtime.terminalContainer, runtime.readOnly, options.identity);
           }
-          createTerminalRuntime(id, root, { ...options, nativeHost: true });
+          const mounted = createTerminalRuntime(id, root, { ...options, nativeHost: true });
+          if (mounted && !worksPreviousHosts.has(id)) recordWorksPreviousHost(id, mounted, root, null, true, options.identity);
+          return mounted;
         },
         mountPreview: (id, root, options = {}) => {
           const terminal = terminalMap.get(id)?.terminal;

@@ -152,6 +152,103 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(works(page).locator(".works-empty")).toHaveText("No local agents are active.");
   });
 
+  test("same-identity Works keeps real xterm scrollback and input across unavailable activity, clear and catalog gaps at 400px", async ({ page }, info) => {
+    await page.setViewportSize({ width: 400, height: 900 });
+    await workRow(page, "agent-one").getByRole("button", { name: "Open terminal" }).click();
+    await expect(full(page)).toBeVisible();
+    const root = full(page).locator('.works-terminal[data-window-id="agent-one"]');
+    const input = root.locator(".xterm-helper-textarea");
+    await root.evaluate(node => {
+      (window as any).__retainedWorks = { root: node, native: node.querySelector(".xterm"), input: node.querySelector("textarea") };
+    });
+    const metrics = () => page.evaluate(() => window.__gwtTerminalTestApi!.metrics("agent-one"));
+    const received = () => page.evaluate(() => (window as any).__worksAgentsFixture.sent
+      .filter((message: any) => message.kind === "terminal_input" && message.id === "agent-one").map((message: any) => message.data));
+    const buffer = () => page.evaluate(() => window.__gwtTerminalTestApi!.bufferText("agent-one"));
+    await page.evaluate(() => {
+      (window as any).__worksAgentsFixture.echoInputForWorks();
+      (window as any).__worksAgentsFixture.output("agent-one", Array.from({ length: 220 }, (_, index) => `retained ${String(index + 1).padStart(3, "0")}\r\n`).join(""));
+    });
+    await expect.poll(buffer).toContain("retained 220");
+    await expect.poll(metrics).toMatchObject({ hasRuntime: true, isReady: true, readOnly: false, viewportRefreshPending: false });
+    await input.focus(); await page.keyboard.type("draft-T790");
+    await expect.poll(buffer).toContain("draft-T790");
+    for (const phase of ["unknown", "clear", "catalog"] as const) {
+      // Reuse the real-buffer/real-wheel method from agent-window-scroll.spec.ts;
+      // these are xterm buffer coordinates, never synthetic DOM scroll markers.
+      await page.evaluate(() => window.__gwtTerminalTestApi!.scrollToBottom("agent-one"));
+      await expect.poll(async () => { const value = await metrics(); return value.viewportY === value.baseY; }).toBe(true);
+      const bottom = await metrics(); expect(bottom.baseY).toBeGreaterThan(0);
+      const box = await root.boundingBox(); expect(box).not.toBeNull();
+      await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+      await page.mouse.wheel(0, -900);
+      await expect.poll(async () => (await metrics()).viewportY).toBeLessThan(bottom.viewportY);
+      const before = await metrics(), text = await buffer(), inputs = await received();
+      if (phase === "catalog") await openRail(page, "agents");
+      // As in terminal-input-disconnect.spec.ts, freeze the overlay grace timer
+      // while checking real keyboard input during a disconnected transport.
+      if (phase === "clear") { await page.clock.install(); await page.clock.pauseAt(new Date(Date.now() + 1000)); }
+      await page.evaluate(phase => (window as any).__worksAgentsFixture.loseWorksProof(phase), phase);
+      if (phase === "clear") await page.clock.runFor(100);
+      await expect.poll(metrics).toMatchObject({ hasRuntime: true, readOnly: true });
+      if (phase === "catalog") await openRail(page, "works");
+      await expect(full(page)).toBeVisible();
+      await expect(full(page).locator(".works-full-meta")).toContainText("Input unavailable");
+      expect(await root.evaluate(node => {
+        const saved = (window as any).__retainedWorks;
+        return node === saved.root && node.querySelector(".xterm") === saved.native && node.querySelector("textarea") === saved.input;
+      })).toBe(true);
+      expect((await metrics()).viewportY, `${phase} preserves the actual scrolled xterm viewport`).toBe(before.viewportY);
+      expect(await buffer()).toBe(text);
+      await input.focus(); await page.keyboard.type("blocked");
+      expect(await received(), `${phase} cannot forward stale keyboard input`).toEqual(inputs);
+      if (phase === "clear") await page.clock.runFor(1000);
+      await page.evaluate(phase => (window as any).__worksAgentsFixture.restoreWorksProof(phase), phase);
+      if (phase === "clear") { await page.clock.runFor(100); await page.clock.resume(); }
+      await expect.poll(metrics).toMatchObject({ hasRuntime: true, isReady: true, readOnly: false, viewportRefreshPending: false });
+      await expect(full(page)).toBeVisible();
+      expect(await root.evaluate(node => node.querySelector(".xterm") === (window as any).__retainedWorks.native)).toBe(true);
+      expect((await metrics()).viewportY).toBe(before.viewportY);
+      expect(await buffer()).toBe(text);
+      await input.focus(); await page.keyboard.type(`fresh-${phase}`);
+      await expect.poll(async () => (await received()).join("")).toContain(`fresh-${phase}`);
+      await expect.poll(buffer).toContain(`fresh-${phase}`);
+      await page.keyboard.press("Enter");
+      await expectNoHorizontalOverflow(page, ".works-full");
+      await info.attach(`works-retained-${phase}`, { body: JSON.stringify({ before, recovered: await metrics(), inputCount: (await received()).length }), contentType: "application/json" });
+    }
+    // Enable actual xterm alternate-buffer + SGR mouse tracking with terminal
+    // output. Real wheel input must report mouse events, with no PageUp fallback.
+    await page.evaluate(() => (window as any).__worksAgentsFixture.output("agent-one", "\u001b[?1049h\u001b[?1000h\u001b[?1006h"));
+    await expect(root.locator(".xterm")).toHaveClass(/enable-mouse-events/);
+    await expect.poll(async () => (await metrics()).baseY).toBe(0);
+    const mouseStart = (await received()).length;
+    const box = await root.boundingBox();
+    await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+    await page.mouse.wheel(0, -300);
+    await expect.poll(async () => (await received()).slice(mouseStart).some((data: string) => /\u001b\[<64;\d+;\d+M/.test(data))).toBe(true);
+    expect((await received()).slice(mouseStart).some((data: string) => data.includes("\u001b[5~") || data.includes("\u001b[6~"))).toBe(false);
+    await page.evaluate(() => (window as any).__worksAgentsFixture.output("agent-one", "\u001b[?1000l\u001b[?1006l\u001b[?1049l"));
+    await expect(root.locator(".xterm")).not.toHaveClass(/enable-mouse-events/);
+    await expect.poll(buffer).toContain("draft-T790");
+    await page.screenshot({ path: info.outputPath("works-retained-real-xterm-400px.png") });
+    const previousInputs = (await received()).length;
+    await page.evaluate(() => (window as any).__worksAgentsFixture.rebindForWorks());
+    await expect(full(page)).toBeHidden();
+    await expect(workRow(page, "agent-one").locator(".work-open")).toBeEnabled();
+    await workRow(page, "agent-one").locator(".work-open").click();
+    await expect(full(page)).toBeVisible();
+    expect(await full(page).locator(".xterm").evaluate(node => node !== (window as any).__retainedWorks.native)).toBe(true);
+    await expect.poll(buffer).toContain("fresh rebound snapshot");
+    expect(await buffer()).not.toContain("draft-T790");
+    await expect.poll(metrics).toMatchObject({ readOnly: false, isReady: true });
+    await full(page).locator(".xterm-helper-textarea").focus();
+    await page.keyboard.type("new-session-input");
+    await expect.poll(async () => (await received()).slice(previousInputs).join("")).toContain("new-session-input");
+    await info.attach("works-rebound-native", { body: JSON.stringify(await metrics()), contentType: "application/json" });
+
+  });
+
   test("workspace snapshots refresh Works and Agents while preserving native controls", async ({ page }, info) => {
     const terminal = works(page).locator('.work-runtime-cache[data-window-id="agent-one"] .xterm');
     await terminal.evaluate(node => { (window as any).__workspaceTerminal = node; });
@@ -845,7 +942,8 @@ async function installWorksAgentsBackend(page: Page) {
       { agent_member_id: "m-two", issues: [{ issue_number: 5004, reason: "queue_order" }] },
       { agent_member_id: "m-idle", issues: [] },
     ];
-    let socket: FixtureWebSocket;
+    let socket: FixtureWebSocket, online = true, echoInput = false, resyncText: string | null = null;
+    const sockets: FixtureWebSocket[] = [];
     const workspace = () => ({ kind: "workspace_state", workspace: { app_version: "playwright", active_tab_id: "tab-works", recent_projects: [], tabs: [{ id: "tab-works", title: "Works Agents Fixture", project_root: "/fixture", project_key: projectKey, kind: "git", workspace: { windows, viewport: { x: 0, y: 0, zoom: 1 } } }] } });
     const rosterSnapshot = () => ({ kind: "agent_roster", roster: { project_key: projectKey, revision, revision_decimal: String(revision), members, capacity: members.filter(member => member.enabled).length, recommended_capacity: 6, past_complete: true, past_contributors: [{ session_id: "s-earlier", name: "Earlier author", kind: "implementation", issue_numbers: [4000], first_posted_at: "2026-10-20T00:00:00Z", last_posted_at: "2026-10-20T02:00:00Z", post_count: 4 }], by_session: Object.fromEntries(agents.map(agent => [agent.session_id, { branch: `work/${agent.window_id}`, ahead_of_develop: 0, model: "Fixture model", provider: agent.is_pm || agent.session_id === "s-two" ? "Claude" : "Codex", last_action: "Fixture observation", elapsed_seconds: 120, warning_count: 0 }])), error: null } });
     const applyRename = (message: any) => {
@@ -880,11 +978,17 @@ async function installWorksAgentsBackend(page: Page) {
       static CONNECTING = 0; static OPEN = 1; static CLOSING = 2; static CLOSED = 3;
       readyState = FixtureWebSocket.CONNECTING;
       constructor(public readonly url: string) {
-        super(); socket = this;
-        setTimeout(() => { this.readyState = FixtureWebSocket.OPEN; this.dispatchEvent(new Event("open")); this.emit(workspace()); this.emit(rosterSnapshot()); this.emit(activity()); }, 0);
+        super(); socket = this; sockets.push(this);
+        setTimeout(() => { if (online) this.open(); }, 0);
       }
+      open() { this.readyState = FixtureWebSocket.OPEN; this.dispatchEvent(new Event("open")); this.emit(workspace()); this.emit(rosterSnapshot()); this.emit(activity()); }
       send(raw: string) {
         const message = JSON.parse(raw); sentMessages.push(message);
+        if (message.kind === "frontend_ready" && resyncText !== null) {
+          this.emit(workspace()); this.emit(activity());
+          this.emit({ kind: "terminal_snapshot", id: "agent-one", data_base64: btoa(resyncText) });
+        }
+        if (echoInput && message.kind === "terminal_input" && !message.data.startsWith("\u001b")) this.emit({ kind: "terminal_output", id: message.id, data_base64: btoa(message.data) });
         if (message.kind === "create_window" && message.preset === "settings" && !windows.some(data => data.preset === "settings")) {
           windows.push(baseWindow("settings-window", { title: "Settings", preset: "settings", z_index: 101, surface_owner: message.surface_owner }));
           this.emit(workspace());
@@ -943,6 +1047,29 @@ async function installWorksAgentsBackend(page: Page) {
     Object.defineProperty(window, "WebSocket", { configurable: true, value: FixtureWebSocket });
     (window as any).__worksAgentsFixture = {
       sent: sentMessages, members, rejectedRevisions, rejectedScheduleRevisions,
+      echoInputForWorks() { echoInput = true; },
+      rebindForWorks() {
+        windows.find(data => data.id === "agent-one").session_id = "rebound-session";
+        agents = [{ window_id: "agent-one", session_id: "rebound-session", runtime_incarnation: 9, issue_number: 4777, is_pm: false }];
+        resyncText = "fresh rebound snapshot\r\n";
+        socket.emit(workspace()); socket.emit(activity());
+      },
+      loseWorksProof(phase: string) {
+        if (phase === "clear") { online = false; sockets.filter(item => item.readyState === FixtureWebSocket.OPEN).forEach(item => item.close()); return; }
+        const event: any = phase === "unknown"
+          ? { kind: "local_agent_activity", activity: { ...activity().projection.local_agent_activity, agents: null } }
+          : workspace();
+        if (phase === "catalog") event.workspace.tabs[0].workspace.windows = windows.filter(data => data.id !== "agent-one");
+        window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: event }));
+      },
+      restoreWorksProof(phase: string) {
+        if (phase === "clear") {
+          online = true;
+          const connecting = sockets.filter(item => item.readyState === FixtureWebSocket.CONNECTING);
+          if (!connecting.length) throw new Error("transport has not created its reconnect socket");
+          connecting.forEach(item => item.open());
+        } else socket.emit(phase === "catalog" ? workspace() : activity());
+      },
       pmUnknown() { socket.emit({ ...pmStatus(), profile_revision: null, configured_agent_id: null }); },
       deferRename() { deferredRename = true; },
       releaseRename() { const message = pendingRename; pendingRename = null; if (message) applyRename(message); },
