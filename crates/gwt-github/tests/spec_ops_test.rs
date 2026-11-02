@@ -2,7 +2,8 @@
 
 use gwt_github::{
     client::{
-        fake::FakeIssueClient, IssueClient, IssueNumber, IssueSnapshot, IssueState, UpdatedAt,
+        fake::FakeIssueClient, CommentId, CommentSnapshot, IssueClient, IssueNumber, IssueSnapshot,
+        IssueState, UpdatedAt,
     },
     sections::SectionName,
     spec_ops::{SpecOps, SpecOpsError},
@@ -12,6 +13,140 @@ use tempfile::TempDir;
 
 fn n(s: &str) -> SectionName {
     SectionName(s.to_string())
+}
+
+#[test]
+fn section_markers_are_rejected_before_any_write() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let client = FakeIssueClient::new();
+    seed_spec(&client, &cache, 1, "original", "tasks");
+    let ops = SpecOps::new(client, cache);
+    ops.write_section(IssueNumber(1), &n("plan"), "original plan")
+        .unwrap();
+    for (section, content) in [
+        ("spec", "<!-- artifact:spec END -->"),
+        (
+            "plan",
+            "<!-- artifact:plan BEGIN -->\nreplacement\n<!-- artifact:plan END -->",
+        ),
+    ] {
+        let before = ops.client().fetch(IssueNumber(1), None).unwrap();
+        let calls = ops.client().call_log().len();
+        let error = ops
+            .write_section(IssueNumber(1), &n(section), content)
+            .unwrap_err();
+        assert!(matches!(error, SpecOpsError::Validation(_)), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("markers are added by the operation"),
+            "{error}"
+        );
+        assert!(!ops.client().call_log()[calls..].iter().any(|call| {
+            call.starts_with("patch_") || call.starts_with("create_") || call.starts_with("delete_")
+        }));
+        assert_eq!(ops.client().fetch(IssueNumber(1), None).unwrap(), before);
+        assert!(ops.diagnose(IssueNumber(1)).unwrap().is_empty());
+    }
+}
+
+#[test]
+fn repair_broken_spec_and_tasks_restores_diagnosis_and_editing() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let client = FakeIssueClient::new();
+    let mut snapshot = seed_spec(&client, &cache, 1, "spec", "tasks");
+    snapshot.body = "<!-- gwt-spec id=1 version=1 -->\n<!-- sections:\nspec=body\ntasks=comment:7\n-->\n<!-- artifact:spec BEGIN -->\n<!-- artifact:spec BEGIN -->\nspec\n<!-- artifact:spec END -->\n<!-- artifact:spec END -->\n".into();
+    snapshot.comments.push(CommentSnapshot {
+        id: CommentId(7),
+        body: "<!-- artifact:tasks BEGIN -->\n<!-- artifact:tasks BEGIN -->\ntasks\n<!-- artifact:tasks END -->\n<!-- artifact:tasks END -->\n".into(),
+        updated_at: UpdatedAt::new("broken"),
+    });
+    client.seed(snapshot);
+    let ops = SpecOps::new(client, cache);
+    assert!(!ops.diagnose(IssueNumber(1)).unwrap().is_empty());
+    assert_eq!(
+        ops.repair_sections(IssueNumber(1)).unwrap(),
+        vec!["body", "comment:7"]
+    );
+    assert!(ops.diagnose(IssueNumber(1)).unwrap().is_empty());
+    ops.write_section(IssueNumber(1), &n("tasks"), "repaired tasks")
+        .unwrap();
+    assert_eq!(
+        ops.read_section(IssueNumber(1), &n("tasks")).unwrap(),
+        "repaired tasks"
+    );
+}
+
+#[test]
+fn archive_explicit_orphan_preserves_payload_and_active_sections() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let client = FakeIssueClient::new();
+    let original = seed_spec(&client, &cache, 1, "current spec", "current tasks");
+    let orphan = client
+        .create_comment(
+            IssueNumber(1),
+            "<!-- artifact:tasks BEGIN -->\nold tasks\n\nliteral artifact:tasks stays\n<!-- artifact:tasks END -->",
+        )
+        .unwrap();
+    let ops = SpecOps::new(client, cache);
+    assert!(!ops.diagnose(IssueNumber(1)).unwrap().is_empty());
+
+    assert_eq!(
+        ops.archive_orphan_comments(IssueNumber(1), &[orphan.id.0])
+            .unwrap(),
+        vec![format!("comment:{}", orphan.id.0)]
+    );
+
+    assert_eq!(
+        ops.client().comments(IssueNumber(1))[0].body,
+        "<!-- archived-artifact:tasks BEGIN -->\nold tasks\n\nliteral artifact:tasks stays\n<!-- archived-artifact:tasks END -->"
+    );
+    let gwt_github::client::FetchResult::Updated(after) =
+        ops.client().fetch(IssueNumber(1), None).unwrap()
+    else {
+        panic!("expected unconditional snapshot");
+    };
+    assert_eq!(after.body, original.body);
+    assert_eq!(
+        ops.read_section(IssueNumber(1), &n("tasks")).unwrap(),
+        "current tasks"
+    );
+    assert!(ops.diagnose(IssueNumber(1)).unwrap().is_empty());
+}
+
+#[test]
+fn archive_validates_all_ids_before_touching_an_orphan() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let client = FakeIssueClient::new();
+    seed_spec(&client, &cache, 1, "spec", "tasks");
+    let ops = SpecOps::new(client, cache);
+    let referenced = ops
+        .write_section(IssueNumber(1), &n("plan"), "current plan")
+        .unwrap();
+    let orphan = ops
+        .client()
+        .create_comment(
+            IssueNumber(1),
+            "<!-- artifact:tasks BEGIN -->\nold tasks\n<!-- artifact:tasks END -->",
+        )
+        .unwrap();
+    let before = ops.client().fetch(IssueNumber(1), None).unwrap();
+    let call_count = ops.client().call_log().len();
+
+    let error = ops
+        .archive_orphan_comments(IssueNumber(1), &[orphan.id.0, referenced.comment_ids[0]])
+        .unwrap_err();
+
+    assert!(matches!(error, SpecOpsError::Validation(_)), "{error}");
+    assert!(error.to_string().contains("referenced"), "{error}");
+    assert!(!ops.client().call_log()[call_count..].iter().any(|call| {
+        call.starts_with("patch_") || call.starts_with("create_") || call.starts_with("delete_")
+    }));
+    assert_eq!(ops.client().fetch(IssueNumber(1), None).unwrap(), before);
 }
 
 fn mk_body(spec: &str, tasks: &str) -> String {

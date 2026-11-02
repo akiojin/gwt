@@ -1991,6 +1991,13 @@ JSON
   Section writes serialize writers sharing the host cache and check fresh body
   content before replacing the index; cross-host/external writes and unknown
   network outcomes are outside this guarantee.
+  Section edit bodies must omit artifact markers; the operation adds them and
+  rejects marker-bearing input before writing. `issue.spec.repair` repairs
+  duplicated markers. After confirming that an old orphan artifact has been
+  superseded, pass its comment ID in `archive_comments` to the repair operation
+  (for example, `{"number":1784,"archive_comments":[12345]}`). This preserves
+  the comment text and retires only its outer markers; indexed comments are
+  refused. Run `issue.spec.lint` again to confirm index health.
 
 ```bash
 gwtd <<'JSON'

@@ -144,6 +144,15 @@ impl<C: IssueClient> SpecOps<C> {
         name: &SectionName,
         content: &str,
     ) -> Result<WriteReceipt, SpecOpsError> {
+        // The operation adds the wrappers. Reject both complete and broken
+        // markers before any mutation, including an in-place comment PATCH.
+        if !matches!(crate::sections::extract_sections(content), Ok(sections) if sections.is_empty())
+        {
+            return Err(SpecOpsError::Validation(
+                "artifact markers are added by the operation; do not include them in section content"
+                    .into(),
+            ));
+        }
         let _writer_lock = self.cache.lock_spec_write(number)?;
         // updatedAt has second granularity: never use a conditional read here.
         self.force_refresh_cache(number)?;
@@ -479,6 +488,120 @@ impl<C: IssueClient> SpecOps<C> {
         // Re-read unconditionally so the cache drops the stale parse error.
         self.force_refresh_cache(number)?;
         Ok(repaired)
+    }
+
+    /// Retire explicitly selected orphan artifacts without deleting their payload.
+    /// Referenced comments and active section content must remain unchanged.
+    pub fn archive_orphan_comments(
+        &self,
+        number: IssueNumber,
+        comment_ids: &[u64],
+    ) -> Result<Vec<String>, SpecOpsError> {
+        if comment_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let _writer_lock = self.cache.lock_spec_write(number)?;
+        let parse = |snapshot: &IssueSnapshot| {
+            let comments = snapshot
+                .comments
+                .iter()
+                .map(|comment| BodyComment {
+                    id: comment.id.0,
+                    body: comment.body.clone(),
+                })
+                .collect::<Vec<_>>();
+            crate::body::SpecBody::parse(&snapshot.body, &comments)
+        };
+        let snapshot = self.fetch_fresh(number)?;
+        let original = parse(&snapshot)?;
+        let mut archives: Vec<(CommentId, String, String)> = Vec::new();
+        // Validate the entire selection before the first mutation.
+        for id in comment_ids {
+            if original.sections_index.0.values().any(
+                |location| matches!(location, SectionLocation::Comments(ids) if ids.contains(id)),
+            ) {
+                return Err(SpecOpsError::Validation(format!(
+                    "comment:{id} is referenced by the active SPEC index; cannot archive it"
+                )));
+            }
+            let comment = snapshot
+                .comments
+                .iter()
+                .find(|comment| comment.id.0 == *id)
+                .ok_or_else(|| SpecOpsError::Validation(format!("comment:{id} not found")))?;
+            let sections = crate::sections::extract_sections(&comment.body).map_err(|error| {
+                SpecOpsError::Validation(format!(
+                    "comment:{id} has malformed artifact markers: {error}"
+                ))
+            })?;
+            let [section] = sections.as_slice() else {
+                return Err(SpecOpsError::Validation(format!(
+                    "comment:{id} must contain one unmarked orphan artifact"
+                )));
+            };
+            let begin = format!("<!-- artifact:{} BEGIN -->", section.name);
+            let end = format!("<!-- artifact:{} END -->", section.name);
+            if section.part.is_some()
+                || !original.sections.contains_key(&section.name)
+                || !comment.body.trim().starts_with(&begin)
+                || !comment.body.trim().ends_with(&end)
+            {
+                return Err(SpecOpsError::Validation(format!(
+                    "comment:{id} must be an unmarked canonical artifact for an active section"
+                )));
+            }
+            let archived = comment
+                .body
+                .replacen(
+                    &begin,
+                    &format!("<!-- archived-artifact:{} BEGIN -->", section.name),
+                    1,
+                )
+                .replacen(
+                    &end,
+                    &format!("<!-- archived-artifact:{} END -->", section.name),
+                    1,
+                );
+            if !archives.iter().any(|(existing, _, _)| existing.0 == *id) {
+                archives.push((comment.id, comment.body.clone(), archived));
+            }
+        }
+        for (id, expected, archived) in &archives {
+            let fresh = self.fetch_fresh(number)?;
+            if fresh.body != snapshot.body
+                || fresh
+                    .comments
+                    .iter()
+                    .find(|comment| comment.id == *id)
+                    .map(|comment| comment.body.as_str())
+                    != Some(expected.as_str())
+                || parse(&fresh)? != original
+            {
+                return Err(SpecOpsError::ConcurrentWrite);
+            }
+            self.client.patch_comment(*id, archived)?;
+        }
+        let fresh = self.fetch_fresh(number)?;
+        self.cache.write_snapshot(&fresh)?;
+        if fresh.body != snapshot.body
+            || parse(&fresh)? != original
+            || archives.iter().any(|(id, _, archived)| {
+                fresh
+                    .comments
+                    .iter()
+                    .find(|comment| comment.id == *id)
+                    .map(|comment| &comment.body)
+                    != Some(archived)
+            })
+        {
+            return Err(SpecOpsError::Operation(
+                "orphan artifact archive readback did not preserve the expected comments and active sections".into(),
+            ));
+        }
+        Ok(archives
+            .iter()
+            .map(|(id, _, _)| format!("comment:{}", id.0))
+            .collect())
     }
 
     /// Conditionally refetch the Issue so the cache reflects the latest labels

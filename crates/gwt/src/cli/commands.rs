@@ -79,6 +79,8 @@ pub enum IssueCommand {
     },
     SpecRepair {
         number: u64,
+        /// Explicit orphan artifact comments whose payload should be archived.
+        archive_comments: Vec<u64>,
     },
     /// Issue #4541: run the deterministic SPEC artifact lint and, unless
     /// `snapshot` is off, finalize the Intake Inspection Snapshot with the

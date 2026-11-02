@@ -687,6 +687,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }),
         "issue.spec.repair" => CliCommand::Issue(IssueCommand::SpecRepair {
             number: required_u64(params, "number")?,
+            archive_comments: optional_u64_vec(params, "archive_comments")?,
         }),
         "issue.cache.repair" => CliCommand::Issue(IssueCommand::CacheRepair {
             number: required_u64(params, "number")?,
@@ -7153,6 +7154,18 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn issue_spec_repair_accepts_explicit_archive_comments() {
+        assert!(matches!(
+            ok(
+                "issue.spec.repair",
+                json!({"number": 3590, "archive_comments": [5565328835u64]})
+            ),
+            CliCommand::Issue(IssueCommand::SpecRepair { number: 3590, archive_comments })
+                if archive_comments == vec![5565328835]
+        ));
     }
 
     #[test]

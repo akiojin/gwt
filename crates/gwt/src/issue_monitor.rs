@@ -4949,6 +4949,10 @@ pub struct IssueMonitorInboxSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dependency: Option<IssueMonitorDependencyStatus>,
     pub issue_number: u64,
+    /// A SPEC parse failure that needs artifact repair. Diagnostic only:
+    /// readiness remains retryable, so fixing the SPEC clears this reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_human_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_tier: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -14953,6 +14957,14 @@ impl IssueMonitorState {
                     IssueMonitorInboxSummary {
                         dependency: item.dependency.clone(),
                         issue_number: item.issue.number,
+                        needs_human_reason: item
+                            .exclusion_reason
+                            .as_ref()
+                            .filter(|reason| {
+                                item.state == MonitorInboxState::NotReady
+                                    && reason.contains("targeted refresh parse failed:")
+                            })
+                            .cloned(),
                         state: item.state,
                         github_state: item.issue.state,
                         issue_updated_at: item.issue.updated_at.clone(),
@@ -26856,6 +26868,7 @@ mod tests {
                 needs_human: Vec::new(),
                 released: Vec::new(),
                 inbox: vec![IssueMonitorInboxSummary {
+                    needs_human_reason: None,
                     dependency: None,
                     launch_tier: None,
                     landing_tier: None,

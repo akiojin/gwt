@@ -5174,6 +5174,42 @@ pub(crate) mod tests {
         );
     }
 
+    #[test]
+    fn broken_spec_reason_reaches_monitor_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path().to_path_buf());
+        let mut broken = structured_spec(42, "2026-09-16T02:35:00Z", "Plan", "- [ ] T-001");
+        broken.body = broken.body.replace(
+            "<!-- artifact:tasks BEGIN -->",
+            "<!-- artifact:tasks BEGIN -->\n<!-- artifact:tasks BEGIN -->",
+        );
+        cache.write_snapshot(&broken).unwrap();
+        let (issues, errors) = issue_monitor_candidates_with_readiness(
+            vec![live_issue(42, &["gwt-spec"], Some("2026-09-16T02:35:00Z"))],
+            dir.path(),
+            |_| Ok(()),
+        );
+        assert_eq!(errors.len(), 1);
+        let mut monitor = test_monitor(crate::IssueMonitorConfig::default());
+        monitor.record_candidate(issues[0].clone());
+        monitor.record_readiness_refresh_failures(&errors);
+        let status = serde_json::to_value(monitor.agent_status()).unwrap();
+        let row = &status["inbox"][0];
+        assert_eq!(row["state"], "not_ready");
+        assert!(row["needs_human_reason"]
+            .as_str()
+            .unwrap()
+            .contains("nested BEGIN"));
+        assert!(monitor.queued_issue_numbers().is_empty());
+
+        // A repaired revision is re-evaluated normally; diagnostics never park it.
+        let mut repaired = issues[0].clone();
+        repaired.readiness = IssueMonitorReadiness::ReadyWithOpenTasks;
+        monitor.record_candidate(repaired);
+        let status = serde_json::to_value(monitor.agent_status()).unwrap();
+        assert!(status["inbox"][0].get("needs_human_reason").is_none());
+    }
+
     /// Issue #4436 AC-3: the legacy create-body transport left `gwt-spec`
     /// Issues whose section index is `{}`. No structured artifact can ever be
     /// read from one, so classifying it `NotReady` parked it with nothing to

@@ -202,7 +202,10 @@ pub(super) fn parse(args: &[&String]) -> Result<IssueCommand, CliParseError> {
         let number = args[1]
             .parse()
             .map_err(|_| CliParseError::InvalidNumber(args[1].clone()))?;
-        return Ok(IssueCommand::SpecRepair { number });
+        return Ok(IssueCommand::SpecRepair {
+            number,
+            archive_comments: Vec::new(),
+        });
     }
 
     let number = head
@@ -456,7 +459,10 @@ pub(super) fn run<E: CliEnv>(
             }
             0
         }
-        IssueCommand::SpecRepair { number } => {
+        IssueCommand::SpecRepair {
+            number,
+            archive_comments,
+        } => {
             let cache = Cache::new(env.cache_root());
             let ops = SpecOps::new(
                 ClientRef {
@@ -465,15 +471,23 @@ pub(super) fn run<E: CliEnv>(
                 cache,
             );
             let repaired = ops.repair_sections(IssueNumber(number))?;
-            if repaired.is_empty() {
+            let archived = ops.archive_orphan_comments(IssueNumber(number), &archive_comments)?;
+            if repaired.is_empty() && archived.is_empty() {
                 out.push_str(&format!(
                     "refreshed cache for Issue #{number}; no artifact needed repair\n"
                 ));
-            } else {
+            } else if !repaired.is_empty() {
                 out.push_str(&format!(
                     "repaired {} artifact(s) for Issue #{number}: {}\n",
                     repaired.len(),
                     repaired.join(", ")
+                ));
+            }
+            if !archived.is_empty() {
+                out.push_str(&format!(
+                    "archived {} orphan artifact comment(s) for Issue #{number}: {} (payload preserved)\n",
+                    archived.len(),
+                    archived.join(", ")
                 ));
             }
             0
