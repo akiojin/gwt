@@ -5,6 +5,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { expect, test, type Page } from "@playwright/test";
 import { startIssueQueueLaunchFixture } from "./_helpers/issue-queue-launch";
 import { gotoLiveGwt, sendLiveGwtEvent } from "./_helpers/live-gwt";
+import { startManagedBrowserSource } from "./_helpers/managed-browser-source";
 
 test.use({ headless: false, viewport: { width: 1600, height: 1100 } });
 
@@ -12,6 +13,19 @@ test.describe("Issue #3590 closed owner terminal convergence", () => {
   test.skip(process.env.GWT_PLAYWRIGHT_CLOSED_OWNER !== "1",
     "requires checkout binaries and isolated provider/loopback GitHub fixtures");
   test.setTimeout(240_000);
+
+  let managedSource: Awaited<ReturnType<typeof startManagedBrowserSource>> | undefined;
+  test.beforeAll(async ({ browser }, info) => {
+    test.setTimeout(240_000);
+    managedSource = await startManagedBrowserSource(browser, info);
+  });
+  test.afterAll(async () => {
+    test.setTimeout(240_000);
+    const failures: unknown[] = [];
+    try { await managedSource?.postAudit(); } catch (error) { failures.push(error); }
+    try { await managedSource?.stop(); } catch (error) { failures.push(error); }
+    if (failures.length) throw new AggregateError(failures, "managed source post/cleanup failed:\n" + failures.map(String).join("\n").slice(0, 16384));
+  });
 
   test("closes only the idle completed owner with a current bookkeeping warning", async ({ page }, info) => {
     const fixture = await startIssueQueueLaunchFixture(info, {

@@ -1641,12 +1641,24 @@ PM ウィンドウの **Reports** は、明示的に投稿された Markdown の
 使います。報告は `~/.gwt/projects/<project-hash>/project-state/pm-reports.jsonl` に保存します。
 指示を記録した Q&A は同じ machine-local project store の `project-state/user-instructions.json`
 を正本とし、1 回の原子的な保存で報告と指示を保持します。再起動後も保持し、自動失効・件数制限は
-ありません。空でない報告本文は 1 件 64 KiB までです。
+ありません。Q&A 本文と各構造化イベントの詳細は 64 KiB、構造化投稿全体は 256 KiB までです。
 
-登録済み PM は `pm.report.post` の `kind`（`progress` / `decision` / `blocker` / `qa`）と
-`body` で投稿します。`qa` には、ユーザーの質問・指示を要約した空でない `question` が必須で、
-`body` に回答・取った行動・結果を記載します。`pm.report.list` で履歴を読み出せます。標準の gwtd JSON envelope を
-使用します。投稿成功は永続化の確認を意味し、失敗時は明示的なエラーを返します。
+PM の更新は共通の短い概要で表示し、**Details** を開くと説明と参照をすべて読めます。
+**Copy** は概要と詳細の両方を含みます。同じ状態の観測では、再起動や Claude / Codex の
+切り替え後も報告を増やしません。新しい重大障害・判断依頼は即時に表示し、通常の更新は
+1 件の digest にまとめます。解決・再発・意味のある変化は新しい報告になります。
+
+登録済み PM の Q&A 以外の更新は、`pm.report.post` の version 付き `submission` に
+`request_id`、project 内の event / episode identity、期待 revision、型付き状態、`summary`、
+省略のない `details`、`refs` を渡します。`pm.report.list` は履歴・event revision・投稿 receipt を
+返します。同じ request の再送は保存済み receipt を返し、異なる payload や古い revision は
+エラーになります。receipt は永続的な受理・抑制の記録で、ユーザーの承認や作業完了の証明では
+ありません。本文だけの Q&A 以外の投稿は、ユーザーが直接使う CLI の互換経路に限ります。
+Q&A は `kind: qa`、`question`、`body` と指示の一体保存を維持し、明示的に求められた詳細回答を
+省略しません。
+
+旧報告履歴も読み出せます。構造化報告を初めて保存した後は、この版以降で報告を読み書きして
+ください。旧版は新 journal 形式を拒否し、既存データをそのまま保持します。履歴は削除しません。
 
 PM の Q&A 投稿には、原文 `original`、種別 `kind`（`standing` / `one_off` / `question`）、
 `actions`、`issue_numbers` を持つ `instruction` を含めます。任意の `supersedes` に旧指示の ID を

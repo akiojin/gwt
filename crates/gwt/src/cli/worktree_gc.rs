@@ -295,7 +295,7 @@ pub(crate) fn run_gc_with_pressure(
         })
         .collect();
     let root_paths: Vec<PathBuf> = roots.iter().map(|(root, _)| root.clone()).collect();
-    let system = process_table();
+    let system = process_table().map_err(unexpected)?;
     let processes = scan_processes(&system, &root_paths);
     let hosts = live_gwt_hosts(&system);
     let tracked = scan_tracked_launches(&gwt_core::paths::gwt_sessions_dir(), &hosts);
@@ -389,7 +389,7 @@ pub(crate) fn run_gc_with_pressure(
             // A sweep can take many minutes. Re-read physical processes and
             // live pane/launch sidecars while holding the deletion boundary;
             // enumeration's snapshot cannot authorize a later deletion.
-            let system = process_table();
+            let system = process_table().map_err(unexpected)?;
             let roots = std::slice::from_ref(&candidate.worktree);
             let processes = scan_processes(&system, roots);
             let hosts = live_gwt_hosts(&system);
@@ -681,8 +681,9 @@ fn git_stdout(cwd: &Path, args: &[&str]) -> Result<String, String> {
 /// One snapshot of the host's processes with their executables and working
 /// directories. Both the worktree attribution and the launch-liveness check
 /// read it, so the sweep judges every worktree against the same instant.
-fn process_table() -> System {
-    let mut system = System::new();
+fn process_table() -> Result<System, String> {
+    let mut system =
+        System::new().map_err(|error| format!("process census unavailable: {error}"))?;
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
         true,
@@ -690,7 +691,7 @@ fn process_table() -> System {
             .with_exe(UpdateKind::Always)
             .with_cwd(UpdateKind::Always),
     );
-    system
+    Ok(system)
 }
 
 /// The gwt Host executable. It is the only process that creates a runtime

@@ -1480,6 +1480,8 @@ pub(crate) enum IssueMonitorLaunchDeliveryState {
     Materializing {
         window_id: String,
         started_at: std::time::Instant,
+        // A successful launch retains its immutable operation in this owner epoch.
+        accepted_owner: Option<gwt::daemon_subscriber::ProjectOwnerIdentity>,
     },
     LaunchedPendingAck {
         window_id: String,
@@ -10045,6 +10047,7 @@ impl AppRuntime {
                 .filter(|lease| {
                     lease.owner.as_ref().is_some_and(|owner| {
                         gwt::process::is_descendant_of(owner.pid, std::process::id())
+                            .unwrap_or(true)
                     })
                 })
                 .and_then(|lease| lease.lease_id)
@@ -13851,7 +13854,10 @@ fn work_branches_with_live_processes(targets: &[WorkBranchScanTarget]) -> HashSe
         return HashSet::new();
     }
 
-    let mut system = System::new();
+    let Ok(mut system) = System::new() else {
+        // An unavailable census cannot authorize collection of any worktree.
+        return worktrees.into_iter().map(|(branch, _)| branch).collect();
+    };
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
         true,
@@ -15314,13 +15320,35 @@ impl AppRuntime {
                     self.apply_owner_window_removed_projection(&context, &window_id)
                 }
                 Ok(RemoteOwnerLaunchOutcome::Runtime(snapshot, session)) => {
-                    self.pending_launch_feedback_contexts.remove(&window_id);
                     let client = client_cell
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .as_ref()
                         .and_then(|value| value.as_ref().ok())
                         .cloned();
+                    let delivery_id = self
+                        .pending_launch_feedback_contexts
+                        .get(&window_id)
+                        .and_then(|feedback| feedback.issue_monitor_delivery_id.as_ref());
+                    match (
+                        client.as_ref().and_then(|client| client.identity()),
+                        delivery_id.and_then(|id| self.issue_monitor_launch_deliveries.get_mut(id)),
+                    ) {
+                        (
+                            Some(identity),
+                            Some(IssueMonitorLaunchDeliveryState::Materializing {
+                                window_id: pending,
+                                accepted_owner,
+                                ..
+                            }),
+                        ) if pending == &window_id => {
+                            // Inventory may already have installed this runtime. Keep the
+                            // native operation's owner before consuming its GUI feedback.
+                            *accepted_owner = Some(identity.clone());
+                        }
+                        _ => {}
+                    }
+                    self.pending_launch_feedback_contexts.remove(&window_id);
                     let Some(client) = client else {
                         return self.status_events(
                             window_id,
@@ -15536,6 +15564,32 @@ impl AppRuntime {
             } else {
                 detail.into()
             };
+            if let Some(delivery_id) = feedback.issue_monitor_delivery_id.as_ref() {
+                if matches!(
+                    self.issue_monitor_launch_deliveries.get(delivery_id),
+                    Some(IssueMonitorLaunchDeliveryState::Materializing { window_id: pending, .. })
+                        if pending == window_id
+                ) {
+                    // Keep the original failure out of placeholder recovery while
+                    // the physical owner retains its delivery/cleanup authority.
+                    let fresh_execution = self.failed_fresh_execution_monitor_candidate(
+                        Some(&context.project_root),
+                        issue_number,
+                        delivery_id,
+                    );
+                    self.issue_monitor_launch_deliveries.insert(
+                        delivery_id.clone(),
+                        IssueMonitorLaunchDeliveryState::LaunchFailed {
+                            message: message.clone(),
+                            session_mode: feedback
+                                .issue_monitor_session_mode
+                                .unwrap_or(gwt_agent::SessionMode::Normal),
+                            retryable: true,
+                            fresh_execution,
+                        },
+                    );
+                }
+            }
             events.push(OutboundEvent::project(
                 context.project_key.clone(),
                 BackendEvent::IssueMonitorLaunchFailed {

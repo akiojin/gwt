@@ -51,6 +51,10 @@ pub enum PmCommand {
         body: String,
         instruction: Option<Box<gwt_core::user_instruction::UserInstructionInput>>,
     },
+    ReportBatch {
+        project_root: Option<String>,
+        submission: Box<pm_report::Submission>,
+    },
     /// Read the project's reports in posting order.
     ReportList { project_root: Option<String> },
     /// Replace the displayed PM status while retaining its authored history.
@@ -368,6 +372,31 @@ pub(super) fn run<E: CliEnv>(
             out.push('\n');
             Ok(0)
         }
+        PmCommand::ReportBatch {
+            project_root,
+            submission,
+        } => {
+            let repo_path = resolve_repo_path(env, project_root);
+            if ambient_session_id().is_some() && !caller_is_registered_pm(&repo_path) {
+                return Err(refusal(
+                    "pm.report.post requires the registered PM or a direct user CLI call".into(),
+                ));
+            }
+            // Typed receipts never acknowledge an instruction/Q&A obligation.
+            let receipt = pm_report::post_submission(&repo_path, &submission).map_err(|error| {
+                refusal(format!("failed to persist PM report submission: {error}"))
+            })?;
+            if !receipt.reports.is_empty() {
+                if let Err(error) = crate::index_worker::queue_reports_index_refresh(&repo_path) {
+                    tracing::warn!(%error, "saved PM report refresh could not be queued; source polling will retry");
+                }
+            }
+            out.push_str(
+                &serde_json::json!({"schema_version":2,"ok":true,"receipt":receipt}).to_string(),
+            );
+            out.push('\n');
+            Ok(0)
+        }
         PmCommand::ReportPost {
             project_root,
             kind,
@@ -380,6 +409,9 @@ pub(super) fn run<E: CliEnv>(
                 return Err(refusal(
                     "pm.report.post requires the registered PM or a direct user CLI call".into(),
                 ));
+            }
+            if ambient_session_id().is_some() && kind != PmReportKind::Qa {
+                return Err(refusal("PM reports require a versioned submission with request_id, events, typed state and summary/details. Body-only non-Q&A is legacy direct-user CLI compatibility; read pm.report.list for event revisions.".into()));
             }
             if kind == PmReportKind::Qa
                 && (question
@@ -427,14 +459,14 @@ pub(super) fn run<E: CliEnv>(
                 }
                 input.summary = question.unwrap_or_default();
                 input.answer = body;
-                let saved = if input.authorizations.is_empty() {
-                    gwt_core::user_instruction::record(&repo_path, *input)
-                } else {
+                let saved = if ambient_session_id().is_some() || !input.authorizations.is_empty() {
                     let turn = qa_turn.as_ref().ok_or_else(|| refusal(
-                        "permission_stage=instruction: scoped instruction capture requires the current human PM turn; use pm.approval.request otherwise".into()))?;
+                        "permission_stage=instruction: PM instruction capture requires the current human PM turn; automatic prompts use structured submissions, and scoped authorization without a human turn uses pm.approval.request".into()))?;
                     let (session, turn_id) = super::hook::pm_reporting::instruction_prompt_identity(
                         &repo_path, turn, &input.original).map_err(super::io_as_api_error)?;
                     gwt_core::user_instruction::record_from_prompt(&repo_path, *input, &session, &turn_id)
+                } else {
+                    gwt_core::user_instruction::record(&repo_path, *input)
                 }.map_err(|error| {
                         SpecOpsError::from(ApiError::Unexpected(format!(
                             "failed to persist PM report: {error}"
@@ -474,13 +506,14 @@ pub(super) fn run<E: CliEnv>(
         }
         PmCommand::ReportList { project_root } => {
             let repo_path = resolve_repo_path(env, project_root);
-            let reports = pm_report::load_reports(&repo_path).map_err(|error| {
-                SpecOpsError::from(ApiError::Unexpected(format!(
-                    "failed to load PM reports: {error}"
-                )))
-            })?;
+            let (reports, journal) =
+                pm_report::load_reports_and_journal(&repo_path).map_err(|error| {
+                    SpecOpsError::from(ApiError::Unexpected(format!(
+                        "failed to load PM reports: {error}"
+                    )))
+                })?;
             out.push_str(
-                &serde_json::json!({"schema_version": 1, "ok": true, "reports": reports})
+                &serde_json::json!({"schema_version": 2, "ok": true, "reports": reports, "receipts":journal.receipts, "events":journal.events()})
                     .to_string(),
             );
             out.push('\n');

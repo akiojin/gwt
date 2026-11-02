@@ -19,7 +19,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "9.146.0"
+version = "9.147.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/akiojin/gwt"
@@ -113,7 +113,7 @@ which = "8"
 dunce = "1"
 
 # System information
-sysinfo = { version = "0.39", default-features = false, features = ["system"] }
+sysinfo = { version = "0.40", default-features = false, features = ["system"] }
 
 # File system watcher (gwt-spec issue)
 notify = "8"
