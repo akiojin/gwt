@@ -880,7 +880,10 @@ fn lint_fixture(number: u64, spec: &str, tasks: &str) -> LintFixture {
     let lock = crate::env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let home = tempfile::tempdir().expect("home");
+    let home_root = gwt_config::home::user_home().expect("isolated test home root");
+    gwt_config::home::assert_test_path(&home_root);
+    std::fs::create_dir_all(&home_root).expect("test home root");
+    let home = tempfile::tempdir_in(home_root).expect("home");
     let home_var = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
     let userprofile_var = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
     let cache = tempfile::tempdir().expect("cache");
