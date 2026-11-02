@@ -640,6 +640,7 @@ pub(crate) fn run_collect<E: CliEnv>(
             } else {
                 env.repo_path().to_path_buf()
             };
+            let repair_plan = hook::health::HookRepairPlan::for_worktree(&worktree);
             let repair = if repair {
                 Some(
                     hook::health::repair_managed_hook_configs(&worktree)
@@ -671,6 +672,7 @@ pub(crate) fn run_collect<E: CliEnv>(
                     "executable": std::env::current_exe().ok(),
                 })),
                 "repair": repair,
+                "repair_plan": repair_plan,
                 "repair_guarantee": "Regenerates managed hook configuration; trust registration and launch success require separate verification.",
                 "health": health,
             });

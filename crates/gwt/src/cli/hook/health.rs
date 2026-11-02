@@ -111,6 +111,53 @@ pub struct ManagedHookRepairOutcome {
     pub repaired: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookRepairAction {
+    MaterializeManagedGitHooks,
+    RegenerateManagedProviderConfigs,
+    VerifyCodexHookTrust,
+    StartNewAgentSession,
+}
+
+/// Describes an explicit repair request, not detected faults or completed work.
+/// Automatic steps reuse the existing managed writers and their merge semantics.
+/// Trust and adoption by running sessions are outside that configuration repair.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HookRepairPlan {
+    pub automatic: Vec<HookRepairAction>,
+    pub user_actions: Vec<HookRepairAction>,
+    pub new_session_actions: Vec<HookRepairAction>,
+}
+
+impl HookRepairPlan {
+    pub fn for_worktree(worktree_root: &Path) -> Self {
+        let runtime = crate::pm_registry::pm_runtime_dir_for_pm_worktree(worktree_root);
+        let assets = runtime.as_deref().unwrap_or(worktree_root);
+        let claude_surface = assets.join(".claude").exists();
+        let codex_surface = assets.join(".codex").exists();
+        let provider_surface = assets.join(".gwt/opencode").exists()
+            || assets.join(".gwt/openclaw").exists()
+            || assets.join(".gwt/hermes").exists();
+        let mut plan = Self {
+            automatic: vec![HookRepairAction::MaterializeManagedGitHooks],
+            user_actions: Vec::new(),
+            new_session_actions: Vec::new(),
+        };
+        if claude_surface || codex_surface || provider_surface {
+            plan.automatic
+                .push(HookRepairAction::RegenerateManagedProviderConfigs);
+            plan.new_session_actions
+                .push(HookRepairAction::StartNewAgentSession);
+        }
+        if codex_surface {
+            plan.user_actions
+                .push(HookRepairAction::VerifyCodexHookTrust);
+        }
+        plan
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookDoctorPurpose {
     ManagedBrowser,
@@ -1572,19 +1619,15 @@ fn cached_runtime_state(path: &Path) -> Arc<CachedRuntimeState> {
 }
 
 pub fn repair_managed_hook_configs(worktree_root: &Path) -> io::Result<ManagedHookRepairOutcome> {
-    let runtime = crate::pm_registry::pm_runtime_dir_for_pm_worktree(worktree_root);
-    let assets = runtime.as_deref().unwrap_or(worktree_root);
-    let claude_surface =
-        assets.join(".claude").exists() || assets.join(".claude/settings.local.json").exists();
-    let codex_surface = assets.join(".codex").exists() || assets.join(".codex/hooks.json").exists();
-    let provider_surface = assets.join(".gwt/opencode").exists()
-        || assets.join(".gwt/openclaw").exists()
-        || assets.join(".gwt/hermes").exists();
+    let plan = HookRepairPlan::for_worktree(worktree_root);
     // #4339: the Git hook directory belongs to the repository, not to any agent
     // provider, so repair it even in a worktree with no agent surface at all.
     let mut repaired = !gwt_skills::materialize_managed_git_hooks(worktree_root)?.is_empty();
 
-    if claude_surface || codex_surface || provider_surface {
+    if plan
+        .automatic
+        .contains(&HookRepairAction::RegenerateManagedProviderConfigs)
+    {
         crate::managed_assets::regenerate_existing_managed_hook_configs(worktree_root)?;
         record_managed_hook_self_healed(worktree_root)?;
         repaired = true;
