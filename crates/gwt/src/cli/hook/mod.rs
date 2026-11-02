@@ -829,26 +829,34 @@ fn option_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
 pub(super) fn append_codex_trust_health_for_doctor(
     input: &health::ManagedHookHealthInput,
     health: &mut health::ManagedHookHealth,
-) {
-    if health.status == health::ManagedHookHealthStatus::Inactive {
-        return;
-    }
+) -> serde_json::Value {
     let runtime = crate::pm_registry::pm_runtime_dir_for_pm_worktree(&input.worktree_root);
     let root = runtime.as_deref().unwrap_or(&input.worktree_root);
-    if !crate::managed_assets::managed_codex_hook_paths(root)
-        .iter()
-        .any(|path| path.exists())
+    // Runtime inactivity is independent of materialization. A shared hooks
+    // file alone must still not activate an unmaterialized linked worktree.
+    let expected_hook_paths = crate::managed_assets::managed_codex_hook_paths(root);
+    if !root.join(".codex").exists()
+        && (health.status == health::ManagedHookHealthStatus::Inactive
+            || !expected_hook_paths.iter().any(|path| path.exists()))
     {
-        return;
+        return serde_json::Value::Null;
     }
+    let mut audit = serde_json::json!({
+        "discovery_mode": crate::managed_assets::MANAGED_CODEX_HOOK_DISCOVERY_MODE.as_cli_value(),
+        "expected_hook_paths": expected_hook_paths,
+        "trust": null,
+        "error": null,
+        "recovery": "Run hook.doctor with repair:true for managed configuration, then hook.register_codex_managed_hook_trust; trust registration and launch require separate verification.",
+    });
     let Some(config_path) = default_codex_config_path() else {
+        audit["error"] = serde_json::json!("Codex hook trust config path is unavailable");
         health
             .issues
             .push("Codex hook trust config path is unavailable".to_string());
         if health.status != health::ManagedHookHealthStatus::Degraded {
             health.status = health::ManagedHookHealthStatus::NeedsAttention;
         }
-        return;
+        return audit;
     };
     let expected = input
         .expected_hook_bin
@@ -860,12 +868,20 @@ pub(super) fn append_codex_trust_health_for_doctor(
         crate::managed_assets::MANAGED_CODEX_HOOK_DISCOVERY_MODE,
         expected.as_deref(),
     ) {
-        Ok(report) => report.hooks_need_review_reason(),
-        Err(error) => Some(format!(
-            "Codex hook trust inspection failed for {} (config {}): {error}",
-            root.display(),
-            config_path.display()
-        )),
+        Ok(report) => {
+            let issue = report.hooks_need_review_reason();
+            audit["trust"] = serde_json::json!(report);
+            issue
+        }
+        Err(error) => {
+            let issue = format!(
+                "Codex hook trust inspection failed for {} (config {}): {error}",
+                root.display(),
+                config_path.display()
+            );
+            audit["error"] = serde_json::json!(issue);
+            Some(issue)
+        }
     };
     if let Some(issue) = issue {
         health.issues.push(issue);
@@ -873,6 +889,7 @@ pub(super) fn append_codex_trust_health_for_doctor(
             health.status = health::ManagedHookHealthStatus::NeedsAttention;
         }
     }
+    audit
 }
 
 fn default_codex_config_path() -> Option<std::path::PathBuf> {

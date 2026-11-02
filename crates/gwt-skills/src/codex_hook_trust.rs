@@ -48,7 +48,7 @@ fn codex_hook_trust_recovery(config_path: &Path) -> String {
     format!("{CODEX_HOOK_TRUST_RECOVERY} with `{params}` to register and verify all discovered hook files")
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct CodexHookTrustEntry {
     pub key: String,
     pub trusted_hash: String,
@@ -57,7 +57,7 @@ pub struct CodexHookTrustEntry {
 /// Issue #4071 AC-2: what the scan compared one hooks file against. A
 /// `Hooks need review` refusal quotes it so the reader can tell a command /
 /// trusted_hash mismatch from a registration that never ran.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct CodexHookTrustExpectation {
     /// The hooks file in the same form the trust keys use.
     pub hooks_path: PathBuf,
@@ -67,7 +67,7 @@ pub struct CodexHookTrustExpectation {
     pub expected_gwt_bin: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct CodexHookTrustReport {
     pub config_path: PathBuf,
     /// Current hook identities whose exact hash was observed in the config.
@@ -90,6 +90,12 @@ pub struct CodexHookTrustReport {
     pub wrote_trust_state: bool,
     /// Per-key failure reason, expected/actual command and Codex identity hash.
     pub hash_diagnostics: Vec<String>,
+    /// Diagnostic only: absent canonical event dispatchers, as `<path>:<event>`.
+    /// Explicit Codex review does not prove that an event is gwt-generated.
+    pub missing_managed_events: Vec<String>,
+    /// Diagnostic only: recognized gwt transports that differ from generation,
+    /// including exact identities a user has already reviewed in Codex.
+    pub modified_gwt_hooks: Vec<String>,
 }
 
 impl CodexHookTrustReport {
@@ -209,6 +215,7 @@ fn collect_codex_managed_hook_trust_entries_for_mode_with_expected_bin(
 struct CodexHookTrustScan {
     hooks: Vec<ScannedCodexHook>,
     expectations: Vec<CodexHookTrustExpectation>,
+    missing_managed_events: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -229,6 +236,8 @@ fn scan_codex_hook_trust_for_mode(
         let path_scan = scan_codex_hook_trust_from_path(&hooks_path, expected_gwt_bin)?;
         scan.hooks.extend(path_scan.hooks);
         scan.expectations.extend(path_scan.expectations);
+        scan.missing_managed_events
+            .extend(path_scan.missing_managed_events);
     }
     Ok(scan)
 }
@@ -242,8 +251,16 @@ fn scan_codex_hook_trust_from_path(
     hooks_path: &Path,
     expected_gwt_bin: Option<&str>,
 ) -> io::Result<CodexHookTrustScan> {
+    let key_source = codex_hook_trust_key_path(hooks_path)?;
+    let mut scan = CodexHookTrustScan {
+        missing_managed_events: MANAGED_EVENTS
+            .iter()
+            .map(|(event, _)| format!("{}:{event}", key_source.display()))
+            .collect(),
+        ..Default::default()
+    };
     if !hooks_path.exists() {
-        return Ok(CodexHookTrustScan::default());
+        return Ok(scan);
     }
 
     // Keep the resolved install as a recognized exact fallback even when a
@@ -265,7 +282,6 @@ fn scan_codex_hook_trust_from_path(
     // `E:\...` form. `std::fs::canonicalize` yields the `\\?\` verbatim
     // form there, and an entry under that key is inert. On macOS even dunce
     // resolves /var to /private/var, which also differs from Codex discovery.
-    let key_source = codex_hook_trust_key_path(hooks_path)?;
     let content = fs::read_to_string(hooks_path)?;
     let root: Value = serde_json::from_str(&content).map_err(|err| {
         io::Error::new(
@@ -275,16 +291,13 @@ fn scan_codex_hook_trust_from_path(
     })?;
 
     let Some(hooks_by_event) = root.get("hooks").and_then(Value::as_object) else {
-        return Ok(CodexHookTrustScan::default());
+        return Ok(scan);
     };
 
-    let mut scan = CodexHookTrustScan {
-        expectations: vec![CodexHookTrustExpectation {
-            hooks_path: key_source.clone(),
-            expected_gwt_bin: expected_gwt_bin.to_string(),
-        }],
-        ..CodexHookTrustScan::default()
-    };
+    scan.expectations.push(CodexHookTrustExpectation {
+        hooks_path: key_source.clone(),
+        expected_gwt_bin: expected_gwt_bin.to_string(),
+    });
     for (event_json_name, event_snake_name) in MANAGED_EVENTS {
         let Some(groups) = hooks_by_event
             .get(*event_json_name)
@@ -314,6 +327,16 @@ fn scan_codex_hook_trust_from_path(
                     continue;
                 }
                 let key = hook_key(&key_source, event_snake_name, group_index, handler_index);
+                if matcher == "*"
+                    && is_generated_gwt_event_command(
+                        command,
+                        event_json_name,
+                        Some(expected_gwt_bin),
+                    )
+                {
+                    let event_key = format!("{}:{event_json_name}", key_source.display());
+                    scan.missing_managed_events.retain(|key| key != &event_key);
+                }
                 let generated = matcher == "*"
                     && is_trusted_gwt_hook_command(
                         command,
@@ -663,8 +686,13 @@ fn hook_trust_report(
         expectations: scan.expectations,
         wrote_trust_state,
         hash_diagnostics: Vec::new(),
+        missing_managed_events: scan.missing_managed_events,
+        modified_gwt_hooks: Vec::new(),
     };
     for hook in scan.hooks {
+        if !hook.generated {
+            report.modified_gwt_hooks.push(hook.entry.key.clone());
+        }
         let stored = stored_hook_hash(root, &hook.entry.key);
         if stored == Some(hook.entry.trusted_hash.as_str()) {
             report.trusted_entries.push(hook.entry);
@@ -4051,6 +4079,14 @@ enabled = false
 
         assert_eq!(report.hooks_need_review_reason(), None, "{report:?}");
         assert_eq!(report.trusted_entries.len(), 5);
+        assert_eq!(report.modified_gwt_hooks, vec![key.clone()]);
+        assert_eq!(
+            report.missing_managed_events,
+            vec![format!(
+                "{}:Stop",
+                codex_hook_trust_key_path(&hooks_path).unwrap().display()
+            )]
+        );
         assert_eq!(
             read_codex_config(&config_path).unwrap()["hooks"]["state"][&key]["enabled"].as_bool(),
             Some(false)
@@ -4157,6 +4193,8 @@ enabled = false
         assert_eq!(report.trusted_entries.len(), 5);
         assert_eq!(report.hooks_need_review_reason(), None);
         assert!(!report.wrote_trust_state);
+        assert!(report.missing_managed_events.is_empty());
+        assert!(report.modified_gwt_hooks.is_empty());
         assert_eq!(fs::read_to_string(&config_path).unwrap(), before);
     }
 
