@@ -662,8 +662,9 @@ pub(crate) fn run_collect<E: CliEnv>(
                 input = input.with_expected_hook_bin(managed_hook_bin.clone());
             }
             let mut health = hook::health::read_managed_hook_health(&input);
-            hook::append_codex_trust_health_for_doctor(&input, &mut health);
+            let codex_hook_audit = hook::append_codex_trust_health_for_doctor(&input, &mut health);
             let mut payload = serde_json::json!({
+                "codex_hook_audit": codex_hook_audit,
                 "managed_hook_bin": managed_hook_bin,
                 "repair_writer": repair.as_ref().map(|_| serde_json::json!({
                     "pid": std::process::id(),
