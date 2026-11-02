@@ -21869,12 +21869,14 @@ exit 1
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
                 autonomous_mode: true,
-                max_active_agents: 5,
+                max_active_agents: 6,
+                allowed_labels: vec!["server".into()],
                 max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                 queued_launch_session_strategies: std::collections::BTreeMap::from([
                     (42, crate::IssueMonitorLaunchSessionStrategy::FreshRequired),
                     (45, crate::IssueMonitorLaunchSessionStrategy::FreshRequired),
                     (46, crate::IssueMonitorLaunchSessionStrategy::FreshRequired),
+                    (48, crate::IssueMonitorLaunchSessionStrategy::FreshRequired),
                 ]),
                 ..Default::default()
             },
@@ -21882,10 +21884,12 @@ exit 1
         monitor.set_source_repository(Some(("akiojin", "gwt")));
         let now = chrono::Utc::now().to_rfc3339();
         let mut candidates = Vec::new();
-        for number in [42, 43, 44, 45, 46] {
+        for number in [42, 43, 44, 45, 46, 48] {
             let mut issue = sample_issue_monitor_issue(number);
             issue.author_login = Some("akiojin".into());
-            issue.labels.push("gwt-spec".into());
+            issue
+                .labels
+                .extend(["gwt-spec".into(), "server".into(), "gwt-queued".into()]);
             issue.readiness = crate::IssueMonitorReadiness::ReadyWithOpenTasks;
             monitor.terminal_queue_push(&[number], "test", &now);
             monitor.record_candidate(issue.clone());
@@ -21906,6 +21910,9 @@ exit 1
             }
             if number == 46 {
                 issue.body = Some("Blocked-by: #47".into());
+            }
+            if matches!(number, 43 | 44 | 48) {
+                issue.labels.retain(|label| label != "server");
             }
             candidates.push(issue);
         }
@@ -22013,6 +22020,61 @@ exit 1
         );
         assert!(cached_driver.pending_effects().is_empty());
         let held = cached_driver.prefs();
+        let mut label_cached = cached_driver.clone();
+        assert!(label_cached
+            .take_pending_launch_requests()
+            .iter()
+            .all(|request| request.issue_number != 48));
+        assert!(!label_cached.has_capacity_for_monitor_spawn(48, false));
+        assert!(!label_cached.claim_launch_delivery(
+            48,
+            "launch:effect-48",
+            "gui-48",
+            48,
+            "tab-1::agent-48",
+            |_| false
+        ));
+        let status = label_cached.agent_status_at(&now);
+        assert_eq!(status.allowed_labels, vec!["server"]);
+        assert!(status.label_excluded_issues.contains(&48));
+        assert!(status
+            .inbox
+            .iter()
+            .find(|row| row.issue_number == 48)
+            .unwrap()
+            .exclusion_reason
+            .as_deref()
+            .unwrap()
+            .contains("allowed labels"));
+        assert_eq!(
+            label_cached.prefs().pending_launch_deliveries,
+            held.pending_launch_deliveries
+        );
+        let mut allowed = candidates[5].clone();
+        allowed.labels.push("server".into());
+        label_cached.record_candidate(allowed);
+        assert!(label_cached
+            .take_pending_launch_requests()
+            .iter()
+            .any(|request| request.issue_number == 48));
+        assert!(label_cached.claim_launch_delivery(
+            48,
+            "launch:effect-48",
+            "gui-48",
+            48,
+            "tab-1::agent-48",
+            |_| false
+        ));
+        label_cached.record_candidate(candidates[5].clone());
+        assert!(!label_cached.has_capacity_for_monitor_spawn(48, false));
+        assert!(!label_cached.claim_launch_delivery(
+            48,
+            "launch:effect-48",
+            "gui-48",
+            48,
+            "tab-1::agent-48",
+            |_| true
+        ));
         assert!(cached_driver
             .take_pending_launch_requests()
             .iter()
@@ -22069,6 +22131,17 @@ exit 1
             |_| true
         ));
         // An exact existing pane can still be adopted and replay its ACK.
+        let mut label_existing = monitor.clone();
+        label_existing.record_candidate(candidates[5].clone());
+        label_existing.complete_active_launch(48, "tab-1::agent-48");
+        assert!(label_existing.claim_launch_delivery(
+            48,
+            "launch:effect-48",
+            "gui-48",
+            48,
+            "tab-1::agent-48",
+            |_| false
+        ));
         let mut existing = monitor.clone();
         existing.record_candidate(candidates[0].clone());
         existing.complete_active_launch(42, "tab-1::agent-42");
@@ -22111,6 +22184,23 @@ exit 1
         ));
 
         let persisted = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+        assert_eq!(monitor.pending_launch_delivery_id(48), None);
+        assert!(!monitor.active_issue_numbers().contains(&48));
+        assert_eq!(
+            monitor.inbox_item(48).unwrap().state,
+            crate::MonitorInboxState::Skipped
+        );
+        assert!(monitor
+            .inbox_item(48)
+            .unwrap()
+            .exclusion_reason
+            .as_deref()
+            .unwrap()
+            .contains("allowed labels"));
+        assert_eq!(persisted.pending_effects.iter().filter(|effect| matches!(
+            &effect.payload, crate::IssueMonitorEffectPayload::ReleaseClaim { issue_number: 48, claim_id, owner }
+                if claim_id == "claim-48" && owner == "owner"
+        )).count(), 1);
         assert_eq!(
             monitor.pending_launch_delivery_id(46),
             None,
@@ -22186,6 +22276,22 @@ exit 1
         }
         assert_eq!(monitor.effect_authority_epoch(), epoch);
         observer.rebase_gui_observer_prefs(&persisted);
+        assert!(!observer.active_issue_numbers().contains(&48));
+        assert!(!observer.claim_launch_delivery(
+            48,
+            "launch:effect-48",
+            "late-gui",
+            48,
+            "tab-1::agent-48",
+            |_| false
+        ));
+        assert!(!observer.apply_confirmed_claim(
+            48,
+            "excluded-label-claim",
+            "owner",
+            "excluded-label-effect",
+            &now
+        ));
         assert!(!observer.active_issue_numbers().contains(&46));
         assert!(!observer.claim_launch_delivery(
             46,
@@ -22240,6 +22346,27 @@ exit 1
         ));
         let mut restored = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), persisted);
         restored.set_source_repository(Some(("akiojin", "gwt")));
+        let mut allowed = candidates[5].clone();
+        allowed.labels.push("server".into());
+        restored.record_candidate(allowed);
+        assert!(restored.apply_confirmed_claim(
+            48,
+            "allowed-claim",
+            "owner",
+            "allowed-effect",
+            &now
+        ));
+        assert_eq!(restored.attempt_count(48), 1);
+        assert_eq!(
+            restored
+                .prefs()
+                .pending_launch_deliveries
+                .iter()
+                .find(|d| d.issue_number == 48)
+                .unwrap()
+                .launch_session_strategy,
+            crate::IssueMonitorLaunchSessionStrategy::FreshRequired
+        );
         let mut unblocked = candidates[4].clone();
         unblocked.body = None;
         restored.record_candidate(unblocked);

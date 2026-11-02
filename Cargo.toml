@@ -129,7 +129,7 @@ hex = "0.4"
 regex = "1"
 
 # Markdown rendering
-pulldown-cmark = "0.13.4"
+pulldown-cmark = "0.13.6"
 ammonia = "4.1.4"
 
 [profile.release]
