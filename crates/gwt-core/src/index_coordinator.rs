@@ -1838,7 +1838,7 @@ fn acquire_heavy_at(
                 check_heavy_attempt_locked(&pending_dir, &target, attempt)?;
             }
             match try_acquire_heavy_storage(root, &me, shared_pool_request, disk_budgets) {
-                Ok(Some(locks)) => {
+                Ok(Some(mut locks)) => {
                     // Cancellation may have arrived while probing or creating a
                     // slot. Never publish a grant or consume a successor claim
                     // without rechecking under the reservation writer lock.
@@ -1877,11 +1877,11 @@ fn acquire_heavy_at(
                     record_interactive_burst_grant(root, priority);
                     let lease = HeavyLease {
                         queue_wait_ms: acquired_at_ms.saturating_sub(queued_at_ms),
-                        _lock_file: locks.lock_file,
-                        _compatibility_file: locks.compatibility_file,
+                        _lock_file: locks.lock_file.take().expect("acquired heavy lock"),
+                        _compatibility_file: locks.compatibility_file.take(),
                         root: root.to_path_buf(),
                         ticket_path: locks.storage.join("heavy.ticket.json"),
-                        storage: locks.storage,
+                        storage: std::mem::take(&mut locks.storage),
                         // Only verification leases keep a ledger: index
                         // jobs run on the hot search path and gain
                         // nothing from an extra append per acquisition.
@@ -1890,7 +1890,7 @@ fn acquire_heavy_at(
                         released: false,
                     };
                     lease.record_event(LeaseEventKind::Acquired, None);
-                    drop(locks.allocator_file);
+                    drop(locks);
                     return Ok(lease);
                 }
                 Ok(None) => {}
@@ -1941,10 +1941,27 @@ fn acquire_heavy_at(
 /// until their queue entry is consumed, so the next claimant observes the
 /// predecessor's completed admission rather than racing its ticket publish.
 struct HeavyLockFiles {
-    lock_file: File,
+    lock_file: Option<File>,
     compatibility_file: Option<File>,
     allocator_file: Option<File>,
     storage: PathBuf,
+}
+
+impl Drop for HeavyLockFiles {
+    fn drop(&mut self) {
+        // A cancelled/failed grant never reaches HeavyLease::drop. Explicitly
+        // unlock before closing, even if a process spawn retained an alias.
+        for file in [
+            self.lock_file.as_ref(),
+            self.compatibility_file.as_ref(),
+            self.allocator_file.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let _ = fs2::FileExt::unlock(file);
+        }
+    }
 }
 
 fn heavy_claim_must_defer(root: &Path, me: &QueueRecord) -> bool {
@@ -2059,7 +2076,7 @@ fn try_acquire_heavy_storage(
                 }
                 publish_disk_reservations(root, disk_budgets)?;
                 Ok(Some(HeavyLockFiles {
-                    lock_file: root_file,
+                    lock_file: Some(root_file),
                     compatibility_file: None,
                     allocator_file: None,
                     storage: root.to_path_buf(),
@@ -2132,7 +2149,7 @@ fn try_acquire_heavy_storage(
             fs::create_dir_all(&storage)?;
             let file = open_lock_file(&storage.join("heavy.lock"))?;
             #[cfg(test)]
-            tests::after_new_slot_created(&storage);
+            tests::after_new_slot_created(&storage, &file);
             match fs2::FileExt::try_lock_exclusive(&file) {
                 Ok(()) => {}
                 Err(err) if is_contended(&err) => return Ok(None),
@@ -2144,7 +2161,7 @@ fn try_acquire_heavy_storage(
     reconcile_orphaned_heavy_ticket(&storage, root);
     publish_disk_reservations(&storage, disk_budgets)?;
     Ok(Some(HeavyLockFiles {
-        lock_file,
+        lock_file: Some(lock_file),
         compatibility_file: Some(root_file),
         allocator_file,
         storage,
@@ -3479,7 +3496,7 @@ mod tests {
     use crate::deadline_budget::HANG_GUARD;
 
     type RegistrationSnapshotHook = Box<dyn FnOnce(&Path)>;
-    type NewSlotCreatedHook = Box<dyn FnOnce(&Path)>;
+    type NewSlotCreatedHook = Box<dyn FnOnce(&Path, &File)>;
 
     thread_local! {
         static REGISTRATION_SNAPSHOT_HOOK: std::cell::RefCell<Option<RegistrationSnapshotHook>> =
@@ -3652,10 +3669,10 @@ mod tests {
         }
     }
 
-    pub(super) fn after_new_slot_created(storage: &Path) {
+    pub(super) fn after_new_slot_created(storage: &Path, file: &File) {
         let hook = NEW_SLOT_CREATED_HOOK.with(|hook| hook.borrow_mut().take());
         if let Some(hook) = hook {
-            hook(storage);
+            hook(storage, file);
         }
     }
 
@@ -3674,7 +3691,7 @@ mod tests {
         let probe = std::rc::Rc::new(std::cell::RefCell::new(None));
         NEW_SLOT_CREATED_HOOK.with(|hook| {
             let probe = std::rc::Rc::clone(&probe);
-            *hook.borrow_mut() = Some(Box::new(move |storage| {
+            *hook.borrow_mut() = Some(Box::new(move |storage, _| {
                 let file = open_lock_file(&storage.join("heavy.lock")).unwrap();
                 fs2::FileExt::try_lock_exclusive(&file).unwrap();
                 *probe.borrow_mut() = Some(file);
@@ -4580,15 +4597,21 @@ mod tests {
             id: "racing",
             check_cancelled: &check,
         };
+        let retained = std::rc::Rc::new(std::cell::RefCell::new(None));
         NEW_SLOT_CREATED_HOOK.with(|hook| {
             let cancelled = std::rc::Rc::clone(&cancelled);
+            let retained = std::rc::Rc::clone(&retained);
             let root = tmp.path().to_path_buf();
-            *hook.borrow_mut() = Some(Box::new(move |_| {
+            *hook.borrow_mut() = Some(Box::new(move |storage, file| {
                 let observer = IndexCoordinator::open(root).unwrap();
                 let queue = published_heavy_queue(&observer.heavy_pending_dir()).unwrap();
                 assert!(queue[0].resident);
                 assert_eq!(queue[0].attempt_id.as_deref(), Some("racing"));
                 assert_eq!(queue[0].job_status, Some(JobStatus::Running));
+                // Keep the actual acquisition's open file description alive,
+                // modelling a descriptor retained by a concurrent process spawn.
+                *retained.borrow_mut() =
+                    Some((file.try_clone().unwrap(), storage.join("heavy.lock")));
                 cancelled.set(true);
             }));
         });
@@ -4601,9 +4624,22 @@ mod tests {
             ),
             Err(CoordinatorError::Cancelled { .. })
         ));
+        assert!(retained.borrow().is_some(), "the new-slot hook ran");
+        assert!(coordinator.heavy_pool_status().unwrap().queue.is_empty());
+        let probe = open_lock_file(&retained.borrow().as_ref().unwrap().1).unwrap();
+        fs2::FileExt::try_lock_exclusive(&probe)
+            .expect("Cancelled must retire the physical slot even with a retained alias");
+        fs2::FileExt::unlock(&probe).unwrap();
         let status = coordinator.heavy_pool_status().unwrap();
         assert_eq!(status.available, 1);
         assert!(status.queue.is_empty());
+        cancelled.set(false);
+        let successor = owner.acquire_heavy(Duration::ZERO).unwrap();
+        drop(retained.borrow_mut().take());
+        assert!(is_contended(
+            &fs2::FileExt::try_lock_exclusive(&probe).unwrap_err()
+        ));
+        drop(successor);
     }
 
     #[test]
