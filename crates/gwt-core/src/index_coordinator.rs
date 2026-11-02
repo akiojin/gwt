@@ -913,10 +913,18 @@ impl IndexCoordinator {
     /// holding the root lock exclusively. Capacity counts physical locks;
     /// terminal or corrupt diagnostics cannot grant an extra slot.
     pub fn heavy_pool_status(&self) -> Result<HeavyPoolStatus, CoordinatorError> {
+        struct ProbeLock<'a>(&'a File);
+        impl Drop for ProbeLock<'_> {
+            fn drop(&mut self) {
+                let _ = fs2::FileExt::unlock(self.0);
+            }
+        }
+
         // Snapshot probes must not look like holders to another reader or mix
         // a released root holder with a successor admitted to a numbered slot.
         let allocator = open_lock_file(&self.root.join(VERIFICATION_ALLOCATOR_LOCK))?;
         fs2::FileExt::lock_exclusive(&allocator)?;
+        let _allocator_lock = ProbeLock(&allocator);
         let capacity = if self.root.join(VERIFICATION_CAPACITY_FILE).exists() {
             read_verification_capacity(&self.root)?
         } else {
@@ -924,15 +932,16 @@ impl IndexCoordinator {
         };
         let queue = published_heavy_queue(&self.heavy_pending_dir())?;
         let root_probe = open_lock_file(&self.heavy_lock_path())?;
-        let legacy_locked = match fs2::FileExt::try_lock_exclusive(&root_probe) {
+        let (legacy_locked, _root_lock) = match fs2::FileExt::try_lock_exclusive(&root_probe) {
             Ok(()) => {
+                let root_lock = ProbeLock(&root_probe);
                 reconcile_orphaned_heavy_ticket(&self.root, &self.root);
-                false
+                (false, Some(root_lock))
             }
             Err(err) if is_contended(&err) => match fs2::FileExt::try_lock_shared(&root_probe) {
                 // Keep the probe through the slot scan to fence legacy grants.
-                Ok(()) => false,
-                Err(err) if is_contended(&err) => true,
+                Ok(()) => (false, Some(ProbeLock(&root_probe))),
+                Err(err) if is_contended(&err) => (true, None),
                 Err(err) => return Err(err.into()),
             },
             Err(err) => return Err(err.into()),
@@ -947,7 +956,7 @@ impl IndexCoordinator {
             slots.push(HeavySlotStatus { slot: None, status });
         }
         #[cfg(test)]
-        tests::after_pool_root_status();
+        tests::after_pool_root_status(&allocator, &root_probe);
         for (slot, storage) in verification_slot_paths(&self.root)? {
             let status = self.heavy_storage_status(&storage)?;
             used += usize::from(status.held || status.holder_stale);
@@ -3497,6 +3506,7 @@ mod tests {
 
     type RegistrationSnapshotHook = Box<dyn FnOnce(&Path)>;
     type NewSlotCreatedHook = Box<dyn FnOnce(&Path, &File)>;
+    type PoolRootStatusHook = Box<dyn FnOnce(&File, &File)>;
 
     thread_local! {
         static REGISTRATION_SNAPSHOT_HOOK: std::cell::RefCell<Option<RegistrationSnapshotHook>> =
@@ -3505,14 +3515,14 @@ mod tests {
             const { std::cell::RefCell::new(None) };
         static STATUS_RETRY_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
             const { std::cell::RefCell::new(None) };
-        static POOL_ROOT_STATUS_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        static POOL_ROOT_STATUS_HOOK: std::cell::RefCell<Option<PoolRootStatusHook>> =
             const { std::cell::RefCell::new(None) };
     }
 
-    pub(super) fn after_pool_root_status() {
+    pub(super) fn after_pool_root_status(allocator: &File, root_probe: &File) {
         let hook = POOL_ROOT_STATUS_HOOK.with(|hook| hook.borrow_mut().take());
         if let Some(hook) = hook {
-            hook();
+            hook(allocator, root_probe);
         }
     }
 
@@ -3613,7 +3623,7 @@ mod tests {
         POOL_ROOT_STATUS_HOOK.with(|hook| {
             let slot_owner = std::rc::Rc::clone(&slot_owner);
             let slot_lease = std::rc::Rc::clone(&slot_lease);
-            *hook.borrow_mut() = Some(Box::new(move || {
+            *hook.borrow_mut() = Some(Box::new(move |_, _| {
                 root_lease.release().unwrap();
                 match slot_owner.acquire_heavy(Duration::ZERO) {
                     Ok(lease) => *slot_lease.borrow_mut() = Some(lease),
@@ -3643,7 +3653,7 @@ mod tests {
         let lease = owner.acquire_heavy(Duration::ZERO).unwrap();
         let root_lock = open_lock_file(&coordinator.heavy_lock_path()).unwrap();
         POOL_ROOT_STATUS_HOOK.with(|hook| {
-            *hook.borrow_mut() = Some(Box::new(move || {
+            *hook.borrow_mut() = Some(Box::new(move |_, _| {
                 lease.release().unwrap();
                 let error = fs2::FileExt::try_lock_exclusive(&root_lock)
                     .expect_err("the status probe must fence legacy admission until its scan ends");
@@ -4896,13 +4906,48 @@ mod tests {
         );
         successor.complete(JobOutcome::Completed).unwrap();
 
+        let retained = std::rc::Rc::new(std::cell::RefCell::new(None));
+        POOL_ROOT_STATUS_HOOK.with(|hook| {
+            let retained = std::rc::Rc::clone(&retained);
+            *hook.borrow_mut() = Some(Box::new(move |allocator, root_probe| {
+                *retained.borrow_mut() = Some((
+                    allocator.try_clone().unwrap(),
+                    root_probe.try_clone().unwrap(),
+                ));
+            }));
+        });
         assert!(coordinator.heavy_pool_status().unwrap().queue.is_empty());
+        assert!(
+            retained.borrow().is_some(),
+            "the status hook retained both probes"
+        );
         assert!(!coordinator.heavy_reservation_path(&finished_key).exists());
+        let released = [
+            coordinator.root.join(VERIFICATION_ALLOCATOR_LOCK),
+            coordinator.heavy_lock_path(),
+        ]
+        .map(|path| {
+            let probe = open_lock_file(&path).unwrap();
+            let result = fs2::FileExt::try_lock_exclusive(&probe);
+            if result.is_ok() {
+                fs2::FileExt::unlock(&probe).unwrap();
+            }
+            result
+        });
+        assert!(
+            released.iter().all(Result::is_ok),
+            "status must release allocator/root probes with retained aliases: {released:?}"
+        );
         let next_key = TargetKey::verification("different-project", "worktree");
         let next = own(&coordinator, &next_key, JobPriority::ManualRebuild);
         let lease = next
             .acquire_heavy_with_disk_budgets(Duration::ZERO, VERIFICATION_RESERVATION_TTL, &[])
             .expect("a completed project must not stall another project until TTL");
+        drop(retained.borrow_mut().take());
+        let probe = open_lock_file(&coordinator.heavy_lock_path()).unwrap();
+        assert!(is_contended(
+            &fs2::FileExt::try_lock_exclusive(&probe).unwrap_err()
+        ));
         drop(lease);
         next.complete(JobOutcome::Completed).unwrap();
     }
