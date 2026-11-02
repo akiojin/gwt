@@ -48,15 +48,19 @@ fn real_model_bootstrap_installs_cpu_torch_before_runtime_dependencies() {
         .find(|(name, _)| name == "Bootstrap gwt runtime assets")
         .expect("real model bootstrap must exist");
     let cpu_install = body
-        .find("pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu")
+        .find("install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu")
         .expect("CPU runner must select CPU torch instead of downloading the CUDA stack");
     let runtime_install = body
-        .find(
-            "pip install --no-cache-dir -r crates/gwt-core/runtime/project_index_requirements.txt",
-        )
+        .find("install --no-cache-dir -r crates/gwt-core/runtime/project_index_requirements.txt")
         .expect("keep shared runtime requirements without caching disposable wheels");
     assert!(cpu_install < runtime_install);
-    assert!(body.contains("pip check"));
+    assert!(body.contains("pip\" check") || body.contains("pip check"));
+    assert!(
+        body.contains("runtime/runners"),
+        "bootstrap must install the content-addressed runner selected by gwt-core"
+    );
+    assert!(body.contains("runtime/venvs/chroma-venv-"));
+    assert!(body.contains("index_path_policy.json"));
 }
 
 const NIGHTLY_WORKFLOW: &str = ".github/workflows/nightly.yml";

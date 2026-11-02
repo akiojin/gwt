@@ -17,13 +17,23 @@ fn runner_script() -> PathBuf {
     gwt_core::runtime::project_index_runner_path()
 }
 
+fn assert_runtime_bootstrapped() {
+    assert!(
+        runner_python().is_file(),
+        "runner Python must be bootstrapped at {}",
+        runner_python().display()
+    );
+    assert!(
+        runner_script().is_file(),
+        "runner script must be bootstrapped at {}",
+        runner_script().display()
+    );
+}
+
 #[test]
 #[ignore]
 fn search_files_e2e_with_real_e5_auto_builds() {
-    if !runner_python().exists() || !runner_script().exists() {
-        eprintln!("skipping: runner not bootstrapped");
-        return;
-    }
+    assert_runtime_bootstrapped();
 
     let tmp = tempfile::tempdir().unwrap();
     let repo_root = tmp.path().join("repo");
@@ -63,6 +73,7 @@ fn search_files_e2e_with_real_e5_auto_builds() {
         .arg("3")
         .env("HOME", &fake_home)
         .env("USERPROFILE", &fake_home)
+        .env("GWT_INDEX_FAKE_EMBEDDING", "0")
         .output()
         .expect("runner spawn must succeed");
 
@@ -84,10 +95,7 @@ fn search_files_e2e_with_real_e5_auto_builds() {
 #[test]
 #[ignore]
 fn search_specs_e2e_with_real_e5_auto_builds() {
-    if !runner_python().exists() || !runner_script().exists() {
-        eprintln!("skipping: runner not bootstrapped");
-        return;
-    }
+    assert_runtime_bootstrapped();
 
     let tmp = tempfile::tempdir().unwrap();
     let repo_root = tmp.path().join("repo");
@@ -131,10 +139,23 @@ fn search_specs_e2e_with_real_e5_auto_builds() {
         .arg("3")
         .env("HOME", &fake_home)
         .env("USERPROFILE", &fake_home)
+        .env("GWT_INDEX_FAKE_EMBEDDING", "0")
         .output()
         .expect("runner spawn must succeed");
 
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "runner exit={:?} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Watcher SPEC") || stdout.contains("1939"));
+    let payload: serde_json::Value = serde_json::from_str(&stdout).expect("runner JSON response");
+    assert_eq!(payload["ok"], true, "runner response: {stdout}");
+    assert!(
+        payload["specResults"]
+            .as_array()
+            .is_some_and(|results| results.iter().any(|result| result["spec_id"] == "1939")),
+        "expected SPEC 1939 in results, got: {stdout}"
+    );
 }
