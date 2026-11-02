@@ -1858,6 +1858,53 @@ mod browser_preflight_tests {
     }
 
     #[test]
+    fn historical_ledger_corruption_does_not_block_a_healthy_current_source() {
+        with_source(|input, _, path, _| {
+            let dir = gwt_core::paths::gwt_error_ledger_dir();
+            fs::create_dir_all(&dir).unwrap();
+            let old_day = (chrono::Utc::now() - chrono::Duration::days(3)).date_naive();
+            let ledger = dir.join(format!("errors.{old_day}.jsonl"));
+            let bytes = b"{PRIVATE_BROKEN_ROW}\n";
+            fs::write(&ledger, bytes).unwrap();
+            let source_before = fs::read(path).unwrap();
+            let result = read_managed_browser_preflight(input);
+            assert_eq!(result.result, PreflightResult::Proceed, "{result:?}");
+            assert_eq!(result.context, PreflightContext::Current);
+            assert!(result.reasons.is_empty());
+            assert_eq!(fs::read(&ledger).unwrap(), bytes);
+            assert_eq!(fs::read(path).unwrap(), source_before);
+            let history = gwt_core::error_ledger::list_since(None).unwrap();
+            assert_eq!(history.len(), 1);
+            assert_eq!(history[0].kind, ErrorKind::LedgerCorruption);
+        });
+    }
+
+    #[test]
+    fn current_unknown_and_unreadable_ledgers_still_block_a_healthy_source() {
+        with_source(|input, _, path, _| {
+            let dir = gwt_core::paths::gwt_error_ledger_dir();
+            fs::create_dir_all(&dir).unwrap();
+            let source_before = fs::read(path).unwrap();
+            for day in [
+                chrono::Utc::now().date_naive().to_string(),
+                "unknown".into(),
+            ] {
+                let ledger = dir.join(format!("errors.{day}.jsonl"));
+                fs::write(&ledger, b"{partial").unwrap();
+                let result = read_managed_browser_preflight(input);
+                assert_eq!(result.result, PreflightResult::Unknown, "{result:?}");
+                assert!(result.reasons.contains(&PreflightReason::LedgerUnavailable));
+                fs::remove_file(ledger).unwrap();
+            }
+            fs::create_dir(dir.join("errors.2026-01-01.jsonl")).unwrap();
+            let result = read_managed_browser_preflight(input);
+            assert_eq!(result.result, PreflightResult::Unknown, "{result:?}");
+            assert!(result.reasons.contains(&PreflightReason::LedgerUnavailable));
+            assert_eq!(fs::read(path).unwrap(), source_before);
+        });
+    }
+
+    #[test]
     fn blocked_missing_old_equal_and_backward_completion_cannot_proceed() {
         with_source(|input, session, path, runtime| {
             let at = runtime.last_completed_hook_event_at.unwrap();
