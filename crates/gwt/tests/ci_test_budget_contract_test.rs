@@ -39,6 +39,26 @@ fn real_model_step_only_runs_index_runner_ignored_tests() {
     );
 }
 
+#[test]
+fn real_model_bootstrap_installs_cpu_torch_before_runtime_dependencies() {
+    let workflow = read(TEST_WORKFLOW);
+    let steps = named_steps(&workflow);
+    let (_, body) = steps
+        .iter()
+        .find(|(name, _)| name == "Bootstrap gwt runtime assets")
+        .expect("real model bootstrap must exist");
+    let cpu_install = body
+        .find("pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu")
+        .expect("CPU runner must select CPU torch instead of downloading the CUDA stack");
+    let runtime_install = body
+        .find(
+            "pip install --no-cache-dir -r crates/gwt-core/runtime/project_index_requirements.txt",
+        )
+        .expect("keep shared runtime requirements without caching disposable wheels");
+    assert!(cpu_install < runtime_install);
+    assert!(body.contains("pip check"));
+}
+
 const NIGHTLY_WORKFLOW: &str = ".github/workflows/nightly.yml";
 const RUST_JOB: &str = "  test:\n";
 const RUN_TESTS_STEP: &str = "Run tests";
