@@ -517,11 +517,18 @@ jobs:
           key: hf-cache-multilingual-e5-base-v1
       - name: Bootstrap gwt runtime assets
         run: |
+          df -h "$HOME" "$RUNNER_TEMP"
           mkdir -p ~/.gwt/runtime
           cp crates/gwt-core/runtime/chroma_index_runner.py ~/.gwt/runtime/
           python -m venv ~/.gwt/runtime/chroma-venv
-          ~/.gwt/runtime/chroma-venv/bin/pip install --upgrade pip
-          ~/.gwt/runtime/chroma-venv/bin/pip install -r crates/gwt-core/runtime/project_index_requirements.txt
+          ~/.gwt/runtime/chroma-venv/bin/pip install --no-cache-dir --upgrade pip
+          # This runner has no GPU; PyPI torch otherwise pulls in the CUDA stack.
+          ~/.gwt/runtime/chroma-venv/bin/pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+          ~/.gwt/runtime/chroma-venv/bin/pip install --no-cache-dir -r crates/gwt-core/runtime/project_index_requirements.txt
+          ~/.gwt/runtime/chroma-venv/bin/pip check
+          ~/.gwt/runtime/chroma-venv/bin/python -c "import torch; print('torch:', torch.__version__, 'CUDA:', torch.version.cuda); assert torch.version.cuda is None"
+          du -sh ~/.gwt/runtime/chroma-venv
+          df -h "$HOME" "$RUNNER_TEMP"
       - name: Run ignored e2e tests with real e5 model
         run: cargo test -p gwt-core --test index_runner_spawn -- --ignored
         timeout-minutes: 30
