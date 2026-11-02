@@ -1796,14 +1796,27 @@ interaction. Reports survive restarts in
 `~/.gwt/projects/<project-hash>/project-state/pm-reports.jsonl`. Captured Q&A and
 user instructions share `project-state/user-instructions.json` in the same
 machine-local project store, so one atomic save preserves both. There is no
-automatic expiry or count limit. Each non-empty report is limited to 64 KiB.
+automatic expiry or count limit. Q&A bodies and each structured event’s details are limited to 64 KiB; a structured submission is limited to 256 KiB.
 
-A registered PM can publish through `pm.report.post` with `kind` (`progress`,
-`decision`, `blocker`, or `qa`) and `body`; `qa` also requires a non-empty
-`question` summarizing the user's question or instruction. Its `body` contains
-the answer, actions taken, and their results. `pm.report.list` reads the saved history.
-These use the standard gwtd JSON envelope. A successful post confirms durable
-storage; failures return an explicit error.
+PM updates use a short common summary with **Details** for the complete explanation
+and references. **Copy** includes both. Unchanged observations create no new card,
+including after a restart or a switch between Claude and Codex. New critical
+failures and decisions appear immediately; ordinary updates share one digest.
+Resolution, recurrence, and meaningful changes produce a new report.
+
+A registered PM publishes non-Q&A updates through `pm.report.post` with a versioned
+`submission`: a `request_id`, project-local event/episode identities, expected
+revisions, typed material state, `summary`, full `details`, and `refs`.
+`pm.report.list` returns history, event revisions, and posting receipts. Retrying
+an identical request returns its saved receipt; conflicting payloads or stale
+revisions return an error. A receipt confirms durable acceptance or suppression,
+not user approval or completion. Body-only non-Q&A posts remain available only
+for direct user CLI compatibility. Q&A keeps `kind: qa`, `question`, `body`, and
+joined instruction capture. Explicitly requested detailed answers remain complete.
+
+Old report history remains readable. After the first structured report is saved,
+use this version or newer to read or post reports: older versions refuse the new
+journal format and leave the existing bytes intact. No history is deleted.
 
 PM Q&A posts include an `instruction` object with the full `original`, `kind`
 (`standing`, `one_off`, or `question`), `actions`, and `issue_numbers`. Optional
@@ -1984,6 +1997,13 @@ JSON
   Section writes serialize writers sharing the host cache and check fresh body
   content before replacing the index; cross-host/external writes and unknown
   network outcomes are outside this guarantee.
+  Section edit bodies must omit artifact markers; the operation adds them and
+  rejects marker-bearing input before writing. `issue.spec.repair` repairs
+  duplicated markers. After confirming that an old orphan artifact has been
+  superseded, pass its comment ID in `archive_comments` to the repair operation
+  (for example, `{"number":1784,"archive_comments":[12345]}`). This preserves
+  the comment text and retires only its outer markers; indexed comments are
+  refused. Run `issue.spec.lint` again to confirm index health.
 
 ```bash
 gwtd <<'JSON'
