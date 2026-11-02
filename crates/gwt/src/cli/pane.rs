@@ -361,6 +361,7 @@ fn read_pane_health(project_root: &Path, requested_id: Option<&str>) -> Result<S
                 WindowState::Starting => PaneState::Starting,
             };
             let observation = (|| {
+                let snapshot = snapshot.as_ref().ok()?;
                 let id = window.session_id.as_deref()?;
                 gwt_agent::validate_session_id_path_component(id).ok()?;
                 let session =

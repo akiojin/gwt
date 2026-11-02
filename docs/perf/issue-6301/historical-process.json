@@ -1,0 +1,1057 @@
+{
+  "path": "<HOME>\\.gwt\\logs\\gwt.log.2026-10-31",
+  "window": "2026-10-31T10:55..11:04+09:00",
+  "rows": [
+    {
+      "line": 131022,
+      "time": "2026-10-31T10:55:00.726947800+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process start",
+        "kind": "git",
+        "spawn_id": 791,
+        "label": "git rev-parse --show-toplevel",
+        "phase": "start"
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 131534,
+      "time": "2026-10-31T10:55:29.583718900+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process end",
+        "kind": "git",
+        "spawn_id": 788,
+        "label": "git rev-parse --verify --quiet work/issue-944",
+        "phase": "end",
+        "exit_code": 0,
+        "duration_ms": 56058,
+        "stdout_lines": 1,
+        "stderr_lines": 0,
+        "success": true
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 131800,
+      "time": "2026-10-31T10:55:39.005943900+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process end",
+        "kind": "git",
+        "spawn_id": 789,
+        "label": "git rev-parse --verify --quiet work/issue-6405",
+        "phase": "end",
+        "exit_code": 0,
+        "duration_ms": 53534,
+        "stdout_lines": 1,
+        "stderr_lines": 0,
+        "success": true
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 131979,
+      "time": "2026-10-31T10:55:55.140672800+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process end",
+        "kind": "git",
+        "spawn_id": 791,
+        "label": "git rev-parse --show-toplevel",
+        "phase": "end",
+        "exit_code": 0,
+        "duration_ms": 54413,
+        "stdout_lines": 1,
+        "stderr_lines": 0,
+        "success": true
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 131980,
+      "time": "2026-10-31T10:55:55.149399100+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process start",
+        "kind": "git",
+        "spawn_id": 797,
+        "label": "git rev-parse --show-toplevel",
+        "phase": "start"
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 132317,
+      "time": "2026-10-31T10:56:11.871206400+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process start",
+        "kind": "git",
+        "spawn_id": 798,
+        "label": "git rev-parse --show-toplevel",
+        "phase": "start"
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 132533,
+      "time": "2026-10-31T10:56:24.363198500+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process start",
+        "kind": "git",
+        "spawn_id": 799,
+        "label": "git rev-parse --verify --quiet origin/main",
+        "phase": "start"
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 132824,
+      "time": "2026-10-31T10:56:37.046911700+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process start",
+        "kind": "git",
+        "spawn_id": 800,
+        "label": "git rev-parse --verify --quiet origin/master",
+        "phase": "start"
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 133083,
+      "time": "2026-10-31T10:56:51.882057200+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process end",
+        "kind": "git",
+        "spawn_id": 797,
+        "label": "git rev-parse --show-toplevel",
+        "phase": "end",
+        "exit_code": 0,
+        "duration_ms": 56732,
+        "stdout_lines": 1,
+        "stderr_lines": 0,
+        "success": true
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 133292,
+      "time": "2026-10-31T10:57:02.379176700+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process end",
+        "kind": "git",
+        "spawn_id": 798,
+        "label": "git rev-parse --show-toplevel",
+        "phase": "end",
+        "exit_code": 0,
+        "duration_ms": 50507,
+        "stdout_lines": 1,
+        "stderr_lines": 0,
+        "success": true
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 133293,
+      "time": "2026-10-31T10:57:02.386527200+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process start",
+        "kind": "git",
+        "spawn_id": 803,
+        "label": "git rev-parse --show-toplevel",
+        "phase": "start"
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 133463,
+      "time": "2026-10-31T10:57:08.899991700+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process end",
+        "kind": "git",
+        "spawn_id": 799,
+        "label": "git rev-parse --verify --quiet origin/main",
+        "phase": "end",
+        "exit_code": 0,
+        "duration_ms": 44536,
+        "stdout_lines": 1,
+        "stderr_lines": 0,
+        "success": true
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 133464,
+      "time": "2026-10-31T10:57:08.900041200+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process start",
+        "kind": "git",
+        "spawn_id": 804,
+        "label": "git rev-parse --verify --quiet origin/main",
+        "phase": "start"
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 133493,
+      "time": "2026-10-31T10:57:14.510339300+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process end",
+        "kind": "git",
+        "spawn_id": 800,
+        "label": "git rev-parse --verify --quiet origin/master",
+        "phase": "end",
+        "exit_code": 1,
+        "duration_ms": 37463,
+        "stdout_lines": 0,
+        "stderr_lines": 0,
+        "success": false
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 133494,
+      "time": "2026-10-31T10:57:14.510395+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process start",
+        "kind": "git",
+        "spawn_id": 806,
+        "label": "git rev-parse --verify --quiet origin/develop",
+        "phase": "start"
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 133766,
+      "time": "2026-10-31T10:57:31.126871600+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process start",
+        "kind": "git",
+        "spawn_id": 808,
+        "label": "git rev-parse --show-toplevel",
+        "phase": "start"
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 134018,
+      "time": "2026-10-31T10:57:44.346943400+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process end",
+        "kind": "git",
+        "spawn_id": 803,
+        "label": "git rev-parse --show-toplevel",
+        "phase": "end",
+        "exit_code": 0,
+        "duration_ms": 41960,
+        "stdout_lines": 1,
+        "stderr_lines": 0,
+        "success": true
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 134141,
+      "time": "2026-10-31T10:57:54.414432800+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process end",
+        "kind": "git",
+        "spawn_id": 804,
+        "label": "git rev-parse --verify --quiet origin/main",
+        "phase": "end",
+        "exit_code": 0,
+        "duration_ms": 45514,
+        "stdout_lines": 1,
+        "stderr_lines": 0,
+        "success": true
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 134142,
+      "time": "2026-10-31T10:57:54.414480500+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process start",
+        "kind": "git",
+        "spawn_id": 810,
+        "label": "git rev-parse --verify --quiet work/issue-944",
+        "phase": "start"
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 134255,
+      "time": "2026-10-31T10:57:59.247694900+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process end",
+        "kind": "git",
+        "spawn_id": 806,
+        "label": "git rev-parse --verify --quiet origin/develop",
+        "phase": "end",
+        "exit_code": 0,
+        "duration_ms": 44737,
+        "stdout_lines": 1,
+        "stderr_lines": 0,
+        "success": true
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 134256,
+      "time": "2026-10-31T10:57:59.247747600+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process start",
+        "kind": "git",
+        "spawn_id": 811,
+        "label": "git rev-parse --verify --quiet origin/develop",
+        "phase": "start"
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 134368,
+      "time": "2026-10-31T10:58:03.346171300+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process start",
+        "kind": "git",
+        "spawn_id": 812,
+        "label": "git rev-parse --show-toplevel",
+        "phase": "start"
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 134457,
+      "time": "2026-10-31T10:58:09.830354100+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process end",
+        "kind": "git",
+        "spawn_id": 808,
+        "label": "git rev-parse --show-toplevel",
+        "phase": "end",
+        "exit_code": 0,
+        "duration_ms": 38703,
+        "stdout_lines": 1,
+        "stderr_lines": 0,
+        "success": true
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 134458,
+      "time": "2026-10-31T10:58:09.837730600+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process start",
+        "kind": "git",
+        "spawn_id": 814,
+        "label": "git rev-parse --show-toplevel",
+        "phase": "start"
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 134952,
+      "time": "2026-10-31T10:58:38.018457+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process end",
+        "kind": "git",
+        "spawn_id": 810,
+        "label": "git rev-parse --verify --quiet work/issue-944",
+        "phase": "end",
+        "exit_code": 0,
+        "duration_ms": 43603,
+        "stdout_lines": 1,
+        "stderr_lines": 0,
+        "success": true
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 135134,
+      "time": "2026-10-31T10:58:44.515805300+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process end",
+        "kind": "git",
+        "spawn_id": 811,
+        "label": "git rev-parse --verify --quiet origin/develop",
+        "phase": "end",
+        "exit_code": 0,
+        "duration_ms": 45268,
+        "stdout_lines": 1,
+        "stderr_lines": 0,
+        "success": true
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 135135,
+      "time": "2026-10-31T10:58:44.515860500+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process start",
+        "kind": "git",
+        "spawn_id": 817,
+        "label": "git rev-parse --verify --quiet work/issue-6393",
+        "phase": "start"
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 135171,
+      "time": "2026-10-31T10:58:46.268329700+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process end",
+        "kind": "git",
+        "spawn_id": 812,
+        "label": "git rev-parse --show-toplevel",
+        "phase": "end",
+        "exit_code": 0,
+        "duration_ms": 42922,
+        "stdout_lines": 1,
+        "stderr_lines": 0,
+        "success": true
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 135172,
+      "time": "2026-10-31T10:58:46.277965900+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process start",
+        "kind": "git",
+        "spawn_id": 819,
+        "label": "git rev-parse --show-toplevel",
+        "phase": "start"
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 135175,
+      "time": "2026-10-31T10:58:46.949905200+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process start",
+        "kind": "git",
+        "spawn_id": 820,
+        "label": "git for-each-ref --format=%(refname:short)\t%(contents:subject) refs/heads/ refs/remotes/origin/",
+        "phase": "start"
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 135225,
+      "time": "2026-10-31T10:58:55.150092500+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process end",
+        "kind": "git",
+        "spawn_id": 814,
+        "label": "git rev-parse --show-toplevel",
+        "phase": "end",
+        "exit_code": 0,
+        "duration_ms": 45312,
+        "stdout_lines": 1,
+        "stderr_lines": 0,
+        "success": true
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 135619,
+      "time": "2026-10-31T10:59:19.718058200+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process start",
+        "kind": "git",
+        "spawn_id": 823,
+        "label": "git rev-parse --verify --quiet origin/master",
+        "phase": "start"
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 135913,
+      "time": "2026-10-31T10:59:30.313798+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process end",
+        "kind": "git",
+        "spawn_id": 817,
+        "label": "git rev-parse --verify --quiet work/issue-6393",
+        "phase": "end",
+        "exit_code": 0,
+        "duration_ms": 45797,
+        "stdout_lines": 1,
+        "stderr_lines": 0,
+        "success": true
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 136001,
+      "time": "2026-10-31T10:59:32.107138900+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process end",
+        "kind": "git",
+        "spawn_id": 819,
+        "label": "git rev-parse --show-toplevel",
+        "phase": "end",
+        "exit_code": 0,
+        "duration_ms": 45829,
+        "stdout_lines": 1,
+        "stderr_lines": 0,
+        "success": true
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 136111,
+      "time": "2026-10-31T10:59:36.018502600+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process end",
+        "kind": "git",
+        "spawn_id": 820,
+        "label": "git for-each-ref --format=%(refname:short)\t%(contents:subject) refs/heads/ refs/remotes/origin/",
+        "phase": "end",
+        "exit_code": 0,
+        "duration_ms": 49068,
+        "stdout_lines": 131,
+        "stderr_lines": 0,
+        "success": true
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 136640,
+      "time": "2026-10-31T11:00:04.178860300+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process end",
+        "kind": "git",
+        "spawn_id": 823,
+        "label": "git rev-parse --verify --quiet origin/master",
+        "phase": "end",
+        "exit_code": 1,
+        "duration_ms": 44460,
+        "stdout_lines": 0,
+        "stderr_lines": 0,
+        "success": false
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 136641,
+      "time": "2026-10-31T11:00:04.178919100+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process start",
+        "kind": "git",
+        "spawn_id": 831,
+        "label": "git rev-parse --verify --quiet origin/develop",
+        "phase": "start"
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 136981,
+      "time": "2026-10-31T11:00:23.821795500+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process start",
+        "kind": "git",
+        "spawn_id": 838,
+        "label": "git rev-parse --verify --quiet origin/develop",
+        "phase": "start"
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 137254,
+      "time": "2026-10-31T11:00:34.803486200+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process start",
+        "kind": "git",
+        "spawn_id": 846,
+        "label": "git for-each-ref --format=%(refname:short)\t%(objectname)\t%(committerdate:unix) refs/heads/ refs/remotes/origin/",
+        "phase": "start"
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 137741,
+      "time": "2026-10-31T11:01:04.951449800+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process end",
+        "kind": "git",
+        "spawn_id": 831,
+        "label": "git rev-parse --verify --quiet origin/develop",
+        "phase": "end",
+        "exit_code": 0,
+        "duration_ms": 60772,
+        "stdout_lines": 1,
+        "stderr_lines": 0,
+        "success": true
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 137742,
+      "time": "2026-10-31T11:01:04.951499+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process start",
+        "kind": "git",
+        "spawn_id": 852,
+        "label": "git rev-parse --verify --quiet origin/develop",
+        "phase": "start"
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 137777,
+      "time": "2026-10-31T11:01:07.231409300+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process start",
+        "kind": "git",
+        "spawn_id": 853,
+        "label": "git rev-parse --show-toplevel",
+        "phase": "start"
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 137916,
+      "time": "2026-10-31T11:01:11.830306100+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process start",
+        "kind": "git",
+        "spawn_id": 854,
+        "label": "git rev-parse --show-toplevel",
+        "phase": "start"
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 137978,
+      "time": "2026-10-31T11:01:17.161845200+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process end",
+        "kind": "git",
+        "spawn_id": 838,
+        "label": "git rev-parse --verify --quiet origin/develop",
+        "phase": "end",
+        "exit_code": 0,
+        "duration_ms": 53340,
+        "stdout_lines": 1,
+        "stderr_lines": 0,
+        "success": true
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 137979,
+      "time": "2026-10-31T11:01:17.161901400+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process start",
+        "kind": "git",
+        "spawn_id": 855,
+        "label": "git rev-parse --verify --quiet origin/develop",
+        "phase": "start"
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 138213,
+      "time": "2026-10-31T11:01:30.978303500+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process end",
+        "kind": "git",
+        "spawn_id": 846,
+        "label": "git for-each-ref --format=%(refname:short)\t%(objectname)\t%(committerdate:unix) refs/heads/ refs/remotes/origin/",
+        "phase": "end",
+        "exit_code": 0,
+        "duration_ms": 56174,
+        "stdout_lines": 131,
+        "stderr_lines": 0,
+        "success": true
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 138790,
+      "time": "2026-10-31T11:02:02.465875400+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process end",
+        "kind": "git",
+        "spawn_id": 852,
+        "label": "git rev-parse --verify --quiet origin/develop",
+        "phase": "end",
+        "exit_code": 0,
+        "duration_ms": 57514,
+        "stdout_lines": 1,
+        "stderr_lines": 0,
+        "success": true
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 138791,
+      "time": "2026-10-31T11:02:02.465923+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process start",
+        "kind": "git",
+        "spawn_id": 858,
+        "label": "git rev-parse --verify --quiet work/issue-948",
+        "phase": "start"
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 138837,
+      "time": "2026-10-31T11:02:03.010108900+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process end",
+        "kind": "git",
+        "spawn_id": 853,
+        "label": "git rev-parse --show-toplevel",
+        "phase": "end",
+        "exit_code": 0,
+        "duration_ms": 55778,
+        "stdout_lines": 1,
+        "stderr_lines": 0,
+        "success": true
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 138838,
+      "time": "2026-10-31T11:02:03.018108300+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process start",
+        "kind": "git",
+        "spawn_id": 859,
+        "label": "git rev-parse --show-toplevel",
+        "phase": "start"
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 138954,
+      "time": "2026-10-31T11:02:11.032674+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process end",
+        "kind": "git",
+        "spawn_id": 854,
+        "label": "git rev-parse --show-toplevel",
+        "phase": "end",
+        "exit_code": 0,
+        "duration_ms": 59202,
+        "stdout_lines": 1,
+        "stderr_lines": 0,
+        "success": true
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 138955,
+      "time": "2026-10-31T11:02:11.039707800+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process start",
+        "kind": "git",
+        "spawn_id": 860,
+        "label": "git rev-parse --show-toplevel",
+        "phase": "start"
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 138974,
+      "time": "2026-10-31T11:02:14.347268900+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process end",
+        "kind": "git",
+        "spawn_id": 855,
+        "label": "git rev-parse --verify --quiet origin/develop",
+        "phase": "end",
+        "exit_code": 0,
+        "duration_ms": 57185,
+        "stdout_lines": 1,
+        "stderr_lines": 0,
+        "success": true
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 138975,
+      "time": "2026-10-31T11:02:14.347329700+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process start",
+        "kind": "git",
+        "spawn_id": 861,
+        "label": "git rev-parse --verify --quiet work/issue-5330",
+        "phase": "start"
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 139365,
+      "time": "2026-10-31T11:02:34.813567400+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process start",
+        "kind": "git",
+        "spawn_id": 868,
+        "label": "git branch --set-upstream-to origin/work/issue-947 work/issue-947",
+        "phase": "start"
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 139636,
+      "time": "2026-10-31T11:02:51.553320100+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process end",
+        "kind": "git",
+        "spawn_id": 858,
+        "label": "git rev-parse --verify --quiet work/issue-948",
+        "phase": "end",
+        "exit_code": 0,
+        "duration_ms": 49087,
+        "stdout_lines": 1,
+        "stderr_lines": 0,
+        "success": true
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 139661,
+      "time": "2026-10-31T11:02:52.134026800+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process end",
+        "kind": "git",
+        "spawn_id": 859,
+        "label": "git rev-parse --show-toplevel",
+        "phase": "end",
+        "exit_code": 0,
+        "duration_ms": 49115,
+        "stdout_lines": 1,
+        "stderr_lines": 0,
+        "success": true
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 139743,
+      "time": "2026-10-31T11:02:59.313185700+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process end",
+        "kind": "git",
+        "spawn_id": 860,
+        "label": "git rev-parse --show-toplevel",
+        "phase": "end",
+        "exit_code": 0,
+        "duration_ms": 48273,
+        "stdout_lines": 1,
+        "stderr_lines": 0,
+        "success": true
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 139822,
+      "time": "2026-10-31T11:03:02.286452200+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process end",
+        "kind": "git",
+        "spawn_id": 861,
+        "label": "git rev-parse --verify --quiet work/issue-5330",
+        "phase": "end",
+        "exit_code": 0,
+        "duration_ms": 47939,
+        "stdout_lines": 1,
+        "stderr_lines": 0,
+        "success": true
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 140089,
+      "time": "2026-10-31T11:03:19.556640200+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process end",
+        "kind": "git",
+        "spawn_id": 868,
+        "label": "git branch --set-upstream-to origin/work/issue-947 work/issue-947",
+        "phase": "end",
+        "exit_code": 0,
+        "duration_ms": 44743,
+        "stdout_lines": 1,
+        "stderr_lines": 0,
+        "success": true
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 140092,
+      "time": "2026-10-31T11:03:19.581294200+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process start",
+        "kind": "git",
+        "spawn_id": 877,
+        "label": "git rev-parse --show-toplevel --symbolic-full-name HEAD",
+        "phase": "start"
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 140362,
+      "time": "2026-10-31T11:03:31.768685400+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process start",
+        "kind": "git",
+        "spawn_id": 879,
+        "label": "git rev-parse --verify --quiet origin/develop",
+        "phase": "start"
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 140564,
+      "time": "2026-10-31T11:03:42.548070700+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process start",
+        "kind": "git",
+        "spawn_id": 880,
+        "label": "git rev-parse --show-toplevel",
+        "phase": "start"
+      },
+      "span": null,
+      "spans": null
+    },
+    {
+      "line": 140619,
+      "time": "2026-10-31T11:03:46.163761400+09:00",
+      "target": "gwt.process.summary",
+      "fields": {
+        "message": "process start",
+        "kind": "git",
+        "spawn_id": 881,
+        "label": "git rev-parse --verify --quiet origin/main",
+        "phase": "start"
+      },
+      "span": null,
+      "spans": null
+    }
+  ]
+}

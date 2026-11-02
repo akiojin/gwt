@@ -651,7 +651,7 @@ fn last_build_artifact_gc_record(
 /// read from the OS so the number is there even when the instance itself
 /// has stopped answering its pane WebSocket.
 fn attach_memory_pressure(status: &mut crate::IssueMonitorAgentStatus) {
-    status.memory_pressure = Some(crate::memory_pressure::probe());
+    status.memory_pressure = crate::memory_pressure::probe().ok();
 }
 
 /// Issue #4386 AC-1: the CPU Spotlight's indexing daemon is spending on this
