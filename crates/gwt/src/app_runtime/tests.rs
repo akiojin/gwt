@@ -7818,6 +7818,8 @@ pub(super) fn seed_owner_fixture_roster(project: &Path, capacity: usize) {
         .into_iter()
         .take(capacity)
         .map(|name| gwt::agent_names::AgentMember {
+            pm_eligible: false,
+            pm_project_key: None,
             agent_member_id: format!("member-{name}"),
             agent_id: None,
             name: name.into(),
@@ -9741,6 +9743,7 @@ fn open_agent_settings_sets(
                 repo,
                 &sessions,
                 gwt::agent_names::AgentRosterAction::Add {
+                    pm_eligible: false,
                     name: None,
                     agent_id: Some(tool.into()),
                 },
@@ -11269,10 +11272,8 @@ pub(super) fn attach_live_pm_pane(runtime: &mut AppRuntime, window_id: &str) -> 
         create_detached_pm_worktree_fixture(&root);
     }
     pin_live_pm_fixture_agents(runtime, &root);
-    let config = AppRuntime::pm_launch_config(
-        &worktree,
-        &gwt::pm_registry::PmLaunchProfile::default_profile(),
-    );
+    let config = AppRuntime::pm_new_launch_config(&root, &worktree)
+        .expect("the same readonly NEW draft as the PM launcher");
     let owner = project_owner_fixture(runtime, window_id);
     let owner_id = owner.pane_id(window_id);
     let receipt = owner_fixture_block_on(owner.command(OwnerCommand::LaunchAgent {

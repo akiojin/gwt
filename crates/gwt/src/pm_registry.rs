@@ -4850,6 +4850,21 @@ pub fn load_pm_prefs(path: &Path) -> io::Result<PmPrefs> {
     load_pm_prefs_unlocked(path)
 }
 
+/// Hold the existing PM writer lock while inspecting an exact profile/identity.
+/// Callers that also need the registry always acquire it inside this callback.
+pub fn with_pm_prefs_snapshot<T>(
+    path: &Path,
+    operation: impl FnOnce(&PmPrefs) -> io::Result<T>,
+) -> io::Result<T> {
+    with_pm_prefs_lock(path, || operation(&load_pm_prefs_unlocked(path)?))
+}
+
+/// Content identity of the persisted input, including None and version selectors.
+pub fn pm_profile_revision(prefs: &PmPrefs) -> String {
+    let raw = serde_json::to_vec(&prefs.settings.launch_profile).expect("serializable PM profile");
+    format!("pm-profile-v1:{}", hex::encode(Sha256::digest(raw)))
+}
+
 pub fn save_pm_prefs(path: &Path, prefs: &PmPrefs) -> io::Result<()> {
     with_pm_prefs_lock(path, || save_pm_prefs_unlocked(path, prefs))
 }

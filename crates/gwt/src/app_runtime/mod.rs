@@ -11537,8 +11537,30 @@ impl AppRuntime {
                 action,
                 expected_revision,
                 request_id,
+                project_key,
             } => {
-                self.agent_roster_events(context, &client_id, action, expected_revision, request_id)
+                if project_key
+                    .as_deref()
+                    .is_some_and(|key| key != context.project_key.as_str())
+                    || matches!(
+                        action,
+                        gwt::agent_names::AgentRosterAction::SelectPm { .. }
+                            | gwt::agent_names::AgentRosterAction::SetPmEligibility { .. }
+                    ) && project_key.is_none()
+                {
+                    vec![OutboundEvent::reply(&client_id, BackendEvent::AgentRosterError {
+                        project_key: context.project_key.to_string(),
+                        message: "Load the current project's Agent roster before changing PM selection".into(), request_id,
+                    })]
+                } else {
+                    self.agent_roster_events(
+                        context,
+                        &client_id,
+                        action,
+                        expected_revision,
+                        request_id,
+                    )
+                }
             }
             FrontendEvent::AgentSchedule { action } => {
                 self.agent_schedule_events(context, &client_id, action)

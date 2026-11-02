@@ -1534,7 +1534,9 @@ impl AppRuntime {
                     description: Some(format!(
                         "{} · {}",
                         member.agent_id.as_deref().unwrap_or("Tool unavailable"),
-                        if !member.enabled {
+                        if !member.implementation_eligible() {
+                            "Configured or reserved as PM; unavailable for implementation"
+                        } else if !member.enabled {
                             "Resting; launches wait"
                         } else if member.assignment.is_some() {
                             "Busy; launches wait"
@@ -1649,7 +1651,8 @@ impl AppRuntime {
             .members
             .into_iter()
             .find(|member| {
-                member.agent_id.is_some()
+                member.implementation_eligible()
+                    && member.agent_id.is_some()
                     && !profiles.iter().any(|profile| {
                         profile.agent_member_id.as_ref() == Some(&member.agent_member_id)
                     })
@@ -1691,6 +1694,9 @@ impl AppRuntime {
                 }) else {
                     return Some(Err("Registered Agent is unavailable; reload Agents".into()));
                 };
+                if !member.implementation_eligible() {
+                    return Some(Err("This Agent is configured or reserved as PM; choose an implementation member".into()));
+                }
                 if let Some(taken) =
                     sets.profiles
                         .iter()
@@ -3519,7 +3525,11 @@ impl AppRuntime {
         }
         let mut profiles = pool.clone();
         if profiles.is_empty() {
-            if let Some(member) = roster.members.iter().find(|member| member.enabled) {
+            if let Some(member) = roster
+                .members
+                .iter()
+                .find(|member| member.enabled && member.implementation_eligible())
+            {
                 if let Some(tool) = member.agent_id.as_ref() {
                     wizard.apply(gwt::LaunchWizardAction::SetAgent {
                         agent_id: tool.clone(),
@@ -3657,8 +3667,12 @@ impl AppRuntime {
             )
             .ok()
             .and_then(|prefs| prefs.agent_roster)
-            .and_then(|roster| roster.members.into_iter().find(|member| member.enabled))
-            {
+            .and_then(|roster| {
+                roster
+                    .members
+                    .into_iter()
+                    .find(|member| member.enabled && member.implementation_eligible())
+            }) {
                 if let Some(tool) = member.agent_id {
                     wizard.apply(gwt::LaunchWizardAction::SetAgent { agent_id: tool });
                     if let Some(mut profile) = wizard.preview_launch_profile() {

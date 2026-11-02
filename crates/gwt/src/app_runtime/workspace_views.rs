@@ -4214,8 +4214,10 @@ fn agent_roster_view(
     gwt::AgentRosterView {
         project_key: context.project_key.to_string(),
         revision: roster.revision,
+        revision_decimal: roster.revision.to_string(),
         members,
-        capacity: roster.enabled_count(),
+        capacity: roster.implementation_enabled_count(),
+        total_enabled: roster.enabled_count(),
         recommended_capacity: capacity
             .measurement_complete
             .then_some(capacity.recommended_implementation_count),

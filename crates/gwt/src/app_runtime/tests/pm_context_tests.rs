@@ -304,8 +304,17 @@ fn pm_process_launch_isolates_discovery_and_keeps_project_data_readable() {
     fs::create_dir_all(worktree.join(".codex")).unwrap();
     fs::write(worktree.join(".codex/config.toml"), "project_marker = true").unwrap();
     let runtime_dir = worktree.parent().unwrap().join("runtime");
-    let sessions = temp.path().join("sessions");
+    let sessions = gwt_core::paths::gwt_sessions_dir();
     fs::create_dir_all(&sessions).unwrap();
+    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+    let mut prefs = gwt::pm_registry::PmPrefs::default();
+    prefs.settings.launch_profile = Some(gwt::pm_registry::PmLaunchProfile {
+        agent_id: "codex".into(),
+        model: None,
+        reasoning: None,
+        version: None,
+    });
+    gwt::pm_registry::save_pm_prefs(&prefs_path, &prefs).unwrap();
     let mut previous = None;
     for resumed in [false, true] {
         let mut config = if let Some(session) = previous.as_ref() {
@@ -328,25 +337,23 @@ fn pm_process_launch_isolates_discovery_and_keeps_project_data_readable() {
         config
             .env_vars
             .insert("CODEX_HOME".into(), codex_home.display().to_string());
-        let (proxy, events) = AppEventProxy::stub();
-        AppRuntime::spawn_agent_window_async(
-            proxy,
-            sessions.clone(),
-            repo.display().to_string(),
-            "tab-1::pm-isolation".into(),
-            config,
-            temp.path().join("missing-config.toml"),
-            None,
-        );
-        let recorded = events.lock().unwrap();
-        let result = recorded
-            .iter()
-            .find_map(|event| match event {
-                UserEvent::LaunchComplete { result, .. } => Some(result.as_ref()),
-                _ => None,
-            })
-            .expect("LaunchComplete");
-        let completion = result.as_ref().expect("successful PM process preparation");
+        let prepared = gwt::project_runtime::test_support::PreparedPmLaunchFixture::prepare(
+            gwt::project_runtime::launch::AgentLaunchInput {
+                sessions_dir: sessions.clone(),
+                project_root: repo.display().to_string(),
+                window_id: "tab-1::pm-isolation".into(),
+                config,
+                profile_config_path: temp.path().join("missing-config.toml"),
+                agent_capability_issuer: None,
+                prepared_manual_launch_claim: None,
+                issue_monitor_trust_candidate: None,
+                issue_monitor_launch: false,
+                pm_restore_prior: None,
+            },
+            previous.as_ref(),
+        )
+        .expect("successful PM process preparation");
+        let completion = &prepared.completion;
         assert_eq!(
             completion.0.cwd.as_deref(),
             Some(runtime_dir.as_path()),
@@ -382,6 +389,22 @@ fn pm_process_launch_isolates_discovery_and_keeps_project_data_readable() {
         );
         session.agent_session_id = Some("pm-isolation-resume".into());
         session.save(&sessions).unwrap();
+        let session = prepared
+            .retire_unspawned(&repo, &sessions, &session)
+            .expect("exact prepared-only PM cleanup before Resume");
+        gwt::pm_registry::try_register_pm(
+            &prefs_path,
+            gwt::pm_registry::PmRegistration {
+                session_id: session.id.clone(),
+                agent_id: "codex".into(),
+                worktree_path: worktree.to_string_lossy().into_owned(),
+                created_at: Some(session.created_at.to_rfc3339()),
+                consecutive_crashes: 0,
+                next_not_before: None,
+            },
+            |_| false,
+        )
+        .expect("registered original PM conversation");
         previous = Some(session);
     }
 }
@@ -952,6 +975,13 @@ fn pm_close_window_deregisters_pm() {
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let (repo, mut runtime, window_id) = pm_wake_fixture(&temp);
+    // Replace the wake-only fixture's known registration with an actual owner
+    // launch; its placeholder has no durable PM Session to resume or import.
+    gwt::pm_registry::deregister_pm(
+        &gwt::pm_registry::pm_prefs_path_for_repo_path(&repo),
+        "pm-session-live",
+    )
+    .expect("retire the known wake-only placeholder registration");
     let _pane = attach_live_pm_pane(&mut runtime, &window_id);
     let (spawner, finalizers) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;

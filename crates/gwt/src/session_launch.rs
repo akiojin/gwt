@@ -449,6 +449,9 @@ pub fn initialize_launch_session(
     session.codex_auth_root = config.validated_codex_auth_root_for_cwd(worktree);
     session.windows_shell = config.windows_shell;
     apply_resume_identity_to_session(&mut session, config);
+    if crate::pm_registry::is_canonical_pm_worktree(worktree) {
+        session.restore_source_session_id = config.predecessor_session_id.clone();
+    }
     session.update_status(gwt_agent::AgentStatus::Running);
     session
 }

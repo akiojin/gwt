@@ -1085,6 +1085,7 @@ impl AppRuntime {
                 prepared_manual_launch_claim,
                 issue_monitor_trust_candidate,
                 issue_monitor_launch,
+                pm_restore_prior: None,
             },
             move |event| match event {
                 AgentLaunchEvent::Progress { message } => {

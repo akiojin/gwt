@@ -426,6 +426,28 @@ impl AgentResourceSettings {
     }
 }
 
+fn deserialize_roster_revision<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error> {
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let Some(value) = value else { return Ok(None) };
+    let revision = match &value {
+        serde_json::Value::String(text) => text
+            .parse::<u64>()
+            .ok()
+            .filter(|revision| revision.to_string() == *text),
+        serde_json::Value::Number(number) => number
+            .as_u64()
+            .filter(|revision| *revision <= 9_007_199_254_740_991),
+        _ => None,
+    };
+    revision.map(Some).ok_or_else(|| {
+        serde::de::Error::custom(
+            "Agent roster revision must be an exact decimal u64; reload Agents before retrying",
+        )
+    })
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FrontendEvent {
@@ -466,8 +488,10 @@ pub enum FrontendEvent {
     /// Project-bound member controls. The client cannot select a filesystem root.
     AgentRoster {
         action: crate::agent_names::AgentRosterAction,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "deserialize_roster_revision")]
         expected_revision: Option<u64>,
+        #[serde(default)]
+        project_key: Option<String>,
         #[serde(default)]
         request_id: Option<String>,
     },
@@ -2105,8 +2129,12 @@ pub struct FleetPaneView {
 pub struct AgentRosterView {
     pub project_key: String,
     pub revision: u64,
+    #[serde(default)]
+    pub revision_decimal: String,
     pub members: Vec<AgentRosterMemberView>,
     pub capacity: usize,
+    #[serde(default)]
+    pub total_enabled: usize,
     pub recommended_capacity: Option<usize>,
     pub past_contributors: Vec<AgentPastContributorView>,
     pub past_complete: bool,
@@ -5472,6 +5500,32 @@ mod tests {
         assert!(
             matches!(event, FrontendEvent::AgentRoster { request_id: Some(id), .. } if id == "name-write-1")
         );
+    }
+
+    #[test]
+    fn agent_roster_accepts_lossless_decimal_revision_and_rejects_unsafe_numbers() {
+        let payload = serde_json::json!({
+            "kind": "agent_roster", "action": {"kind": "read"},
+            "expected_revision": u64::MAX.to_string(),
+        });
+        let event: FrontendEvent = serde_json::from_value(payload).unwrap();
+        assert!(matches!(
+            event,
+            FrontendEvent::AgentRoster {
+                expected_revision: Some(u64::MAX),
+                ..
+            }
+        ));
+        for revision in [
+            serde_json::json!(9_007_199_254_740_992_u64),
+            serde_json::json!("01"),
+            serde_json::json!(" 1"),
+        ] {
+            assert!(serde_json::from_value::<FrontendEvent>(serde_json::json!({
+                "kind": "agent_roster", "action": {"kind": "read"}, "expected_revision": revision,
+            }))
+            .is_err());
+        }
     }
 
     #[test]

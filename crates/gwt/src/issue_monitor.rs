@@ -1557,6 +1557,7 @@ impl IssueMonitorPrefs {
                         roster.members.iter().any(|member| {
                             profile.agent_member_id.as_deref()
                                 == Some(member.agent_member_id.as_str())
+                                && member.implementation_eligible()
                                 && (member.enabled
                                     || member.assignment.as_ref().is_some_and(|assignment| {
                                         assignment.issue_number == Some(issue_number)
@@ -11265,7 +11266,7 @@ impl IssueMonitorState {
     /// Issue #6096: derive the slot limit without applying the capacity sample.
     /// Admission compares this decision because sampler snapshot bytes change.
     pub fn effective_max_active_agents_under(&self, capacity: &AgentCapacity) -> usize {
-        if self.agent_roster.is_some() {
+        if let Some(roster) = self.agent_roster.as_ref() {
             let machine = match self.roster_machine_policy.as_ref() {
                 Some(policy) if policy.mode == IssueMonitorMaxActiveMode::Manual => policy
                     .manual_limit
@@ -11281,7 +11282,11 @@ impl IssueMonitorState {
                 }
                 _ => self.config.max_active,
             };
-            return self.config.max_active.min(machine);
+            return self
+                .config
+                .max_active
+                .min(machine)
+                .min(roster.implementation_enabled_count());
         }
         match self.max_active_agents_mode {
             IssueMonitorMaxActiveMode::Manual => self
@@ -14739,7 +14744,7 @@ impl IssueMonitorState {
             agent_roster_capacity: self
                 .agent_roster
                 .as_ref()
-                .map(|roster| roster.enabled_count()),
+                .map(|roster| roster.implementation_enabled_count()),
             agent_roster_revision: self.agent_roster.as_ref().map(|roster| roster.revision),
             max_active_agents_scope: machine_max_active_scope(),
             allowed_labels: self.allowed_labels.clone(),

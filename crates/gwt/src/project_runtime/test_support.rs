@@ -2,6 +2,110 @@
 
 use std::sync::{atomic::AtomicBool, Arc, Mutex};
 
+/// A process-preparation fixture that never starts an OS child. Its exact
+/// reservation and provisional runtime still use the production PM guards.
+pub struct PreparedPmLaunchFixture {
+    pub completion: super::launch_payload::AgentLaunchCompletion,
+    captured_runtime: Result<Option<Vec<u8>>, String>,
+    restore_prior: Option<(
+        gwt_agent::Session,
+        Option<crate::agent_names::AgentMemberAssignment>,
+    )>,
+}
+
+impl PreparedPmLaunchFixture {
+    pub fn prepare(
+        mut input: super::launch::AgentLaunchInput,
+        source: Option<&gwt_agent::Session>,
+    ) -> Result<Self, String> {
+        let root = std::path::Path::new(&input.project_root);
+        let reservation = uuid::Uuid::new_v4().to_string();
+        let prepared = match source {
+            Some(source) => crate::agent_registry::reserve_resume_pm_member(
+                root,
+                &input.sessions_dir,
+                source,
+                &reservation,
+                false,
+            ),
+            None => crate::agent_registry::reserve_new_pm_member(
+                root,
+                &input.sessions_dir,
+                input.config.working_dir.as_deref().ok_or("PM worktree")?,
+                &reservation,
+            ),
+        }
+        .map_err(|error| error.to_string())?;
+        let revision = prepared
+            .member
+            .assignment
+            .as_ref()
+            .and_then(|assignment| assignment.pm_profile_revision.clone())
+            .ok_or("captured PM profile revision")?;
+        input.config.env_vars.extend([
+            (
+                "GWT_AGENT_MEMBER_ID".into(),
+                prepared.member.agent_member_id,
+            ),
+            ("GWT_AGENT_RESERVATION_ID".into(), reservation),
+            ("GWT_AGENT_NAME".into(), prepared.member.name),
+            ("GWT_PM_PROFILE_REVISION".into(), revision),
+        ]);
+        input.pm_restore_prior = source.map(|source| (source.clone(), prepared.prior_assignment));
+        let restore_prior = input.pm_restore_prior.clone();
+        let sessions = input.sessions_dir.clone();
+        let completion =
+            super::launch::prepare_agent_launch(input, |_| {}).map_err(|error| error.detail)?;
+        let captured_runtime =
+            match std::fs::read(gwt_agent::runtime_state_path(&sessions, &completion.1)) {
+                Ok(bytes) => Ok(Some(bytes)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error.to_string()),
+            };
+        Ok(Self {
+            completion,
+            captured_runtime,
+            restore_prior,
+        })
+    }
+
+    pub fn retire_unspawned(
+        &self,
+        root: &std::path::Path,
+        sessions: &std::path::Path,
+        expected: &gwt_agent::Session,
+    ) -> Result<gwt_agent::Session, String> {
+        if let Some(handshake) = self.completion.11.active_launch_handshake.as_ref() {
+            crate::cli::execution_state::finish_active_session_launch_handshake(
+                sessions, handshake,
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        let stopped = super::owner::retire_unspawned_launch_runtime(
+            sessions,
+            expected,
+            Some(&self.captured_runtime),
+        )?;
+        let env = &self.completion.0.env;
+        if !crate::agent_registry::cancel_unspawned_pm_member(
+            root,
+            sessions,
+            env.get("GWT_AGENT_MEMBER_ID").ok_or("PM member")?,
+            env.get("GWT_AGENT_RESERVATION_ID")
+                .ok_or("PM reservation")?,
+            Some(&stopped),
+            self.restore_prior
+                .as_ref()
+                .map(|(source, prior)| (source, prior.as_ref())),
+        )
+        .map_err(|error| error.to_string())?
+        {
+            return Err("exact unspawned PM fixture reservation changed".into());
+        }
+        Ok(stopped)
+    }
+}
+
 /// Captured only by the owner's mailbox after an exact pane/incarnation match.
 /// These are the production resources, never a second GUI runtime or registry.
 #[doc(hidden)]

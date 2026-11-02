@@ -352,7 +352,11 @@ impl IssueMonitorPrefs {
         let member = roster
             .members
             .iter()
-            .find(|member| member.agent_member_id == member_id && member.enabled)
+            .find(|member| {
+                member.agent_member_id == member_id
+                    && member.enabled
+                    && member.implementation_eligible()
+            })
             .ok_or_else(unavailable)?;
         let assignment = member.assignment.as_ref().ok_or_else(unavailable)?;
         let session = assignment
@@ -779,6 +783,8 @@ mod tests {
             schema_version: 1,
             revision: 1,
             members: vec![crate::agent_names::AgentMember {
+                pm_eligible: false,
+                pm_project_key: None,
                 agent_id: None,
                 agent_member_id: "member".into(),
                 name: "Member".into(),

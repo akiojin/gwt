@@ -2253,15 +2253,12 @@ impl AppRuntime {
         project_root: &Path,
         worktree: &Path,
     ) -> Vec<OutboundEvent> {
-        let profile = pm_registry::pm_prefs_path_for_repo_path(project_root);
-        let profile = pm_registry::load_pm_prefs(&profile)
-            .map(|prefs| prefs.settings.launch_profile_or_default())
-            .unwrap_or_else(|_| pm_registry::PmLaunchProfile::default_profile());
-        // T-052: the `$gwt-pm` bootstrap prompt resolves against the guidance
-        // skill that managed-asset materialization writes into this worktree.
-        // Writing it here instead would be futile — the launch's own asset
-        // refresh prunes unbundled `gwt-*` skills right after.
-        let config = Self::pm_launch_config(worktree, &profile);
+        let config = match Self::pm_new_launch_config(project_root, worktree) {
+            Ok(config) => config,
+            Err(error) => {
+                return self.pm_worktree_preparation_failed_events(project_root, &error);
+            }
+        };
         let before = self.pm_window_ids(tab_id);
         match self.spawn_agent_window_with_identity(tab_id, config, None, None) {
             Ok(events) => {
@@ -2273,6 +2270,38 @@ impl AppRuntime {
                 Vec::new()
             }
         }
+    }
+
+    /// Capture only the cheap readonly NEW draft; reservation stays owner-local.
+    pub(crate) fn pm_new_launch_config(
+        project_root: &Path,
+        worktree: &Path,
+    ) -> Result<gwt_agent::LaunchConfig, String> {
+        let prefs =
+            pm_registry::load_pm_prefs(&pm_registry::pm_prefs_path_for_repo_path(project_root))
+                .map_err(|error| format!("PM launch profile is unavailable: {error}"))?;
+        let member = gwt::agent_registry::SessionMemberSnapshot::load()
+            .and_then(|snapshot| {
+                snapshot.configured_pm_member(&gwt_core::paths::project_scope_hash(project_root))
+            })
+            .map_err(|error| format!("PM selection is unavailable: {error}"))?;
+        let profile = prefs.settings.launch_profile_or_default();
+        // T-052: the `$gwt-pm` bootstrap prompt resolves against the guidance
+        // skill that managed-asset materialization writes into this worktree.
+        // Writing it here instead would be futile — the launch's own asset
+        // refresh prunes unbundled `gwt-*` skills right after.
+        let mut config = Self::pm_launch_config(worktree, &profile);
+        config.env_vars.insert(
+            "GWT_PM_EXPECTED_MEMBER_ID".into(),
+            member
+                .map(|member| member.agent_member_id)
+                .unwrap_or_default(),
+        );
+        config.env_vars.insert(
+            "GWT_PM_PROFILE_REVISION".into(),
+            pm_registry::pm_profile_revision(&prefs),
+        );
+        Ok(config)
     }
 
     /// Issue #4375 AC-3: a PM worktree preparation that failed stays visible.

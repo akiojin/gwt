@@ -70,6 +70,7 @@ pub(crate) struct OwnerSavedSessionRestore {
     pub registry_after: Option<Result<crate::PersistedWindowRegistry, String>>,
     pub launch_started: bool,
     pub member_reservation: Option<(String, String)>,
+    pub pm_prior_assignment: Option<crate::agent_names::AgentMemberAssignment>,
     pub refusal: Option<OwnerRestoreRefusal>,
 }
 
@@ -201,8 +202,22 @@ pub(crate) fn finish_owner_restore_failure(
     restore: &mut OwnerSavedSessionRestore,
     detail: &str,
 ) -> Result<(), String> {
-    if let Some((member, reservation)) = restore.member_reservation.take() {
-        crate::agent_names::release_project_member(root, sessions_dir, &member, &reservation)?;
+    if let Some((member, reservation)) = restore.member_reservation.as_ref() {
+        if crate::pm_registry::is_canonical_pm_worktree(&restore.source.worktree_path) {
+            crate::agent_registry::cancel_unspawned_pm_member(
+                root,
+                sessions_dir,
+                member,
+                reservation,
+                None,
+                Some((&restore.source, restore.pm_prior_assignment.as_ref())),
+            )
+            .map_err(|error| error.to_string())?;
+        } else {
+            crate::agent_names::release_project_member(root, sessions_dir, member, reservation)?;
+        }
+        restore.member_reservation = None;
+        restore.pm_prior_assignment = None;
     }
     if restore.refusal.is_none() {
         restore.refuse("restore_launch_failed", detail, true);
@@ -537,7 +552,43 @@ pub(crate) fn prepare_owner_saved_session_restore(
             })
             .find_map(|row| row.agent_name.clone())
     });
-    if let Some(member_root) = member_root {
+    if is_pm {
+        let existing = restore.member_reservation.is_some();
+        let token = restore
+            .member_reservation
+            .as_ref()
+            .map(|(_, token)| token.clone())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let prepared = crate::agent_registry::reserve_resume_pm_member(
+            root,
+            sessions_dir,
+            &restore.source,
+            &token,
+            restore.worktree_reserved,
+        )
+        .map_err(|error| error.to_string())?;
+        if !existing {
+            restore.pm_prior_assignment = prepared.prior_assignment;
+        }
+        let member = prepared.member;
+        let assignment = member.assignment.as_ref().expect("PM restore reservation");
+        config
+            .env_vars
+            .insert("GWT_AGENT_MEMBER_ID".into(), member.agent_member_id.clone());
+        config.env_vars.insert(
+            "GWT_AGENT_RESERVATION_ID".into(),
+            assignment.reservation_id.clone(),
+        );
+        config.env_vars.insert(
+            "GWT_PM_PROFILE_REVISION".into(),
+            assignment
+                .pm_profile_revision
+                .clone()
+                .expect("PM restore profile"),
+        );
+        agent_name = Some(member.name);
+        restore.member_reservation = Some((member.agent_member_id, token));
+    } else if let Some(member_root) = member_root {
         let token = uuid::Uuid::new_v4().to_string();
         let member = crate::agent_names::reserve_project_member_for_agent(
             member_root,
@@ -2984,7 +3035,72 @@ pub(crate) fn prepare_owner_agent_admission(
         .working_dir
         .as_deref()
         .is_some_and(crate::pm_registry::is_canonical_pm_worktree);
-    if is_pm || is_review {
+    if is_pm {
+        if let Some(reservation) = config.env_vars.get("GWT_AGENT_RESERVATION_ID").cloned() {
+            let member_id = config
+                .env_vars
+                .get("GWT_AGENT_MEMBER_ID")
+                .ok_or("PM reservation has no captured member")?;
+            let assignment =
+                crate::agent_registry::pm_assignment(input.project_root, member_id, &reservation)
+                    .map_err(|error| error.to_string())?
+                    .ok_or("PM reservation is unavailable")?;
+            if assignment.pm_profile_revision.as_ref()
+                != config.env_vars.get("GWT_PM_PROFILE_REVISION")
+            {
+                return Err("Captured PM conversation profile changed; retry Resume".into());
+            }
+            let member = crate::agent_registry::SessionMemberSnapshot::load()
+                .and_then(|snapshot| snapshot.member(member_id))
+                .map_err(|error| error.to_string())?
+                .ok_or("PM member is unavailable")?;
+            config.env_vars.insert("GWT_AGENT_NAME".into(), member.name);
+        } else {
+            if config.predecessor_session_id.is_some() {
+                return Err("Resume the registered PM through its saved conversation".into());
+            }
+            let expected = config
+                .env_vars
+                .get("GWT_PM_EXPECTED_MEMBER_ID")
+                .ok_or("Reload PM status before starting a NEW conversation")?
+                .clone();
+            let revision = config
+                .env_vars
+                .get("GWT_PM_PROFILE_REVISION")
+                .ok_or("Reload PM launch settings before starting a NEW conversation")?
+                .clone();
+            let token = uuid::Uuid::new_v4().to_string();
+            let worktree = config
+                .working_dir
+                .as_deref()
+                .expect("canonical PM worktree");
+            let prepared = crate::agent_registry::reserve_new_pm_member_from_draft(
+                input.project_root,
+                input.sessions_dir,
+                worktree,
+                &token,
+                &crate::agent_registry::PmLaunchDraft {
+                    member_id: (!expected.is_empty()).then_some(expected.as_str()),
+                    profile_revision: &revision,
+                    agent_id: config.agent_id.command(),
+                    model: config.model.as_deref(),
+                    reasoning: config.reasoning_level.as_deref(),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+            config.env_vars.insert(
+                "GWT_AGENT_MEMBER_ID".into(),
+                prepared.member.agent_member_id,
+            );
+            config
+                .env_vars
+                .insert("GWT_AGENT_RESERVATION_ID".into(), token);
+            config
+                .env_vars
+                .insert("GWT_AGENT_NAME".into(), prepared.member.name);
+            config.env_vars.remove("GWT_PM_EXPECTED_MEMBER_ID");
+        }
+    } else if is_review {
         config.env_vars.remove("GWT_AGENT_MEMBER_ID");
         config.env_vars.remove("GWT_AGENT_RESERVATION_ID");
         let history = gwt_core::paths::gwt_project_dir_for_repo_path(input.project_root)
@@ -3054,25 +3170,44 @@ pub(crate) fn prepare_owner_agent_admission(
         );
         config.env_vars.insert("GWT_AGENT_NAME".into(), member.name);
     }
-    let prepared_manual_launch_claim = super::continuation::claim_prepared_manual_successor_launch(
-        input.sessions_dir,
-        input.project_root,
-        config,
-    )
-    .inspect_err(|_| {
-        if let Some((member, reservation)) = config
-            .env_vars
-            .get("GWT_AGENT_MEMBER_ID")
-            .zip(config.env_vars.get("GWT_AGENT_RESERVATION_ID"))
-        {
-            let _ = crate::agent_names::release_project_member(
-                input.project_root,
-                input.sessions_dir,
-                member,
-                reservation,
-            );
-        }
-    })?;
+    let prepared_manual_launch_claim =
+        match super::continuation::claim_prepared_manual_successor_launch(
+            input.sessions_dir,
+            input.project_root,
+            config,
+        ) {
+            Ok(claim) => claim,
+            Err(error) => {
+                if let Some((member, reservation)) = config
+                    .env_vars
+                    .get("GWT_AGENT_MEMBER_ID")
+                    .zip(config.env_vars.get("GWT_AGENT_RESERVATION_ID"))
+                {
+                    if is_pm {
+                        if input.restore_source.is_none() {
+                            if let Err(cleanup) = crate::agent_registry::cancel_unspawned_pm_member(
+                                input.project_root,
+                                input.sessions_dir,
+                                member,
+                                reservation,
+                                None,
+                                None,
+                            ) {
+                                return Err(format!("{error}; PM reservation retained pending exact reconciliation: {cleanup}"));
+                            }
+                        }
+                    } else {
+                        let _ = crate::agent_names::release_project_member(
+                            input.project_root,
+                            input.sessions_dir,
+                            member,
+                            reservation,
+                        );
+                    }
+                }
+                return Err(error);
+            }
+        };
     Ok(PreparedOwnerAgentAdmission {
         workspace_resume_context,
         launch_feedback_context,

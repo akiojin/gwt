@@ -2611,6 +2611,7 @@ fn app_runtime_selected_member_keeps_its_model_when_pool_order_changes() {
         &repo,
         &sessions,
         gwt::agent_names::AgentRosterAction::Add {
+            pm_eligible: false,
             name: None,
             agent_id: Some("codex".into()),
         },

@@ -318,6 +318,7 @@ fn native_final_permission_guard_rechecks_materialized_skip_after_an_allowed_aud
                 prepared_manual_launch_claim: None,
                 issue_monitor_trust_candidate: None,
                 issue_monitor_launch: false,
+                pm_restore_prior: None,
             },
             |_| {},
         )
@@ -3388,6 +3389,7 @@ fn direct_agent_presets_create_and_restart_are_observed_until_stopped() {
         &repo,
         &runtime.sessions_dir,
         gwt::agent_names::AgentRosterAction::Add {
+            pm_eligible: false,
             name: None,
             agent_id: Some("claude".into()),
         },

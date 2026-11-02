@@ -1129,7 +1129,7 @@ impl OwnerState {
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
             gwt_core::operation_deadline::now() + std::time::Duration::from_secs(5),
         );
-        if let Err(error) = crate::agent_registry::ensure_active_for_project(&self.root) {
+        if let Err(error) = crate::agent_registry::ensure_active_for_owner(&self.root) {
             let error = format!("Shared Agent registry initialization failed: {error}");
             self.shared_registry_initialization = Some(Err(error.clone()));
             return Err(error);
@@ -3788,6 +3788,7 @@ impl OwnerState {
             registry_after: None,
             launch_started: false,
             member_reservation: None,
+            pm_prior_assignment: None,
             refusal: None,
         };
         self.launch_agent_inner(
@@ -4904,6 +4905,8 @@ impl OwnerState {
                             prepared_manual_launch_claim: admitted.prepared_manual_launch_claim,
                             issue_monitor_trust_candidate: admitted.issue_monitor_trust_candidate,
                             issue_monitor_launch: admitted.issue_monitor_launch,
+                            pm_restore_prior: restore.as_ref().filter(|restore| crate::pm_registry::is_canonical_pm_worktree(&restore.source.worktree_path))
+                                .map(|restore| (restore.source.clone(), restore.pm_prior_assignment.clone())),
                         },
                         move |event| {
                             let event = match event {
@@ -10100,7 +10103,7 @@ fn abandon_agent_launch(
     Ok(())
 }
 
-fn retire_unspawned_launch_runtime(
+pub(super) fn retire_unspawned_launch_runtime(
     sessions_dir: &std::path::Path,
     expected: &gwt_agent::Session,
     captured_runtime: Option<&Result<Option<Vec<u8>>, String>>,
@@ -10752,6 +10755,18 @@ pub(crate) fn close_runtime(
             &runtime.pty,
         )?;
         runtime.member_cleanup = None;
+    } else if let Some(agent) = runtime
+        .agent
+        .as_ref()
+        .filter(|agent| crate::pm_registry::is_canonical_pm_worktree(&agent.snapshot.worktree_path))
+    {
+        crate::agent_names::release_reaped_pm_member(
+            &runtime.project_root,
+            &gwt_core::paths::gwt_sessions_dir(),
+            &agent.snapshot,
+            None,
+            &runtime.pty,
+        )?;
     }
     if let Some(agent) = runtime.agent.as_ref() {
         let pm_cause = match cause {
@@ -11891,6 +11906,174 @@ mod tests {
             "shutdown must reap the captured PTY child"
         );
     }
+    #[tokio::test]
+    async fn legacy_pm_owner_reap_releases_its_original_member_after_selection_changes() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let root = home.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let worktree = crate::pm_registry::pm_worktree_path_for_repo_path(&root);
+        std::fs::create_dir_all(&worktree).unwrap();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let (mut snapshot, pane) = unbound_fixture(&worktree);
+        let pty = pane.shared_pty();
+        struct PmChildGuard(Arc<PtyHandle>);
+        impl Drop for PmChildGuard {
+            fn drop(&mut self) {
+                let _ = crate::session_finalizer::kill_and_reap(&self.0, "pane");
+            }
+        }
+        let _cleanup = PmChildGuard(pty.clone());
+        snapshot.agent_id = gwt_agent::AgentId::ClaudeCode;
+        snapshot.repo_hash = Some(gwt_core::paths::project_scope_hash(&root).to_string());
+        snapshot.project_state_root = Some(root.clone());
+        snapshot.agent_name = Some("Legacy PM".into());
+        snapshot.model = Some("old-conversation-model".into());
+        snapshot.agent_session_id = Some("legacy-pm-conversation".into());
+        snapshot.update_status(gwt_agent::AgentStatus::Running);
+        snapshot.save(&sessions).unwrap();
+        let pm_path = crate::pm_registry::pm_prefs_path_for_repo_path(&root);
+        let mut prefs = crate::pm_registry::PmPrefs {
+            registration: Some(crate::pm_registry::PmRegistration {
+                session_id: snapshot.id.clone(),
+                agent_id: "claude".into(),
+                worktree_path: worktree.to_string_lossy().into_owned(),
+                created_at: Some(snapshot.created_at.to_rfc3339()),
+                consecutive_crashes: 0,
+                next_not_before: None,
+            }),
+            ..Default::default()
+        };
+        prefs.settings.launch_profile = Some(crate::pm_registry::PmLaunchProfile {
+            agent_id: "codex".into(),
+            model: Some("next-new-model".into()),
+            reasoning: None,
+            version: None,
+        });
+        crate::pm_registry::save_pm_prefs(&pm_path, &prefs).unwrap();
+        let imported = crate::agent_names::read_project_roster(&root, &sessions).unwrap();
+        let old_id = imported.members[0].agent_member_id.clone();
+        let added = crate::agent_names::mutate_project_roster(
+            &root,
+            &sessions,
+            crate::agent_names::AgentRosterAction::Add {
+                agent_id: Some("codex".into()),
+                name: Some("Successor PM".into()),
+                pm_eligible: true,
+            },
+            Some(imported.revision),
+        )
+        .unwrap();
+        let successor_id = added.members.last().unwrap().agent_member_id.clone();
+        let selected = crate::agent_names::mutate_project_roster(
+            &root,
+            &sessions,
+            crate::agent_names::AgentRosterAction::SelectPm {
+                member_id: successor_id.clone(),
+            },
+            Some(added.revision),
+        )
+        .unwrap();
+        assert!(
+            selected
+                .members
+                .iter()
+                .find(|member| member.agent_member_id == old_id)
+                .unwrap()
+                .assignment
+                .is_some(),
+            "selection keeps the live old PM reservation"
+        );
+        let (mut state, receiver, handle) = owner_fixture(&root);
+        let current = Arc::new(AtomicBool::new(true));
+        state
+            .install_pane("pane".into(), 1, pane, current.clone())
+            .unwrap();
+        let runtime = state.runtimes.get_mut("pane").unwrap();
+        assert!(runtime.member_cleanup.is_none());
+        runtime.agent = Some(AgentRuntimeRecord {
+            feedback: None,
+            monitor_owner: None,
+            monitor_terminal_failure: None,
+            monitor_answer_inflight: false,
+            binding_repair_inflight: false,
+            monitor_source: None,
+            monitor_ack_replies: Vec::new(),
+            monitor_adopt_claim: false,
+            monitor_commit_inflight: false,
+            monitor_ready: false,
+            monitor_retry_at: None,
+            monitor_startup_at: None,
+            current,
+            active: active_fixture(&worktree, &snapshot),
+            snapshot: snapshot.clone(),
+            capability_token: None,
+            issuer: state.issuer.clone(),
+            pending_fresh: None,
+            pending_continue: None,
+            purpose_title: None,
+            readiness_deadline: None,
+        });
+        let mut events = handle.subscribe();
+        let actor_home = home.path().to_path_buf();
+        let actor = thread::spawn(move || {
+            let _home = gwt_core::test_support::ScopedGwtHome::set(actor_home);
+            run_fixture_owner(state, receiver);
+        });
+        handle
+            .request(request(OwnerCommand::Input {
+                id: "pane".into(),
+                incarnation: 1,
+                data: b"finish\n".to_vec(),
+            }))
+            .await
+            .unwrap();
+        // test-hygiene: allow-wall-clock-deadline Bounds the actual owned PTY completion; exact durable assertions determine success.
+        let terminal = tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+            loop {
+                if matches!(events.recv().await.unwrap(), OwnerEvent::Status { ref id, incarnation: 1, exit_confirmed: true, .. } if id == "pane") { break; }
+            }
+        }).await;
+        handle.request(request(OwnerCommand::Health)).await.unwrap();
+        handle.shutdown().await;
+        actor.join().unwrap();
+        assert!(terminal.is_ok());
+        assert!(pty.tree_exit_confirmed());
+        let after = crate::agent_names::read_project_roster(&root, &sessions).unwrap();
+        assert!(
+            after
+                .members
+                .iter()
+                .find(|member| member.agent_member_id == old_id)
+                .unwrap()
+                .assignment
+                .is_none(),
+            "the actual legacy owner reap must release only its original assignment"
+        );
+        assert_eq!(
+            after
+                .members
+                .iter()
+                .find(|member| member.agent_member_id == successor_id)
+                .unwrap()
+                .pm_project_key,
+            snapshot.repo_hash
+        );
+        let historical =
+            gwt_agent::Session::load(&sessions.join(format!("{}.toml", snapshot.id))).unwrap();
+        assert_eq!(historical.agent_member_id, None);
+        assert_eq!(historical.agent_name, snapshot.agent_name);
+        assert_eq!(historical.model, snapshot.model);
+        assert_eq!(historical.agent_session_id, snapshot.agent_session_id);
+        assert_eq!(
+            crate::pm_registry::load_pm_prefs(&pm_path)
+                .unwrap()
+                .settings,
+            prefs.settings
+        );
+        assert!(!crate::issue_monitor_prefs_path_for_repo_path(&root).exists());
+    }
+
     #[tokio::test]
     async fn natural_exit_commits_session_receipt_and_stopped_state_before_terminal_projection() {
         let root = tempfile::tempdir().unwrap();

@@ -162,7 +162,9 @@ impl IssueMonitorPrefs {
         let members = roster
             .members
             .iter()
-            .filter(|member| member.enabled || member.assignment.is_some())
+            .filter(|member| {
+                member.implementation_eligible() && (member.enabled || member.assignment.is_some())
+            })
             .map(|member| {
                 let issues: Vec<_> = self
                     .agent_issue_schedule
@@ -227,6 +229,7 @@ fn reconcile(
         });
     let eligible = |member: &&AgentMember| {
         member.enabled
+            && member.implementation_eligible()
             && selected
                 .as_ref()
                 .is_none_or(|ids| ids.contains(member.agent_member_id.as_str()))
@@ -480,7 +483,7 @@ pub fn mutate_project_agent_schedule(
             }
             if prefs.scheduled_issue_in_flight(*issue_number) || prefs.scheduled_issue_has_pending_claim(*issue_number) {return Err(io::Error::other("Issue already claiming, launching or running; read issue.monitor.schedule.read and retry"));}
             let target = prefs.agent_roster.as_ref().and_then(|roster| roster.members.iter().find(|member| member.agent_member_id == *target_member_id)).ok_or_else(|| io::Error::other("Target Agent member is absent; read issue.monitor.schedule.read and retry"))?;
-            if !target.enabled || target.assignment.as_ref().is_some_and(|assignment| !assignment.host_id.is_empty() && assignment.host_id != host) {
+            if !target.enabled || !target.implementation_eligible() || target.assignment.as_ref().is_some_and(|assignment| !assignment.host_id.is_empty() && assignment.host_id != host) {
                 return Err(io::Error::other("Target Agent must be enabled and belong to this host; read issue.monitor.schedule.read and choose a local member"));
             }
             let tool_exclusion = if source_member_id != target_member_id {
@@ -565,7 +568,7 @@ impl IssueMonitorState {
         if self
             .agent_roster
             .as_ref()
-            .is_some_and(|roster| roster.schema_version == 2)
+            .is_some_and(|roster| matches!(roster.schema_version, 2 | 3))
         {
             self.agent_registry_project_key =
                 Some(gwt_core::paths::project_scope_hash(root).to_string());
@@ -630,6 +633,13 @@ impl IssueMonitorState {
     }
 
     pub fn agent_schedule_launch_exclusion(&self, number: u64) -> Option<String> {
+        if self
+            .agent_roster
+            .as_ref()
+            .is_some_and(|roster| roster.implementation_enabled_count() == 0)
+        {
+            return Some("No implementation members are available: enabled Agents are configured or reserved as PM; add or enable an implementation Agent in Agents".into());
+        }
         let host = crate::process::current_hostname();
         if let Some(foreign) = self
             .agent_issue_schedule
@@ -667,7 +677,7 @@ impl IssueMonitorState {
         if let Some(reason) = selected_member_tool_exclusion(&self.launch_profiles, member, id) {
             return Some(format!("scheduled_member_unavailable: {reason}; read issue.monitor.schedule.read and reassign to a matching selected member"));
         }
-        let available = member.is_some_and(|member| match &member.assignment {
+        let available = member.is_some_and(|member| member.implementation_eligible() && match &member.assignment {
             None => member.enabled,
             Some(assignment) => assignment.issue_number == Some(number)
                 && assignment.project_key.as_deref().is_none_or(|key| self.agent_registry_project_key.as_deref() == Some(key))
@@ -1312,6 +1322,7 @@ mod tests {
             &root,
             &sessions,
             crate::agent_names::AgentRosterAction::Add {
+                pm_eligible: false,
                 agent_id: Some("claude".into()),
                 name: None,
             },
