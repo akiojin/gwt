@@ -476,3 +476,20 @@ See [the scoped measurements and limits](rpc-runtime-lifetime.md) and
 [the evidence artifact](rpc-runtime-lifetime.json). Historical notifications,
 installed rollout, original EO3/EO4, final verification and delivery remain
 unproven; this controlled repair is not a parent CPU/fleet acceptance result.
+
+### Works telemetry layout slice (2026-11-02)
+
+Telemetry updates forced native terminal rehosting and persisted layout even
+without a host transition. The telemetry caller now uses the existing render
+path without forced rehosting; ordinary host synchronization keeps its default.
+The same finite module probe's 20-update burst changes from one layout and
+two mount calls to zero, with one frame and no pending work in both cases.
+A single regression was RED, then all 105 related tests passed. These are
+fixture callback counts, not measured Chromium/PTY traffic or CPU improvement.
+See [the observations and limits](ui-telemetry-fit.md) and
+[the evidence artifact](ui-telemetry-fit.json). Mac scroll/typing recovery,
+actual headed acceptance and delivery remain unverified.
+The intermediate native canonical record
+`vrr-0bc801c3c9ae4d9ca9ed89cbe58947eb` passed 14/14 commands, including
+1,716 frontend and 101 Rust tests. Its earlier WSL-runner FAIL is retained.
+Neither record establishes final-head, actual headed or Mac acceptance.

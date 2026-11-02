@@ -22,17 +22,17 @@ async function fixture(telemetry = null, initialCatalog = catalog(windows)) {
   const windowCatalogModel = createUiStateStore({ catalog: initialCatalog }, options);
   const activityModel = createUiStateStore({ agents: live, count: 2 }, options);
   const rosterModel = createUiStateStore({ members: [{ member_id: "m1", name: "One", enabled: true, assignment: { session_id: "s1" } }] }, options);
-  const runtimes = new Map(), mounts = [], previews = new Set(), previewMounts = [], selected = [], focused = [];
+  const runtimes = new Map(), mounts = [], layouts = [], previews = new Set(), previewMounts = [], selected = [], focused = [];
   const systemSettingsModel = createUiStateStore({ worksPreviewLines: 3 }, options);
   const surface = createWorksSurface({ document, windowCatalogModel, activityModel, rosterModel, systemSettingsModel,
     windowDisplayTitle: w => `${w.agent_name || w.title || "Agent"}${w.dynamic_title ? ` — ${w.dynamic_title}` : ""}`,
     mountTerminal(id, root, options) { let input = runtimes.get(id); if (!input) { input = document.createElement("textarea"); runtimes.set(id, input); } root.appendChild(input); mounts.push({ id, root, readOnly: options?.readOnly }); },
     mountPreview(id, root, options) { const pre = document.createElement("pre"); pre.textContent = `${id} output`; root.appendChild(pre); previews.add(pre); previewMounts.push({ id, root, lines: options?.tailLines }); return () => { previews.delete(pre); pre.remove(); }; },
-    onFocus: id => focused.push(id), onLayout() {}, onSelectMember: id => selected.push(id), getTelemetry: () => telemetry,
+    onFocus: id => focused.push(id), onLayout() { layouts.push(true); }, onSelectMember: id => selected.push(id), getTelemetry: () => telemetry,
   });
   document.querySelector("main").append(surface.element); surface.sync();
   const flush = () => { for (const frame of [...frames]) { frames.delete(frame); frame(); } };
-  return { surface, document, window, windowCatalogModel, activityModel, rosterModel, frames, flush, runtimes, mounts, previews, previewMounts, systemSettingsModel, selected, focused };
+  return { surface, document, window, windowCatalogModel, activityModel, rosterModel, frames, flush, runtimes, mounts, layouts, previews, previewMounts, systemSettingsModel, selected, focused };
 }
 
 test("Works implements the approved list and native terminal API", () => {
@@ -276,6 +276,26 @@ test("Works retains native input and fixed names when runtime state and purpose 
   f.flush();
   assert.match(f.surface.element.querySelector(".works-full-meta").textContent, /Running.*Interactive/,
     "a current runtime recovery supersedes the earlier interrupted catalog status");
+  f.surface.dispose();
+});
+
+test("Works telemetry refresh preserves the terminal host without requesting layout", async () => {
+  const telemetry = { today: { input_tokens: 1, output_tokens: 2 } };
+  const f = await fixture(telemetry);
+  f.surface.openWork("one");
+  const input = f.runtimes.get("one"), host = input.parentElement;
+  const mounts = f.mounts.length, layouts = f.layouts.length;
+  telemetry.today.input_tokens = 10;
+  f.surface.sync(false);
+  assert.equal(f.surface.element.querySelector('[data-metric="today-total"]').textContent, "12");
+  assert.equal(input.parentElement, host);
+  assert.equal(f.mounts.length, mounts, "telemetry must not rehost the live terminal");
+  assert.equal(f.layouts.length, layouts, "telemetry must not trigger persisted terminal fits");
+  f.surface.sync();
+  assert.ok(f.mounts.length > mounts, "explicit host synchronization still reclaims runtimes");
+  assert.equal(f.layouts.length, layouts + 1, "explicit host synchronization still requests layout");
+  const app = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+  assert.match(app, /worksTelemetryModel\.subscribeFrame\(state => state, \(\) => worksSurface\.sync\(false\)\)/);
   f.surface.dispose();
 });
 
