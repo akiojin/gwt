@@ -529,6 +529,8 @@ Board keeps up to 1,000 entries in each window. Scroll to the top or choose
 choose `Back to latest entries` to resume the latest updates.
 
 Implementation Agents are persistent members shared by projects on this computer, with memorable names in the output language.
+Resting members remain in Agents with their saved settings and history;
+they do not receive new work.
 A new Issue reuses an available member; a continuation prefers its previous member when available.
 New member names are unique across the shared roster and use localized family names when needed.
 Saved manual model, reasoning and Fast Mode follow the member; runtime, permission and routing settings remain project-specific.

@@ -428,7 +428,7 @@ test("Agents batches shared updates, keeps stable member selection, and releases
 });
 
 
-test("a resting busy member remains reachable from Works until its exact assignment ends", async () => {
+test("resting members stay registered after work ends and across unavailable activity and readback", async () => {
   let workSurface;
   const f = await fixture({ onOpenWork: assignment => workSurface.openWork(assignment) });
   f.surface.selectMember("m2");
@@ -444,13 +444,32 @@ test("a resting busy member remains reachable from Works until its exact assignm
   workSurface.element.querySelector(".work-member").click();
   assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="m1"]')?.getAttribute("aria-selected"), "true");
   assert.equal(f.surface.element.querySelector(".roster-count").textContent, "1");
+  assert.equal(f.surface.element.querySelector(".roster-capacity-value").textContent, "1");
+  assert.equal(f.surface.element.querySelector(".roster-active").textContent, "Active 1");
   assert.match(f.surface.element.querySelector('.roster-row[data-member-id="m1"]').textContent, /Resting.*Finishing/);
-  assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="rested-idle"]'), null);
+  const rested = f.surface.element.querySelector('.roster-row[data-member-id="rested-idle"]');
+  assert.ok(rested, "a canonical resting member remains registered without a live assignment");
+  assert.equal(rested.querySelector(".roster-state").textContent, "Resting");
+  assert.match(rested.querySelector(".roster-purpose").textContent, /Not selected for new work/);
+  assert.match(f.surface.element.querySelector(".roster-capacity-note").textContent, /Registered 3/);
+  assert.deepEqual([...f.surface.element.querySelectorAll(".roster-row")].map(row => row.dataset.memberId), ["m1", "m2", "rested-idle"]);
   assert.equal(f.surface.element.querySelector('.roster-detail [data-action="rest"]').disabled, true);
   f.surface.element.querySelector(".roster-now button").click();
   assert.deepEqual(f.opened, [current]); assert.equal(workSurface.isVisible("one"), true);
   f.activityModel.update(() => ({ agents: [], count: 0 })); f.flush();
-  assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="m1"]'), null);
+  assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="m1"] .roster-state').textContent, "Resting");
+  assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="m1"]').getAttribute("aria-selected"), "true");
+  assert.match(f.surface.element.querySelector(".roster-detail").textContent, /Recorded author/);
+  f.surface.selectMember("rested-idle");
+  f.activityModel.update(() => ({ agents: [], count: null })); f.flush();
+  const saved = f.rosterModel.read();
+  f.rosterController.applyAgentRosterSnapshot({ ...saved, project_key: "project", revision: 4,
+    members: saved.members.map(member => ({ ...member, agent_member_id: member.member_id })) }); f.flush();
+  assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="rested-idle"]'), rested);
+  assert.equal(rested.getAttribute("aria-selected"), "true");
+  assert.equal(f.surface.element.querySelector(".roster-count").textContent, "1");
+  assert.equal(f.surface.element.querySelector(".roster-active").textContent, "Active —");
+  assert.deepEqual(f.rested, []); assert.deepEqual(f.added, []);
   workSurface.dispose(); f.surface.dispose();
 });
 

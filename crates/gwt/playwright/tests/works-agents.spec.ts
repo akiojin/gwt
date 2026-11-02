@@ -546,6 +546,15 @@ test.describe("Works and Agents approved baseline", () => {
     expect(mutations.map(message => [message.action, message.expected_revision])).toEqual([[{ kind: "add", agent_id: "codex", name: "Dahlia" }, 3], [{ kind: "rest", member_id: "m-added" }, 4]]);
     expect(await page.evaluate(() => (window as any).__worksAgentsFixture.rejectedRevisions)).toEqual([]);
     expect(await page.evaluate(() => (window as any).__worksAgentsFixture.members.find(member => member.agent_member_id === "m-added").enabled)).toBe(false);
+    const resting = roster(page).locator('.roster-row[data-member-id="m-added"]');
+    await expect(resting).toBeVisible();
+    await expect(resting.locator(".roster-state")).toHaveText("Resting");
+    await expect(roster(page).locator(".roster-capacity-note")).toContainText("Registered 4");
+    await page.evaluate(() => (window as any).__worksAgentsFixture.census(null));
+    await expect(roster(page).locator(".roster-active")).toHaveText("Active —");
+    await expect(resting).toBeVisible();
+    await page.evaluate(() => (window as any).__worksAgentsFixture.census(["agent-one", "agent-two", "pm-window"]));
+    await expect(roster(page).locator(".roster-active")).toHaveText("Active 3");
 
     await roster(page).locator('.roster-row[data-member-id="m-one"]').click();
     await roster(page).locator(".roster-now button").evaluate(button => {
@@ -576,6 +585,18 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(works(page).locator('[data-availability="today"]')).toBeVisible();
     await expect(works(page).locator('[data-availability="fleet"]')).toBeVisible();
     await expect(works(page).locator(".works-source-note")).toBeVisible();
+    await page.reload();
+    await openRail(page, "agents");
+    await expect(resting).toBeVisible();
+    await expect(resting.locator(".roster-state")).toHaveText("Resting");
+    await expect(roster(page).locator(".roster-count")).toHaveText("3");
+    await expect(roster(page).locator(".roster-capacity-value")).toHaveText("3");
+    await expect(roster(page).locator(".roster-capacity-note")).toContainText("Registered 4");
+    expect(await roster(page).locator(".roster-row").evaluateAll(rows => rows.map(row => (row as HTMLElement).dataset.memberId)))
+      .toEqual(["m-one", "m-two", "m-idle", "m-added"]);
+    await expectNoHorizontalOverflow(page, ".agents-surface:not([hidden]):not(.agents-surface--preview)");
+    await resting.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: info.outputPath("agents-resting-reload-400.png") });
   });
 
   test("inline member names preserve drafts, IME, current work and history through conflict retry", async ({ page }, info) => {
@@ -751,7 +772,8 @@ async function installWorksAgentsBackend(page: Page) {
       baseWindow("recorded-window", { preset: "codex", session_id: "s-recorded", agent_name: "Recorded only", status: "running" }),
     ];
     const assignment = (session_id: string, issue_number: number) => ({ reservation_id: `r-${session_id}`, session_id, issue_number, spec_number: null, delivery_id: null, host_id: "fixture-host", host_pid: 12345, host_started_at: 1 });
-    const members: any[] = [
+    const savedRoster = JSON.parse(sessionStorage.getItem("fixture:works-roster") || "null");
+    const members: any[] = savedRoster?.members ?? [
       { agent_member_id: "m-one", agent_id: "codex", name: "Aster", enabled: true, created_at: "2026-10-20T00:00:00Z", last_issue_number: 4777, last_spec_number: null, assignment: assignment("s-one", 4777), provider: "Codex", model: "Fixture model", saved_manual_profile: { agent_id: "codex", agent_member_id: "m-one", model: "saved-manual-model", reasoning: "high", runtime_target: "Host", skip_permissions: false }, issue_count: 3, landed_count: 2, active_seconds: 7200, tokens: 5000, history: [
         { session_id: "s-one", name: "Launch author", provider: "codex", model: "launch-model", issue_number: 4777, title: "Current issue", result: "Running", started_at: "2026-10-23T00:00:00Z", ended_at: null },
         { session_id: "s-earlier", name: "Recorded author", provider: "claude", model: "recorded-model", issue_number: 4000, title: "Earlier slice", result: "landed", started_at: "2026-10-20T00:00:00Z", ended_at: "2026-10-20T02:00:00Z" },
@@ -762,7 +784,7 @@ async function installWorksAgentsBackend(page: Page) {
     ];
     // Fixture-only backing storage models backend persistence across page reload.
     let worksPreviewLines = Number(sessionStorage.getItem("fixture:works-preview-lines") || 3);
-    let revision = 3, activityRevision = 0;
+    let revision = savedRoster?.revision ?? 3, activityRevision = 0;
     let agents: any[] = [
       { window_id: "agent-two", session_id: "s-two", runtime_incarnation: 2, issue_number: 4001, is_pm: false },
       { window_id: "agent-one", session_id: "s-one", runtime_incarnation: 1, issue_number: 4777, is_pm: false },
@@ -842,6 +864,7 @@ async function installWorksAgentsBackend(page: Page) {
           if (message.action.kind !== "read" && message.expected_revision !== revision) { rejectedRevisions.push(message); this.emit(rosterSnapshot()); return; }
           if (message.action.kind === "add") { members.push({ agent_member_id: "m-added", agent_id: message.action.agent_id, name: message.action.name, enabled: true, created_at: "2026-10-25T00:00:00Z", last_issue_number: null, last_spec_number: null, assignment: null, provider: null, model: null, history: [], issue_count: 0, landed_count: 0, active_seconds: 0, tokens: 0 }); revision++; }
           if (message.action.kind === "rest") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member) { member.enabled = false; revision++; } }
+          if (message.action.kind !== "read") sessionStorage.setItem("fixture:works-roster", JSON.stringify({ members, revision }));
           this.emit(rosterSnapshot());
         }
         if (message.kind === "agent_schedule") {

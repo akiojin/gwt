@@ -100,7 +100,7 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
     const result = document.createElement("span"); result.className = "roster-avatar"; result.setAttribute("aria-hidden", "true"); result.textContent = Array.from(member.name || "?")[0]; return result;
   }
   function selectMember(memberId) {
-    if (disposed || !rosterModel.read().members.some(member => member.member_id === memberId && (member.enabled || liveWork(member)))) return false;
+    if (disposed || !rosterModel.read().members.some(member => member.member_id === memberId && !member.is_pm)) return false;
     // Removing an IME target is not a commit. Preserve that unfinished draft
     // until a later input explicitly supplies a completed value.
     if (memberId !== selectedId && nameFields.has(selectedId)) nameFields.get(selectedId).composing = false;
@@ -397,8 +397,8 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
     row.querySelector(".roster-avatar").textContent = Array.from(member.name || "?")[0];
     row.querySelector("h3").textContent = member.name;
     const purpose = row.querySelector(".roster-purpose");
-    purpose.textContent = current ? workTitle(current) : unavailable ? "Activity unavailable" : "Waiting for the next issue"; purpose.title = purpose.textContent;
-    row.querySelector(".roster-state").textContent = current ? `${member.enabled ? "In Works" : "Resting · Finishing in Works"} ${current.issue_number ? `#${current.issue_number}` : ""}` : unavailable ? "Activity unavailable" : "Waiting";
+    purpose.textContent = current ? workTitle(current) : unavailable ? "Activity unavailable" : member.enabled ? "Waiting for the next issue" : "Not selected for new work"; purpose.title = purpose.textContent;
+    row.querySelector(".roster-state").textContent = current ? `${member.enabled ? "In Works" : "Resting · Finishing in Works"} ${current.issue_number ? `#${current.issue_number}` : ""}` : unavailable ? `${member.enabled ? "" : "Resting · "}Activity unavailable` : member.enabled ? "Waiting" : "Resting";
     const values = [number(member.issue_count), number(member.landed_count), hours(member.active_seconds), number(member.tokens)];
     row.querySelectorAll(".roster-stat b").forEach((node, index) => { node.textContent = values[index]; });
     return row;
@@ -416,7 +416,7 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
     const schedule = scheduleState();
     if (submittedSnapshot && (schedule.error || schedule.snapshot !== submittedSnapshot)) submittedSnapshot = null;
     const enabledMembers = (roster.members || []).filter(member => member.enabled && !member.is_pm);
-    const members = (roster.members || []).filter(member => !member.is_pm && (member.enabled || liveWork(member)));
+    const members = (roster.members || []).filter(member => !member.is_pm);
     const enabledCount = enabledMembers.length;
     if (!members.some(member => member.member_id === selectedId)) {
       if (nameFields.has(selectedId)) nameFields.get(selectedId).composing = false;
@@ -430,7 +430,7 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
     const bar = element.querySelector(".roster-capacity-bar"); bar.setAttribute("aria-valuemin", "0"); bar.setAttribute("aria-valuemax", String(scale)); bar.setAttribute("aria-valuenow", String(enabledCount));
     element.querySelector(".roster-capacity-fill").style.width = `${enabledCount / scale * 100}%`;
     const limit = element.querySelector(".roster-capacity-limit"); limit.hidden = !finite(roster.recommended_capacity); limit.style.left = `${(roster.recommended_capacity || 0) / scale * 100}%`;
-    element.querySelector(".roster-capacity-note").textContent = `Busy ${number(activity.count === null ? null : members.filter(member => liveWork(member)).length)} / Team ${enabledCount} · Recommended capacity ${number(roster.recommended_capacity)}${finite(roster.recommended_capacity) && enabledCount > roster.recommended_capacity ? " · Above recommended capacity" : ""}`;
+    element.querySelector(".roster-capacity-note").textContent = `Registered ${number(Number.isSafeInteger(roster.revision) ? members.length : null)} · Busy ${number(activity.count === null ? null : members.filter(member => liveWork(member)).length)} / Team ${enabledCount} · Recommended capacity ${number(roster.recommended_capacity)}${finite(roster.recommended_capacity) && enabledCount > roster.recommended_capacity ? " · Above recommended capacity" : ""}`;
     element.querySelector('.roster-capacity [data-action="rest"]').disabled = !selected?.enabled || enabledCount <= 1;
     const error = element.querySelector(".roster-error"); error.textContent = roster.error || ""; error.hidden = !roster.error;
     const list = element.querySelector(".roster-list"), memberIds = new Set(members.map(member => member.member_id));
