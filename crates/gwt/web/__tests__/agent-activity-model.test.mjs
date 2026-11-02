@@ -153,6 +153,55 @@ test("stale or failed name receipts retain drafts until explicit retry at the cu
   assert.equal(model.read().name_edits.m1.status, "saved");
 });
 
+test("a rejected rename converges when its exact canonical member already has the requested name", () => {
+  const sent = [], { model, editAgentMemberName, applyAgentRosterSnapshot, applyAgentRosterError,
+    applyAgentRosterUsage, retryAgentMemberName } = nameController(sent);
+  applyAgentRosterSnapshot(namedRoster(3)); editAgentMemberName("m1", "Maple");
+  const rejected = namedRoster(4, "Maple", { error: "Agent roster changed; reload before retrying" });
+  applyAgentRosterSnapshot(rejected, sent[0].request_id);
+  assert.equal(model.read().name_edits.m1.status, "saved", "canonical equality confirms the desired result despite the rejected CAS");
+  assert.equal(model.read().name_edits.m1.blocked, false);
+  assert.equal(model.read().name_edits.m1.error, "");
+  assert.equal(model.read().error, null);
+  retryAgentMemberName("m1");
+  assert.equal(sent.length, 1, "a confirmed name needs no duplicate write");
+  applyAgentRosterSnapshot(rejected, sent[0].request_id);
+  applyAgentRosterUsage([], "/project");
+  assert.equal(model.read().error, null, "late failed receipts and usage updates cannot resurrect the error");
+  assert.equal(model.read().name_edits.m1.status, "saved");
+  applyAgentRosterError({ project_key: "project", message: "Registration failed" });
+  editAgentMemberName("m1", "Maple");
+  assert.equal(model.read().error, "Registration failed", "a name no-op must preserve unrelated operation errors");
+});
+
+test("fresh canonical readback clears a lost rename's retry while preserving a newer draft and IME", () => {
+  const sent = [], { model, editAgentMemberName, applyAgentRosterSnapshot, applyAgentRosterError } = nameController(sent);
+  applyAgentRosterSnapshot(namedRoster(3)); editAgentMemberName("m1", "Maple");
+  applyAgentRosterError({ project_key: "project", request_id: sent[0].request_id, message: "Connection lost" });
+  applyAgentRosterSnapshot(namedRoster(4, "Another writer"));
+  assert.equal(model.read().name_edits.m1.status, "error");
+  applyAgentRosterSnapshot(namedRoster(5, "Maple"));
+  assert.equal(model.read().name_edits.m1.status, "saved");
+  assert.equal(model.read().name_edits.m1.blocked, false);
+  editAgentMemberName("m1", "Cedar");
+  editAgentMemberName("m1", "ま", { composing: true });
+  applyAgentRosterSnapshot(namedRoster(6, "Cedar", { error: "Agent roster changed; reload before retrying" }), sent[1].request_id);
+  assert.equal(model.read().name_edits.m1.value, "ま");
+  assert.equal(model.read().name_edits.m1.status, "editing", "the old request cannot mark unfinished IME as saved");
+  assert.equal(model.read().name_edits.m1.error, "");
+  assert.equal(model.read().error, null);
+  editAgentMemberName("m1", "Pine");
+  applyAgentRosterError({ project_key: "project", request_id: sent[2].request_id, message: "Connection lost" });
+  editAgentMemberName("m1", "ま", { composing: true });
+  applyAgentRosterSnapshot(namedRoster(7, "Pine"));
+  assert.equal(model.read().name_edits.m1.status, "editing");
+  editAgentMemberName("m1", "Pine ");
+  assert.equal(model.read().name_edits.m1.value, "Pine ");
+  assert.equal(model.read().name_edits.m1.status, "saved", "finishing IME at the confirmed name clears the retry");
+  assert.equal(model.read().name_edits.m1.blocked, false);
+  assert.equal(sent.length, 3);
+});
+
 test("the name writer preserves other member drafts and revalidates coalesced edits after readback", () => {
   const sent = [], { model, editAgentMemberName, applyAgentRosterSnapshot, clearAgentRosterRename, flush } = nameController(sent);
   applyAgentRosterSnapshot(namedRoster(3));

@@ -162,8 +162,13 @@ export function createAgentRosterModel(projectKey, { onRename = () => {}, schedu
   }
   function editAgentMemberName(memberId, value, { composing = false } = {}) {
     const state = model.read();
-    if (typeof value !== "string" || !state.members.some(member => member.member_id === memberId && !member.is_pm)) return;
+    const member = state.members.find(member => member.member_id === memberId && !member.is_pm);
+    if (typeof value !== "string" || !member) return;
     const error = composing ? "" : nameError(state, memberId, value);
+    if (!composing && !error && value.trim() === member.name && state.pending_name?.action.member_id !== memberId) {
+      updateNameEdit(memberId, () => ({ value, composing: false, blocked: false, error: "", status: "saved" }));
+      sendNextName(); return;
+    }
     updateNameEdit(memberId, previous => ({ value, composing, blocked: previous?.blocked || false,
       error: error || (previous?.blocked ? previous.error : ""),
       status: composing ? "editing" : error ? "invalid" : previous?.blocked ? "error" : "queued" }));
@@ -184,7 +189,7 @@ export function createAgentRosterModel(projectKey, { onRename = () => {}, schedu
       name_edits: { ...current.name_edits, [memberId]: error
         ? { ...edit, blocked: true, error, status: "error" }
         : !edit.composing && edit.value.trim() === pending.action.name
-          ? { ...edit, error: "", status: "saved" }
+          ? { ...edit, blocked: false, error: "", status: "saved" }
           : { ...edit, error: validationError, status: edit.composing ? "editing" : validationError ? "invalid" : "queued" } } }));
   }
   function applyAgentRosterSnapshot(snapshot, requestId) {
@@ -192,20 +197,25 @@ export function createAgentRosterModel(projectKey, { onRename = () => {}, schedu
         !Number.isSafeInteger(snapshot.revision)) return;
     model.update(state => {
       if (state.revision !== null && snapshot.revision < state.revision) return state;
-      latestSnapshot = snapshot;
+      // Correlated rename errors belong to their field. Replaying an old
+      // receipt must not replace another operation's banner or revive one.
+      latestSnapshot = { ...snapshot, error: requestId ? state.error : snapshot.error ?? null };
       const nameEdits = { ...state.name_edits };
       for (const member of snapshot.members) {
         const edit = nameEdits[member.agent_member_id];
         if (edit?.status === "saved" && edit.value.trim() !== member.name) nameEdits[member.agent_member_id] = { ...edit, value: member.name };
+        if (edit?.blocked && !edit.composing && edit.value.trim() === member.name && !snapshot.error) {
+          nameEdits[member.agent_member_id] = { ...edit, blocked: false, error: "", status: "saved" };
+        }
       }
-      return { ...snapshot, name_edits: nameEdits, pending_name: state.pending_name, members: snapshot.members.map(member => ({ ...member,
+      return { ...latestSnapshot, name_edits: nameEdits, pending_name: state.pending_name, members: snapshot.members.map(member => ({ ...member,
         member_id: member.agent_member_id, tokens: member.tokens ?? memberUsage[member.agent_member_id] ?? null })) };
     });
     const state = model.read(), pending = state.pending_name;
     if (requestId && pending?.request_id === requestId) {
       const member = state.members.find(member => member.member_id === pending.action.member_id);
-      settleName(requestId, snapshot.error || (member?.name !== pending.action.name
-        ? "This name changed elsewhere. Review your draft and retry." : ""));
+      settleName(requestId, member?.name === pending.action.name ? ""
+        : snapshot.error || "This name changed elsewhere. Review your draft and retry.");
     }
   }
   function applyAgentRosterError(event) {

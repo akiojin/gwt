@@ -593,12 +593,20 @@ test.describe("Works and Agents approved baseline", () => {
     await page.evaluate(() => (window as any).__worksAgentsFixture.workspaceStatus("idle"));
     await expect(name).toBeFocused();
     await expect(name).toHaveValue("Oak current");
-    await page.evaluate(() => (window as any).__worksAgentsFixture.releaseRename());
+    // A rejected CAS can read back the requested name already saved by another
+    // writer. Confirm that result and continue the newer draft without Retry.
+    await page.evaluate(() => {
+      (window as any).__worksAgentsFixture.renameElsewhere("Maple current");
+      (window as any).__worksAgentsFixture.releaseRename();
+    });
     await expect.poll(async () => (await writes()).length).toBe(2);
     await page.evaluate(() => (window as any).__worksAgentsFixture.releaseRename());
     await expect(status).toHaveText("Saved");
     await page.evaluate(() => (window as any).__worksAgentsFixture.replayRename());
     await expect(name).toHaveValue("Oak current");
+    await expect(status).toHaveText("Saved");
+    await expect(roster(page).getByRole("button", { name: "Retry name", exact: true })).toHaveCount(0);
+    await expect(roster(page).locator(":scope > .roster-error")).toBeHidden();
     await expect(roster(page).locator(".roster-detail h3")).toHaveText("Oak current");
     await name.fill("  ");
     await expect(name).toHaveAttribute("aria-invalid", "true");
