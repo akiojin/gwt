@@ -14998,6 +14998,10 @@ impl IssueMonitorState {
                                     self.source_repository,
                                 )
                                 .map(|(_, reason)| reason)
+                                .or_else(|| {
+                                    (!self.allows_issue_labels(&item.issue))
+                                        .then(|| "excluded by allowed labels".to_string())
+                                })
                             })
                         } else {
                             item.exclusion_reason.clone()
@@ -17571,7 +17575,8 @@ impl IssueMonitorState {
                         MonitorInboxState::NotReady | MonitorInboxState::SourceExcluded,
                         _
                     ))
-                ) || confirmed_dependency_blocker)
+                ) || !self.allows_issue_labels(&item.issue)
+                    || confirmed_dependency_blocker)
                     && !self.launched_windows.contains_key(&number)
                     && !self.process_held_issues.contains(&number)
                     && !self.has_monitor_pane_for_issue(number)
@@ -19214,10 +19219,11 @@ impl IssueMonitorState {
             return true;
         }
         // Holding a new pane requires no cancellation authority. A cached
-        // readiness regression must wait even before a complete Live scan
+        // candidate exclusion must wait even before a complete Live scan
         // can compensate the claim; existing-pane ACKs above stay valid.
         if self.inbox_item(delivery.issue_number).is_some_and(|item| {
             issue_monitor_candidate_exclusion(&item.issue, self.source_repository).is_some()
+                || !self.allows_issue_labels(&item.issue)
         }) {
             return false;
         }
