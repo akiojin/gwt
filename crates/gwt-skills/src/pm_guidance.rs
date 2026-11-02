@@ -625,6 +625,9 @@ Use this wire through the existing operation; do not attach legacy `body`,
   Summary wording, details, refs, and optional `observed_at` alone are not
   material changes; a changed decision packet is material. Do not rotate
   episode, event, milestone, or action IDs to force a card.
+  Give a changed required action its own stable `action.id`, even if
+  `action.kind` stays the same, and update `summary.next_action` to match.
+  Keep `action.id` for wording-only changes.
   Request, episode, event, milestone, and action IDs use 1-128 ASCII letters,
   digits, or `-_.:/`.
 - `summary.result` is required; `impact`, `owner`, `next_action`, and `decision`
@@ -1735,6 +1738,9 @@ Keep the PM turn responsive even when gwtd or its endpoint is slow.
 - Every resident cycle begins by reading `pm.status` worktree freshness.
   A new or materially changed state of `stale` or `unknown` is reported
   immediately and not batched into a digest; an unchanged state is not reposted.
+  Set the freshness event's `milestone_id` to `freshness:unknown` or
+  `freshness:stale` to distinguish these diagnoses under `stale_unknown` severity.
+  Keep the milestone stable until the freshness diagnosis changes.
   Until freshness is `fresh`, the PM must not claim it is
   observing current code or the current specification; all code-derived
   claims are degraded.
@@ -2796,6 +2802,9 @@ mod tests {
                     "same request ID with a different payload or a stale revision conflicts",
                     "The same material state on the next tick creates zero cards",
                     "Do not rotate episode, event, milestone, or action IDs to force a card",
+                    "Give a changed required action its own stable `action.id`, even if `action.kind` stays the same",
+                    "Keep `action.id` for wording-only changes",
+                    "Set the freshness event's `milestone_id` to `freshness:unknown` or `freshness:stale`",
                     "complete supporting detail in `details` and `refs`",
                 ] {
                     assert!(

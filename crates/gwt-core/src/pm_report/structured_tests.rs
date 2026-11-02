@@ -264,6 +264,54 @@ fn structured_decisions_and_corrections_are_material_but_internal_actions_still_
         ..Default::default()
     });
     assert_eq!(post_submission(&repo, &batch).unwrap().reports.len(), 1);
+
+    batch.events.truncate(1);
+    batch.digest = None;
+    let event = &mut batch.events[0];
+    event.expected_revision = 1;
+    event.state.action = Some(ReportAction {
+        id: "approve-first".into(),
+        kind: ReportActionKind::Respond,
+        deadline: None,
+    });
+    event.summary.next_action = Some("Approve the first wait".into());
+    batch.request_id = "first-wait-action".into();
+    assert_eq!(post_submission(&repo, &batch).unwrap().reports.len(), 1);
+    batch.request_id = "same-wait-action-wording".into();
+    batch.events[0].expected_revision = 2;
+    batch.events[0].summary.next_action = Some("Respond to the same first wait".into());
+    assert!(post_submission(&repo, &batch).unwrap().reports.is_empty());
+    batch.request_id = "changed-wait-action".into();
+    batch.events[0].state.action.as_mut().unwrap().id = "approve-second".into();
+    batch.events[0].summary.next_action = Some("Approve the second wait".into());
+    assert_eq!(post_submission(&repo, &batch).unwrap().reports.len(), 1);
+
+    batch.request_id = "freshness-unknown".into();
+    let event = &mut batch.events[0];
+    event.event_id = "freshness".into();
+    event.expected_revision = 0;
+    event.state.action = None;
+    event.state.severity = ReportSeverity::StaleUnknown;
+    event.state.milestone_id = Some("freshness:unknown".into());
+    event.summary.result = "Worktree freshness is unknown".into();
+    event.summary.next_action = None;
+    assert_eq!(
+        post_submission(&repo, &batch).unwrap().decisions[0].reason,
+        PostingReason::Immediate
+    );
+    batch.request_id = "freshness-stale".into();
+    batch.events[0].expected_revision = 1;
+    batch.events[0].state.milestone_id = Some("freshness:stale".into());
+    batch.events[0].summary.result = "Worktree freshness is stale".into();
+    assert_eq!(
+        post_submission(&repo, &batch).unwrap().decisions[0].reason,
+        PostingReason::Immediate
+    );
+    batch.request_id = "same-freshness-next-tick".into();
+    batch.events[0].expected_revision = 2;
+    batch.events[0].summary.result = "Only the freshness wording changed".into();
+    batch.events[0].observed_at = Some(Utc::now());
+    assert!(post_submission(&repo, &batch).unwrap().reports.is_empty());
 }
 
 #[test]

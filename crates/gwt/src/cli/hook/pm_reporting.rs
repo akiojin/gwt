@@ -454,6 +454,21 @@ mod tests {
         let first: serde_json::Value = serde_json::from_str(&first).unwrap();
         let retried: serde_json::Value = serde_json::from_str(&retried).unwrap();
         assert_eq!(first["instruction"]["id"], retried["instruction"]["id"]);
+        let source = gwt_core::user_instruction::instructions_path(&repo);
+        let before = fs::read(&source).unwrap();
+        let mut changed = post();
+        let crate::cli::pm::PmCommand::ReportPost { body, .. } = &mut changed else {
+            unreachable!()
+        };
+        *body = "回答を変更しました".into();
+        assert!(crate::cli::pm::run(&mut env, changed, &mut String::new()).is_err());
+        let mut changed = post();
+        let crate::cli::pm::PmCommand::ReportPost { question, .. } = &mut changed else {
+            unreachable!()
+        };
+        *question = Some("変更した質問要約".into());
+        assert!(crate::cli::pm::run(&mut env, changed, &mut String::new()).is_err());
+        assert_eq!(fs::read(source).unwrap(), before);
         assert_eq!(gwt_core::user_instruction::load(&repo).unwrap().len(), 1);
         assert_eq!(
             handle_stop(&worktree, Some("pm-session")),

@@ -980,6 +980,8 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
     const HOME = target.home;
     const ROOT = target.project;
     const BASE = target.url;
+    const primaryErrors: unknown[] = [];
+    const cleanupErrors: unknown[] = [];
     try {
       const errors: string[] = [];
       page.on('pageerror', error => errors.push(error.message));
@@ -1056,6 +1058,7 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
           instruction: { original: qaQuestion, kind: 'question', actions: ['Explain every result'], issue_numbers: [3431] } }, null).output;
         expect(qa.instruction.id).toBe(qa.report.id);
         const initialEvent = event('supervision', `RPT-F compact overview <literal> ${theme}`);
+        initialEvent.refs.push('Issue #3431 <literal>');
         const longText = '詳細'.repeat(9000);
         initialEvent.details = `**Full evidence**\n\n${longText}\n\nTAIL: item 48 preserved\n\n<script>window.__rptFUnsafe=true</script>`;
         const initial = request('initial', [initialEvent]);
@@ -1092,18 +1095,27 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
         expect(await details.textContent()).toContain(longText);
         await expect(details).toContainText('TAIL: item 48 preserved');
         await expect(details).toContainText(initialEvent.refs[0]);
+        await expect(details.locator('a')).toHaveAttribute('href', initialEvent.refs[0]);
+        await expect(details).toContainText(initialEvent.refs[1]);
+        await expect(details.locator('literal')).toHaveCount(0);
         await expect(firstRow.locator('script')).toHaveCount(0);
         expect(await page.evaluate(() => (window as any).__rptFUnsafe)).toBeUndefined();
         await firstRow.getByRole('button', { name: 'Copy report' }).click();
-        const fullCopy = `${first.reports[0].body}\n\n${initialEvent.details}\n\n- ${initialEvent.refs[0]}`;
+        const fullCopy = `${first.reports[0].body}\n\n${initialEvent.details}\n\n${initialEvent.refs.map(ref => `- ${ref}`).join('\n')}`;
         await expect.poll(() => page.evaluate(async () => (await navigator.clipboard.readText()).replace(/\r\n/g, '\n'))).toBe(fullCopy);
+
+        const summaryOnly = post(request('summary-only', [{ ...event('summary-only', `RPT-F summary only ${theme}`), details: ' \n ', refs: [] }]));
+        await refreshPmReports(page);
+        const summaryOnlyRow = reports.locator(`article[data-report-id="${summaryOnly.reports[0].id}"]`);
+        await expect(summaryOnlyRow.locator(':scope > .pm-chat__text')).toHaveText(summaryOnly.reports[0].body);
+        await expect(summaryOnlyRow.locator('details')).toHaveCount(0);
 
         const unchanged = post(request('unchanged', [{ ...initialEvent, expected_revision: 1,
           observed_at: '2026-11-02T12:00:00Z', summary: { ...initialEvent.summary, result: 'Only wording changed' }, details: 'Only observation text changed' }]));
         expect(unchanged.reports).toEqual([]);
         expect(unchanged.decisions[0]).toMatchObject({ reason: 'unchanged', revision: 1, report_id: null });
         await refreshPmReports(page);
-        await expect(reports.locator('article')).toHaveCount(originalCount + 2);
+        await expect(reports.locator('article')).toHaveCount(originalCount + 3);
         expect(invoke('pm.report.post', { kind: 'progress', body: 'Body-only bypass' }, SESSION, ROOT, false)).toContain('submission');
 
         const fatal = { ...initialEvent, expected_revision: 1, kind: 'blocker',
@@ -1133,7 +1145,7 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
         expect(listed.receipts.find((row: any) => row.request_id === unchanged.request_id)).toEqual(unchanged);
         expect(listed.events.find((row: any) => row.event_id === initialEvent.event_id)).toMatchObject({ revision: 3, state: { status: 'resolved' } });
         await refreshPmReports(page);
-        await expect(reports.locator('article')).toHaveCount(originalCount + 6);
+        await expect(reports.locator('article')).toHaveCount(originalCount + 7);
         await expect(details).toHaveAttribute('open', '');
         for (const receipt of [mixed, resolved]) {
           for (const row of receipt.reports) await expect(reports.locator(`article[data-report-id="${row.id}"]`)).toHaveCount(1);
@@ -1211,22 +1223,34 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
         await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
         await saveEvidence('second-project-reports', await pane.screenshot(), 'image/png');
         await gotoPmReports(page, primaryKey, BASE);
-        await expect(reports.locator('article')).toHaveCount(originalCount + 6);
+        await expect(reports.locator('article')).toHaveCount(originalCount + 7);
         await expect(reports).not.toContainText(`RPT-F second project only ${theme}`);
         expect(invoke('pm.report.list', {}).output.events.find((row: any) => row.event_id === 'supervision').revision).toBe(3);
         expect(invoke('pm.report.list', {}, secondSession, secondRoot).output.events.find((row: any) => row.event_id === 'supervision').revision).toBe(1);
         expect(errors).toEqual([]);
+      } catch (error) {
+        primaryErrors.push(error);
+        throw error;
       } finally {
-        await saveEvidence('real-cli-calls', JSON.stringify(calls), 'application/json');
+        try { await saveEvidence('real-cli-calls', JSON.stringify(calls), 'application/json'); }
+        catch (error) { cleanupErrors.push(error); }
         for (const [index, path] of journals.entries()) {
-          if (existsSync(path)) await saveEvidence(`journal-project-${index + 1}`, readFileSync(path), 'application/x-ndjson');
+          try {
+            if (existsSync(path)) await saveEvidence(`journal-project-${index + 1}`, readFileSync(path), 'application/x-ndjson');
+          } catch (error) { cleanupErrors.push(error); }
         }
       }
+    } catch (error) {
+      if (!primaryErrors.includes(error)) primaryErrors.push(error);
+      throw error;
     } finally {
-      const failures: unknown[] = [];
-      try { await page.close(); } catch (error) { failures.push(error); }
-      try { await target.stop(); } catch (error) { failures.push(error); }
-      if (failures.length) throw new AggregateError(failures, 'RPT-F target cleanup failed');
+      try { await page.close(); } catch (error) { cleanupErrors.push(error); }
+      try { await target.stop(); } catch (error) { cleanupErrors.push(error); }
+      if (cleanupErrors.length) {
+        const failures = [...primaryErrors, ...cleanupErrors];
+        throw new AggregateError(failures, 'RPT-F target cleanup failed:\n' + failures.map(String).join('\n'),
+          { cause: primaryErrors[0] });
+      }
     }
   });
 });
