@@ -1,18 +1,20 @@
 /* SPEC #5023: explicit durable reports -> backend -> read-only PM view. */
 import { expect, test, type Page } from '@playwright/test';
 import { spawnSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
-import { appendFileSync, existsSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { gotoLiveGwt, sendLiveGwtEvent, withLiveGwtBackendLock } from './_helpers/live-gwt';
+import { createHash, randomUUID } from 'node:crypto';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
+import { basename, join, resolve } from 'node:path';
+import { startExactRelaunchFixture } from './_helpers/exact-relaunch';
+import { gotoLiveGwt, readLiveHubCatalog, sendLiveGwtEvent, withLiveGwtBackendLock } from './_helpers/live-gwt';
+import { startManagedBrowserSource } from './_helpers/managed-browser-source';
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? 'http://127.0.0.1:0/';
 const HOME = process.env.GWT_PLAYWRIGHT_CHECK_HOME ?? '';
 const ROOT = process.env.GWT_PLAYWRIGHT_PROJECT_ROOT ?? '';
 const SESSION = 'pm-reports-fixture';
 
-async function gotoPmReports(page: Page) {
-  await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+async function gotoPmReports(page: Page, projectKey?: string, base = BASE) {
+  await gotoLiveGwt(page, base, { enableTestBridge: true, projectKey });
   // PM registration settles after the first workspace projection in this
   // stopped-PM fixture. Read its current projection before testing views.
   await expect.poll(async () => {
@@ -929,6 +931,303 @@ test.describe('PM reports', () => {
       await info.attach('PM reports', { path: screenshot, contentType: 'image/png' });
       expect(errors).toEqual([]);
     });
+  });
+});
+
+test.describe('RPT-F Reports (isolated checkout)', () => {
+  test.skip(process.env.GWT_PLAYWRIGHT_RPT !== '1', 'requires checkout binaries and isolated managed-source fixtures');
+  test.skip(process.platform === 'win32', 'the existing managed-source provider callback uses POSIX hooks');
+  test.use({ viewport: { width: 1440, height: 1000 } });
+  test.setTimeout(240_000);
+  let managedSource: Awaited<ReturnType<typeof startManagedBrowserSource>> | undefined;
+  test.beforeAll(async ({ browser }, info) => {
+    test.setTimeout(240_000);
+    managedSource = await startManagedBrowserSource(browser, info);
+  });
+  test.afterAll(async () => {
+    test.setTimeout(240_000);
+    const failures: unknown[] = [];
+    try { await managedSource?.postAudit(); } catch (error) { failures.push(error); }
+    try { await managedSource?.stop(); } catch (error) { failures.push(error); }
+    if (failures.length) throw new AggregateError(failures, 'managed source post/cleanup failed:\n' + failures.map(String).join('\n').slice(0, 16384));
+  });
+
+  test('RPT-F structured Reports enforce durable decisions and complete details across two projects', async ({ page, context }, info) => {
+    const CHECKOUT = resolve(process.env.GWT_PLAYWRIGHT_CHECKOUT_ROOT ?? process.cwd());
+    const suffix = process.platform === 'win32' ? '.exe' : '';
+    const GWTD = join(CHECKOUT, `target/debug/gwtd${suffix}`);
+    let ownedState = '';
+    let targetEnv: NodeJS.ProcessEnv = {};
+    const target = await startExactRelaunchFixture(info, {
+      async beforeStart({ home, project, env, preferences }) {
+        ownedState = preferences;
+        targetEnv = { ...env };
+        const at = new Date().toISOString();
+        writeFileSync(join(preferences, 'pm.json'), JSON.stringify({ settings: { auto_start: false }, registration: {
+          session_id: SESSION, agent_id: 'codex', worktree_path: project, created_at: at,
+        } }));
+        writeFileSync(join(preferences, '../workspace.json'), JSON.stringify({ viewport: { x: 0, y: 0, zoom: 1 },
+          windows: [{ id: 'pm-reports', title: 'PM', preset: 'agent', geometry: { x: 30, y: 30, width: 1050, height: 720 },
+            z_index: 1, status: 'stopped', session_id: SESSION, agent_id: 'codex', persist: true }], next_z_index: 2 }));
+        mkdirSync(join(home, '.gwt/sessions'), { recursive: true });
+        writeFileSync(join(home, '.gwt/sessions', `${SESSION}.toml`), `id = "${SESSION}"\nworktree_path = ${JSON.stringify(project)}\nbranch = "main"\nagent_id = { type = "Codex" }\nstatus = "Stopped"\ncreated_at = "${at}"\nupdated_at = "${at}"\nlast_activity_at = "${at}"\n`);
+        writeFileSync(join(home, '.gwt/config.toml'), '[pr_inventory]\ncache_ttl_secs = 3600\nchecks_refresh_secs = 3600\n');
+        writeFileSync(join(preferences, '../pr-inventory-cache.json'), JSON.stringify({ fetched_at: at, rows: [] }));
+        writeFileSync(join(preferences, 'pm-reports.jsonl'), JSON.stringify({ id: 'persisted-before-restart', kind: 'decision',
+          body: '# Persisted before restart\n\nLegacy details remain readable.', created_at: at }) + '\n');
+      },
+    });
+    const HOME = target.home;
+    const ROOT = target.project;
+    const BASE = target.url;
+    try {
+      const errors: string[] = [];
+      page.on('pageerror', error => errors.push(error.message));
+      page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+      const theme = info.project.name.includes('light') ? 'light' : 'dark';
+      await page.addInitScript(value => localStorage.setItem('gwt:ui:theme', value), theme);
+      await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: new URL(BASE).origin });
+      await gotoPmReports(page, undefined, BASE);
+      const primaryKey = new URL(page.url()).pathname.split('/').at(-1)!;
+      const pane = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
+      const reports = pane.getByRole('log', { name: 'PM reports' });
+      await expect(reports.getByRole('heading', { name: 'Persisted before restart', exact: true })).toBeVisible();
+      const originalCount = await reports.locator('article').count();
+      const state = ownedState;
+      const fixture = { repo_hash: basename(join(state, '..')) };
+      const history = join(state, 'pm-reports.jsonl');
+      const childEnv: NodeJS.ProcessEnv = { ...targetEnv, HOME, USERPROFILE: HOME };
+      for (const key of Object.keys(childEnv)) {
+        if (key.startsWith('GWT_SESSION_') || key.startsWith('GWT_HOOK_FORWARD_')
+          || key === 'GWT_PANE_WS_URL' || key === 'GWT_BIN_PATH') delete childEnv[key];
+      }
+      const calls: unknown[] = [];
+      const journals = [history];
+      const saveEvidence = async (name: string, body: Buffer | string, contentType: string) => {
+        const extension = contentType === 'image/png' ? 'png' : contentType === 'application/x-ndjson' ? 'jsonl' : 'json';
+        const path = info.outputPath(`rpt-f-${theme}-${name}.${extension}`);
+        mkdirSync(info.outputDir, { recursive: true });
+        writeFileSync(path, body);
+        await info.attach(`RPT-F ${name} ${theme}`, { path, contentType });
+      };
+      const invoke = (operation: string, params: Record<string, unknown>, session: string | null = SESSION,
+        projectRoot = ROOT, succeeds = true): any => {
+        const env = { ...childEnv, GWT_PROJECT_ROOT: projectRoot, ...(session ? { GWT_SESSION_ID: session } : {}) };
+        const result = spawnSync(GWTD, [], {
+          cwd: projectRoot, env, encoding: 'utf8', timeout: 30_000, maxBuffer: 8 * 1024 * 1024,
+          input: JSON.stringify({ schema_version: 1, operation, params: { ...params, project_root: projectRoot } }),
+        });
+        calls.push({ operation, projectRoot, session, params, status: result.status, stdout: result.stdout, stderr: result.stderr });
+        expect(result.error).toBeUndefined();
+        expect(result.status, result.stderr || result.stdout).toBe(succeeds ? 0 : 1);
+        if (!succeeds) return result.stdout + result.stderr;
+        const envelope = JSON.parse(result.stdout);
+        expect(envelope.ok).toBe(true);
+        const output = JSON.parse(envelope.output);
+        if ('ok' in output) expect(output.ok).toBe(true);
+        return { envelope, output };
+      };
+      const post = (submission: object, session = SESSION, projectRoot = ROOT) =>
+        invoke('pm.report.post', { submission }, session, projectRoot).output.receipt;
+      const request = (name: string, events: object[], digest?: object) => ({
+        schema_version: 1, request_id: `rpt-f-${theme}-${name}`, events, ...(digest ? { digest } : {}),
+      });
+      const episode = `rpt-f-${theme}`;
+      const event = (eventId: string, result: string) => ({ episode_id: episode, event_id: eventId,
+        expected_revision: 0, kind: 'progress', state: { status: 'active', severity: 'routine', impact: 'project' },
+        summary: { result, impact: 'Project remains supervised', owner: 'PM', next_action: 'Check the next material change' },
+        details: `Complete evidence for ${eventId}`, refs: ['https://example.com/issues/3431'] });
+      try {
+        const served = await page.request.get(new URL('/pm-chat.js', BASE).toString());
+        expect(served.ok()).toBe(true);
+        expect(await served.text(), 'served renderer is bound to this checkout source')
+          .toBe(readFileSync(join(CHECKOUT, 'crates/gwt/web/pm-chat.js'), 'utf8'));
+        const sha = (bytes: Buffer | string) => createHash('sha256').update(bytes).digest('hex');
+        await saveEvidence('target-checkout-binding', JSON.stringify({
+          checkout: CHECKOUT, project: ROOT, home: HOME, url: BASE, pid: target.ownedPid,
+          gwt_path: join(CHECKOUT, `target/debug/gwt${suffix}`), gwtd_path: GWTD,
+          gwt_sha256: sha(readFileSync(join(CHECKOUT, `target/debug/gwt${suffix}`))),
+          gwtd_sha256: sha(readFileSync(GWTD)), served_pm_chat_sha256: sha(await served.body()),
+        }), 'application/json');
+
+        const qaQuestion = `RPT-F explicit detailed question ${theme}`;
+        const qaAnswer = `All requested Q&A details remain available ${theme}.`;
+        const qa = invoke('pm.report.post', { kind: 'qa', question: qaQuestion, body: qaAnswer,
+          instruction: { original: qaQuestion, kind: 'question', actions: ['Explain every result'], issue_numbers: [3431] } }, null).output;
+        expect(qa.instruction.id).toBe(qa.report.id);
+        const initialEvent = event('supervision', `RPT-F compact overview <literal> ${theme}`);
+        const longText = '詳細'.repeat(9000);
+        initialEvent.details = `**Full evidence**\n\n${longText}\n\nTAIL: item 48 preserved\n\n<script>window.__rptFUnsafe=true</script>`;
+        const initial = request('initial', [initialEvent]);
+        const first = post(initial);
+        expect(first.reports).toHaveLength(1);
+        expect(first.decisions[0]).toMatchObject({ reason: 'first', revision: 1 });
+        expect(first.reports[0].body.split('\n')).toHaveLength(4);
+        expect(first.reports[0].structured.details).toBe(initialEvent.details);
+        const transactions = () => readFileSync(history, 'utf8').trim().split('\n')
+          .map(line => JSON.parse(line)).filter(row => row.journal_schema === 2).map(row => JSON.parse(row.payload));
+        expect(transactions().find(row => row.submission.request_id === initial.request_id).receipt).toEqual(first);
+        const beforeRetry = readFileSync(history);
+        expect(post(initial)).toEqual(first);
+        expect(readFileSync(history), 'exact request replay appends no record').toEqual(beforeRetry);
+
+        await refreshPmReports(page);
+        const firstRow = reports.locator(`article[data-report-id="${first.reports[0].id}"]`);
+        const details = firstRow.locator('details');
+        await expect(firstRow.locator(':scope > .pm-chat__text')).toHaveText(first.reports[0].body);
+        const overview = firstRow.locator(':scope > .pm-chat__text');
+        expect(await overview.textContent()).toBe(first.reports[0].body);
+        await expect(overview.locator('literal')).toHaveCount(0);
+        const lineMetrics = await overview.evaluate(node => ({
+          whitespace: getComputedStyle(node).whiteSpace,
+          lines: node.getBoundingClientRect().height / parseFloat(getComputedStyle(node).lineHeight),
+        }));
+        expect(lineMetrics.whitespace).toBe('pre-wrap');
+        expect(lineMetrics.lines).toBeGreaterThanOrEqual(4);
+        expect(lineMetrics.lines).toBeLessThan(5);
+        await expect(details).not.toHaveAttribute('open');
+        await expect(details.locator('.knowledge-markdown-body')).toBeHidden();
+        await details.locator('summary').click();
+        await expect(details.locator('strong')).toHaveText('Full evidence');
+        expect(await details.textContent()).toContain(longText);
+        await expect(details).toContainText('TAIL: item 48 preserved');
+        await expect(details).toContainText(initialEvent.refs[0]);
+        await expect(firstRow.locator('script')).toHaveCount(0);
+        expect(await page.evaluate(() => (window as any).__rptFUnsafe)).toBeUndefined();
+        await firstRow.getByRole('button', { name: 'Copy report' }).click();
+        const fullCopy = `${first.reports[0].body}\n\n${initialEvent.details}\n\n- ${initialEvent.refs[0]}`;
+        await expect.poll(() => page.evaluate(async () => (await navigator.clipboard.readText()).replace(/\r\n/g, '\n'))).toBe(fullCopy);
+
+        const unchanged = post(request('unchanged', [{ ...initialEvent, expected_revision: 1,
+          observed_at: '2026-11-02T12:00:00Z', summary: { ...initialEvent.summary, result: 'Only wording changed' }, details: 'Only observation text changed' }]));
+        expect(unchanged.reports).toEqual([]);
+        expect(unchanged.decisions[0]).toMatchObject({ reason: 'unchanged', revision: 1, report_id: null });
+        await refreshPmReports(page);
+        await expect(reports.locator('article')).toHaveCount(originalCount + 2);
+        expect(invoke('pm.report.post', { kind: 'progress', body: 'Body-only bypass' }, SESSION, ROOT, false)).toContain('submission');
+
+        const fatal = { ...initialEvent, expected_revision: 1, kind: 'blocker',
+          state: { status: 'waiting', severity: 'fatal', impact: 'service', action: { id: 'restore-service', kind: 'intervene' } },
+          summary: { result: `RPT-F fatal ${theme}` }, details: 'New fatal event needs immediate intervention.' };
+        const decision = { ...event('judgment', `RPT-F decision ${theme}`), kind: 'decision',
+          state: { status: 'waiting', severity: 'routine', impact: 'project', action: { id: 'choose-recovery', kind: 'decide' } },
+          summary: { result: `RPT-F decision ${theme}`, decision: { question: 'Which recovery?', recommendation: 'Retry',
+            reason: 'The saved work is intact', options: ['Retry', 'Wait'] } } };
+        const mixed = post(request('mixed', [
+          { ...event('routine-a', 'Routine item A'), state: { ...initialEvent.state, action: { id: 'monitor-a', kind: 'monitor' } } },
+          fatal, decision,
+          { ...event('routine-b', 'Routine item B'), state: { ...initialEvent.state, action: { id: 'retry-b', kind: 'retry' } } },
+        ], { result: `RPT-F routine digest ${theme}`, owner: 'PM', next_action: 'Keep supervising both items' }));
+        expect(mixed.reports.map((row: any) => row.structured.summary.result))
+          .toEqual([fatal.summary.result, decision.summary.result, `RPT-F routine digest ${theme}`]);
+        expect(mixed.decisions.filter((row: any) => row.reason === 'immediate')).toHaveLength(2);
+        expect(mixed.decisions[0].report_id).toBe(mixed.decisions[3].report_id);
+        expect(mixed.reports[2].structured.details).toContain('Routine item A');
+        expect(mixed.reports[2].structured.details).toContain('Routine item B');
+        const resolved = post(request('resolved', [{ ...initialEvent, expected_revision: 2,
+          state: { status: 'resolved', severity: 'routine', impact: 'none' },
+          summary: { result: `RPT-F resolved ${theme}` }, details: 'The author reports recovery; this does not confer approval.' }]));
+        expect(resolved.decisions[0]).toMatchObject({ reason: 'resolved', revision: 3 });
+        expect(resolved.reports).toHaveLength(1);
+        const listed = invoke('pm.report.list', {}).output;
+        expect(listed.receipts.find((row: any) => row.request_id === unchanged.request_id)).toEqual(unchanged);
+        expect(listed.events.find((row: any) => row.event_id === initialEvent.event_id)).toMatchObject({ revision: 3, state: { status: 'resolved' } });
+        await refreshPmReports(page);
+        await expect(reports.locator('article')).toHaveCount(originalCount + 6);
+        await expect(details).toHaveAttribute('open', '');
+        for (const receipt of [mixed, resolved]) {
+          for (const row of receipt.reports) await expect(reports.locator(`article[data-report-id="${row.id}"]`)).toHaveCount(1);
+        }
+        const qaRow = reports.locator(`article[data-report-id="${qa.report.id}"]`);
+        await expect(qaRow.locator('.pm-chat__question')).toHaveText(qaQuestion);
+        await expect(qaRow.getByRole('region', { name: 'Answer', exact: true })).toContainText(qaAnswer);
+        await expect(qaRow.locator('details')).toHaveCount(0);
+        const projected = await page.evaluate(id => (window as any).__gwtPlaywrightMessages.map((entry: any) => entry.payload)
+          .findLast((message: any) => message.kind === 'pm_reports' && message.reports?.some((row: any) => row.id === id)), first.reports[0].id);
+        expect(projected.reports.find((row: any) => row.id === first.reports[0].id).details_html).toContain('TAIL: item 48 preserved');
+        await saveEvidence('pm-report-view', JSON.stringify(projected), 'application/json');
+        await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+        await reports.locator(`article[data-report-id="${resolved.reports[0].id}"]`).scrollIntoViewIfNeeded();
+        await saveEvidence('primary-reports', await pane.screenshot(), 'image/png');
+
+        // Only the registration/workspace scaffolding is seeded; both projects'
+        // typed cards go through the real operation and the normal Reports route.
+        const secondRoot = join(HOME, `rpt-f-second-${theme}`);
+        mkdirSync(secondRoot, { recursive: true });
+        // Recent Projects normalizes a bare repository to its parent workspace
+        // home. Isolate the one bare child under its own wrapper so neither the
+        // normal route nor its identity can resolve to the shared fixture HOME.
+        const secondBare = join(secondRoot, 'repo.git');
+        const git = spawnSync('git', ['init', '--bare', '--quiet', secondBare], { cwd: secondRoot, env: childEnv, encoding: 'utf8' });
+        expect(git.status, git.stderr).toBe(0);
+        const secondHash = invoke('issue.monitor.status', {}, null, secondRoot).envelope.project_store.hash;
+        expect(secondHash).not.toBe(fixture.repo_hash);
+        await saveEvidence('second-project-layout', JSON.stringify({ wrapper: secondRoot, bare: secondBare,
+          project_store_hash: secondHash, git: { args: ['init', '--bare', '--quiet', secondBare], status: git.status },
+          source_contract: { detection: 'runtime_support::resolve_project_target: child Bare layout is migration-clear',
+            recent: 'launch_runtime::normalize_recent_project_path: bare layout root normalizes to parent workspace home' },
+          change_reason: 'A bare repository directly under fixture HOME normalized Recent to shared HOME; use an isolated wrapper instead.',
+        }), 'application/json');
+        const secondProject = join(HOME, '.gwt/projects', secondHash);
+        const secondState = join(secondProject, 'project-state');
+        mkdirSync(secondState, { recursive: true });
+        const secondSession = 'pm-rpt-f-claude-fixture';
+        writeFileSync(join(secondState, 'pm.json'), JSON.stringify({ settings: { auto_start: false }, registration: {
+          session_id: secondSession, agent_id: 'claude', worktree_path: secondRoot, created_at: '2026-11-02T00:00:00Z',
+        } }));
+        writeFileSync(join(secondState, 'issue-monitor.json'), JSON.stringify({ enabled: false, max_active_agents: 1, priority_order: [] }));
+        const workspace = JSON.parse(readFileSync(join(state, '../workspace.json'), 'utf8'));
+        const pmWindow = workspace.windows.find((window: any) => window.session_id === SESSION);
+        expect(pmWindow).toBeTruthy();
+        writeFileSync(join(secondProject, 'workspace.json'), JSON.stringify({ ...workspace,
+          windows: [{ ...pmWindow, id: 'pm-rpt-f-second', session_id: secondSession, agent_id: 'claude', status: 'stopped' }] }));
+        writeFileSync(join(HOME, '.gwt/sessions', `${secondSession}.toml`),
+          readFileSync(join(HOME, '.gwt/sessions', `${SESSION}.toml`), 'utf8')
+            .replaceAll(SESSION, secondSession).replaceAll(ROOT, secondRoot).replaceAll('"Codex"', '"ClaudeCode"'));
+        writeFileSync(join(secondProject, 'pr-inventory-cache.json'), readFileSync(join(state, '../pr-inventory-cache.json')));
+        const secondHistory = join(secondState, 'pm-reports.jsonl');
+        journals.push(secondHistory);
+        expect(invoke('pm.report.post', { submission: initial }, SESSION, secondRoot, false)).toContain('registered PM');
+        expect(existsSync(secondHistory), 'foreign PM cannot create the other project journal').toBe(false);
+        const secondFirst = post(initial, secondSession, secondRoot);
+        expect(secondFirst.reports).toHaveLength(1);
+        expect(secondFirst.decisions[0]).toMatchObject({ reason: 'first', revision: 1 });
+        const secondOnly = post(request('second-only', [event('second-only', `RPT-F second project only ${theme}`)]), secondSession, secondRoot);
+        const catalog = await readLiveHubCatalog(page, BASE, { send: { kind: 'reopen_recent_project', path: secondRoot },
+          until: (hub, root) => hub.recent_projects.some(entry => entry.path === root && entry.project_key
+            && hub.projects.some(project => project.project_key === entry.project_key)), arg: secondRoot });
+        const secondKey = catalog.recent_projects.find(entry => entry.path === secondRoot)!.project_key!;
+        expect(secondKey, 'normal Hub opening retains the native project-store identity').toBe(secondHash);
+        await saveEvidence('second-project-hub-route', JSON.stringify({ wrapper: secondRoot, project_store_hash: secondHash,
+          recent: catalog.recent_projects.find(entry => entry.path === secondRoot),
+          open: catalog.projects.find(project => project.project_key === secondKey) }), 'application/json');
+        await gotoPmReports(page, secondKey, BASE);
+        await expect(page).toHaveURL(new RegExp(`/p/${secondKey}$`));
+        expect(JSON.parse(readFileSync(join(secondState, 'pm.json'), 'utf8')).start_block ?? null).toBeNull();
+        await expect(reports.locator('article')).toHaveCount(2);
+        await expect(reports.locator(`article[data-report-id="${secondFirst.reports[0].id}"]`)).toHaveCount(1);
+        await expect(reports.locator(`article[data-report-id="${secondOnly.reports[0].id}"]`)).toContainText(`RPT-F second project only ${theme}`);
+        await expect(reports).not.toContainText(fatal.summary.result);
+        await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+        await saveEvidence('second-project-reports', await pane.screenshot(), 'image/png');
+        await gotoPmReports(page, primaryKey, BASE);
+        await expect(reports.locator('article')).toHaveCount(originalCount + 6);
+        await expect(reports).not.toContainText(`RPT-F second project only ${theme}`);
+        expect(invoke('pm.report.list', {}).output.events.find((row: any) => row.event_id === 'supervision').revision).toBe(3);
+        expect(invoke('pm.report.list', {}, secondSession, secondRoot).output.events.find((row: any) => row.event_id === 'supervision').revision).toBe(1);
+        expect(errors).toEqual([]);
+      } finally {
+        await saveEvidence('real-cli-calls', JSON.stringify(calls), 'application/json');
+        for (const [index, path] of journals.entries()) {
+          if (existsSync(path)) await saveEvidence(`journal-project-${index + 1}`, readFileSync(path), 'application/x-ndjson');
+        }
+      }
+    } finally {
+      const failures: unknown[] = [];
+      try { await page.close(); } catch (error) { failures.push(error); }
+      try { await target.stop(); } catch (error) { failures.push(error); }
+      if (failures.length) throw new AggregateError(failures, 'RPT-F target cleanup failed');
+    }
   });
 });
 

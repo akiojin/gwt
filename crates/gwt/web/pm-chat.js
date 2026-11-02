@@ -1,6 +1,11 @@
 import { createUiStateStore } from './ui-state-store.js';
 import { renderUiContent } from './ui-content.js';
 
+function reportDetailsMarkdown(structured) {
+  return [structured.details, (structured.refs || []).map(ref => `- ${ref}`).join('\n')]
+    .filter(Boolean).join('\n\n');
+}
+
 // Explicit PM reports and raw terminal packets share one immutable window version.
 // The terminal runtime retains responsibility for buffering and snapshot ordering.
 export function createPmWindowModel() {
@@ -72,7 +77,10 @@ export function createPmWindowModel() {
         next = { ...next, reportsVersion: event.version, error: event.error || null, loaded: true,
           current: event.error ? previous.current : (event.current || null),
           reports: event.error ? previous.reports : (event.reports || []).map(report => ({ ...report,
-            content: { type: 'markdown', body: report.body || '', body_html: report.body_html || '' } })) };
+            content: report.structured ? { type: 'text', body: report.body || '' }
+              : { type: 'markdown', body: report.body || '', body_html: report.body_html || '' },
+            detailsContent: report.structured ? { type: 'markdown', body: reportDetailsMarkdown(report.structured),
+              body_html: report.details_html || '' } : null })) };
       } else if (event.kind === 'terminal_output' || event.kind === 'terminal_snapshot') {
         next = { ...next, terminal: { kind: event.kind, dataBase64: event.data_base64 } };
       } else return state;
@@ -103,6 +111,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
   let latestState;
   let scrollTop = 0;
   let followTail = true;
+  const expandedReports = new Set();
   const element = (tag, className, text) => {
     const node = document.createElement(tag);
     node.className = className;
@@ -260,8 +269,14 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
     const visibleReports = kindSelect.value === 'all' ? reports : reports.filter(report => report.kind === kindSelect.value);
     const nextDigest = JSON.stringify([kindSelect.value, visibleReports]);
     if (digest !== nextDigest) {
+      for (const row of transcript.children) {
+        const details = row.querySelector('details');
+        if (details?.hasAttribute('open')) expandedReports.add(row.dataset.reportId);
+        else expandedReports.delete(row.dataset.reportId);
+      }
       const nodes = visibleReports.map(report => {
         const row = element('article', 'pm-chat__message');
+        row.dataset.reportId = report.id;
         const qa = report.kind === 'qa';
         const header = element('div', 'pm-chat__author');
         const time = element('time', '', new Date(report.created_at).toLocaleString());
@@ -271,7 +286,8 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
         copy.setAttribute('aria-label', 'Copy report');
         copy.addEventListener('click', async () => {
           try {
-            await copyText(qa ? `Q: ${report.question || ''}\n\nA:\n${report.body}` : report.body);
+            await copyText(qa ? `Q: ${report.question || ''}\n\nA:\n${report.body}`
+              : [report.body, report.structured ? reportDetailsMarkdown(report.structured) : ''].filter(Boolean).join('\n\n'));
             if (!disposed) copy.textContent = 'Copied';
           } catch {
             if (!disposed) {
@@ -291,7 +307,16 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
           answer.setAttribute('aria-label', 'Answer');
           answer.append(element('h2', 'pm-chat__section-label', 'A'), content);
           row.append(question, answer);
-        } else row.append(content);
+        } else {
+          row.append(content);
+          if (report.structured) {
+            const details = element('details', '');
+            if (expandedReports.has(report.id)) details.setAttribute('open', '');
+            details.append(element('summary', '', 'Details'),
+              renderUiContent(document, report.detailsContent, 'pm-chat__text'));
+            row.append(details);
+          }
+        }
         return row;
       });
       transcript.replaceChildren(...nodes);
@@ -306,6 +331,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
   function setSession(nextSession) {
     if (disposed || session === nextSession) return;
     session = nextSession;
+    expandedReports.clear();
     transcript.replaceChildren();
     body.scrollTop = 0;
     scrollTop = 0;
@@ -316,6 +342,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
   }
   function dispose() {
     disposed = true;
+    expandedReports.clear();
     body.removeEventListener('scroll', rememberScroll);
     resizeObserver?.disconnect();
     reportsButton.removeEventListener('click', showReports);

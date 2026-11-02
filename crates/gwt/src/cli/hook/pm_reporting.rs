@@ -162,11 +162,7 @@ pub(crate) fn capture_qa_turn(repo: &Path) -> io::Result<Option<QaTurn>> {
             Err(error) => return Err(error),
         };
         Ok(Some(receipt)
-            .filter(|receipt| {
-                receipt.identity.session_id == session_id
-                    && receipt.requires_qa
-                    && receipt.qa_report_id.is_none()
-            })
+            .filter(|receipt| receipt.identity.session_id == session_id && receipt.requires_qa)
             .map(|receipt| receipt.identity))
     })
 }
@@ -180,7 +176,6 @@ pub(crate) fn instruction_prompt_identity(
 ) -> io::Result<(String, String)> {
     let receipt = read_receipt(repo, &turn.session_id)?
         .filter(|receipt| receipt.identity == *turn && receipt.requires_qa
-            && receipt.qa_report_id.is_none()
             && receipt.prompt_sha256.as_deref() == Some(gwt_core::pm_authorization::digest(original.as_bytes()).as_str()))
         .ok_or_else(|| io::Error::new(io::ErrorKind::PermissionDenied,
             "permission_stage=instruction: instruction.original must exactly match the current recorded human prompt; use pm.approval.request when no applicable instruction exists"))?;
@@ -322,6 +317,23 @@ mod tests {
         worktree
     }
 
+    fn native_human_fixture(home: &Path, worktree: &Path, original: &str) -> ScopedEnvVar {
+        let native_home = home.join("qa-native");
+        let native = ScopedEnvVar::set("CLAUDE_CONFIG_DIR", &native_home);
+        let mut session = gwt_agent::Session::new(worktree, "pm", gwt_agent::AgentId::ClaudeCode);
+        session.id = "pm-session".into();
+        session.agent_session_id = Some("qa-conversation".into());
+        fs::create_dir_all(gwt_core::paths::gwt_sessions_dir()).unwrap();
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        let directory = native_home.join("projects/project");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("qa-conversation.jsonl"), format!("{}\n", serde_json::json!({
+            "type":"user","uuid":"native-qa-turn","sessionId":"qa-conversation","cwd":worktree,
+            "message":{"role":"user","content":original}
+        }))).unwrap();
+        native
+    }
+
     #[test]
     fn scoped_instruction_capture_requires_the_native_human_message() {
         let home = tempfile::tempdir().unwrap();
@@ -394,6 +406,58 @@ mod tests {
         assert_eq!(
             saved["instruction"]["authorizations"][0]["operation"],
             "update.settings.set"
+        );
+        let mut ordinary = post();
+        let crate::cli::pm::PmCommand::ReportPost { instruction, .. } = &mut ordinary else {
+            unreachable!()
+        };
+        instruction.as_mut().unwrap().authorizations.clear();
+        assert!(
+            crate::cli::pm::run(&mut env, ordinary, &mut String::new()).is_err(),
+            "same native turn cannot mint a second capture through the ordinary path"
+        );
+        assert_eq!(
+            gwt_core::user_instruction::load(&home.path().join("repo"))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn human_qa_response_loss_retries_one_joined_capture_after_acknowledgement() {
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-session");
+        let worktree = fixture(home.path());
+        let _native = native_human_fixture(home.path(), &worktree, "状況は？");
+        let repo = home.path().join("repo");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        handle_user_prompt_submit(&worktree, r#"{"prompt":"状況は？"}"#).unwrap();
+        let post = || crate::cli::pm::PmCommand::ReportPost {
+            project_root: None,
+            kind: gwt_core::pm_report::PmReportKind::Qa,
+            question: Some("状況は？".into()),
+            body: "確認しました".into(),
+            instruction: Some(instruction_capture()),
+        };
+        let mut first = String::new();
+        crate::cli::pm::run(&mut env, post(), &mut first).unwrap();
+        let mut retried = String::new();
+        crate::cli::pm::run(&mut env, post(), &mut retried).unwrap();
+        let first: serde_json::Value = serde_json::from_str(&first).unwrap();
+        let retried: serde_json::Value = serde_json::from_str(&retried).unwrap();
+        assert_eq!(first["instruction"]["id"], retried["instruction"]["id"]);
+        assert_eq!(gwt_core::user_instruction::load(&repo).unwrap().len(), 1);
+        assert_eq!(
+            handle_stop(&worktree, Some("pm-session")),
+            HookOutput::Silent
         );
     }
 
@@ -539,6 +603,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-session");
         let worktree = fixture(home.path());
+        let _native = native_human_fixture(home.path(), &worktree, "状況は？");
         let mut env = crate::cli::TestEnv::new(home.path().join("repo"));
         let post = |kind, body: &str| crate::cli::pm::PmCommand::ReportPost {
             project_root: None,
@@ -579,12 +644,29 @@ mod tests {
             handle_stop(&worktree, Some("pm-session")),
             HookOutput::StopBlock { .. }
         ));
-        crate::cli::pm::run(
-            &mut env,
-            post(gwt_core::pm_report::PmReportKind::Progress, "進行中"),
-            &mut String::new(),
-        )
+        assert!(
+            crate::cli::pm::run(
+                &mut env,
+                post(gwt_core::pm_report::PmReportKind::Progress, "進行中"),
+                &mut String::new(),
+            )
+            .is_err(),
+            "registered PM cannot bypass typed reporting"
+        );
+        let input = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"request_id":"human-turn-progress","events":[{
+                "episode_id":"work","event_id":"status","expected_revision":0,"kind":"progress",
+                "state":{"status":"active","severity":"routine","impact":"local"},
+                "summary":{"result":"Work advanced"},"details":"Full evidence","refs":[]
+            }]
+        }))
         .unwrap();
+        let batch = crate::cli::pm::PmCommand::ReportBatch {
+            project_root: None,
+            submission: Box::new(input),
+        };
+        crate::cli::pm::run(&mut env, batch.clone(), &mut String::new()).unwrap();
+        crate::cli::pm::run(&mut env, batch, &mut String::new()).unwrap();
         assert!(matches!(
             handle_stop(&worktree, Some("pm-session")),
             HookOutput::StopBlock { .. }
@@ -775,6 +857,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-session");
         let worktree = fixture(home.path());
+        let _native = native_human_fixture(home.path(), &worktree, "状況は？");
         let repo = home.path().join("repo");
         let mut env = crate::cli::TestEnv::new(repo.clone());
         let post = |body: &str| crate::cli::pm::PmCommand::ReportPost {
@@ -819,7 +902,7 @@ mod tests {
             handle_stop(&worktree, Some("pm-session")),
             HookOutput::StopBlock { .. }
         ));
-        handle_user_prompt_submit(&worktree, r#"{"prompt":"新しい質問"}"#).unwrap();
+        handle_user_prompt_submit(&worktree, r#"{"prompt":"状況は？"}"#).unwrap();
         acknowledge_qa(&repo, &recovered, "older-success").unwrap();
         assert!(matches!(
             handle_stop(&worktree, Some("pm-session")),
