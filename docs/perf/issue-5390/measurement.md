@@ -418,8 +418,8 @@ unproven; this record does not replace headed, required CI or base inclusion.
 ### Resume checkpoint (2026-11-02)
 
 The previous four commits were preserved and merged with fetched develop at
-`ef7fdfe67d3a266ee8a0a3cafd7e137f935b6308`, including the delivered Issue
-#6622 source. The current managed caller now has a normal hook completion.
+`ef7fdfe67d3a266ee8a0a3cafd7e137f935b6308`, including the delivered
+Issue #6622 source. The current managed caller now has a normal hook completion.
 Checkout `hook.doctor` reports current/converged/normal, but still returns
 `unknown` with only `ledger_unavailable`. Host diagnostics identify September
 corruption rows with November 2 read-time timestamps. This separate reader
