@@ -309,7 +309,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
           row.append(question, answer);
         } else {
           row.append(content);
-          if (report.structured) {
+          if (report.structured && (report.structured.details.trim() || report.structured.refs.length)) {
             const details = element('details', '');
             if (expandedReports.has(report.id)) details.setAttribute('open', '');
             details.append(element('summary', '', 'Details'),

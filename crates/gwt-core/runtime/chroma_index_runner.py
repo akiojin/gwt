@@ -6169,6 +6169,37 @@ def _validate_report_text(value: Any) -> None:
     _validate_report_summary(value.get("summary"))
 
 
+def _report_submission_size(submission: dict) -> int:
+    """Measure validated input as Rust's compact typed JSON, without changing it."""
+    def summary(value: dict) -> dict:
+        return {**dict.fromkeys(("impact", "owner", "next_action", "decision")), **value}
+
+    def timestamp(value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        seconds, nanoseconds = _parse_rfc3339_instant(value)
+        epoch = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+        instant = epoch + datetime.timedelta(seconds=seconds)
+        base = instant.isoformat(timespec="seconds").removesuffix("+00:00")
+        # Chrono's Serde serializer uses UTC Z and AutoSi (0/3/6/9 digits).
+        if nanoseconds == 0:
+            return base + "Z"
+        digits = 3 if nanoseconds % 1_000_000 == 0 else 6 if nanoseconds % 1_000 == 0 else 9
+        return base + "." + f"{nanoseconds:09d}"[:digits] + "Z"
+
+    wire = {**submission, "events": [],
+            "digest": summary(submission["digest"]) if submission.get("digest") is not None else None}
+    for event in submission["events"]:
+        action = event["state"].get("action")
+        state = {**event["state"], "milestone_id": event["state"].get("milestone_id"),
+                 "action": {**action, "deadline": timestamp(action.get("deadline"))} if action is not None else None}
+        wire["events"].append({
+            **event, "state": state, "summary": summary(event["summary"]),
+            "refs": event.get("refs", []), "observed_at": timestamp(event.get("observed_at")),
+        })
+    return len(json.dumps(wire, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8"))
+
+
 def _versioned_report_cards(envelope: Any, requests: set[str]) -> list[dict]:
     """Check the journal wire and project saved cards, without rerunning posting policy."""
     _report_fields(envelope, {"journal_schema", "payload", "payload_sha256"})
@@ -6233,6 +6264,8 @@ def _versioned_report_cards(envelope: Any, requests: set[str]) -> list[dict]:
                 raise ValueError("invalid PM report observation timestamp")
             _parse_rfc3339_instant(event["observed_at"])
         _validate_report_text(event)
+        if len(event["details"].encode("utf-8")) > 64 * 1024 or len(event.get("refs", [])) > 16:
+            raise ValueError("PM report event exceeds details or refs limit")
         report_id = decision["report_id"]
         if (decision["reason"] == "unchanged") != (report_id is None):
             raise ValueError("invalid suppressed PM report decision")
@@ -6240,6 +6273,8 @@ def _versioned_report_cards(envelope: Any, requests: set[str]) -> list[dict]:
             if not isinstance(report_id, str) or not report_id:
                 raise ValueError("invalid PM report reference")
             referenced.add(report_id)
+    if _report_submission_size(submission) > 256 * 1024:
+        raise ValueError("PM report submission exceeds 256 KiB")
     card_ids = set()
     for card in cards:
         _report_fields(card, {"id", "kind", "body", "created_at", "structured"}, {"question"})

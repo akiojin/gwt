@@ -250,6 +250,26 @@ test('structured details have a safe text fallback while legacy, peer and Q&A re
   assert.match(articles[3].querySelector('[aria-label="Answer"]').textContent, /Update.*Ready.*checked.*cargo test/s);
 });
 
+test('structured summary-only reports omit empty Details while refs-only reports retain disclosure and raw Copy', async () => {
+  const { root, update, copied } = fixture();
+  const empty = { ...structuredReport('empty'), structured: { summary: { result: 'Ready' }, details: '', refs: [] }, details_html: '' };
+  const refsOnly = { ...structuredReport('refs-only'), structured: { summary: { result: 'Ready' }, details: '',
+    refs: ['https://example.com/issues/3431'] }, details_html: '<ul><li><a href="https://example.com/issues/3431">https://example.com/issues/3431</a></li></ul>' };
+  update([empty, refsOnly]);
+  assert.equal(root.querySelector('article[data-report-id="empty"] details') === null, true);
+  empty.structured.details = ' \n ';
+  update([empty, refsOnly]);
+  const emptyRow = root.querySelector('article[data-report-id="empty"]');
+  const refsRow = root.querySelector('article[data-report-id="refs-only"]');
+  assert.equal(emptyRow.querySelector('details') === null, true, 'whitespace has no detail content to expand');
+  assert.equal(emptyRow.querySelector('.pm-chat__text').textContent, empty.body);
+  assert.ok(refsRow.querySelector('details'), 'references alone remain expandable');
+  assert.equal(refsRow.querySelector('a').getAttribute('href'), refsOnly.structured.refs[0]);
+  refsRow.querySelector('[aria-label="Copy report"]').click();
+  await Promise.resolve();
+  assert.deepEqual(copied, [`${refsOnly.body}\n\n- ${refsOnly.structured.refs[0]}`]);
+});
+
 test('structured disclosure follows report identity across polling and filters without moving a history reader', () => {
   const { root, model, update } = fixture();
   const body = root.querySelector('.pm-chat__body');

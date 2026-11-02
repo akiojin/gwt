@@ -93,6 +93,65 @@ def journal_line(payload):
     }) + "\n"
 
 
+def boundary_transaction(omit_defaults=False):
+    """One lawful routine digest at Rust's compact typed submission byte limit."""
+    payload = transaction()
+    submission, receipt = payload["submission"], payload["receipt"]
+    summary = dict.fromkeys(("impact", "owner", "next_action", "decision"))
+    summary["result"] = "Watcher batch is ready"
+    submission["digest"] = summary
+    submission["events"] = []
+    for index in range(4):
+        event = transaction()["submission"]["events"][0]
+        event.update({"event_id": f"event-{index}", "details": "x" * (64 * 1024),
+                      "refs": [f"ref-{index}-{number}" for number in range(16)], "observed_at": None})
+        event["summary"] = dict(summary)
+        event["state"].update({"action": None, "milestone_id": None})
+        if index < 2:
+            observed, deadline = (("", ".123") if index == 0 else (".123456", ".123456789"))
+            event["observed_at"] = f"1969-12-31T23:59:59{observed}Z"
+            event["state"]["action"] = {
+                "id": f"monitor-{index}", "kind": "monitor", "deadline": f"1969-12-31T23:59:59{deadline}Z",
+            }
+        submission["events"].append(event)
+    excess = len(json.dumps(submission, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) - 256 * 1024
+    assert 0 < excess < 64 * 1024
+    submission["events"][-1]["details"] = submission["events"][-1]["details"][:-excess]
+    report_id = f"pm-rpt-{hashlib.sha256(submission['request_id'].encode('utf-8')).hexdigest()}-0"
+    receipt["decisions"] = [dict(receipt["decisions"][0], event_id=event["event_id"], report_id=report_id) for event in submission["events"]]
+    receipt["reports"][0].update({"id": report_id, "body": summary["result"], "structured": {
+        "summary": summary,
+        "details": "\n\n---\n\n".join(event["summary"]["result"] + "\n\n" + event["details"] for event in submission["events"]),
+        "refs": [ref for event in submission["events"] for ref in event["refs"]],
+    }})
+    if omit_defaults:
+        submission = json.loads(json.dumps(submission), object_hook=lambda obj: {key: value for key, value in obj.items() if value is not None})
+        for index, (observed, deadline) in enumerate(((".000000000", ".123000000"), (".123456000", ".123456789"))):
+            submission["events"][index]["observed_at"] = f"1970-01-01T08:59:59{observed}+09:00"
+            submission["events"][index]["state"]["action"]["deadline"] = f"1970-01-01T08:59:59{deadline}+09:00"
+        payload["submission"] = submission
+    return payload
+
+
+def test_native_submission_boundary_preserves_aggregated_digest_and_normalizes_defaults(corpus):
+    _, ledger, _, _, _ = corpus
+    payload = boundary_transaction()
+    assert len(json.dumps(payload["submission"], ensure_ascii=False, separators=(",", ":")).encode("utf-8")) == 256 * 1024
+    structured = payload["receipt"]["reports"][0]["structured"]
+    assert len(structured["details"].encode("utf-8")) > 64 * 1024 and len(structured["refs"]) > 16
+    for omit_defaults in (False, True):
+        candidate = boundary_transaction(omit_defaults)
+        original = json.dumps(candidate)
+        assert runner._versioned_report_cards(json.loads(journal_line(candidate)), set()) == candidate["receipt"]["reports"]
+        assert json.dumps(candidate) == original, "measurement must not rewrite journal data"
+    with ledger.open("a", encoding="utf-8") as handle:
+        handle.write(journal_line(payload))
+    records, _ = runner._load_report_records("reports-repo")
+    document = next(record["document"] for record in records if record["metadata"]["report_id"] == payload["receipt"]["reports"][0]["id"])
+    assert structured["details"] in document and all(ref in document for ref in structured["refs"])
+    assert index(corpus)["indexed"] == 3
+
+
 def test_versioned_reports_keep_full_search_text_and_suppressed_receipts_add_no_document(corpus):
     _, ledger, _, _, _ = corpus
     (ledger.parents[3] / "pm-peer-messages.json").write_text(json.dumps({
@@ -120,7 +179,7 @@ def test_versioned_reports_keep_full_search_text_and_suppressed_receipts_add_no_
 @pytest.mark.parametrize("corruption", [
     "journal_version", "hash", "unknown_field", "submission_version", "receipt_version",
     "request_mismatch", "no_decisions", "report_reference", "structured_details", "duplicate_request",
-    "invalid_enum", "revision", "summary_lines",
+    "invalid_enum", "revision", "summary_lines", "event_refs", "event_details_bytes", "submission_bytes",
 ])
 def test_invalid_versioned_report_preserves_verified_store(corpus, corruption):
     db_root, ledger, _, _, _ = corpus
@@ -147,6 +206,14 @@ def test_invalid_versioned_report_preserves_verified_store(corpus, corruption):
         payload["submission"]["events"][0]["state"]["status"] = []
     elif corruption == "revision":
         payload["receipt"]["decisions"][0]["revision"] = 2
+    elif corruption == "event_refs":
+        payload["submission"]["events"][0]["refs"] = [f"ref-{index}" for index in range(17)]
+    elif corruption == "event_details_bytes":
+        payload["submission"]["events"][0]["details"] = "界" * 21846  # 65,538 UTF-8 bytes.
+    elif corruption == "submission_bytes":
+        payload = boundary_transaction(omit_defaults=True)
+        payload["submission"]["events"][-1]["details"] += "x"
+        assert len(json.dumps(payload["submission"], ensure_ascii=False, separators=(",", ":")).encode("utf-8")) < 256 * 1024
     line = journal_line(payload)
     envelope = json.loads(line)
     if corruption == "journal_version":
