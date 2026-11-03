@@ -572,3 +572,30 @@ unchanged. The same selection passed all 14 with D compiler TEMP afterwards.
 Independent review found no blocking issue. This proves the tested placement,
 not every USERPROFILE override or LocalAppData redirection. The complete
 five-command canonical matrix must run fresh for the final committed head.
+
+The first PR CI run at `4060520e4` stopped in
+[Coverage shard 3](https://github.com/akiojin/gwt/actions/runs/41736787341/job/126267934629):
+2,073 tests passed and the existing
+`app_runtime_issue_monitor_auto_launch_uses_last_settings_runtime_target`
+timed out at 120 seconds. No coverage was exported. The other CI checks
+completed successfully. This fixture uses a cache-only Monitor scan override,
+which does not call the modified bulk reader; the Windows HOME change is not
+compiled into that Linux run.
+
+The current-source Linux exact case passed in 2.29 seconds, its instrumented
+coverage-profile run passed in 5.638 seconds, and three owned debugger runs
+completed normally. These did not reproduce the original stall. Local coverage
+retained line-table debug information, whereas CI uses debug level zero, and
+the local case did not reproduce the concurrent full-shard workload. An initial
+short exact filter selected zero tests and is excluded from evidence.
+
+Only this existing test now prints fixed phase names around owner startup,
+launch preparation, Close and shutdown. The markers expose no dynamic content
+and change no helper, assertion, timeout, retry or product code. `closed` means
+the Close result returned, and `stopped` means shutdown returned; the original
+subsequent assertions still determine success. The original timeout root cause
+remains open as T-5390-LF6 in the parent. A new passing head or these diagnostics
+alone must not be reported as its repair. Fresh canonical and mandatory CI
+evidence determine delivery of this limited FIFO/observability slice.
+The existing exact Linux case with these markers passed in 5.04 seconds and
+observed all nine phases through `stopped`; all original assertions passed.
