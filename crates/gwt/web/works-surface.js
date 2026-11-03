@@ -133,8 +133,8 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
     const available = work.data.session_id && ["running", "waiting", "idle"].includes(work.state);
     full.querySelector(".works-full-meta").textContent = `${work.assignment.is_pm ? "PM" : work.assignment.issue_number ? `#${work.assignment.issue_number}` : "—"} · ${purposeFor(work)} · ${labelFor(work.state)} · ${seconds(t.elapsed_seconds)} · ${providerFor(work)} / ${work.member?.model || t.model || "—"} · ${available ? "Interactive" : "Input unavailable"}`;
     full.querySelector(".works-full-usage").textContent = `${number(t.input_tokens)} input / ${number(t.cache_tokens)} cache / ${number(t.output_tokens)} output · Context ${finite(t.context_remaining_percent) ? `${t.context_remaining_percent}%` : "—"}`;
-    // Another surface may have moved the native child out of this retained host.
-    if ((rehost || !entry.terminal.firstElementChild) && isPresented()) mountTerminal(work.data.id, entry.terminal, { readOnly: false });
+    // Attachment progress may remain after another surface moves the native xterm.
+    if ((rehost || !entry.terminal.querySelector(".xterm")) && isPresented()) mountTerminal(work.data.id, entry.terminal, { readOnly: false });
   }
   function openWork(target) {
     if (disposed) return false;
