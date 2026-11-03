@@ -1771,6 +1771,193 @@ pub fn resolve_member_id_in_source(source: &ProjectKey, observed_id: &str) -> io
     SessionMemberSnapshot::load()?.resolve_member_id(source, observed_id)
 }
 
+/// Exact core observation; names, pool routing and unrelated members are excluded.
+pub fn implementation_core_revision(member_id: &str, core: &AgentProfileCore) -> String {
+    let bytes = serde_json::to_vec(&(member_id, core)).expect("serializable implementation core");
+    format!(
+        "implementation-core-v1:{}",
+        hex::encode(Sha256::digest(bytes))
+    )
+}
+
+pub struct MemberTuningOutcome {
+    pub snapshot: Option<SessionMemberSnapshot>,
+    pub error: Option<String>,
+}
+
+/// A target-only transaction. Activation, replay and Session cleanup are separate operations.
+pub fn set_member_tuning(request: &crate::agent_names::MemberTuning) -> MemberTuningOutcome {
+    let mut snapshot = None;
+    let result = (|| -> io::Result<()> {
+        loop {
+            let observed =
+                load()?.ok_or_else(|| invalid("Load the Agent roster before editing tuning"))?;
+            let mut keys = source_keys()?;
+            keys.extend(observed.sources.keys().cloned());
+            let _sources = source_locks(&keys)?;
+            let _registry = lock()?;
+            let mut current =
+                load()?.ok_or_else(|| invalid("Agent registry is unavailable; reload"))?;
+            let mut fresh_keys = source_keys()?;
+            fresh_keys.extend(current.sources.keys().cloned());
+            if fresh_keys != keys {
+                continue;
+            }
+            if keys.iter().any(|key| !current.sources.contains_key(key)) {
+                return Err(invalid("Agent source enrollment is required. Refresh the Agent roster before editing tuning."));
+            }
+            if current.phase != RegistryPhase::Active {
+                return Err(invalid(
+                    "Agent registry needs recovery; inspect agent.registry.status and reconcile",
+                ));
+            }
+            confirm_durable()?;
+            for (key, source) in &current.sources {
+                let path = prefs_path(key)?;
+                let observed = raw(&path)?;
+                assert_known(&current, key, observed.as_deref())?;
+                assert_known_floor(source, &path)?;
+                if raw_hash(observed.as_deref()) != source.after_sha256
+                    || raw_hash(raw(&path.with_extension("committed.json"))?.as_deref())
+                        != source.after_sha256
+                {
+                    return Err(invalid("Agent mirrors need confirmation. Refresh the Agent roster or inspect agent.registry.status and reconcile before editing tuning."));
+                }
+            }
+            snapshot = Some(SessionMemberSnapshot {
+                registry: Some(current.clone()),
+            });
+            let member = current
+                .roster
+                .as_ref()
+                .and_then(|roster| {
+                    roster
+                        .members
+                        .iter()
+                        .find(|member| member.agent_member_id == request.member_id)
+                })
+                .ok_or_else(|| {
+                    invalid("Agent member no longer exists; reload registered members")
+                })?;
+            let core = current
+                .profiles
+                .get(&request.member_id)
+                .ok_or_else(|| invalid("Saved implementation core is unavailable; reload"))?;
+            if member.agent_id.as_deref() != Some(core.agent_id.as_str()) {
+                return Err(invalid("The member's fixed implementation tool is inconsistent; inspect agent.registry.status"));
+            }
+            if implementation_core_revision(&request.member_id, core)
+                != request.expected_core_revision
+            {
+                return Err(invalid("This implementation profile changed elsewhere. Reload, review your draft and retry."));
+            }
+            let normalize = |value: &Option<String>| {
+                value
+                    .as_ref()
+                    .map(|text| text.trim().to_string())
+                    .filter(|text| !text.is_empty())
+            };
+            let model = normalize(&request.model);
+            let reasoning = normalize(&request.reasoning);
+            gwt_agent::validate_native_tuning(
+                &core.agent_id,
+                model.as_deref(),
+                reasoning.as_deref(),
+            )
+            .map_err(invalid)?;
+            if core.model == model && core.reasoning == reasoning {
+                return Ok(());
+            }
+            let core = current
+                .profiles
+                .get_mut(&request.member_id)
+                .expect("checked core");
+            core.model = model;
+            core.reasoning = reasoning;
+            current.revision = current
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| invalid("Agent registry revision exhausted"))?;
+            let roster = current.roster.as_mut().expect("checked member roster");
+            roster.revision = roster
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| invalid("Agent roster revision exhausted"))?;
+            if let Err(error) = save(&current) {
+                // Rename may have committed. Never replay or ACK an uncertain write.
+                snapshot = None;
+                if confirm_durable().is_ok() {
+                    if let Ok(Some(readback)) = load() {
+                        snapshot = Some(SessionMemberSnapshot {
+                            registry: Some(readback),
+                        });
+                    }
+                }
+                return Err(io::Error::other(format!(
+                    "Profile write outcome is unknown; reload before retrying: {error}"
+                )));
+            }
+            snapshot = Some(SessionMemberSnapshot {
+                registry: Some(current),
+            });
+            return Ok(());
+        }
+    })();
+    MemberTuningOutcome {
+        snapshot,
+        error: result.err().map(|error| error.to_string()),
+    }
+}
+
+/// Keep the selected-member proof locked through the caller's PM durable save.
+pub(crate) fn with_configured_pm_guard<T>(
+    key: &ProjectKey,
+    member_id: &str,
+    operation: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    let _guard = lock()?;
+    let registry =
+        load()?.ok_or_else(|| invalid("Load registered members before editing the PM profile"))?;
+    if registry.phase != RegistryPhase::Active {
+        return Err(invalid(
+            "Agent registry needs recovery; inspect agent.registry.status and reconcile",
+        ));
+    }
+    confirm_durable()?;
+    let member = registry.roster.as_ref().and_then(|roster| {
+        roster
+            .members
+            .iter()
+            .find(|member| member.pm_project_key.as_deref() == Some(key.as_str()))
+    });
+    if member.map(|member| member.agent_member_id.as_str()) != Some(member_id) {
+        return Err(invalid(
+            "The configured Project Manager changed. Reload and review this draft.",
+        ));
+    }
+    operation()
+}
+
+/// Coherent read-only PM settings and member identity under the writer's lock order.
+pub fn pm_profile_status_snapshot(
+    root: &Path,
+) -> io::Result<(crate::pm_registry::PmPrefs, SessionMemberSnapshot)> {
+    crate::pm_registry::with_pm_prefs_snapshot(
+        &crate::pm_registry::pm_prefs_path_for_repo_path(root),
+        |prefs| {
+            let _guard = lock()?;
+            let registry = load()?;
+            if let Some(registry) = &registry {
+                if registry.phase != RegistryPhase::Active {
+                    return Err(invalid("Agent registry needs recovery; inspect agent.registry.status and reconcile"));
+                }
+                confirm_durable()?;
+            }
+            Ok((prefs.clone(), SessionMemberSnapshot { registry }))
+        },
+    )
+}
+
 /// One immutable, validated registry read for a batch of retained Sessions.
 /// It carries no write authority and never refreshes itself during a view.
 pub struct SessionMemberSnapshot {
@@ -1780,6 +1967,31 @@ pub struct SessionMemberSnapshot {
 impl SessionMemberSnapshot {
     pub fn load() -> io::Result<Self> {
         Ok(Self { registry: load()? })
+    }
+
+    pub fn project_snapshot(&self, key: &ProjectKey) -> io::Result<IssueMonitorPrefs> {
+        let registry = self
+            .registry
+            .as_ref()
+            .filter(|registry| registry.phase == RegistryPhase::Active)
+            .ok_or_else(|| invalid("Agent registry snapshot is unavailable; reload"))?;
+        project(
+            registry,
+            key.as_str(),
+            registry
+                .sources
+                .get(key.as_str())
+                .map(|source| source.after_json.as_str()),
+        )
+    }
+
+    pub fn implementation_core(&self, member_id: &str) -> Option<(AgentProfileCore, String)> {
+        let registry = self
+            .registry
+            .as_ref()
+            .filter(|registry| registry.phase == RegistryPhase::Active)?;
+        let core = registry.profiles.get(member_id)?;
+        Some((core.clone(), implementation_core_revision(member_id, core)))
     }
 
     pub fn configured_pm_member(&self, source: &ProjectKey) -> io::Result<Option<AgentMember>> {
@@ -3738,6 +3950,258 @@ mod tests {
         fs::write(&path, &raw).unwrap();
         fs::write(path.with_extension("committed.json"), &raw).unwrap();
         (root, path, raw)
+    }
+
+    #[test]
+    fn member_tuning_preserves_candidates_other_cores_and_immutable_refusals() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (root, mirror, _) = source();
+        ensure_active_for_project(&root).unwrap();
+        let mut registry = load().unwrap().unwrap();
+        let target = registry.roster.as_ref().unwrap().members[0]
+            .agent_member_id
+            .clone();
+        let mut other = registry.roster.as_ref().unwrap().members[0].clone();
+        other.agent_member_id = uuid::Uuid::new_v4().to_string();
+        other.name = "Another member".into();
+        other.assignment = Some(serde_json::from_value(serde_json::json!({
+            "reservation_id":"retained-dead","session_id":"dead-session","issue_number":null,"spec_number":null,
+            "delivery_id":null,"project_key":gwt_core::paths::project_scope_hash(&root).to_string(),"host_id":"unreachable-host","host_pid":0,"host_started_at":null
+        })).unwrap());
+        registry
+            .roster
+            .as_mut()
+            .unwrap()
+            .members
+            .push(other.clone());
+        let core = registry.profiles.get_mut(&target).unwrap();
+        core.version = Some("kept-version".into());
+        core.fast_mode = true;
+        let request = crate::agent_names::MemberTuning {
+            member_id: target.clone(),
+            model: Some("  private-model  ".into()),
+            reasoning: Some("high".into()),
+            expected_core_revision: implementation_core_revision(&target, core),
+        };
+        registry.profiles.insert(
+            other.agent_member_id.clone(),
+            AgentProfileCore {
+                agent_id: "codex".into(),
+                model: Some("newer-other-core".into()),
+                reasoning: None,
+                version: None,
+                fast_mode: false,
+            },
+        );
+        save(&registry).unwrap();
+        crate::try_mutate_issue_monitor_prefs(&mirror, |prefs| {
+            prefs.set_launch_profile_pool(vec![serde_json::from_value(serde_json::json!({
+                "agent_id":"codex", "agent_member_id":other.agent_member_id,
+                "model":"newer-other-core"
+            }))
+            .unwrap()]);
+            Ok(())
+        })
+        .unwrap();
+        let before = load().unwrap().unwrap();
+        let mirror_bytes = fs::read(&mirror).unwrap();
+        let floor_bytes = fs::read(mirror.with_extension("committed.json")).unwrap();
+        let outcome = set_member_tuning(&request);
+        assert!(outcome.error.is_none(), "{:?}", outcome.error);
+        let snapshot = outcome.snapshot.unwrap();
+        let prefs = snapshot
+            .project_snapshot(&gwt_core::paths::project_scope_hash(&root))
+            .unwrap();
+        assert_eq!(prefs.launch_profile_pool().len(), 1);
+        assert_eq!(prefs.launch_profile_pool()[0].agent_member_id.as_deref(), Some(other.agent_member_id.as_str()), "a concurrently added candidate is retained and the unselected target is never inserted");
+        let after = load().unwrap().unwrap();
+        let mut expected = before.clone();
+        expected.revision += 1;
+        expected.roster.as_mut().unwrap().revision += 1;
+        expected.profiles.get_mut(&target).unwrap().model = Some("private-model".into());
+        expected.profiles.get_mut(&target).unwrap().reasoning = Some("high".into());
+        assert_eq!(after, expected);
+        assert_eq!(fs::read(&mirror).unwrap(), mirror_bytes);
+        assert_eq!(
+            fs::read(mirror.with_extension("committed.json")).unwrap(),
+            floor_bytes
+        );
+        let bytes = fs::read(path()).unwrap();
+        let stale = set_member_tuning(&request);
+        assert!(stale.error.unwrap().contains("changed elsewhere"));
+        assert!(stale
+            .snapshot
+            .unwrap()
+            .project_snapshot(&gwt_core::paths::project_scope_hash(&root))
+            .unwrap()
+            .agent_roster
+            .unwrap()
+            .members
+            .iter()
+            .any(|member| member.assignment == other.assignment));
+        assert_eq!(fs::read(path()).unwrap(), bytes);
+        let mut request = request;
+        request.expected_core_revision = snapshot.implementation_core(&target).unwrap().1;
+        assert!(set_member_tuning(&request).error.is_none());
+        assert_eq!(
+            fs::read(path()).unwrap(),
+            bytes,
+            "no-op has no revision or byte changes"
+        );
+        let late_root = home.path().join("late-project");
+        fs::create_dir_all(&late_root).unwrap();
+        let late_path = crate::issue_monitor_prefs_path_for_repo_path(&late_root);
+        fs::create_dir_all(late_path.parent().unwrap()).unwrap();
+        fs::write(
+            &late_path,
+            serde_json::to_vec(&IssueMonitorPrefs::default()).unwrap(),
+        )
+        .unwrap();
+        assert!(set_member_tuning(&request)
+            .error
+            .unwrap()
+            .contains("enrollment"));
+        assert_eq!(fs::read(path()).unwrap(), bytes);
+        assert!(!late_path.with_extension("committed.json").exists());
+        ensure_active_for_project(&late_root).unwrap();
+        request.expected_core_revision = SessionMemberSnapshot::load()
+            .unwrap()
+            .implementation_core(&target)
+            .unwrap()
+            .1;
+        assert!(
+            set_member_tuning(&request).error.is_none(),
+            "normal prerequisite recovery admits the same legitimate target"
+        );
+        assert!(late_path.with_extension("committed.json").exists());
+        let bytes = fs::read(path()).unwrap();
+        request.reasoning = Some("ultracode".into());
+        assert!(set_member_tuning(&request)
+            .error
+            .unwrap()
+            .contains("unsupported"));
+        assert_eq!(fs::read(path()).unwrap(), bytes);
+        fs::write(mirror.with_extension("committed.json"), "unconfirmed floor").unwrap();
+        assert!(set_member_tuning(&request).error.is_some());
+        assert_eq!(fs::read(path()).unwrap(), bytes);
+        assert_eq!(
+            fs::read(mirror.with_extension("committed.json")).unwrap(),
+            b"unconfirmed floor"
+        );
+        fs::write(mirror.with_extension("committed.json"), &floor_bytes).unwrap();
+        fs::write(&mirror, b"unknown mirror").unwrap();
+        assert!(set_member_tuning(&request).error.is_some());
+        assert_eq!(fs::read(path()).unwrap(), bytes);
+        assert_eq!(fs::read(&mirror).unwrap(), b"unknown mirror");
+        let mut prepared = load().unwrap().unwrap();
+        prepared.phase = RegistryPhase::Prepared;
+        save(&prepared).unwrap();
+        let prepared_bytes = fs::read(path()).unwrap();
+        assert!(set_member_tuning(&request)
+            .error
+            .unwrap()
+            .contains("recovery"));
+        assert_eq!(fs::read(path()).unwrap(), prepared_bytes);
+    }
+
+    #[test]
+    fn selected_pm_profile_cas_preserves_version_core_and_original_session() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (root, session, _) = pm_only_fixture();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        ensure_current_pm_identity(&root, &sessions).unwrap();
+        let key = gwt_core::paths::project_scope_hash(&root);
+        let member = SessionMemberSnapshot::load()
+            .unwrap()
+            .configured_pm_member(&key)
+            .unwrap()
+            .unwrap();
+        let prefs_path = crate::pm_registry::pm_prefs_path_for_repo_path(&root);
+        crate::pm_registry::mutate_pm_prefs(&prefs_path, |prefs| {
+            prefs.settings.launch_profile = Some(crate::pm_registry::PmLaunchProfile {
+                agent_id: "claude".into(),
+                model: Some("opusplan".into()),
+                reasoning: None,
+                version: Some("keep-version".into()),
+            })
+        })
+        .unwrap();
+        let before = crate::pm_registry::load_pm_prefs(&prefs_path).unwrap();
+        let token = crate::pm_registry::pm_profile_revision(&before);
+        let registry_bytes = fs::read(path()).unwrap();
+        let session_bytes = fs::read(sessions.join(format!("{}.toml", session.id))).unwrap();
+        let saved = crate::pm_registry::set_selected_pm_profile(
+            &root,
+            &member.agent_member_id,
+            &token,
+            crate::pm_registry::PmLaunchProfile {
+                agent_id: "claude".into(),
+                model: Some(" opusplan ".into()),
+                reasoning: Some(" high ".into()),
+                version: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            saved
+                .settings
+                .launch_profile
+                .as_ref()
+                .unwrap()
+                .version
+                .as_deref(),
+            Some("keep-version")
+        );
+        assert_eq!(
+            saved
+                .settings
+                .launch_profile
+                .as_ref()
+                .unwrap()
+                .reasoning
+                .as_deref(),
+            Some("high")
+        );
+        assert_eq!(saved.registration, before.registration);
+        assert_eq!(fs::read(path()).unwrap(), registry_bytes);
+        assert_eq!(
+            fs::read(sessions.join(format!("{}.toml", session.id))).unwrap(),
+            session_bytes
+        );
+        assert!(!crate::issue_monitor_prefs_path_for_repo_path(&root).exists());
+        let core_snapshot = SessionMemberSnapshot::load().unwrap();
+        let tuning = crate::agent_names::MemberTuning {
+            member_id: member.agent_member_id.clone(),
+            model: Some("future-implementation-model".into()),
+            reasoning: None,
+            expected_core_revision: core_snapshot
+                .implementation_core(&member.agent_member_id)
+                .unwrap()
+                .1,
+        };
+        assert!(
+            set_member_tuning(&tuning).error.is_none(),
+            "PM-only registries need no Monitor source to tune a legitimate member"
+        );
+        assert!(!crate::issue_monitor_prefs_path_for_repo_path(&root).exists());
+        let bytes = fs::read(&prefs_path).unwrap();
+        assert!(crate::pm_registry::set_selected_pm_profile(
+            &root,
+            &member.agent_member_id,
+            &token,
+            crate::pm_registry::PmLaunchProfile::default_profile()
+        )
+        .is_err());
+        assert!(crate::pm_registry::selected_pm_profile_snapshot(&root, "another-member").is_err());
+        assert_eq!(fs::read(&prefs_path).unwrap(), bytes);
     }
 
     fn recovery_request(status: &RegistryStatus, floor: &str) -> RegistryReconcileRequest {

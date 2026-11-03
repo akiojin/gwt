@@ -601,13 +601,18 @@ impl AppRuntime {
                 )]));
             }
             settle_window_lifecycle_generation(&generations, &window_id, closing_window_generation);
-            let pm_status = pm_outcome.as_ref().map(|outcome| {
-                gwt::project_runtime::pm_delivery::pm_status_from_launch_prefs(
-                    &gwt_core::paths::gwt_sessions_dir(),
-                    &outcome.prefs,
-                    None,
-                )
-            });
+            let pm_status =
+                pm_outcome
+                    .as_ref()
+                    .zip(close_project_root.as_ref())
+                    .map(|(outcome, root)| {
+                        gwt::project_runtime::pm_delivery::pm_status_from_launch_prefs(
+                            &gwt_core::paths::gwt_sessions_dir(),
+                            root,
+                            &outcome.prefs,
+                            None,
+                        )
+                    });
             let pm_deregistered = pm_outcome
                 .as_ref()
                 .is_some_and(|outcome| outcome.deregistered);

@@ -11096,8 +11096,13 @@ impl AppRuntime {
                         FrontendEvent::FrontendReady => {
                             self.unopened_project_route_events(&client_id, key)
                         }
-                        event => recovery_center::rejected_action_events(&client_id, &event)
-                            .unwrap_or_default(),
+                        event => {
+                            pm::rejected_member_settings_events(&client_id, key.as_str(), &event)
+                                .or_else(|| {
+                                    recovery_center::rejected_action_events(&client_id, &event)
+                                })
+                                .unwrap_or_default()
+                        }
                     };
                 };
                 self.handle_frontend_event_for_project(&context, client_id, event)
@@ -11409,7 +11414,13 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         if !self.project_owns_frontend_request(context, &event) {
             tracing::warn!(project_key = %context.project_key, "rejected frontend request outside its project scope");
-            return recovery_center::rejected_action_events(&client_id, &event).unwrap_or_default();
+            return pm::rejected_member_settings_events(
+                &client_id,
+                context.project_key.as_str(),
+                &event,
+            )
+            .or_else(|| recovery_center::rejected_action_events(&client_id, &event))
+            .unwrap_or_default();
         }
         let project_scope = self.frontend_project_log_scope(Some(context), &event);
         let _project_scope = project_scope.as_ref().map(|scope| scope.enter()).unwrap_or_else(|| {
@@ -11546,6 +11557,7 @@ impl AppRuntime {
                         action,
                         gwt::agent_names::AgentRosterAction::SelectPm { .. }
                             | gwt::agent_names::AgentRosterAction::SetPmEligibility { .. }
+                            | gwt::agent_names::AgentRosterAction::SetTuning(_)
                     ) && project_key.is_none()
                 {
                     vec![OutboundEvent::reply(&client_id, BackendEvent::AgentRosterError {
@@ -11602,10 +11614,29 @@ impl AppRuntime {
                 self.set_pm_loop_interval_events(context, loop_interval_secs)
             }
             FrontendEvent::SetPmLaunchProfile {
+                project_key,
+                member_id,
+                request_id,
+                expected_profile_revision,
                 agent_id,
                 model,
                 reasoning,
-            } => self.set_pm_launch_profile_events(context, &agent_id, model, reasoning),
+            } => self.set_pm_launch_profile_events(
+                context,
+                &client_id,
+                pm::PmProfileEdit {
+                    project_key,
+                    member_id,
+                    request_id,
+                    expected_profile_revision,
+                    profile: gwt::pm_registry::PmLaunchProfile {
+                        agent_id,
+                        model,
+                        reasoning,
+                        version: None,
+                    },
+                },
+            ),
             FrontendEvent::RestartPmAgent => self.restart_pm_agent_events(context),
             FrontendEvent::OpenProjectDialog => self.open_project_dialog_events(&client_id),
             FrontendEvent::SelectCloneProjectParent => {

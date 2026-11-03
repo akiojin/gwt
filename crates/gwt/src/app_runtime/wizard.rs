@@ -3721,6 +3721,27 @@ impl AppRuntime {
         ]
     }
 
+    /// Agent/model assistance without Monitor enrollment or Docker probing.
+    pub(super) fn member_tuning_choices(
+        &self,
+        project_root: &Path,
+    ) -> Vec<gwt::launch_wizard::IssueMonitorAgentChoices> {
+        let mut wizard = self.issue_monitor_settings_wizard(
+            project_root.to_path_buf(),
+            gwt::LaunchWizardPreviousProfiles::default(),
+        );
+        for agent in gwt::build_builtin_agent_options(Vec::new()) {
+            if !wizard
+                .detected_agents
+                .iter()
+                .any(|known| known.id == agent.id)
+            {
+                wizard.detected_agents.push(agent);
+            }
+        }
+        wizard.issue_monitor_agent_choices(&[])
+    }
+
     pub(super) fn issue_monitor_profile_choices(
         &self,
         project_root: &Path,

@@ -107,6 +107,25 @@ pub enum AgentRosterAction {
     SelectPm {
         member_id: String,
     },
+    SetTuning(MemberTuning),
+}
+
+/// Only these two future-launch inputs may be changed by an individual editor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemberTuning {
+    pub member_id: String,
+    #[serde(deserialize_with = "required_nullable_text")]
+    pub model: Option<String>,
+    #[serde(deserialize_with = "required_nullable_text")]
+    pub reasoning: Option<String>,
+    pub expected_core_revision: String,
+}
+
+fn required_nullable_text<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    Option::<String>::deserialize(deserializer)
 }
 
 impl AgentRoster {
@@ -732,6 +751,9 @@ pub fn mutate_project_roster_snapshot(
     action: AgentRosterAction,
     expected_revision: Option<u64>,
 ) -> Result<crate::IssueMonitorPrefs, String> {
+    if matches!(action, AgentRosterAction::SetTuning(_)) {
+        return Err("Use the target-only tuning writer".into());
+    }
     if let AgentRosterAction::Add {
         agent_id: Some(id), ..
     } = &action
@@ -882,7 +904,9 @@ pub(crate) fn apply_roster_action(
                 roster.members[index].name = name.to_string();
             }
         }
-        AgentRosterAction::SetPmEligibility { .. } | AgentRosterAction::SelectPm { .. } => {
+        AgentRosterAction::SetPmEligibility { .. }
+        | AgentRosterAction::SelectPm { .. }
+        | AgentRosterAction::SetTuning(_) => {
             unreachable!("registry-only action")
         }
     }

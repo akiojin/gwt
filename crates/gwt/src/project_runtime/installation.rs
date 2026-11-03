@@ -1113,6 +1113,7 @@ pub fn install_agent_launch(
             }
             let status = super::pm_delivery::pm_status_from_launch_prefs(
                 &input.sessions_dir,
+                &root,
                 &prefs,
                 prefs.registration.as_ref(),
             );

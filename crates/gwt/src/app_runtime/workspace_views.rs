@@ -3954,6 +3954,27 @@ fn agent_roster_view(
     past_complete: bool,
     sessions_dir: &Path,
 ) -> gwt::AgentRosterView {
+    let snapshot = gwt::agent_registry::SessionMemberSnapshot::load().ok();
+    agent_roster_view_from_snapshot(
+        context,
+        prefs,
+        sessions,
+        entries,
+        past_complete,
+        sessions_dir,
+        snapshot.as_ref(),
+    )
+}
+
+fn agent_roster_view_from_snapshot(
+    context: &ProjectContext,
+    prefs: &gwt::IssueMonitorPrefs,
+    sessions: &[Arc<gwt_agent::Session>],
+    entries: &[gwt_core::coordination::BoardEntry],
+    past_complete: bool,
+    sessions_dir: &Path,
+    member_snapshot: Option<&gwt::agent_registry::SessionMemberSnapshot>,
+) -> gwt::AgentRosterView {
     use std::collections::{BTreeMap, BTreeSet};
     let roster = prefs
         .agent_roster
@@ -3982,7 +4003,6 @@ fn agent_roster_view(
                 }) == normalized_root
         })
         .collect();
-    let member_snapshot = gwt::agent_registry::SessionMemberSnapshot::load().ok();
     let member_ids: BTreeMap<_, _> = sessions
         .iter()
         .map(|session| {
@@ -4048,6 +4068,12 @@ fn agent_roster_view(
                     .as_ref()
                     .map(saved_manual_profile_revision),
                 saved_manual_profile,
+                saved_implementation_core: member_snapshot
+                    .and_then(|snapshot| snapshot.implementation_core(&member.agent_member_id))
+                    .map(|(core, _)| core),
+                saved_implementation_core_revision: member_snapshot
+                    .and_then(|snapshot| snapshot.implementation_core(&member.agent_member_id))
+                    .map(|(_, revision)| revision),
                 history: assigned
                     .iter()
                     .map(|session| history_for(session))
@@ -4212,6 +4238,7 @@ fn agent_roster_view(
     let capacity =
         gwt::agent_capacity::project_capacity(&context.project_root, &BTreeSet::new(), 0);
     gwt::AgentRosterView {
+        tuning_choices: None,
         project_key: context.project_key.to_string(),
         revision: roster.revision,
         revision_decimal: roster.revision.to_string(),
@@ -4276,7 +4303,19 @@ impl AppRuntime {
         expected_revision: Option<u64>,
         request_id: Option<String>,
     ) -> Vec<OutboundEvent> {
+        let tuning = matches!(action, gwt::agent_names::AgentRosterAction::SetTuning(_));
+        if tuning && request_id.as_deref().is_none_or(|id| id.trim().is_empty()) {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::AgentRosterError {
+                    project_key: context.project_key.to_string(),
+                    message: "A tuning request id is required; reload and retry".into(),
+                    request_id,
+                },
+            )];
+        }
         if !matches!(action, gwt::agent_names::AgentRosterAction::Read)
+            && !tuning
             && expected_revision.is_none()
         {
             return vec![OutboundEvent::reply(
@@ -4288,31 +4327,47 @@ impl AppRuntime {
                 },
             )];
         }
+        let read = matches!(action, gwt::agent_names::AgentRosterAction::Read);
+        let pm_capture = read.then(|| self.pm_status_read_capture(context)).flatten();
+        let pm_unavailable = (read && pm_capture.is_none()).then(|| self.pm_status_event(context));
+        let choices = self.member_tuning_choices(&context.project_root);
         let context_owned = context.clone();
         let reply_to = client_id.clone();
         let proxy = self.proxy.clone();
         let sessions_dir = self.sessions_dir.clone();
         let reply_request_id = request_id.clone();
         let spawn = self.blocking_tasks.try_spawn(move || {
-            let result = gwt::agent_names::mutate_project_roster_snapshot(
-                &context_owned.project_root,
-                &sessions_dir,
-                action,
-                expected_revision,
-            );
-            let (prefs, error) = match result {
-                Ok(prefs) => (Some(prefs), None),
-                Err(error) => (
-                    gwt::agent_names::mutate_project_roster_snapshot(
+            let mut immutable_snapshot = None;
+            let (prefs, error) =
+                if let gwt::agent_names::AgentRosterAction::SetTuning(request) = action {
+                    let outcome = gwt::agent_registry::set_member_tuning(&request);
+                    let prefs = outcome.snapshot.as_ref().and_then(|snapshot| {
+                        snapshot.project_snapshot(&context_owned.project_key).ok()
+                    });
+                    immutable_snapshot = outcome.snapshot;
+                    (prefs, outcome.error)
+                } else {
+                    let result = gwt::agent_names::mutate_project_roster_snapshot(
                         &context_owned.project_root,
                         &sessions_dir,
-                        gwt::agent_names::AgentRosterAction::Read,
-                        None,
-                    )
-                    .ok(),
-                    Some(error),
-                ),
-            };
+                        action,
+                        expected_revision,
+                    );
+                    let (prefs, error) = match result {
+                        Ok(prefs) => (Some(prefs), None),
+                        Err(error) => (
+                            gwt::agent_names::mutate_project_roster_snapshot(
+                                &context_owned.project_root,
+                                &sessions_dir,
+                                gwt::agent_names::AgentRosterAction::Read,
+                                None,
+                            )
+                            .ok(),
+                            Some(error),
+                        ),
+                    };
+                    (prefs, error)
+                };
             let event = if let Some(prefs) = prefs {
                 match gwt_agent::session_ledger::load_sessions_shared(&sessions_dir) {
                     Ok(sessions) => {
@@ -4321,14 +4376,27 @@ impl AppRuntime {
                             chrono::DateTime::<chrono::Utc>::MIN_UTC,
                         );
                         let complete = entries.is_ok();
-                        let mut view = agent_roster_view(
-                            &context_owned,
-                            &prefs,
-                            &sessions,
-                            &entries.unwrap_or_default(),
-                            complete,
-                            &sessions_dir,
-                        );
+                        let mut view = if tuning {
+                            agent_roster_view_from_snapshot(
+                                &context_owned,
+                                &prefs,
+                                &sessions,
+                                &entries.unwrap_or_default(),
+                                complete,
+                                &sessions_dir,
+                                immutable_snapshot.as_ref(),
+                            )
+                        } else {
+                            agent_roster_view(
+                                &context_owned,
+                                &prefs,
+                                &sessions,
+                                &entries.unwrap_or_default(),
+                                complete,
+                                &sessions_dir,
+                            )
+                        };
+                        view.tuning_choices = Some(choices);
                         view.error = error;
                         BackendEvent::AgentRoster {
                             roster: view,
@@ -4349,9 +4417,23 @@ impl AppRuntime {
                     request_id: reply_request_id,
                 }
             };
+            let mut events = vec![OutboundEvent::reply(&reply_to, event)];
+            if read {
+                let status = if let Some((root, running)) = pm_capture {
+                    gwt::project_runtime::pm_delivery::pm_status_from_launch_prefs(
+                        &sessions_dir,
+                        &root,
+                        &gwt::pm_registry::PmPrefs::default(),
+                        running.as_ref(),
+                    )
+                } else {
+                    pm_unavailable.expect("unavailable project status captured before Read")
+                };
+                events.push(OutboundEvent::reply(&reply_to, status));
+            }
             proxy.send(UserEvent::ProjectDispatch {
                 context: context_owned,
-                events: vec![OutboundEvent::reply(&reply_to, event)],
+                events,
             });
         });
         match spawn {

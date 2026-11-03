@@ -42,7 +42,9 @@ use gwt::project_runtime::pm_delivery::{
 use crate::UserEvent;
 
 use super::startup::RestoreOrigin;
-use super::{AppRuntime, BackendEvent, OutboundEvent, WindowPreset, WorkspaceResumeContext};
+use super::{
+    AppRuntime, BackendEvent, FrontendEvent, OutboundEvent, WindowPreset, WorkspaceResumeContext,
+};
 
 pub(super) use gwt::pm_registry::PM_BOOTSTRAP_PROMPT;
 
@@ -328,6 +330,53 @@ impl PmWorktreeContinuation {
     }
 }
 
+pub(super) struct PmProfileEdit {
+    pub project_key: Option<String>,
+    pub member_id: Option<String>,
+    pub request_id: Option<String>,
+    pub expected_profile_revision: Option<String>,
+    pub profile: PmLaunchProfile,
+}
+
+pub(super) fn rejected_member_settings_events(
+    client_id: &crate::ClientId,
+    project_key: &str,
+    event: &FrontendEvent,
+) -> Option<Vec<OutboundEvent>> {
+    let event = match event {
+        FrontendEvent::SetPmLaunchProfile {
+            member_id,
+            request_id,
+            ..
+        } => BackendEvent::PmLaunchProfileResult {
+            project_key: project_key.to_string(),
+            member_id: member_id.clone(),
+            request_id: request_id.clone(),
+            success: false,
+            field: Some("profile".into()),
+            message: Some(
+                "The current project is unavailable. Reload the project's PM profile and retry."
+                    .into(),
+            ),
+            retryable: true,
+            profile_revision: None,
+            profile: None,
+        },
+        FrontendEvent::AgentRoster {
+            action: gwt::agent_names::AgentRosterAction::SetTuning(_),
+            request_id,
+            ..
+        } => BackendEvent::AgentRosterError {
+            project_key: project_key.to_string(),
+            request_id: request_id.clone(),
+            message: "The current project is unavailable. Reload registered members and retry."
+                .into(),
+        },
+        _ => return None,
+    };
+    Some(vec![OutboundEvent::reply(client_id, event)])
+}
+
 impl AppRuntime {
     /// Ensure the resident PM pane for this project. Focus the existing pane,
     /// resume a stale registration when materializable, or start one PM.
@@ -510,6 +559,19 @@ impl AppRuntime {
         }
     }
 
+    /// Capture only the current project's proven live registration before an async Read.
+    pub(super) fn pm_status_read_capture(
+        &self,
+        context: &super::ProjectContext,
+    ) -> Option<(PathBuf, Option<PmRegistration>)> {
+        let root = self.pm_project_root(context)?;
+        let running = pm_registry::load_pm_prefs(&pm_registry::pm_prefs_path_for_repo_path(&root))
+            .ok()
+            .and_then(|prefs| prefs.registration)
+            .filter(|registration| self.pm_registration_is_live(registration));
+        Some((root, running))
+    }
+
     /// SPEC-3431 FR-026: the PM settings snapshot for the active project tab.
     ///
     /// A non-Git or missing active tab produces an explicit unavailable
@@ -519,6 +581,13 @@ impl AppRuntime {
         let Some(project_root) = self.pm_project_root(context) else {
             let loop_interval_secs = pm_registry::PM_LOOP_INTERVAL_DEFAULT_SECS;
             return BackendEvent::PmStatus {
+                project_key: context.project_key.to_string(),
+                configured_member_id: None,
+                configured_member_name: None,
+                running_member_id: None,
+                running_session_id: None,
+                roster_revision_decimal: None,
+                profile_revision: None,
                 available: false,
                 auto_start: true,
                 paused: false,
@@ -545,7 +614,7 @@ impl AppRuntime {
             .registration
             .as_ref()
             .filter(|registration| self.pm_registration_is_live(registration));
-        pm_status_from_launch_prefs(&self.sessions_dir, &prefs, running)
+        pm_status_from_launch_prefs(&self.sessions_dir, &project_root, &prefs, running)
     }
 
     /// The PM settings snapshot as a broadcast, for the call sites that change
@@ -647,38 +716,72 @@ impl AppRuntime {
     /// at launch time, leaving the panel claiming a configuration the PM never
     /// actually uses. The running pane is untouched — applying the change is
     /// [`Self::restart_pm_agent_events`].
-    pub(crate) fn set_pm_launch_profile_events(
+    pub(super) fn set_pm_launch_profile_events(
         &mut self,
         context: &super::ProjectContext,
-        agent_id: &str,
-        model: Option<String>,
-        reasoning: Option<String>,
+        client_id: &crate::ClientId,
+        edit: PmProfileEdit,
     ) -> Vec<OutboundEvent> {
-        let Some(project_root) = self.pm_project_root(context) else {
-            return Vec::new();
+        let PmProfileEdit {
+            project_key,
+            member_id,
+            request_id,
+            expected_profile_revision,
+            profile,
+        } = edit;
+        let root = self.pm_project_root(context);
+        let qualified = project_key.as_deref() == Some(context.project_key.as_str())
+            && member_id.as_deref().is_some_and(|id| !id.is_empty())
+            && request_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty())
+            && expected_profile_revision
+                .as_deref()
+                .is_some_and(|revision| !revision.is_empty());
+        let result = if qualified {
+            root.as_ref()
+                .ok_or_else(|| {
+                    std::io::Error::other("The current PM project is unavailable; reload")
+                })
+                .and_then(|root| {
+                    pm_registry::set_selected_pm_profile(
+                        root,
+                        member_id.as_deref().expect("qualified"),
+                        expected_profile_revision.as_deref().expect("qualified"),
+                        profile,
+                    )
+                })
+        } else {
+            Err(std::io::Error::other("Load the current configured PM and profile before saving; project, member, request and profile preconditions are required"))
         };
-        if !pm_registry::pm_agent_is_supported(agent_id) {
-            tracing::warn!(
-                agent_id,
-                "rejected PM launch profile: the agent cannot resolve the gwt-pm skill"
-            );
-            return Vec::new();
-        }
-        let profile = PmLaunchProfile {
-            agent_id: agent_id.to_string(),
-            model,
-            reasoning,
-            version: None,
-        }
-        .normalized();
-        let prefs_path = pm_registry::pm_prefs_path_for_repo_path(&project_root);
-        if let Err(error) = pm_registry::mutate_pm_prefs(&prefs_path, |prefs| {
-            prefs.settings.launch_profile = Some(profile.clone());
-        }) {
-            tracing::warn!(%error, "failed to persist the PM launch profile");
-            return Vec::new();
-        }
-        self.pm_status_broadcast_events(context)
+        let success = result.is_ok();
+        let error = result.as_ref().err().map(ToString::to_string);
+        // Even failures may carry a trustworthy current profile, never another selected member's.
+        let snapshot = match result {
+            Ok(prefs) => Some(prefs),
+            Err(_) => root
+                .as_ref()
+                .zip(member_id.as_deref())
+                .and_then(|(root, member)| {
+                    pm_registry::selected_pm_profile_snapshot(root, member).ok()
+                }),
+        };
+        let event = BackendEvent::PmLaunchProfileResult {
+            project_key: context.project_key.to_string(),
+            member_id,
+            request_id,
+            success,
+            field: error.as_ref().map(|_| "profile".into()),
+            message: error,
+            retryable: !success,
+            profile_revision: snapshot.as_ref().map(pm_registry::pm_profile_revision),
+            profile: snapshot
+                .as_ref()
+                .map(|prefs| prefs.settings.launch_profile_or_default()),
+        };
+        let mut events = vec![OutboundEvent::reply(client_id, event)];
+        events.extend(self.pm_status_broadcast_events(context));
+        events
     }
 
     /// SPEC-3431 FR-026: apply the configured profile by restarting the PM.
@@ -2024,7 +2127,12 @@ impl AppRuntime {
         self.sync_pm_session_cache(&context.project_root, outcome.prefs.registration.as_ref());
         let mut events = vec![OutboundEvent::project(
             context.project_key.clone(),
-            pm_status_from_launch_prefs(&self.sessions_dir, &outcome.prefs, None),
+            pm_status_from_launch_prefs(
+                &self.sessions_dir,
+                &context.project_root,
+                &outcome.prefs,
+                None,
+            ),
         )];
         if outcome.respawn {
             events.extend(self.ensure_pm_agent_for_tab(&context.tab_id, PmEnsureTrigger::Explicit));

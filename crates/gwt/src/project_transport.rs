@@ -2476,6 +2476,27 @@ impl ClientSessionScope {
     }
 }
 
+/// Malformed tuning can only be correlated on its own authenticated browser project.
+/// Payload identity is never routing authority, and parser diagnostics are not echoed.
+fn rejected_tuning_parse(scope: &ClientSessionScope, text: &str) -> Option<BackendEvent> {
+    let ClientSessionScope::Browser(ClientScope::Project(key)) = scope else {
+        return None;
+    };
+    let raw: serde_json::Value = serde_json::from_str(text).ok()?;
+    if raw.get("kind")?.as_str()? != "agent_roster"
+        || raw.get("action")?.get("kind")?.as_str()? != "set_tuning"
+        || raw.get("project_key")?.as_str()? != key.as_str()
+    {
+        return None;
+    }
+    let request_id = raw.get("request_id")?.as_str()?;
+    if request_id.trim().is_empty() || request_id.len() > 256 {
+        return None;
+    }
+    Some(BackendEvent::AgentRosterError { project_key: key.to_string(), request_id: Some(request_id.to_string()),
+        message: "Invalid tuning request. Reload registered members and retry with explicit model and reasoning fields.".into() })
+}
+
 fn decode_frontend_event(text: &str) -> Result<FrontendEvent, serde_json::Error> {
     let event = serde_json::from_str(text)?;
     if matches!(&event, FrontendEvent::PaneName { .. }) {
@@ -3033,6 +3054,9 @@ async fn client_session_with_scope(
                                 }
                             }
                             Err(error) => {
+                                if let Some(event) = rejected_tuning_parse(&scope, text.as_ref()) {
+                                    send_agent_terminal_result(&mut sender, event, Duration::from_secs(1)).await;
+                                }
                                 if let Some(request_id) = name_request_id {
                                     pending_names.remove(&request_id);
                                     send_agent_terminal_result(&mut sender, BackendEvent::PaneNameResult {
@@ -5545,5 +5569,30 @@ mod tests {
         assert_eq!(hub.scope("a"), None);
         hub.register("a".into());
         assert_eq!(hub.scope("a"), Some(ClientScope::Hub));
+    }
+}
+
+#[cfg(test)]
+mod tuning_parse_tests {
+    use super::*;
+    #[test]
+    fn malformed_tuning_correlates_only_the_authenticated_browser_project() {
+        let key = gwt_core::repo_hash::ProjectKey::parse("0123456789abcdef").unwrap();
+        let scope = ClientSessionScope::Browser(ClientScope::Project(key.clone()));
+        let request = serde_json::json!({"kind":"agent_roster","project_key":key.as_str(),"request_id":"tune-1",
+            "action":{"kind":"set_tuning","member_id":"member","model":null,"expected_core_revision":"token","authority":"forged"}});
+        assert!(decode_frontend_event(&request.to_string()).is_err());
+        let event = rejected_tuning_parse(&scope, &request.to_string()).unwrap();
+        assert!(
+            matches!(event, BackendEvent::AgentRosterError { project_key, request_id: Some(id), .. } if project_key == key.as_str() && id == "tune-1")
+        );
+        assert!(rejected_tuning_parse(
+            &ClientSessionScope::Browser(ClientScope::Hub),
+            &request.to_string()
+        )
+        .is_none());
+        let mut foreign = request;
+        foreign["project_key"] = serde_json::json!("fedcba9876543210");
+        assert!(rejected_tuning_parse(&scope, &foreign.to_string()).is_none());
     }
 }

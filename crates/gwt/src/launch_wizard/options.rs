@@ -388,6 +388,10 @@ pub(super) fn codex_reasoning_options_for_model(model: &str) -> Vec<ReasoningDis
         .map_or(CODEX_REASONING_LADDER.len(), |index| index + 1);
     CODEX_REASONING_LADDER[..end]
         .iter()
+        .filter(|option| {
+            gwt_agent::codex_reasoning_effort(Some(model), Some(option.stored_value))
+                == Some(option.stored_value)
+        })
         .map(|option| ReasoningDisplayOption {
             is_default: option.stored_value == default_effort,
             ..*option
@@ -1944,7 +1948,7 @@ mod tests {
         assert_eq!(codex_capability_row("gpt-6.1-sol"), (SIX.to_vec(), "low"));
         assert_eq!(
             codex_capability_row("gpt-6-astra"),
-            (SIX.to_vec(), "medium")
+            (FIVE.to_vec(), "medium")
         );
         assert_eq!(codex_capability_row("gpt-5.6-sol"), (SIX.to_vec(), "low"));
         assert_eq!(

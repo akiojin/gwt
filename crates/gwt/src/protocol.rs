@@ -531,6 +531,14 @@ pub enum FrontendEvent {
     /// SPEC-3431 FR-026: persist what the NEXT PM start runs as. The running
     /// pane is untouched; applying the change is the explicit restart below.
     SetPmLaunchProfile {
+        #[serde(default)]
+        project_key: Option<String>,
+        #[serde(default)]
+        member_id: Option<String>,
+        #[serde(default)]
+        request_id: Option<String>,
+        #[serde(default)]
+        expected_profile_revision: Option<String>,
         agent_id: String,
         #[serde(default)]
         model: Option<String>,
@@ -2127,6 +2135,8 @@ pub struct FleetPaneView {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentRosterView {
+    #[serde(default, skip_deserializing)]
+    pub tuning_choices: Option<Vec<crate::launch_wizard::IssueMonitorAgentChoices>>,
     pub project_key: String,
     pub revision: u64,
     #[serde(default)]
@@ -2154,6 +2164,10 @@ pub struct AgentRosterMemberView {
     /// Content identity of saved manual tuning, not a chronological/CAS counter.
     #[serde(default)]
     pub saved_manual_revision: Option<String>,
+    #[serde(default)]
+    pub saved_implementation_core: Option<crate::agent_registry::AgentProfileCore>,
+    #[serde(default)]
+    pub saved_implementation_core_revision: Option<String>,
     pub history: Vec<AgentAssignmentHistoryView>,
     pub issue_count: Option<usize>,
     pub landed_count: Option<usize>,
@@ -2443,7 +2457,25 @@ pub enum BackendEvent {
     /// the live conversation actually is. They are separate fields on purpose —
     /// the panel's "restart to apply" affordance exists precisely because a
     /// profile change cannot migrate a running conversation.
+    PmLaunchProfileResult {
+        project_key: String,
+        member_id: Option<String>,
+        request_id: Option<String>,
+        success: bool,
+        field: Option<String>,
+        message: Option<String>,
+        retryable: bool,
+        profile_revision: Option<String>,
+        profile: Option<crate::pm_registry::PmLaunchProfile>,
+    },
     PmStatus {
+        project_key: String,
+        configured_member_id: Option<String>,
+        configured_member_name: Option<String>,
+        running_member_id: Option<String>,
+        running_session_id: Option<String>,
+        roster_revision_decimal: Option<String>,
+        profile_revision: Option<String>,
         /// Whether the active tab is a Git project with PM settings.
         /// `false` clears shared Settings mounts after switching to a
         /// non-project surface or closing the final project tab.
@@ -2469,7 +2501,7 @@ pub enum BackendEvent {
         /// Restart cannot clear. `None` means Restart is worth offering —
         /// either the PM is fine, or the last refusal was transient.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        start_block: Option<crate::pm_registry::PmStartBlock>,
+        start_block: Option<Box<crate::pm_registry::PmStartBlock>>,
     },
     IssueMonitorStatus {
         /// Boxed: the view is by far the largest payload in this enum
@@ -3843,6 +3875,7 @@ impl BackendEvent {
             BackendEvent::FleetPaneCloseResult { .. } => "fleet_pane_close_result",
             BackendEvent::WorkCloseResult { .. } => "work_close_result",
             BackendEvent::PmStatus { .. } => "pm_status",
+            BackendEvent::PmLaunchProfileResult { .. } => "pm_launch_profile_result",
             BackendEvent::IssueMonitorStatus { .. } => "issue_monitor_status",
             BackendEvent::IssueMonitorProfiles { .. } => "issue_monitor_profiles",
             BackendEvent::IssueMonitorProfilesWriteFailed { .. } => {
@@ -4383,6 +4416,13 @@ mod tests {
     #[test]
     fn pm_status_serializes_effective_loop_interval() {
         let event = BackendEvent::PmStatus {
+            project_key: String::new(),
+            configured_member_id: None,
+            configured_member_name: None,
+            running_member_id: None,
+            running_session_id: None,
+            roster_revision_decimal: None,
+            profile_revision: None,
             available: true,
             auto_start: true,
             paused: false,
@@ -6965,5 +7005,23 @@ mod tests {
             event,
             FrontendEvent::RestartWindow { id } if id == "tab-1::agent-1"
         ));
+    }
+}
+#[cfg(test)]
+mod member_tuning_wire_tests {
+    #[test]
+    fn tuning_requires_explicit_nullable_fields_and_rejects_foreign_fields() {
+        let valid = serde_json::json!({"kind":"agent_roster","request_id":"tuning-1",
+            "action":{"kind":"set_tuning","member_id":"a4263a32-14e9-4bb0-ab78-ec3d4816e811",
+                "model":null,"reasoning":null,"expected_core_revision":"implementation-core-v1:test"}});
+        assert!(serde_json::from_value::<super::FrontendEvent>(valid.clone()).is_ok());
+        for key in ["model", "reasoning"] {
+            let mut missing = valid.clone();
+            missing["action"].as_object_mut().unwrap().remove(key);
+            assert!(serde_json::from_value::<super::FrontendEvent>(missing).is_err());
+        }
+        let mut foreign = valid;
+        foreign["action"]["version"] = serde_json::json!("old");
+        assert!(serde_json::from_value::<super::FrontendEvent>(foreign).is_err());
     }
 }
