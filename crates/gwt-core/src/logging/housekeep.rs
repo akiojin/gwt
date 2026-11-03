@@ -118,9 +118,6 @@ pub(crate) fn enforce_size_limit(
         if entry.path() == active {
             continue;
         }
-        if !entry.file_type()?.is_file() {
-            continue;
-        }
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
             continue;
@@ -134,7 +131,17 @@ pub(crate) fn enforce_size_limit(
         if suffix != date.to_string() {
             continue;
         }
-        let bytes = entry.metadata()?.len();
+        // DirEntry metadata does not follow symlinks. A concurrent age-based
+        // cleanup may already have removed this entry before the snapshot.
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if !metadata.file_type().is_file() {
+            continue;
+        }
+        let bytes = metadata.len();
         total = total.saturating_add(bytes);
         files.push((date, entry.path(), bytes));
     }
@@ -145,7 +152,7 @@ pub(crate) fn enforce_size_limit(
         if total <= available {
             break;
         }
-        match fs::remove_file(path) {
+        match remove_history_file(&path) {
             Ok(()) => total = total.saturating_sub(bytes),
             Err(error) => {
                 retained = retained.saturating_add(bytes);
@@ -166,6 +173,15 @@ pub(crate) fn enforce_size_limit(
         active_file.set_len(0)?;
     }
     Ok(())
+}
+
+fn remove_history_file(path: &Path) -> std::io::Result<()> {
+    match fs::remove_file(path) {
+        // Age-based retention runs outside the writer lock; its successful
+        // removal has freed these bytes just as our own removal would.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
 }
 
 #[cfg(test)]
@@ -282,6 +298,7 @@ mod tests {
 
         enforce_size_limit(dir.path(), &active, &opened, 16, 0).unwrap();
         assert!(!oldest.exists());
+        remove_history_file(&oldest).expect("another cleanup already removed this history file");
         assert_eq!(fs::read(&recent).unwrap(), b"12345678");
         assert_eq!(fs::read(&active).unwrap(), b"12345678");
 
