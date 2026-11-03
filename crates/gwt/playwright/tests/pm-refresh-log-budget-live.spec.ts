@@ -12,9 +12,9 @@ const home = process.env.GWT_PLAYWRIGHT_CHECK_HOME;
 const state = process.env.GWT_PLAYWRIGHT_PROJECT_STATE;
 
 test.use({ headless: false });
+test.skip(!base || !home || !state, "requires issue-6678-browser-check.ps1");
 
 test("isolated GUI keeps PM diagnostic volume bounded", async ({ page }, info) => {
-  test.skip(!base || !home || !state, "requires issue-6678-browser-check.ps1");
   test.setTimeout(720_000);
   const theme = info.project.name.includes("light") ? "light" : "dark";
   // The dark run is the ten-minute volume measurement. Light verifies the same

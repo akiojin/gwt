@@ -2564,6 +2564,15 @@ mod delivery_tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(temp.path());
+        let trace_path = temp.path().join("pm-lock-stages.jsonl");
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_env_filter("gwt.pm.refresh=debug")
+            .with_writer(std::sync::Mutex::new(
+                std::fs::File::create(&trace_path).unwrap(),
+            ))
+            .finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
         let (repo, mut runtime, window_id) = pm_wake_fixture(&temp);
         let _pane = attach_live_pm_pane(&mut runtime, &window_id);
         let (spawner, tasks) = BlockingTaskSpawner::queued();
@@ -2588,6 +2597,15 @@ mod delivery_tests {
         state.source_event = Some("Stop".into());
         state.last_activity_at = chrono::Utc::now() - chrono::Duration::hours(1);
         state.save(&path).unwrap();
+        let lock_count = || {
+            std::fs::read_to_string(&trace_path)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                .filter(|row| row["fields"]["stage"] == "pm_prefs.lock")
+                .count()
+        };
+        let locks_before = lock_count();
         tasks.lock().unwrap().remove(0)();
         assert!(
             capture.prompts().is_empty(),
@@ -2610,6 +2628,12 @@ mod delivery_tests {
             tasks.lock().unwrap().is_empty(),
             "a silent turn must not cause a retry task storm"
         );
+        let acquisitions = lock_count() - locks_before;
+        assert!(
+            (1..=4).contains(&acquisitions),
+            "one wake acquired {acquisitions} PM locks; limit is 4"
+        );
+        println!("Issue #6678: one deferred PM wake acquired {acquisitions} locks (limit 4)");
         runtime
             .active_agent_sessions
             .insert(window_id.clone(), projection);
