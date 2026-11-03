@@ -1,6 +1,26 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.148.3] - 2026-11-03
+
+### Bug Fixes
+
+- **verify:** Restore gwtd in the verified cargo target
+- **verify:** Retain restoration targets after command failures
+- **issue-monitor:** Recover window creation timeouts with bounded retries
+- **issue-monitor:** Preserve concurrent failures and legacy launch order
+- **issue-monitor:** Reconcile delivered failure states
+
+### Miscellaneous Tasks
+
+- **work:** Link Issue #6689 to PR #6712
+
+### Testing
+
+- **issue-monitor:** Keep queue fixtures under the isolated test home
+- **issue-monitor:** Isolate fixture homes from compiler temp
+- **issue-monitor:** Qualify Windows fixture path
+
 ## [9.148.2] - 2026-11-03
 
 ### Bug Fixes
