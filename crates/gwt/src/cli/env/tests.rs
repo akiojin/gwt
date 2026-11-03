@@ -1177,9 +1177,10 @@ fn dispatch_json_envelope_hook_health_returns_managed_health_json() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::tempdir().expect("tempdir");
-    let stable_hook_bin = temp
-        .path()
-        .join(format!("stable-gwtd{}", std::env::consts::EXE_SUFFIX));
+    let stable_hook_bin = temp.path().join(format!(
+        "stable O'Brien gwtd{}",
+        std::env::consts::EXE_SUFFIX
+    ));
     write_executable_fixture(&stable_hook_bin, "test binary");
     let _hook_bin =
         crate::cli::test_support::ScopedEnvVar::set("GWT_HOOK_BIN", stable_hook_bin.as_os_str());
@@ -1233,6 +1234,102 @@ fn dispatch_json_envelope_hook_health_returns_managed_health_json() {
         health["slow_handlers"][0]["handler"].as_str(),
         Some("workflow-policy")
     );
+
+    let paths = [
+        temp.path().join(".claude/settings.local.json"),
+        temp.path().join(".codex/hooks.json"),
+    ];
+    let before: Vec<_> = paths.iter().map(|path| fs::read(path).unwrap()).collect();
+    let runtime_bin = temp.path().join("runtime-gwtd");
+    let _runtime_bin =
+        crate::cli::test_support::ScopedEnvVar::set("GWT_BIN_PATH", runtime_bin.as_os_str());
+    let opt_in_profile = temp.path().join("opt-in-profile.jsonl");
+    let _profile = crate::cli::test_support::ScopedEnvVar::set(
+        "GWT_HOOK_PROFILE_PATH",
+        opt_in_profile.as_os_str(),
+    );
+    for explicit_profile in [Some(&profile_path), None] {
+        env.stdout.clear();
+        env.stdin = serde_json::json!({
+            "schema_version": 1, "operation": "hook.doctor",
+            "params": {"profile_path": explicit_profile}
+        })
+        .to_string();
+        assert_eq!(dispatch(&mut env, &["gwtd".to_string()]), 0);
+        let envelope: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
+        let doctor: serde_json::Value =
+            serde_json::from_str(envelope["output"].as_str().unwrap()).unwrap();
+        let audit = &doctor["configuration_audit"];
+        assert_eq!(audit["asset_root"], serde_json::json!(temp.path()));
+        assert_eq!(audit["gwt_bin_path"], serde_json::json!(runtime_bin));
+        assert_eq!(audit["gwt_hook_bin"], serde_json::json!(stable_hook_bin));
+        assert_eq!(
+            audit["profile_path"],
+            serde_json::json!(explicit_profile.unwrap_or(&opt_in_profile))
+        );
+        let configs = audit["configs"]
+            .as_array()
+            .expect("configuration observations");
+        assert_eq!(configs.len(), 2);
+        for (config, provider) in configs.iter().zip(["claude", "codex"]) {
+            assert_eq!(config["provider"], provider);
+            assert_eq!(config["state"], "present");
+            assert!(config["error"].is_null());
+            let binaries = config["event_binaries"].as_array().unwrap();
+            assert_eq!(binaries.len(), 5);
+            assert_eq!(
+                binaries
+                    .iter()
+                    .map(|entry| entry["event"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                [
+                    "SessionStart",
+                    "UserPromptSubmit",
+                    "PreToolUse",
+                    "PostToolUse",
+                    "Stop"
+                ]
+            );
+            assert!(binaries
+                .iter()
+                .all(|entry| entry["fallback_binary"] == serde_json::json!(stable_hook_bin)));
+        }
+        assert!(!opt_in_profile.exists(), "audit must not enable profiling");
+        for (path, original) in paths.iter().zip(&before) {
+            assert_eq!(fs::read(path).unwrap(), *original);
+        }
+    }
+}
+
+#[test]
+fn hook_doctor_configuration_audit_distinguishes_read_failures() {
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join(".claude/settings.local.json");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    for state in ["missing", "invalid_json", "unreadable"] {
+        if state == "invalid_json" {
+            fs::write(&path, "{invalid").unwrap();
+        }
+        if state == "unreadable" {
+            fs::remove_file(&path).unwrap();
+            fs::create_dir(&path).unwrap();
+        }
+        let mut env = TestEnv::new(temp.path().to_path_buf());
+        env.stdin = serde_json::json!({"schema_version":1,"operation":"hook.doctor","params":{}})
+            .to_string();
+        assert_eq!(dispatch(&mut env, &["gwtd".to_string()]), 0);
+        let envelope: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
+        let doctor: serde_json::Value =
+            serde_json::from_str(envelope["output"].as_str().unwrap()).unwrap();
+        let config = &doctor["configuration_audit"]["configs"][0];
+        assert_eq!(config["path"], serde_json::json!(path));
+        assert_eq!(config["state"], state);
+        assert!(config["error"].is_string());
+        assert_eq!(config["event_binaries"], serde_json::json!([]));
+    }
 }
 
 #[test]
@@ -1304,6 +1401,11 @@ fn hook_doctor_reports_codex_trust_command_mismatch_without_registering_it() {
         serde_json::json!([hooks_path])
     );
     assert_eq!(audit["trust"]["wrote_trust_state"], false);
+    let observation = &doctor["configuration_audit"]["configs"][1];
+    assert_eq!(observation["path"], serde_json::json!(hooks_path));
+    assert_eq!(observation["state"], "present");
+    assert_eq!(observation["event_binaries"][0]["event"], "SessionStart");
+    assert_eq!(observation["event_binaries"][0]["fallback_binary"], "gwtd");
     assert_eq!(
         doctor["managed_hook_bin"].as_str(),
         Some(stable_hook_bin.to_str().unwrap()),
@@ -1343,6 +1445,48 @@ fn hook_doctor_reports_codex_trust_command_mismatch_without_registering_it() {
     );
     assert_eq!(fs::read(&hooks_path).unwrap(), hooks_before);
     assert!(!codex_home.join("config.toml").exists());
+
+    for (kind, command) in [
+        (
+            "command",
+            "echo private-value; gwtd hook event SessionStart",
+        ),
+        (
+            "command",
+            r#"printf '%s' "gwt_fallback='private-value';"; gwtd hook event SessionStart"#,
+        ),
+        (
+            "command",
+            r#"gwt_fallback='/opt/first'; gwt_fallback='/opt/second'; "$gwt_fallback" hook event SessionStart"#,
+        ),
+        ("prompt", "gwtd hook event SessionStart"),
+    ] {
+        // A displayed assignment or a reassigned variable is not a known binary.
+        hooks["hooks"]["SessionStart"][0]["hooks"][0]["type"] = serde_json::json!(kind);
+        hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"] = serde_json::json!(command);
+        fs::write(&hooks_path, serde_json::to_vec(&hooks).unwrap()).unwrap();
+        let before = fs::read(&hooks_path).unwrap();
+        env.stdout.clear();
+        env.stdin = serde_json::json!({"schema_version":1,"operation":"hook.doctor","params":{}})
+            .to_string();
+        assert_eq!(dispatch(&mut env, &["gwtd".to_string()]), 0);
+        let envelope: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
+        let doctor: serde_json::Value =
+            serde_json::from_str(envelope["output"].as_str().unwrap()).unwrap();
+        let observations = &doctor["configuration_audit"];
+        let binaries = observations["configs"][1]["event_binaries"]
+            .as_array()
+            .unwrap();
+        if kind == "command" {
+            assert!(binaries[0]["fallback_binary"].is_null(), "{command}");
+        } else {
+            assert!(!binaries
+                .iter()
+                .any(|entry| entry["event"] == "SessionStart"));
+        }
+        assert!(!observations.to_string().contains("private-value"));
+        assert_eq!(fs::read(&hooks_path).unwrap(), before);
+    }
 }
 
 #[test]
@@ -1385,6 +1529,21 @@ fn hook_doctor_keeps_unmaterialized_worktree_inactive_with_shared_hooks() {
         serde_json::from_str(envelope["output"].as_str().unwrap()).unwrap();
     assert_eq!(doctor["health"]["status"].as_str(), Some("inactive"));
     assert!(doctor["codex_hook_audit"].is_null());
+    assert_eq!(
+        doctor["configuration_audit"]["asset_root"],
+        serde_json::json!(worktree)
+    );
+    let configs = doctor["configuration_audit"]["configs"].as_array().unwrap();
+    assert_eq!(
+        configs[1]["path"],
+        serde_json::json!(worktree.join(".codex/hooks.json"))
+    );
+    assert_eq!(configs[1]["state"], "missing");
+    assert_eq!(
+        configs[2]["path"],
+        serde_json::json!(repo.join(".codex/hooks.json"))
+    );
+    assert_eq!(configs[2]["state"], "present");
     assert_eq!(
         doctor["repair_plan"],
         serde_json::json!({
