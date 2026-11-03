@@ -3,6 +3,10 @@
 This is a gwt runtime performance fix. It applies to every project opened with
 gwt. The parent performance family remains open.
 
+The current delivery is the [backend-only slice](backend-delivery.md). UI
+experiments below remain historical results of their named commits; their
+source is preserved at `0df66c0e1` for later headed verification and delivery.
+
 ## Observed production context
 
 The unchanged installed v9.145.0 process was PID 33132, started at
@@ -486,8 +490,8 @@ The same finite module probe's 20-update burst changes from one layout and
 two mount calls to zero, with one frame and no pending work in both cases.
 A single regression was RED, then all 105 related tests passed. These are
 fixture callback counts, not measured Chromium/PTY traffic or CPU improvement.
-See [the observations and limits](ui-telemetry-fit.md) and
-[the evidence artifact](ui-telemetry-fit.json). Mac scroll/typing recovery,
+See [the preserved observations and limits](https://github.com/akiojin/gwt/blob/0df66c0e18be4622519b8d194b23771eb4520f84/docs/perf/issue-5390/ui-telemetry-fit.md) and
+[the preserved evidence artifact](https://github.com/akiojin/gwt/blob/0df66c0e18be4622519b8d194b23771eb4520f84/docs/perf/issue-5390/ui-telemetry-fit.json). Mac scroll/typing recovery,
 actual headed acceptance and delivery remain unverified.
 The intermediate native canonical record
 `vrr-0bc801c3c9ae4d9ca9ed89cbe58947eb` passed 14/14 commands, including

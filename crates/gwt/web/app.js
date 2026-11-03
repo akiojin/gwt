@@ -5644,8 +5644,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       });
       agentsSurface.element.hidden = true;
       document.querySelector(".surface-area").appendChild(agentsSurface.element);
-      // Telemetry updates keep the current native terminal host.
-      worksTelemetryModel.subscribeFrame(state => state, () => worksSurface.sync(false));
+      worksTelemetryModel.subscribeFrame(state => state, () => worksSurface.sync());
       splitSurfaces = createSplitSurfaces({
         document,
 

@@ -1,5 +1,11 @@
 # Issue #5390: unchanged graph updates and PR inventory reads
 
+Delivery scope: the current PR ships the backend inventory correction. The UI
+changes described below remain a follow-up under Issue #5390; they are preserved
+at commit `0df66c0e18be4622519b8d194b23771eb4520f84` and are absent from this
+PR's frontend diff. Its original source and UI-only measurement files remain
+available in that commit, with a saved forward patch for later integration.
+
 ## Scope and preserved evidence
 
 This work resumes the existing performance scope independently of the shared
@@ -20,7 +26,7 @@ packet are preserved:
 | Recovery `packet.md` | `41f717d5221fddd9ef4c3e03f79a987a86b57bb3fbf737f88f20d88dcc2d8a71` |
 | Earlier verification record | `145e89fa39dd242c9b32ff5cb6e8701589caf23aded7f26bedbebda8eeacd7a7` |
 
-## Unchanged sparkline mutation
+## Preserved UI follow-up: unchanged sparkline mutation
 
 The existing Works fixture renders two live agents and their fleet graph.
 Each of 20 telemetry flushes supplies fresh arrays containing identical values.
@@ -85,13 +91,19 @@ The observed ledger cadence near 45 seconds is not correlated to a particular
 set of three 15-second operations. No timeout is extended, and no failure is
 cached across scans.
 
-## Remaining acceptance
+## Preserved parent and UI acceptance at the original snapshot
 
 Actual isolated headed Chromium dark/light checks, zero console/page errors,
 Mac input/scroll behavior, installed delivery, the fleet duration/CPU/RSS
-criteria, current-head canonical verification, and Ready/CI delivery remain
-unproven for this slice. The shared GUI restart conditions still apply.
+criteria, canonical verification, and Ready/CI delivery were unproven at the
+preserved `0df66c0e1` snapshot. Those parent/UI conditions and the shared GUI
+restart requirement remain outside the current backend delivery.
 
 User Verification Result: n/a (autonomous)
 
-Agent Visual Check: fail(existing shared-GUI ancestry admission; no new headed evidence)
+Historical Agent Visual Check: fail(existing shared-GUI ancestry admission; no new headed evidence)
+
+The current [backend delivery](backend-delivery.md) has no frontend source diff.
+Its own fresh canonical record and Ready/CI evidence are required independently;
+its visual classification is `n/a (no UI surface)`. The historical UI failure
+above remains preserved and is not converted into a passing browser result.

@@ -22,6 +22,35 @@ use std::path::PathBuf;
 const TEST_WORKFLOW: &str = ".github/workflows/test.yml";
 
 #[test]
+fn macos_socket_targets_compile_before_the_execution_budget() {
+    let workflow: serde_yaml::Value =
+        serde_yaml::from_str(&read(".github/workflows/build.yml")).unwrap();
+    let steps = workflow["jobs"]["check-macos"]["steps"]
+        .as_sequence()
+        .unwrap();
+    let execution = steps
+        .iter()
+        .position(|step| step["run"] == "bash scripts/test-short-socket-fixtures.sh")
+        .unwrap();
+    assert_eq!(steps[execution]["timeout-minutes"].as_u64(), Some(15));
+    let preparation = steps[..execution]
+        .iter()
+        .find(|step| step["name"] == "Check macOS compilation")
+        .unwrap();
+    assert!(preparation["if"].is_null() && preparation["continue-on-error"].is_null());
+    let commands = preparation["run"].as_str().unwrap();
+    for command in [
+        "cargo test -p gwt-core --lib --test test_hygiene_test --test daemon_socket_path_limit --no-run",
+        "cargo test -p gwt --lib --test runtime_tests --no-run",
+    ] {
+        assert!(
+            commands.lines().any(|line| line.trim() == command),
+            "prepare every socket fixture target before the execution budget: {command}"
+        );
+    }
+}
+
+#[test]
 fn real_model_step_only_runs_index_runner_ignored_tests() {
     let workflow = read(TEST_WORKFLOW);
     let steps = named_steps(&workflow);

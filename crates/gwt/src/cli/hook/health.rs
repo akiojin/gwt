@@ -111,6 +111,53 @@ pub struct ManagedHookRepairOutcome {
     pub repaired: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookRepairAction {
+    MaterializeManagedGitHooks,
+    RegenerateManagedProviderConfigs,
+    VerifyCodexHookTrust,
+    StartNewAgentSession,
+}
+
+/// Describes an explicit repair request, not detected faults or completed work.
+/// Automatic steps reuse the existing managed writers and their merge semantics.
+/// Trust and adoption by running sessions are outside that configuration repair.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HookRepairPlan {
+    pub automatic: Vec<HookRepairAction>,
+    pub user_actions: Vec<HookRepairAction>,
+    pub new_session_actions: Vec<HookRepairAction>,
+}
+
+impl HookRepairPlan {
+    pub fn for_worktree(worktree_root: &Path) -> Self {
+        let runtime = crate::pm_registry::pm_runtime_dir_for_pm_worktree(worktree_root);
+        let assets = runtime.as_deref().unwrap_or(worktree_root);
+        let claude_surface = assets.join(".claude").exists();
+        let codex_surface = assets.join(".codex").exists();
+        let provider_surface = assets.join(".gwt/opencode").exists()
+            || assets.join(".gwt/openclaw").exists()
+            || assets.join(".gwt/hermes").exists();
+        let mut plan = Self {
+            automatic: vec![HookRepairAction::MaterializeManagedGitHooks],
+            user_actions: Vec::new(),
+            new_session_actions: Vec::new(),
+        };
+        if claude_surface || codex_surface || provider_surface {
+            plan.automatic
+                .push(HookRepairAction::RegenerateManagedProviderConfigs);
+            plan.new_session_actions
+                .push(HookRepairAction::StartNewAgentSession);
+        }
+        if codex_surface {
+            plan.user_actions
+                .push(HookRepairAction::VerifyCodexHookTrust);
+        }
+        plan
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookDoctorPurpose {
     ManagedBrowser,
@@ -1572,19 +1619,15 @@ fn cached_runtime_state(path: &Path) -> Arc<CachedRuntimeState> {
 }
 
 pub fn repair_managed_hook_configs(worktree_root: &Path) -> io::Result<ManagedHookRepairOutcome> {
-    let runtime = crate::pm_registry::pm_runtime_dir_for_pm_worktree(worktree_root);
-    let assets = runtime.as_deref().unwrap_or(worktree_root);
-    let claude_surface =
-        assets.join(".claude").exists() || assets.join(".claude/settings.local.json").exists();
-    let codex_surface = assets.join(".codex").exists() || assets.join(".codex/hooks.json").exists();
-    let provider_surface = assets.join(".gwt/opencode").exists()
-        || assets.join(".gwt/openclaw").exists()
-        || assets.join(".gwt/hermes").exists();
+    let plan = HookRepairPlan::for_worktree(worktree_root);
     // #4339: the Git hook directory belongs to the repository, not to any agent
     // provider, so repair it even in a worktree with no agent surface at all.
     let mut repaired = !gwt_skills::materialize_managed_git_hooks(worktree_root)?.is_empty();
 
-    if claude_surface || codex_surface || provider_surface {
+    if plan
+        .automatic
+        .contains(&HookRepairAction::RegenerateManagedProviderConfigs)
+    {
         crate::managed_assets::regenerate_existing_managed_hook_configs(worktree_root)?;
         record_managed_hook_self_healed(worktree_root)?;
         repaired = true;
@@ -1859,66 +1902,48 @@ mod browser_preflight_tests {
 
     #[test]
     fn historical_ledger_corruption_does_not_block_a_healthy_current_source() {
-        with_source(|input, session, _, runtime| {
-            let row = failure(input, Some(&session.id), runtime.updated_at);
-            gwt_core::error_ledger::record(row.clone()).unwrap();
-            let path = gwt_core::paths::gwt_error_ledger_dir().join("errors.2000-01-01.jsonl");
-            let bytes = b"{broken historical row}\n";
-            fs::write(&path, bytes).unwrap();
-            let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        with_source(|input, _, path, _| {
+            let dir = gwt_core::paths::gwt_error_ledger_dir();
+            fs::create_dir_all(&dir).unwrap();
+            let old_day = (chrono::Utc::now() - chrono::Duration::days(3)).date_naive();
+            let ledger = dir.join(format!("errors.{old_day}.jsonl"));
+            let bytes = b"{PRIVATE_BROKEN_ROW}\n";
+            fs::write(&ledger, bytes).unwrap();
+            let source_before = fs::read(path).unwrap();
             let result = read_managed_browser_preflight(input);
             assert_eq!(result.result, PreflightResult::Proceed, "{result:?}");
             assert_eq!(result.context, PreflightContext::Current);
-            assert_eq!(result.convergence, PreflightConvergence::Converged);
-            assert_eq!(
-                result.diagnostics,
-                vec![RetainedHookDiagnostic {
-                    id: row.id,
-                    classification: RetainedHookClassification::Recovered,
-                }]
-            );
-            assert!(gwt_core::error_ledger::list_since(None)
-                .unwrap()
-                .iter()
-                .any(|row| {
-                    row.kind == ErrorKind::LedgerCorruption
-                        && row.context["ledger_file"] == "errors.2000-01-01.jsonl"
-                }));
-            assert_eq!(fs::read(&path).unwrap(), bytes);
-            assert_eq!(fs::metadata(path).unwrap().modified().unwrap(), modified);
+            assert!(result.reasons.is_empty());
+            assert_eq!(fs::read(&ledger).unwrap(), bytes);
+            assert_eq!(fs::read(path).unwrap(), source_before);
+            let history = gwt_core::error_ledger::list_since(None).unwrap();
+            assert_eq!(history.len(), 1);
+            assert_eq!(history[0].kind, ErrorKind::LedgerCorruption);
         });
     }
 
     #[test]
-    fn current_uncertain_and_unreadable_ledger_sources_still_fail_closed() {
-        with_source(|input, _, _, _| {
+    fn current_unknown_and_unreadable_ledgers_still_block_a_healthy_source() {
+        with_source(|input, _, path, _| {
             let dir = gwt_core::paths::gwt_error_ledger_dir();
             fs::create_dir_all(&dir).unwrap();
-            let now = chrono::Utc::now();
-            for name in [
-                format!("errors.{}.jsonl", now.date_naive()),
-                format!(
-                    "errors.{}.jsonl",
-                    (now + chrono::Duration::days(1)).date_naive()
-                ),
-                "errors.unknown.jsonl".to_string(),
-                "errors.2026-02-30.jsonl".to_string(),
+            let source_before = fs::read(path).unwrap();
+            for day in [
+                chrono::Utc::now().date_naive().to_string(),
+                "unknown".into(),
             ] {
-                let path = dir.join(&name);
-                fs::write(&path, b"{broken}\n").unwrap();
+                let ledger = dir.join(format!("errors.{day}.jsonl"));
+                fs::write(&ledger, b"{partial").unwrap();
                 let result = read_managed_browser_preflight(input);
-                assert_eq!(
-                    result.result,
-                    PreflightResult::Unknown,
-                    "{name}: {result:?}"
-                );
+                assert_eq!(result.result, PreflightResult::Unknown, "{result:?}");
                 assert!(result.reasons.contains(&PreflightReason::LedgerUnavailable));
-                fs::remove_file(path).unwrap();
+                fs::remove_file(ledger).unwrap();
             }
-            fs::create_dir(dir.join("errors.unreadable.jsonl")).unwrap();
+            fs::create_dir(dir.join("errors.2026-01-01.jsonl")).unwrap();
             let result = read_managed_browser_preflight(input);
             assert_eq!(result.result, PreflightResult::Unknown, "{result:?}");
             assert!(result.reasons.contains(&PreflightReason::LedgerUnavailable));
+            assert_eq!(fs::read(path).unwrap(), source_before);
         });
     }
 

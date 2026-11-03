@@ -4949,6 +4949,10 @@ pub struct IssueMonitorInboxSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dependency: Option<IssueMonitorDependencyStatus>,
     pub issue_number: u64,
+    /// A SPEC parse failure that needs artifact repair. Diagnostic only:
+    /// readiness remains retryable, so fixing the SPEC clears this reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_human_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_tier: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -14953,6 +14957,14 @@ impl IssueMonitorState {
                     IssueMonitorInboxSummary {
                         dependency: item.dependency.clone(),
                         issue_number: item.issue.number,
+                        needs_human_reason: item
+                            .exclusion_reason
+                            .as_ref()
+                            .filter(|reason| {
+                                item.state == MonitorInboxState::NotReady
+                                    && reason.contains("targeted refresh parse failed:")
+                            })
+                            .cloned(),
                         state: item.state,
                         github_state: item.issue.state,
                         issue_updated_at: item.issue.updated_at.clone(),
@@ -14998,6 +15010,10 @@ impl IssueMonitorState {
                                     self.source_repository,
                                 )
                                 .map(|(_, reason)| reason)
+                                .or_else(|| {
+                                    (!self.allows_issue_labels(&item.issue))
+                                        .then(|| "excluded by allowed labels".to_string())
+                                })
                             })
                         } else {
                             item.exclusion_reason.clone()
@@ -17571,7 +17587,8 @@ impl IssueMonitorState {
                         MonitorInboxState::NotReady | MonitorInboxState::SourceExcluded,
                         _
                     ))
-                ) || confirmed_dependency_blocker)
+                ) || !self.allows_issue_labels(&item.issue)
+                    || confirmed_dependency_blocker)
                     && !self.launched_windows.contains_key(&number)
                     && !self.process_held_issues.contains(&number)
                     && !self.has_monitor_pane_for_issue(number)
@@ -19214,11 +19231,16 @@ impl IssueMonitorState {
             return true;
         }
         // Holding a new pane requires no cancellation authority. A cached
-        // readiness regression must wait even before a complete Live scan
+        // candidate exclusion must wait even before a complete Live scan
         // can compensate the claim; existing-pane ACKs above stay valid.
-        if self.inbox_item(delivery.issue_number).is_some_and(|item| {
-            issue_monitor_candidate_exclusion(&item.issue, self.source_repository).is_some()
-        }) {
+        // Cold prefs restore no candidates, so configured labels need a refresh.
+        if self
+            .inbox_item(delivery.issue_number)
+            .map_or(!self.allowed_labels.is_empty(), |item| {
+                issue_monitor_candidate_exclusion(&item.issue, self.source_repository).is_some()
+                    || !self.allows_issue_labels(&item.issue)
+            })
+        {
             return false;
         }
         if self
@@ -26378,6 +26400,77 @@ mod tests {
         assert_eq!(monitor.queued_issue_numbers(), vec![1]);
     }
 
+    #[test]
+    fn label_allowlist_restored_delivery_waits_for_candidate() {
+        let mut monitor = label_allowlist_monitor(&["Server"]);
+        monitor.terminal_queue_push(&[42], "operator", IDLE_NOW);
+        let mut candidate = issue(42);
+        candidate.labels.push("server".into());
+        monitor.record_candidate(candidate.clone());
+        monitor.record_attempt(42);
+        monitor
+            .queued_launch_session_strategies
+            .insert(42, IssueMonitorLaunchSessionStrategy::FreshRequired);
+        assert!(monitor.apply_confirmed_claim(42, "claim", "owner", "effect", IDLE_NOW));
+        let saved = monitor.prefs();
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), saved.clone());
+        assert!(restored.inbox_item(42).is_none());
+        assert!(
+            restored.take_pending_launch_requests().is_empty(),
+            "a restored allowlist needs candidate labels before creating a pane"
+        );
+        assert!(!restored.has_capacity_for_monitor_spawn(42, false));
+        assert!(!restored.claim_launch_delivery(
+            42,
+            "launch:effect",
+            "gui",
+            42,
+            "tab::agent-42",
+            |_| false
+        ));
+        assert_eq!(
+            restored.prefs().pending_launch_deliveries,
+            saved.pending_launch_deliveries
+        );
+        restored.record_candidate(issue(42));
+        assert!(restored.take_pending_launch_requests().is_empty());
+        restored.record_candidate(candidate);
+        let requests = restored.take_pending_launch_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].delivery_id.as_deref(), Some("launch:effect"));
+        assert_eq!(
+            requests[0].launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::FreshRequired
+        );
+        assert_eq!(restored.attempt_count(42), 1);
+        assert!(restored.has_capacity_for_monitor_spawn(42, false));
+        assert!(restored.claim_launch_delivery(
+            42,
+            "launch:effect",
+            "gui",
+            42,
+            "tab::agent-42",
+            |_| false
+        ));
+        assert!(restored.mark_launch_delivery_materialized(
+            42,
+            "launch:effect",
+            "gui",
+            "tab::agent-42"
+        ));
+        let mut existing = test_monitor_with_prefs(IssueMonitorConfig::default(), restored.prefs());
+        assert!(existing.inbox_item(42).is_none());
+        assert_eq!(existing.take_pending_launch_requests().len(), 1);
+        assert!(existing.claim_launch_delivery(
+            42,
+            "launch:effect",
+            "gui",
+            42,
+            "tab::agent-42",
+            |_| false
+        ));
+    }
+
     /// Issue #3676 AC-2: the auth verdict must be definitive before it may
     /// block a launch — every ambiguous shape stays fail-open (`Unknown`).
     #[test]
@@ -26856,6 +26949,7 @@ mod tests {
                 needs_human: Vec::new(),
                 released: Vec::new(),
                 inbox: vec![IssueMonitorInboxSummary {
+                    needs_human_reason: None,
                     dependency: None,
                     launch_tier: None,
                     landing_tier: None,

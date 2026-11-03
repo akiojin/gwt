@@ -226,9 +226,9 @@ pub fn record_fail_open(kind: ErrorKind, message: impl Into<String>, target: Err
     }
 }
 
-/// Return valid rows at or after `since`, oldest first. Synthetic corruption
-/// diagnostics are retained when their source UTC day overlaps the window, or
-/// its date is unknown; their timestamps never imply an exact event time.
+/// Return ledger rows at or after `since`, oldest first. Reader-generated
+/// corruption diagnostics use the source file's UTC day, retaining overlapping
+/// or unknown days conservatively; their timestamp is not a precise event time.
 pub fn list_since(since: Option<DateTime<Utc>>) -> io::Result<Vec<ErrorRecord>> {
     #[cfg(any(test, feature = "test-support"))]
     if crate::test_support::gwt_home_override().is_none() {
@@ -353,19 +353,6 @@ fn append_record(record: &ErrorRecord, once: bool) -> io::Result<()> {
     Ok(())
 }
 
-fn ledger_file_day(path: &Path) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
-    let name = path.file_name()?.to_str()?;
-    let day = name.strip_prefix("errors.")?.strip_suffix(".jsonl")?;
-    let date = NaiveDate::parse_from_str(day, "%Y-%m-%d").ok()?;
-    if day.len() != 10 || date.format("%Y-%m-%d").to_string() != day {
-        return None;
-    }
-    Some((
-        date.and_hms_opt(0, 0, 0)?.and_utc(),
-        date.succ_opt()?.and_hms_opt(0, 0, 0)?.and_utc(),
-    ))
-}
-
 // Callers hold the ledger lock: shared for listing, exclusive for record_once.
 fn read_ledger_files(since: Option<DateTime<Utc>>) -> io::Result<Vec<ErrorRecord>> {
     let dir = ledger_dir();
@@ -390,16 +377,22 @@ fn read_ledger_files(since: Option<DateTime<Utc>>) -> io::Result<Vec<ErrorRecord
     let mut records = Vec::new();
     for path in paths {
         let file = fs::File::open(&path)?;
-        let source_day = ledger_file_day(&path);
+        let source_day = ledger_source_day(&path);
         for (index, line) in BufReader::new(file).split(b'\n').enumerate() {
             let line = line?;
             if line.iter().all(u8::is_ascii_whitespace) {
                 continue;
             }
             let record = match serde_json::from_slice::<ErrorRecord>(&line) {
-                Ok(record) if since.is_none_or(|since| record.recorded_at >= since) => record,
-                Ok(_) => continue,
+                Ok(record) => {
+                    if since.is_some_and(|since| record.recorded_at < since) {
+                        continue;
+                    }
+                    record
+                }
                 Err(_) => {
+                    // Only a source day wholly before the window proves this
+                    // corruption historical. Unknown dates must remain visible.
                     if since.is_some_and(|since| source_day.is_some_and(|(_, end)| end <= since)) {
                         continue;
                     }
@@ -416,23 +409,14 @@ fn read_ledger_files(since: Option<DateTime<Utc>>) -> io::Result<Vec<ErrorRecord
                         ("line".into(), line_number.clone()),
                     ]));
                     diagnostic.id = format!("ledger_corruption:{file_name}:{line_number}");
-                    // Day precision is source provenance, not an event timestamp.
-                    // Unknown dates use a stable sentinel and never expire by it.
+                    // A stable day anchor (or explicit unknown sentinel), never
+                    // the read time. Keep uncertainty in the existing context.
                     diagnostic.recorded_at =
                         source_day.map_or(DateTime::<Utc>::UNIX_EPOCH, |(start, _)| start);
                     diagnostic.context.insert(
-                        "timestamp_source".into(),
+                        "source_time_precision".into(),
                         if source_day.is_some() {
-                            "ledger_file"
-                        } else {
-                            "unknown"
-                        }
-                        .into(),
-                    );
-                    diagnostic.context.insert(
-                        "timestamp_precision".into(),
-                        if source_day.is_some() {
-                            "utc_day"
+                            "day"
                         } else {
                             "unknown"
                         }
@@ -456,6 +440,22 @@ fn read_ledger_files(since: Option<DateTime<Utc>>) -> io::Result<Vec<ErrorRecord
     Ok(records)
 }
 
+fn ledger_source_day(path: &Path) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    let date = path
+        .file_name()?
+        .to_str()?
+        .strip_prefix("errors.")?
+        .strip_suffix(".jsonl")?;
+    let day = NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
+    if day.format("%Y-%m-%d").to_string() != date {
+        return None;
+    }
+    Some((
+        day.and_hms_opt(0, 0, 0)?.and_utc(),
+        day.succ_opt()?.and_hms_opt(0, 0, 0)?.and_utc(),
+    ))
+}
+
 fn json_io_error(error: serde_json::Error) -> io::Error {
     io::Error::other(error)
 }
@@ -465,7 +465,6 @@ mod tests {
     use super::*;
     use crate::test_support::ScopedGwtHome;
     use chrono::TimeZone;
-    use sha2::{Digest, Sha256};
 
     fn isolated_home() -> (tempfile::TempDir, ScopedGwtHome) {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -666,11 +665,11 @@ mod tests {
             "corruption must be counted instead of skipped"
         );
         assert!(rows.contains(&valid));
-        let corrupt = rows
+        let corruption = rows
             .iter()
             .find(|row| row.kind == ErrorKind::LedgerCorruption)
             .unwrap();
-        let diagnostic = serde_json::to_value(corrupt).unwrap();
+        let diagnostic = serde_json::to_value(corruption).unwrap();
         assert_eq!(diagnostic["kind"], "ledger_corruption");
         assert_eq!(diagnostic["scope"], "host");
         assert_eq!(diagnostic["context"]["line"], "2");
@@ -678,105 +677,102 @@ mod tests {
             diagnostic["context"]["ledger_file"],
             path.file_name().unwrap().to_str().unwrap()
         );
-        assert!(corrupt.target.project_root.is_none());
+        assert!(corruption.target.project_root.is_none());
     }
 
     #[test]
-    fn historical_corruption_keeps_source_provenance_without_retiming_valid_rows() {
+    fn historical_corruption_is_stable_visible_and_outside_the_current_window() {
         let (_dir, _home) = isolated_home();
-        let day = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
-        let cutoff = day + chrono::Duration::days(2);
-        fs::create_dir_all(ledger_dir()).unwrap();
-        let path = ledger_path_for_date(day.date_naive());
-        // Even a valid row stored in the wrong daily file uses its own exact time.
-        let mut bytes = b"{broken}\n\xff\n \t\n".to_vec();
-        for (name, at) in [
-            ("before", cutoff - chrono::Duration::seconds(1)),
-            ("equal", cutoff),
-            ("after", cutoff + chrono::Duration::seconds(1)),
-        ] {
-            let mut row = sample(ErrorKind::HookFailure, name);
-            row.recorded_at = at;
-            serde_json::to_writer(&mut bytes, &row).unwrap();
-            bytes.push(b'\n');
-        }
-        bytes.extend_from_slice(b"{unfinished");
-        fs::write(&path, &bytes).unwrap();
-        let hash = Sha256::digest(&bytes);
+        let mut valid = sample(ErrorKind::HookFailure, "current");
+        valid.recorded_at = Utc.with_ymd_and_hms(2026, 11, 2, 12, 0, 0).unwrap();
+        record(valid.clone()).unwrap();
+        let path = ledger_path_for_date(NaiveDate::from_ymd_opt(2026, 10, 1).unwrap());
+        let bytes = b"{PRIVATE_BROKEN_ROW}\n\xff\n";
+        fs::write(&path, bytes).unwrap();
         let modified = fs::metadata(&path).unwrap().modified().unwrap();
 
-        let recent = list_since(Some(cutoff)).unwrap();
-        assert_eq!(
-            recent
-                .iter()
-                .map(|row| row.message.as_str())
-                .collect::<Vec<_>>(),
-            ["equal", "after"],
-            "old corruption must not become a failure at read time"
-        );
-        let all = list_since(None).unwrap();
-        assert_eq!(all, list_since(None).unwrap());
-        let corrupt = all
+        let current = list_since(Some(valid.recorded_at)).unwrap();
+        assert_eq!(current, vec![valid.clone()]);
+        let history = list_since(None).unwrap();
+        assert_eq!(history, list_since(None).unwrap());
+        assert_eq!(history.len(), 3);
+        for row in history
             .iter()
             .filter(|row| row.kind == ErrorKind::LedgerCorruption)
-            .collect::<Vec<_>>();
-        assert_eq!(corrupt.len(), 3);
-        for (row, line) in corrupt.iter().zip([1, 2, 7]) {
+        {
             assert_eq!(
-                row.id,
-                format!("ledger_corruption:errors.2026-09-01.jsonl:{line}")
+                row.recorded_at,
+                Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap()
             );
-            assert_eq!(row.recorded_at, day);
-            assert_eq!(row.context["timestamp_source"], "ledger_file");
-            assert_eq!(row.context["timestamp_precision"], "utc_day");
+            assert_eq!(row.context["source_time_precision"], "day");
             assert_eq!(
                 row.context["source_day_end_exclusive"],
-                "2026-09-02T00:00:00+00:00"
+                "2026-10-02T00:00:00+00:00"
+            );
+            assert!(row
+                .id
+                .starts_with("ledger_corruption:errors.2026-10-01.jsonl:"));
+            assert!(!serde_json::to_string(row)
+                .unwrap()
+                .contains("PRIVATE_BROKEN_ROW"));
+            assert_eq!(
+                serde_json::from_value::<ErrorRecord>(serde_json::to_value(row).unwrap()).unwrap(),
+                *row
             );
         }
         assert_eq!(fs::read(&path).unwrap(), bytes);
-        assert_eq!(Sha256::digest(fs::read(&path).unwrap()), hash);
-        assert_eq!(fs::metadata(path).unwrap().modified().unwrap(), modified);
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
     }
 
     #[test]
-    fn uncertain_corruption_keeps_boundary_days_and_unknown_dates_fail_closed() {
+    fn corruption_window_keeps_boundary_future_and_unknown_dates_fail_closed() {
         let (_dir, _home) = isolated_home();
         fs::create_dir_all(ledger_dir()).unwrap();
-        let day = Utc.with_ymd_and_hms(2026, 9, 2, 0, 0, 0).unwrap();
+        let since = Utc.with_ymd_and_hms(2026, 11, 2, 12, 0, 0).unwrap();
         for name in [
-            "errors.2026-09-02.jsonl",
-            "errors.2026-09-03.jsonl",
-            "errors.unknown.jsonl",
-            "errors.2026-9-02.jsonl",
-            "errors.2026-02-30.jsonl",
+            "2026-11-01",
+            "2026-11-02",
+            "2026-11-03",
+            "2026-11-04",
+            "unknown",
+            "2026-02-30",
+            "2026-1-1",
         ] {
-            fs::write(ledger_dir().join(name), b"{broken}\n").unwrap();
+            fs::write(
+                ledger_dir().join(format!("errors.{name}.jsonl")),
+                b" \n{partial",
+            )
+            .unwrap();
         }
-        let rows = list_since(Some(day + chrono::Duration::hours(12))).unwrap();
-        assert_eq!(rows.len(), 5, "a partial source day cannot be ruled out");
-        let next_day = list_since(Some(day + chrono::Duration::days(1))).unwrap();
-        assert_eq!(next_day.len(), 4, "only a fully elapsed UTC day can expire");
-        for row in next_day
+        let rows = list_since(Some(since)).unwrap();
+        assert_eq!(
+            rows.len(),
+            6,
+            "only a day proven before the cutoff is excluded"
+        );
+        assert!(rows
             .iter()
-            .filter(|row| row.context["timestamp_source"] == "unknown")
+            .all(|row| row.kind == ErrorKind::LedgerCorruption && row.context["line"] == "2"));
+        assert_eq!(
+            list_since(Some(since - chrono::Duration::hours(12)))
+                .unwrap()
+                .len(),
+            6
+        );
+        for row in rows
+            .iter()
+            .filter(|row| row.context["source_time_precision"] == "unknown")
         {
             assert_eq!(row.recorded_at, DateTime::<Utc>::UNIX_EPOCH);
-            assert_eq!(row.context["timestamp_precision"], "unknown");
         }
-        assert_eq!(
-            next_day,
-            list_since(Some(day + chrono::Duration::days(1))).unwrap()
-        );
-        let unknown = list_since(Some(DateTime::<Utc>::MAX_UTC)).unwrap();
-        assert_eq!(
-            unknown.len(),
-            3,
-            "unknown provenance never expires by timestamp"
-        );
-        // An actual source read error must still reach the caller.
-        fs::create_dir(ledger_dir().join("errors.unreadable.jsonl")).unwrap();
-        assert!(list_since(Some(day)).is_err());
+        assert_eq!(rows, list_since(Some(since)).unwrap());
+    }
+
+    #[test]
+    fn ledger_file_read_failure_is_not_historical_corruption() {
+        let (_dir, _home) = isolated_home();
+        fs::create_dir_all(ledger_dir().join("errors.2026-01-01.jsonl")).unwrap();
+        assert!(list_since(Some(Utc.with_ymd_and_hms(2026, 11, 2, 0, 0, 0).unwrap())).is_err());
     }
 
     #[test]

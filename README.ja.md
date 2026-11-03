@@ -1830,6 +1830,13 @@ JSON
   （section・part 番号付き）も報告し、内容の書き換えや削除は行いません。
   section 書き込みはホストの同じ cache を使う writer を直列化し、索引更新直前に
   最新本文と比較します。別ホスト・外部 writer・通信結果不明は保証対象外です。
+  section 編集の本文には artifact マーカーを含めないでください。マーカーは
+  operation が付け、マーカーを含む入力は書き込み前に拒否します。
+  `issue.spec.repair` は二重マーカーを修復します。古い孤立 artifact が新しい内容へ
+  引き継がれていることを確認した場合は、修復の `archive_comments` にコメント ID を
+  指定できます（例: `{"number":1784,"archive_comments":[12345]}`）。本文を保存し、
+  外側マーカーだけを退役します。索引が参照するコメントは拒否します。
+  その後 `issue.spec.lint` を再実行し、索引の健全性を確認してください。
 
 ```bash
 gwtd <<'JSON'
