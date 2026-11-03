@@ -17,6 +17,9 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
     fn github_repository(&self) -> io::Result<(String, String)> {
         self.inner.github_repository()
     }
+    fn release_policy_context(&mut self) -> io::Result<crate::cli::ReleasePolicyContext> {
+        self.inner.release_policy_context()
+    }
     fn pm_settings_snapshot(
         &mut self,
         operation: &str,

@@ -104,6 +104,7 @@ root_js_modules! {
     "recovery-center-modal.js" => "createRecoveryCenterController",
     // SPEC-1939 Phase 12 / T-IDX-106 — Settings.Index tab renderer.
     "index-settings-panel.js" => "renderIndexSettingsPanel",
+    "hook-center-panel.js" => "renderHookCenterPanel",
     // SPEC-2008 Phase 24 — terminal viewport reflow primitives.
     "terminal-viewport-reflow.js" => "attachHostResizeReflow",
     // Issue #2694 Phase C — kind-coalesced, rAF-flushed WebSocket inbound

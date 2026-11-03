@@ -1889,60 +1889,14 @@ fn issue_monitor_agent_failure_is_persisted_to_the_window_owner_project() {
     let repo_a = temp.path().join("repo-a");
     std::fs::create_dir_all(&repo_a).expect("create repo A");
     init_repo_without_origin(&repo_a);
-    let (repo_b, owner, delivery) = owner_monitor_fixture(
-        &temp.path().join("repo-b"),
-        42,
-        true,
-        &["pane-contract-fixture"],
-    );
-    let mut observed = owner.subscribe();
-    let mut config = pane_control_tests::control_launch_config(&repo_b, 42);
-    *config.args.last_mut().unwrap() = if cfg!(windows) {
-        "[Console]::WriteLine('agent failed'); $null = [Console]::ReadLine(); exit 7".into()
-    } else {
-        "stty -echo; printf 'agent failed\\n'; IFS= read -r line; exit 7".into()
-    };
-    let pane =
-        owner_monitor_launch_with_config(&repo_b, &owner, 42, "monitor-agent", delivery, config);
-    owner_fixture_block_on(async {
-        // test-hygiene: allow-wall-clock-deadline Bounds missing native output; actual owner output orders the diagnostic before the provider exit.
-        tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
-            loop {
-                if let gwt::project_runtime::events::OwnerEvent::Output {
-                    id,
-                    incarnation,
-                    screen,
-                    ..
-                } = observed.recv().await.expect("actual provider output")
-                {
-                    if id == pane.id
-                        && incarnation == pane.incarnation
-                        && screen.contains("agent failed")
-                    {
-                        break;
-                    }
-                }
-            }
-        })
-        .await
-        .expect("owner must observe the provider diagnostic before releasing exit");
-    });
-    let monitor = owner_monitor_read(&repo_b, 42);
-    assert_eq!(
-        monitor.active_count(),
-        1,
-        "the real bound launch occupies one Monitor slot"
-    );
-    assert!(
-        monitor.live_claim_id(42).is_some(),
-        "the exact launch retains its real claim"
-    );
-    let mut projection = super::managed_launch_tests::managed_project_owner_projection(
-        temp.path(),
-        &repo_b,
-        &owner,
-        &[&pane],
-    );
+    let (repo_b, owner, pane, mut projection, mut observed) =
+        super::managed_launch_tests::managed_monitor_exit_fixture(
+            &temp.path().join("repo-b"),
+            42,
+            7,
+            "agent failed",
+            true,
+        );
 
     let prefs_a_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo_a);
     let prefs_b_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo_b);
@@ -1982,6 +1936,12 @@ fn issue_monitor_agent_failure_is_persisted_to_the_window_owner_project() {
         },
     ))
     .unwrap();
+    assert!(
+        snapshot["screen"]
+            .as_str()
+            .is_some_and(|screen| screen.contains("agent failed")),
+        "the provider diagnostic must be parsed before releasing its exit gate"
+    );
     runtime.install_remote_owner_projection(
         &context,
         "project-b::monitor-agent",
