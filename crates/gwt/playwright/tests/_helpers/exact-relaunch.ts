@@ -457,9 +457,22 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     // providers still carrying our unique argv-recorder path in their command.
     const providerPaths = [join(bin, windows ? "codex.cjs" : "codex"), join(bin, windows ? "claude.cjs" : "claude")];
     const providerPids: number[] = [];
+    const providerPreFallback: unknown[] = [];
     for (const launch of await launches()) {
       const command = processCommand(launch.pid);
-      if (providerPaths.some(path => command.includes(path))) {
+      const privatePathMatch = providerPaths.some(path => command.includes(path));
+      // Diagnostic only: inspection failure is UNKNOWN and never changes the
+      // existing exact-provider fallback or its cleanup authority.
+      if (!windows) {
+        try {
+          const result = spawnSync("ps", ["-p", String(launch.pid), "-o", "lstart=", "-o", "ppid="], { encoding: "utf8" });
+          const match = result.status === 0 && !result.error ? result.stdout.trim().match(/^(.*?)\s+(\d+)$/) : null;
+          providerPreFallback.push({ at: new Date().toISOString(), pid: launch.pid, session_id: launch.gwt_session_id,
+            private_path_match: privatePathMatch, birth: match?.[1] ?? null, parent_pid: match ? Number(match[2]) : null,
+            state: match ? "observed" : result.status === 1 && !result.error && !result.stdout.trim() && !result.stderr.trim() ? "absent" : "unknown" });
+        } catch { providerPreFallback.push({ at: new Date().toISOString(), pid: launch.pid, state: "unknown" }); }
+      } else providerPreFallback.push({ at: new Date().toISOString(), pid: launch.pid, state: "unknown_unsupported" });
+      if (privatePathMatch) {
         providerPids.push(launch.pid);
         try { process.kill(launch.pid, "SIGTERM"); } catch { /* exited */ }
       }
@@ -485,7 +498,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     }
     if (ownedPid) {
       const remaining = processCommand(ownedPid);
-      await testInfo.attach("fixture-process-cleanup", { body: JSON.stringify({ pid: ownedPid, exited: !remaining }), contentType: "application/json" });
+      await testInfo.attach("fixture-process-cleanup", { body: JSON.stringify({ pid: ownedPid, exited: !remaining, provider_pre_fallback: providerPreFallback }), contentType: "application/json" });
       if (remaining) throw new Error(`Fixture gwt process ${ownedPid} remained after shutdown`);
     }
     child = undefined;

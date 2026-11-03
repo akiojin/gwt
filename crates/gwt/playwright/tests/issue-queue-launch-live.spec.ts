@@ -1,8 +1,32 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { mkdir, readFile, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { startIssueQueueLaunchFixture } from "./_helpers/issue-queue-launch";
 import { gotoLiveGwt, sendLiveGwtEvent } from "./_helpers/live-gwt";
+
+let rosterReadSequence = 0;
+async function readCanonicalRoster(page: Page): Promise<any> {
+  const requestId = `t814-roster-${++rosterReadSequence}`;
+  const projectKey = await page.evaluate(() => location.pathname.split("/")[2]);
+  expect(projectKey).toBeTruthy();
+  const after = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
+  await sendLiveGwtEvent(page, { kind: "agent_roster", project_key: projectKey, request_id: requestId, action: { kind: "read" } });
+  const reply = await page.waitForFunction(({ after, requestId }) => ((window as any).__gwtPlaywrightMessages || []).find((entry: any) =>
+    entry.sequence > after && entry.payload.request_id === requestId
+    && ["agent_roster", "agent_roster_error"].includes(entry.payload.kind))?.payload,
+  { after, requestId }, { timeout: 30_000 }).then(handle => handle.jsonValue());
+  expect(reply.kind, reply.message).toBe("agent_roster");
+  expect(reply.roster.project_key).toBe(projectKey);
+  expect(reply.roster.error).toBeFalsy();
+  expect(Array.isArray(reply.roster.members)).toBe(true);
+  return reply.roster;
+}
+function durableRoster(roster: any) {
+  const fields = ["agent_member_id", "agent_id", "name", "enabled", "pm_eligible", "pm_project_key", "created_at",
+    "origin_session_id", "last_issue_number", "last_spec_number", "last_owner_project_key", "assignment"];
+  return { revision: roster.revision, members: roster.members.map((member: any) =>
+    Object.fromEntries(fields.map(field => [field, member[field]]))) };
+}
 
 test.describe("Issue queue real backend launch", () => {
   test.skip(process.env.GWT_PLAYWRIGHT_QUEUE_LAUNCH !== "1", "requires checkout binaries and isolated provider fixture");
@@ -29,16 +53,39 @@ test.describe("Issue queue real backend launch", () => {
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       operation("issue.monitor.config.set", { max_active: 10 });
       operation("issue.monitor.schedule.read");
-      await expect.poll(async () => (await prefs()).agent_roster?.members.filter((member: any) => member.enabled).length).toBe(10);
-      const roster = (await prefs()).agent_roster;
-      // A separate, unregistered fixture scope uses the normal local ConfigSet
-      // path to establish an older machine limit without editing trusted state.
+      await expect.poll(async () => (await readCanonicalRoster(page)).members.filter((member: any) => member.enabled).length).toBe(10);
+      const canonical = await readCanonicalRoster(page);
+      expect(canonical.members).toHaveLength(10);
+      expect(canonical.total_enabled).toBe(10);
+      const originalMembers = durableRoster(canonical).members;
+      // The seed ConfigSet changes the shared roster as well as machine policy.
+      // Restore its ten existing members through the normal roster writer.
       const seed = join(fixture.home, "machine-policy-seed");
       await mkdir(seed);
       operation("issue.monitor.config.set", { max_active: 4 }, seed);
       const olderMachine = await machine();
       expect(olderMachine).toMatchObject({ mode: "manual", manual_limit: 4 });
-      expect(await prefs()).toMatchObject({ max_active_agents: 10, max_active_agents_mode: "manual", agent_roster: roster });
+      const reduced = await readCanonicalRoster(page);
+      const resizeRequestId = `t814-resize-${++rosterReadSequence}`;
+      const beforeResize = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
+      await sendLiveGwtEvent(page, { kind: "agent_roster", project_key: reduced.project_key, request_id: resizeRequestId,
+        expected_revision: reduced.revision, action: { kind: "resize", size: 10 } });
+      const resizedReply = await page.waitForFunction(({ after, requestId }) => ((window as any).__gwtPlaywrightMessages || []).find((entry: any) =>
+        entry.sequence > after && entry.payload.request_id === requestId
+        && ["agent_roster", "agent_roster_error"].includes(entry.payload.kind))?.payload,
+      { after: beforeResize, requestId: resizeRequestId }, { timeout: 30_000 }).then(handle => handle.jsonValue());
+      expect(resizedReply.kind, resizedReply.message).toBe("agent_roster");
+      expect(resizedReply.roster.project_key).toBe(reduced.project_key);
+      expect(resizedReply.roster.error).toBeFalsy();
+      expect(resizedReply.roster.revision).toBeGreaterThan(reduced.revision);
+      expect(resizedReply.roster.members).toHaveLength(10);
+      expect(resizedReply.roster.members.filter((member: any) => member.enabled)).toHaveLength(10);
+      expect(resizedReply.roster.total_enabled).toBe(10);
+      expect(durableRoster(resizedReply.roster).members).toEqual(originalMembers);
+      expect(await machine()).toEqual(olderMachine);
+      const roster = durableRoster(await readCanonicalRoster(page));
+      expect(roster).toEqual(durableRoster(resizedReply.roster));
+      expect(await prefs()).toMatchObject({ max_active_agents: 10, max_active_agents_mode: "manual" });
       const before = operation("issue.monitor.status");
       expect(before.envelope.project_store.identity_resolved).toBe(true);
       expect(before.output.autonomous_mode).toBe(true);
@@ -49,7 +96,7 @@ test.describe("Issue queue real backend launch", () => {
       // must not suppress the explicit write to the shared machine authority.
       expect(await machine()).toMatchObject({ mode: "manual", manual_limit: 10,
         last_change: { source: "json_operation", max_active_agents_override: 10 } });
-      expect((await prefs()).agent_roster).toEqual(roster);
+      expect(durableRoster(await readCanonicalRoster(page))).toEqual(roster);
       const saved = operation("issue.monitor.status").output;
       const capacity = saved.agent_capacity;
       const available = Math.max(0, 10 - Math.max(0, capacity.other_live_agents - capacity.other_pm_agents)
@@ -155,7 +202,7 @@ test.describe("Issue queue real backend launch", () => {
       expect(saved.stage).toBe("requested");
       const duplicate = await request({ kind: "agent_switch", action: { kind: "request", ...saved.request } }, "agent_switch");
       expect(duplicate.snapshot.intents.filter((value: any) => value.operation_id === operation)).toHaveLength(1);
-      expect((await preferences()).agent_roster.members.find((value: any) => value.agent_member_id === member.agent_member_id).assignment).toEqual(sourceAssignment);
+      expect((await readCanonicalRoster(current)).members.find((value: any) => value.agent_member_id === member.agent_member_id).assignment).toEqual(sourceAssignment);
       expect((await preferences()).monitor_runtime_stop_requests || []).toEqual([]);
       expect(fixture.processAlive(source.pid)).toBe(true);
       expect(await fixture.launches()).toHaveLength(1);
@@ -163,7 +210,7 @@ test.describe("Issue queue real backend launch", () => {
       await plans.getByRole("button", { name: "Cancel switch", exact: true }).click();
       await expect.poll(async () => (await intent(operation))?.stage).toBe("cancelled");
       expect(fixture.processAlive(source.pid)).toBe(true);
-      expect((await preferences()).agent_roster.members.find((value: any) => value.agent_member_id === member.agent_member_id).assignment).toEqual(sourceAssignment);
+      expect((await readCanonicalRoster(current)).members.find((value: any) => value.agent_member_id === member.agent_member_id).assignment).toEqual(sourceAssignment);
       await expect(change).toBeEnabled();
       await change.click();
       await expect.poll(async () => Object.keys((await preferences()).agent_switch_intents).length).toBe(2);
@@ -294,7 +341,7 @@ test.describe("Issue queue real backend launch", () => {
       expect(field(after, "agent_member_id")).toBe(member.agent_member_id);
       expect(field(after, "agent_name")).toBe(field(before, "agent_name"));
       expect(field(after, "agent_name")).toBe(member.name);
-      expect((await preferences()).agent_roster.members.find((value: any) => value.agent_member_id === member.agent_member_id)
+      expect((await readCanonicalRoster(page)).members.find((value: any) => value.agent_member_id === member.agent_member_id)
         .assignment.session_id).toBe(target.gwt_session_id);
       expect(fixture.executionStatus(source.cwd).ecr_status).toBe("active");
       const work = (await fixture.workItems()).work_items.find((value: any) => value.id === ack.work_id);
@@ -455,6 +502,7 @@ test.describe("Issue queue real backend launch", () => {
         issues: [{ issue_number: fixture.issueNumber, reason: "assigned_by_you" }] });
       await info.attach(`agent-schedule-ui-${theme}`, { body: await current.screenshot(), contentType: "image/png" });
       const beforeStale = await fixture.monitorPreferencesBytes();
+      const rosterBeforeStale = durableRoster(await readCanonicalRoster(current));
       const stale = fixture.scheduleOperation("issue.monitor.schedule.reassign", reassignment);
       expect(stale.ok).toBe(false);
       const afterStale = await fixture.monitorPreferencesBytes();
@@ -463,11 +511,12 @@ test.describe("Issue queue real backend launch", () => {
       }, null, 2), contentType: "application/json" });
       const plan = (bytes: Buffer) => {
         const prefs = JSON.parse(bytes.toString());
-        return { agent_issue_schedule: prefs.agent_issue_schedule, agent_roster: prefs.agent_roster,
+        return { agent_issue_schedule: prefs.agent_issue_schedule,
           terminal_queues: Object.fromEntries(Object.entries(prefs.terminal_queues)
             .map(([host, queue]) => [host, (queue as any).entries])) };
       };
-      expect(plan(afterStale), "rejected stale move preserves canonical member plans and queue order").toEqual(plan(beforeStale));
+      expect(plan(afterStale), "rejected stale move preserves project member plans and queue order").toEqual(plan(beforeStale));
+      expect(durableRoster(await readCanonicalRoster(current)), "rejected stale move preserves canonical roster").toEqual(rosterBeforeStale);
       expect(schedule()).toEqual(saved);
       const gui = await request({ kind: "agent_schedule", action: { kind: "read" } }, "agent_schedule");
       expect(gui.schedule, "GUI and JSON use the same canonical schedule").toEqual(saved);

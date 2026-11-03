@@ -7,7 +7,7 @@
  *       rebound to that same exact session.
  */
 import { chmod, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { basename, dirname, join } from "node:path";
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import { startExactRelaunchFixture, writeFixtureNodeCommand, type ExactRelaunchInvocation } from "./_helpers/exact-relaunch";
@@ -147,7 +147,7 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
 
   test("restart evidence failure reaps the owned process", async ({}, testInfo) => {
     let starts = 0;
-    const cleanups: { pid: number; ps_status: number }[] = [];
+    const cleanups: { pid: number; exited: boolean }[] = [];
     const fixture = await startExactRelaunchFixture({
       async attach(name, attachment) {
         if (name === "exact-relaunch-fixture" && ++starts === 2) throw new Error("fixture evidence failure");
@@ -158,7 +158,7 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
     try {
       await expect(fixture.restart()).rejects.toThrow("fixture evidence failure");
       expect(cleanups).toHaveLength(2);
-      expect(cleanups.every(cleanup => cleanup.pid > 0 && cleanup.ps_status === 1)).toBe(true);
+      expect(cleanups.every(cleanup => cleanup.pid > 0 && cleanup.exited === true)).toBe(true);
     } finally {
       await fixture.stop();
     }
@@ -326,6 +326,11 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       throw error;
     });
     const errors = capture(page);
+    const tuningRequests: any[] = [];
+    page.on("websocket", socket => socket.on("framesent", ({ payload }) => {
+      try { const event = JSON.parse(String(payload)); if (event.kind === "agent_roster" && event.action?.kind === "set_tuning") tuningRequests.push(event); }
+      catch { /* unrelated non-JSON frame */ }
+    }));
     const secondErrors = capture(secondPage);
     const theme = info.project.name.includes("light") ? "light" : "dark";
     try {
@@ -439,7 +444,9 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       await revisionInput.focus();
       await page.keyboard.press("End");
       expect(await revisionInput.evaluate((node: HTMLInputElement) => node.selectionStart)).toBe(savedRevision!.length);
-      await readRoster(page);
+      const beforeTuningRoster = await readRoster(page);
+      const beforeCoreRevision = (beforeTuningRoster.members.find(value => value.agent_member_id === memberId) as any)?.saved_implementation_core_revision;
+      expect(beforeCoreRevision).toBeTruthy();
       await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
       await expect(revisionInput).toBeFocused();
       await expect(surface.locator(".roster-current-config")).toHaveText(expected);
@@ -451,16 +458,32 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       await expect(surface.locator(".roster-saved-settings")).toContainText("Reasoning: medium");
       await surface.evaluate(node => { (window as any).__savedCandidateRoster = node; });
       const beforeInlineSave = await cursor(page);
-      const reasoning = settings.locator(`fieldset[data-agent-member-id="${memberId}"] [data-profile-field="reasoning"]`);
+      const candidate = settings.locator(`fieldset[data-agent-member-id="${memberId}"]`);
+      await expect(candidate.locator('[data-profile-field="model"], [data-profile-field="reasoning"]')).toHaveCount(0);
+      const reasoning = candidate.locator('[data-member-tuning-field="reasoning"]');
+      await expect(reasoning).toBeEnabled();
+      await expect(reasoning).toHaveValue("medium");
+      const requestCount = tuningRequests.length;
       await reasoning.focus();
       await expect(reasoning).toBeFocused();
-      await reasoning.selectOption("high");
-      const inlineReply = await page.waitForFunction(after => ((window as any).__gwtPlaywrightMessages || []).find((entry: any) =>
-        entry.sequence > after && Number.isInteger(entry.payload.request_id)
-        && ["issue_monitor_profiles", "issue_monitor_profiles_write_failed"].includes(entry.payload.kind))?.payload,
-      beforeInlineSave).then(handle => handle.jsonValue());
-      expect(inlineReply.kind, inlineReply.message).toBe("issue_monitor_profiles");
-      expect(inlineReply.profiles).toContainEqual(expect.objectContaining({ ...savedCandidate, reasoning: "high" }));
+      await reasoning.fill("high");
+      await expect.poll(() => tuningRequests.length).toBe(requestCount + 1);
+      const tuningRequest = tuningRequests[requestCount];
+      expect(tuningRequest).toMatchObject({ kind: "agent_roster", project_key: firstProjectKey,
+        action: { kind: "set_tuning", member_id: memberId, model: savedCandidate.model, reasoning: "high", expected_core_revision: beforeCoreRevision } });
+      expect(typeof tuningRequest.request_id).toBe("string");
+      expect(tuningRequest.request_id).toBeTruthy();
+      const inlineReply = await page.waitForFunction(({ after, requestId }) => ((window as any).__gwtPlaywrightMessages || []).find((entry: any) =>
+        entry.sequence > after && entry.payload.request_id === requestId
+        && ["agent_roster", "agent_roster_error"].includes(entry.payload.kind))?.payload,
+      { after: beforeInlineSave, requestId: tuningRequest.request_id }).then(handle => handle.jsonValue());
+      expect(inlineReply.kind, inlineReply.message).toBe("agent_roster");
+      expect(inlineReply.roster.project_key).toBe(firstProjectKey);
+      expect(inlineReply.roster.error).toBeFalsy();
+      const tuned = inlineReply.roster.members.find((value: any) => value.agent_member_id === memberId);
+      expect(tuned.saved_implementation_core).toMatchObject({ agent_id: "codex", model: savedCandidate.model, reasoning: "high" });
+      expect(tuned.saved_implementation_core_revision).toBeTruthy();
+      expect(tuned.saved_implementation_core_revision).not.toBe(beforeCoreRevision);
       // No manual read, host change or reload can mask a missing ACK invalidation.
       await expect(surface.locator(".roster-saved-settings")).toContainText("Reasoning: high");
       await expect(revisionInput).not.toHaveValue(savedRevision!);
@@ -610,6 +633,46 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
     await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
     const surface = page.locator(".works-surface:not(.works-surface--preview)");
     const config = join(fixture.home, ".gwt", "config.toml");
+    const restartObservations: unknown[] = [];
+    let restartSession = "";
+    const snapshot = async (stage: string) => {
+      const guiPid = fixture.ownedPid;
+      const launches = await fixture.launches().catch(() => null);
+      const own = launches?.find(entry => entry.gwt_session_id === restartSession);
+      const processMetadata = (pid: number | undefined) => {
+        if (!pid) return { state: "unknown", pid: null };
+        try {
+          const result = spawnSync("ps", ["-p", String(pid), "-o", "lstart=", "-o", "ppid="], { encoding: "utf8" });
+          const match = result.status === 0 && !result.error ? result.stdout.trim().match(/^(.*?)\s+(\d+)$/) : null;
+          return { pid, state: match ? "observed" : result.status === 1 && !result.error && !result.stdout.trim() && !result.stderr.trim() ? "absent" : "unknown",
+            birth: match?.[1] ?? null, parent_pid: match ? Number(match[2]) : null };
+        } catch { return { pid, state: "unknown" }; }
+      };
+      const sessions = launches?.map(entry => entry.gwt_session_id).filter((id): id is string => !!id) ?? [];
+      const census = await page.evaluate(({ sessions }) => {
+        const entries = (window as any).__gwtPlaywrightMessages ?? [];
+        const latest = entries.map((entry: any) => entry.payload.kind === "local_agent_activity" ? entry.payload.activity : entry.payload.projection?.local_agent_activity)
+          .filter((value: any) => value?.project_key === location.pathname.split("/")[2]).at(-1);
+        return latest ? { project_key: latest.project_key, host_id: latest.host_id ?? null,
+          agents: Array.isArray(latest.agents) ? latest.agents.filter((value: any) => sessions.includes(value.session_id))
+            .map((agent: any) => ({ window_id: agent.window_id, session_id: agent.session_id, runtime_incarnation: agent.runtime_incarnation })) : null } : { state: "unknown" };
+      }, { sessions }).catch(() => ({ state: "unknown" }));
+      const observed = census as { host_id?: string; agents?: { session_id: string; runtime_incarnation: number }[] | null };
+      const host = /^(\d+):(\d+)$/.exec(observed.host_id ?? "");
+      const hostPid = host && Number(host[1]) > 0 && Number(host[2]) > 0 ? Number(host[1]) : null;
+      const runtime = hostPid && observed.agents?.length ? await Promise.all(observed.agents.map(async agent =>
+        readFile(join(fixture.home, ".gwt", "sessions", "runtime", String(hostPid), `${agent.session_id}.json`), "utf8")
+          .then(value => { const state = JSON.parse(value);
+            return state.host_started_at === Number(host![2]) && state.runtime_incarnation === agent.runtime_incarnation
+              ? { session_id: agent.session_id, child_pid: state.child_pid, child_started_at: state.child_started_at,
+                host_started_at: state.host_started_at, runtime_incarnation: state.runtime_incarnation }
+              : { session_id: agent.session_id, state: "unknown" }; })
+          .catch(() => ({ session_id: agent.session_id, state: "unknown" })))) : { state: "unknown" };
+      restartObservations.push({ stage, at: new Date().toISOString(), session: restartSession || null,
+        gui: processMetadata(guiPid), provider: processMetadata(own?.pid), native_session: own?.provider_session_id ?? null,
+        runtime, census, launches: launches ? launches.map(entry => ({ pid: entry.pid, session_id: entry.gwt_session_id,
+          provider_session_id: entry.provider_session_id, resume_session_id: entry.resume_session_id })) : { state: "unknown" } });
+    };
     try {
       await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
       await page.locator('.op-rail__surface[data-surface="works"]').click();
@@ -627,6 +690,7 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       await expect.poll(async () => (await fixture.launches()).length, { timeout: 90_000 }).toBe(1);
       const launch = (await fixture.launches())[0];
       const session = launch.gwt_session_id!;
+      restartSession = session;
       expect(session).toBeTruthy();
       const checkOutput = async (stage: string, observedSession = session) => {
         const window = await liveCodexWindow(page, observedSession);
@@ -676,9 +740,11 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       await checkOutput("reload");
       await expect(page.locator('.workspace-window[data-preset="settings"]')).toHaveCount(0);
       const oldPid = fixture.ownedPid;
+      await snapshot("before-restart");
       const restarted = await fixture.restart();
       expect(fixture.ownedPid).not.toBe(oldPid);
       await gotoLiveGwt(page, restarted, { enableTestBridge: true });
+      await snapshot("after-restart");
       await page.locator('.op-rail__surface[data-surface="works"]').click();
       await expect(surface).toHaveCSS("--works-preview-lines", "10");
       expect(await readFile(config, "utf8")).toMatch(/^works_preview_lines\s*=\s*10$/m);
@@ -704,7 +770,21 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       expect(errors, "real settings/terminal/restart console and page errors").toEqual([]);
     } finally {
-      await fixture.stop();
+      try {
+        await snapshot("final").catch(() => { restartObservations.push({ stage: "final", state: "unknown" }); });
+        const logs = await Promise.all(["gwt-1.log", "gwt-2.log"].map(async name => {
+          const content = await readFile(join(fixture.home, name), "utf8").catch(() => null);
+          if (content === null) return { name, state: "unknown" };
+          // Only fixed diagnostic tokens and line numbers leave the owned log;
+          // never retain raw log lines, arguments, capabilities or environment.
+          const tokens = content.split("\n").flatMap((line, index) => {
+            const token = line.match(/automatic_restore|restore|startup|owner|reconnect|launch/gi);
+            return token ? [{ line: index + 1, tokens: token.map(value => value.toLowerCase()) }] : [];
+          }).slice(-80);
+          return { name, state: "observed", tokens };
+        }));
+        await info.attach("works-restart-diagnostics", { body: JSON.stringify({ observations: restartObservations, logs }), contentType: "application/json" });
+      } finally { await fixture.stop(); }
     }
   });
 
@@ -1005,7 +1085,10 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
         await expect.poll(async () => JSON.parse(await readFile(preferences, "utf8")).max_active_agents,
           { timeout: 30_000, message: "persisted max_active equals the latest roster capacity" }).toBe(roster.capacity);
         expect(JSON.parse(await readFile(preferences, "utf8")).launch_profiles,
-          "selected member, fixed tool and model settings survive native restart").toContainEqual(expect.objectContaining(savedCandidate));
+          "selected member and fixed tool survive native restart").toContainEqual(expect.objectContaining({ agent_member_id: memberId, agent_id: "codex" }));
+        const member = roster.members.find(value => value.agent_member_id === memberId)!;
+        expect((member as any).saved_implementation_core).toMatchObject({ agent_id: "codex", model: savedCandidate.model, reasoning: savedCandidate.reasoning });
+        expect(member.saved_manual_profile).toMatchObject(savedCandidate);
       };
       const checkMemberLinks = async (target: Page, currentWindow: AgentWindow, sessionId: string, stage: string) => {
         const roster = await readRoster(target);
@@ -1202,7 +1285,9 @@ fs.writeFileSync(path.join(process.env.HOME, 'attachment-raw-ready.json'), JSON.
       socket.on("framesent", ({ payload }) => { try { sent.push(JSON.parse(String(payload))); } catch { /* unrelated frame */ } });
       socket.on("framereceived", ({ payload }) => { try { received.push(JSON.parse(String(payload))); } catch { /* unrelated frame */ } });
     });
-    await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
+    await page.addInitScript(value => {
+      if (location.protocol === "http:" || location.protocol === "https:") localStorage.setItem("gwt:ui:theme", value);
+    }, theme);
     const surface = page.locator(".works-surface:not(.works-surface--preview)");
     const rawPath = join(fixture.home, "attachment-raw.bin");
     const readyPath = join(fixture.home, "attachment-raw-ready.json");

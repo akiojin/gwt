@@ -327,7 +327,7 @@ test("owned actual Codex PM retains genuine history and composer across Works re
   const { createHash, randomBytes } = await import("node:crypto");
   const { constants } = await import("node:fs");
   const { isAbsolute } = await import("node:path");
-  const { access, chmod, copyFile, readFile, readdir, rm, writeFile } = await import("node:fs/promises");
+  const { access, chmod, copyFile, readFile, readdir, rename, rm, writeFile } = await import("node:fs/promises");
   const { homedir } = await import("node:os");
   const { startExactRelaunchFixture, writeFixtureNodeCommand } = await import("./_helpers/exact-relaunch");
   const nativePath = process.env.GWT_PLAYWRIGHT_REAL_CODEX_PATH;
@@ -335,7 +335,6 @@ test("owned actual Codex PM retains genuine history and composer across Works re
   expect(nativePath, "GWT_PLAYWRIGHT_REAL_CODEX_PATH must identify the installed native executable").toBeTruthy();
   if (!nativePath || !isAbsolute(nativePath)) throw new Error("Expected an absolute native Codex path");
   await access(nativePath, constants.X_OK);
-  await access(join(homedir(), ".codex", "auth.json"));
   const hash = createHash("sha256").update(await readFile(nativePath)).digest("hex");
   const version = spawnSync(nativePath, ["--version"], { encoding: "utf8" });
   if (version.error) throw version.error;
@@ -345,12 +344,16 @@ test("owned actual Codex PM retains genuine history and composer across Works re
   page.on("pageerror", error => errors.push(error.message));
   page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
   const theme = info.project.name.includes("light") ? "light" : "dark";
-  await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
+  await page.addInitScript(value => {
+    if (location.protocol === "http:" || location.protocol === "https:") localStorage.setItem("gwt:ui:theme", value);
+  }, theme);
   let home = "", preferences = "", id = "", session = "";
   let fixture: Awaited<ReturnType<typeof startExactRelaunchFixture>> | undefined;
-  let captured: { pid: number; birth: string; parent: string; cwd: string; session: string; ancestry: number[] } | undefined;
+  let captured: { pid: number; birth: string; cwd: string; session: string; deadline: number; ancestry: { pid: number; birth: string }[] } | undefined;
+  let qualified: { hostPid: number; hostBirth: number; session: string; incarnation: number; childStartedAt: number } | undefined;
+  const gateNonce = randomBytes(16).toString("hex");
   let monitoring = false, unexpectedTool = false, monitorError: unknown;
-  let ownedGuiPid = 0;
+  let ownedGuiPid = 0, gateRequested = false;
   let monitor: Promise<void> | undefined;
   const received: string[] = [];
   page.on("websocket", socket => socket.on("framereceived", ({ payload }) => {
@@ -369,17 +372,20 @@ test("owned actual Codex PM retains genuine history and composer across Works re
     }
     return value;
   };
-  const ownedNative = () => !!captured && captured.ancestry.includes(ownedGuiPid)
+  const ownedNative = () => !!captured && !!qualified && captured.session === qualified.session
+    && captured.ancestry.some(item => item.pid === qualified!.hostPid && Math.floor(Date.parse(item.birth) / 1000) === qualified!.hostBirth)
     && captured.cwd.startsWith(home + "/") && /^[0-9a-f-]{36}$/i.test(captured.session)
     && ps(captured.pid, "lstart=") === captured.birth
     && (ps(captured.pid, "command=") === nativePath || ps(captured.pid, "command=").startsWith(nativePath + " "));
-  const nativeRows = async (directory: string): Promise<any[]> => {
-    const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
+  const nativeRows = async (directory: string, strict = false): Promise<any[]> => {
+    const entries = strict ? await readdir(directory, { withFileTypes: true })
+      : await readdir(directory, { withFileTypes: true }).catch(() => []);
     return (await Promise.all(entries.map(async entry => {
       const path = join(directory, entry.name);
-      if (entry.isDirectory()) return nativeRows(path);
+      if (entry.isDirectory()) return nativeRows(path, strict);
       if (!entry.name.endsWith(".jsonl")) return [];
-      const contents = await readFile(path, "utf8").catch(() => "");
+      const contents = strict ? await readFile(path, "utf8") : await readFile(path, "utf8").catch(() => "");
+      if (strict && !contents.endsWith("\n")) throw new Error("Incomplete native rollout during final scan");
       const lines = contents.split("\n");
       if (!contents.endsWith("\n")) lines.pop();
       return lines.filter(Boolean).map(line => JSON.parse(line));
@@ -392,10 +398,51 @@ test("owned actual Codex PM retains genuine history and composer across Works re
     fixture = await startExactRelaunchFixture(info, {
       async prepare(context) {
         home = context.home;
-        await copyFile(join(homedir(), ".codex", "auth.json"), join(home, ".codex", "auth.json"));
-        await chmod(join(home, ".codex", "auth.json"), 0o600);
-        // Exec preserves PID and argv. Only the owned Session records its birth before exec.
-        await writeFixtureNodeCommand(context.bin, "codex", `#!/bin/sh\nif [ -n "$GWT_SESSION_ID" ]; then\n  owner="$HOME/native-owner.$$"\n  printf '%s\\n%s\\n%s\\n' "$$" "$GWT_SESSION_ID" "$PWD" > "$owner" || exit 1\n  ps -p $$ -o lstart= -o ppid= >> "$owner" || exit 1\n  ancestor=$$\n  while [ "$ancestor" -gt 1 ]; do\n    ancestor=$(ps -p "$ancestor" -o ppid= | tr -d ' ') || exit 1\n    [ -n "$ancestor" ] || exit 1\n    printf '%s\\n' "$ancestor" >> "$owner" || exit 1\n  done\n  mv "$owner" "$HOME/native-owner" || exit 1\nfi\nexec '${nativePath.replace(/'/g, "'\\''")}' "$@"\n`);
+        // Probes are argument-shaped: the Session environment may already
+        // exist during preflight, so it cannot distinguish an interactive run.
+        await writeFixtureNodeCommand(context.bin, "codex", `#!/bin/sh
+is_probe() {
+  [ "$#" -eq 1 ] && [ "$1" = "--version" ] && return 0
+  while [ "$#" -gt 2 ]; do
+    case "$1" in
+      --config|-c|--profile|-p|--enable|--disable) [ "$#" -ge 4 ] || return 1; shift 2 ;;
+      --config=*|--profile=*|--enable=*|--disable=*) shift ;;
+      *) return 1 ;;
+    esac
+  done
+  [ "$#" -eq 2 ] && [ "$1" = "features" ] && [ "$2" = "list" ]
+}
+if is_probe "$@"; then exec '${nativePath.replace(/'/g, "'\\''")}' "$@"; fi
+case "$GWT_SESSION_ID" in ????????-????-????-????-????????????) ;; *) exit 64 ;; esac
+umask 077
+child_birth=$(ps -p $$ -o lstart= | sed 's/^ *//;s/ *$//') || exit 65
+[ -n "$child_birth" ] || exit 65
+deadline=$(( $(date +%s) + 120 )) || exit 65
+record="$HOME/native-owner.$$"
+printf '%s\n%s\n%s\n%s\n%s\n' "$$" "$GWT_SESSION_ID" "$PWD" "$child_birth" "$deadline" > "$record" || exit 65
+ancestor=$$
+while [ "$ancestor" -gt 1 ]; do
+  ancestor=$(ps -p "$ancestor" -o ppid= | tr -d ' ') || exit 65
+  case "$ancestor" in ''|*[!0-9]*) exit 65 ;; esac
+  [ "$ancestor" -gt 0 ] || exit 65
+  birth=$(ps -p "$ancestor" -o lstart= | sed 's/^ *//;s/ *$//') || exit 65
+  [ -n "$birth" ] || exit 65
+  printf '%s|%s\n' "$ancestor" "$birth" >> "$record" || exit 65
+done
+mv "$record" "$HOME/native-owner" || exit 65
+expected="$GWT_SESSION_ID|$$|$child_birth|${gateNonce}"
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  if [ -f "$HOME/native-permission" ]; then
+    permission=$(cat "$HOME/native-permission") || exit 66
+    [ "$permission" = "$expected" ] || exit 66
+    rm "$HOME/native-permission" || exit 66
+    [ "$(date +%s)" -lt "$deadline" ] || exit 67
+    exec '${nativePath.replace(/'/g, "'\\''")}' "$@"
+  fi
+  sleep 0.1
+done
+exit 67
+`);
       },
       async beforeStart(context) {
         preferences = context.preferences;
@@ -420,26 +467,83 @@ test("owned actual Codex PM retains genuine history and composer across Works re
     await detail.locator('[data-action="select-pm"]').click();
     await expect(detail.locator('[data-action="select-pm"]')).toHaveText("Configured Project Manager");
     expect(JSON.parse(await readFile(join(preferences, "pm.json"), "utf8")).settings.launch_profile.agent_id).toBe("codex");
+    gateRequested = true;
     await sendLiveGwtEvent(page, { kind: "open_pm_agent" });
-    await expect.poll(async () => {
-      const prefs = JSON.parse(await readFile(join(preferences, "pm.json"), "utf8"));
-      session = prefs.registration?.session_id ?? "";
-      return session;
-    }, { timeout: 90_000 }).not.toBe("");
-    id = await page.waitForFunction(sessionId => {
-      const rows = (window as any).__gwtPlaywrightMessages ?? [];
-      const state = rows.findLast((row: any) => row.payload.kind === "workspace_state")?.payload.workspace;
-      const pane = state?.tabs.flatMap((tab: any) => tab.workspace.windows).find((row: any) => row.session_id === sessionId);
-      return pane?.is_pm && pane.agent_id === "codex" ? pane.id : null;
-    }, session, { timeout: 60_000 }).then(handle => handle.jsonValue());
-    await expect.poll(async () => (await readFile(join(home, "native-owner"), "utf8").catch(() => "")).split("\n").length, { timeout: 30_000 }).toBeGreaterThanOrEqual(5);
-    const [pidText, ownerSession, cwd, birthParent, ...ancestors] = (await readFile(join(home, "native-owner"), "utf8")).trim().split("\n");
-    const match = birthParent.trim().match(/^(.*?)\s+(\d+)$/)!;
-    captured = { pid: Number(pidText), session: ownerSession, cwd, birth: match[1], parent: match[2], ancestry: ancestors.map(Number) };
-    expect(captured.session).toBe(session);
+    await expect.poll(async () => (await readFile(join(home, "native-owner"), "utf8").catch(() => "")).split("\n").length,
+      { timeout: 60_000 }).toBeGreaterThanOrEqual(7);
+    const [pidText, ownerSession, cwd, birth, deadlineText, ...ancestors] = (await readFile(join(home, "native-owner"), "utf8")).trim().split("\n");
+    captured = { pid: Number(pidText), session: ownerSession, cwd, birth, deadline: Number(deadlineText),
+      ancestry: ancestors.map(line => { const split = line.indexOf("|"); return { pid: Number(line.slice(0, split)), birth: line.slice(split + 1) }; }) };
+    expect(captured.pid).toBeGreaterThan(0);
+    expect(captured.session).toMatch(/^[0-9a-f-]{36}$/i);
     expect(captured.cwd.startsWith(home + "/")).toBe(true);
+    expect(Number.isFinite(Date.parse(captured.birth))).toBe(true);
     expect(ps(captured.pid, "lstart=")).toBe(captured.birth);
-    expect(ownedNative(), "captured native PID and ancestry belong to this fixture").toBe(true);
+    session = captured.session;
+    const latestOwnActivity = (snapshots: any[], projectKey: string) => snapshots.filter(value => value?.project_key === projectKey).at(-1);
+    const matchesIdentity = (value: any, windowId: string, sessionId: string, incarnation?: number) =>
+      !!value?.host_id && Array.isArray(value.agents) && value.agents.some((agent: any) => agent.window_id === windowId
+        && agent.session_id === sessionId && agent.runtime_incarnation > 0
+        && (incarnation === undefined || agent.runtime_incarnation === incarnation));
+    const matching = { project_key: "probe", host_id: "host", agents: [{ window_id: "w", session_id: "s", runtime_incarnation: 1 }] };
+    for (const agents of [[], null, [{ window_id: "w", session_id: "replacement", runtime_incarnation: 2 }],
+      [{ window_id: "w", session_id: "s", runtime_incarnation: 2 }]]) {
+      expect(matchesIdentity(latestOwnActivity([matching, { ...matching, agents }], "probe"), "w", "s", 1)).toBe(false);
+    }
+    expect(matchesIdentity(latestOwnActivity([matching, { ...matching }], "probe"), "w", "s", 1)).toBe(true);
+    const projectKey = await page.evaluate(() => location.pathname.split("/")[2]);
+    const activity = async () => latestOwnActivity(await page.evaluate(() => ((window as any).__gwtPlaywrightMessages ?? [])
+      .map((row: any) => row.payload.kind === "local_agent_activity" ? row.payload.activity : row.payload.projection?.local_agent_activity)), projectKey);
+    await expect.poll(async () => {
+      const latest = await activity();
+      return Array.isArray(latest?.agents) && latest.agents.some((agent: any) => agent.session_id === session && agent.runtime_incarnation > 0);
+    }, { timeout: 60_000 }).toBe(true);
+    const initialActivity = await activity();
+    const censusAgent = initialActivity?.agents?.find((agent: any) => agent.session_id === session && agent.runtime_incarnation > 0);
+    expect(censusAgent).toBeTruthy();
+    id = censusAgent.window_id;
+    const incarnation = censusAgent.runtime_incarnation;
+    expect(matchesIdentity(initialActivity, id, session, incarnation)).toBe(true);
+    const host = /^(\d+):(\d+)$/.exec(initialActivity.host_id);
+    expect(host).not.toBeNull();
+    const hostPid = Number(host![1]), hostBirth = Number(host![2]);
+    expect(hostPid).toBeGreaterThan(0);
+    expect(hostBirth).toBeGreaterThan(0);
+    const ownerAncestor = captured.ancestry.find(item => item.pid === hostPid);
+    expect(ownerAncestor).toBeTruthy();
+    expect(Math.floor(Date.parse(ownerAncestor!.birth) / 1000)).toBe(hostBirth);
+    expect(ps(hostPid, "lstart=")).toBe(ownerAncestor!.birth);
+    const runtimePath = join(home, ".gwt", "sessions", "runtime", String(hostPid), `${session}.json`);
+    const runtime = async () => JSON.parse(await readFile(runtimePath, "utf8"));
+    await expect.poll(async () => (await runtime().catch(() => ({}))).child_pid, { timeout: 30_000 }).toBe(captured!.pid);
+    const initialRuntime = await runtime();
+    expect(initialRuntime.runtime_incarnation).toBe(incarnation);
+    expect(initialRuntime.host_started_at).toBe(hostBirth);
+    expect(initialRuntime.child_started_at).toBe(Math.floor(Date.parse(captured.birth) / 1000));
+    expect(matchesIdentity(await activity(), id, session, incarnation)).toBe(true);
+    expect((await activity()).host_id).toBe(initialActivity.host_id);
+    qualified = { hostPid, hostBirth, session, incarnation, childStartedAt: initialRuntime.child_started_at };
+    expect(Math.floor(Date.now() / 1000)).toBeLessThan(captured.deadline);
+    await access(join(homedir(), ".codex", "auth.json"));
+    await copyFile(join(homedir(), ".codex", "auth.json"), join(home, ".codex", "auth.json"));
+    await chmod(join(home, ".codex", "auth.json"), 0o600);
+    expect(Math.floor(Date.now() / 1000)).toBeLessThan(captured.deadline);
+    const releaseActivity = await activity();
+    expect(matchesIdentity(releaseActivity, id, session, incarnation)).toBe(true);
+    expect(releaseActivity.host_id).toBe(initialActivity.host_id);
+    expect(await runtime()).toMatchObject({ host_started_at: hostBirth, child_pid: captured.pid,
+      child_started_at: initialRuntime.child_started_at, runtime_incarnation: incarnation });
+    expect(ps(captured.pid, "lstart=")).toBe(captured.birth);
+    const permission = `${session}|${captured.pid}|${captured.birth}|${gateNonce}`;
+    const permissionTemp = join(home, "native-permission.pending");
+    await writeFile(permissionTemp, permission, { mode: 0o600, flag: "wx" });
+    await rename(permissionTemp, join(home, "native-permission"));
+    await expect.poll(() => ownedNative(), { timeout: 30_000 }).toBe(true);
+    const releasedVersion = spawnSync(nativePath, ["--version"], { encoding: "utf8" });
+    if (releasedVersion.error) throw releasedVersion.error;
+    expect(releasedVersion.status).toBe(0);
+    expect(releasedVersion.stdout.trim()).toBe(version.stdout.trim());
+    expect(createHash("sha256").update(await readFile(nativePath)).digest("hex")).toBe(hash);
     monitoring = true;
     monitor = (async () => {
       while (monitoring) {
@@ -452,32 +556,16 @@ test("owned actual Codex PM retains genuine history and composer across Works re
         await new Promise(resolve => setTimeout(resolve, 100));
       }
     })().catch(error => { monitorError = error; });
-    const latestOwnActivity = (snapshots: any[], projectKey: string) => snapshots.filter(value => value?.project_key === projectKey).at(-1);
-    const matchesIdentity = (value: any, windowId: string, sessionId: string, incarnation?: number) =>
-      !!value?.host_id && Array.isArray(value.agents) && value.agents.some((agent: any) => agent.window_id === windowId
-        && agent.session_id === sessionId && agent.runtime_incarnation > 0
-        && (incarnation === undefined || agent.runtime_incarnation === incarnation));
-    // A newer full census must never fall back to the older matching census.
-    const matching = { project_key: "probe", host_id: "host", agents: [{ window_id: "w", session_id: "s", runtime_incarnation: 1 }] };
-    for (const agents of [[], null, [{ window_id: "w", session_id: "replacement", runtime_incarnation: 2 }],
-      [{ window_id: "w", session_id: "s", runtime_incarnation: 2 }]]) {
-      expect(matchesIdentity(latestOwnActivity([matching, { ...matching, agents }], "probe"), "w", "s", 1)).toBe(false);
-    }
-    expect(matchesIdentity(latestOwnActivity([matching, { ...matching }], "probe"), "w", "s", 1)).toBe(true);
-    const projectKey = await page.evaluate(() => location.pathname.split("/")[2]);
-    const activity = async () => latestOwnActivity(await page.evaluate(() => ((window as any).__gwtPlaywrightMessages ?? [])
-      .map((row: any) => row.payload.kind === "local_agent_activity" ? row.payload.activity : row.payload.projection?.local_agent_activity)), projectKey);
-    await expect.poll(async () => matchesIdentity(await activity(), id, session), { timeout: 60_000 }).toBe(true);
-    const initialActivity = await activity();
-    expect(matchesIdentity(initialActivity, id, session)).toBe(true);
-    const incarnation = initialActivity.agents.find((agent: any) => agent.window_id === id && agent.session_id === session).runtime_incarnation;
-    const runtimePath = join(home, ".gwt", "sessions", "runtime", String(ownedGuiPid), `${session}.json`);
-    const runtime = async () => JSON.parse(await readFile(runtimePath, "utf8"));
-    await expect.poll(async () => (await runtime().catch(() => ({}))).child_pid, { timeout: 30_000 }).toBe(captured!.pid);
-    const initialRuntime = await runtime();
-    expect(initialRuntime.runtime_incarnation).toBe(incarnation);
-    expect(initialRuntime.child_started_at).toBeGreaterThan(0);
-    expect(initialRuntime.host_started_at).toBeGreaterThan(0);
+    await expect.poll(async () => {
+      const prefs = JSON.parse(await readFile(join(preferences, "pm.json"), "utf8"));
+      return prefs.registration?.session_id ?? "";
+    }, { timeout: 60_000 }).toBe(session);
+    await page.waitForFunction(({ sessionId, id }) => {
+      const rows = (window as any).__gwtPlaywrightMessages ?? [];
+      const state = rows.findLast((row: any) => row.payload.kind === "workspace_state")?.payload.workspace;
+      const pane = state?.tabs.flatMap((tab: any) => tab.workspace.windows).find((row: any) => row.session_id === sessionId && row.id === id);
+      return !!pane?.is_pm && pane.agent_id === "codex";
+    }, { sessionId: session, id }, { timeout: 60_000 });
     await page.locator("#op-pm-entry").click();
     const pm = page.locator(`.workspace-window[data-id="${id}"]`);
     await pm.getByRole("button", { name: "Execution log", exact: true }).click();
@@ -487,6 +575,12 @@ test("owned actual Codex PM retains genuine history and composer across Works re
     const input = pm.locator(".xterm-helper-textarea");
     await input.focus();
     const marker = `GWT4777${randomBytes(8).toString("hex").toUpperCase()}`;
+    const preTurnActivity = await activity();
+    expect(matchesIdentity(preTurnActivity, id, session, incarnation)).toBe(true);
+    expect(preTurnActivity.host_id).toBe(initialActivity.host_id);
+    expect(await runtime()).toMatchObject({ host_started_at: hostBirth, child_pid: captured.pid,
+      child_started_at: initialRuntime.child_started_at, runtime_incarnation: incarnation });
+    expect(ownedNative()).toBe(true);
     await page.keyboard.type(`Reply with exactly 64 lines numbered 01 through 64. Each line must contain ${marker} immediately followed by its two-digit number without spaces. Do not use tools.`);
     const beforeOutput = received.length;
     // Submit and leave in one browser task: no asynchronous provider response
@@ -580,9 +674,8 @@ test("owned actual Codex PM retains genuine history and composer across Works re
     expect(finalVersion.status).toBe(0);
     expect(finalVersion.stdout.trim()).toBe(version.stdout.trim());
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-    expect(errors).toEqual([]);
     await info.attach(`actual-pm-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
-    await info.attach("actual-pm-identity", { body: JSON.stringify({ theme, session, id, host: initialActivity.host_id, incarnation, nativePath, hash, version: version.stdout.trim(), pid: captured.pid, birth: captured.birth, parent: captured.parent, ancestry: captured.ancestry, cwd: captured.cwd, childStartedAt: initialRuntime.child_started_at, hostStartedAt: initialRuntime.host_started_at }), contentType: "application/json" });
+    await info.attach("actual-pm-identity", { body: JSON.stringify({ theme, session, id, host: initialActivity.host_id, incarnation, nativePath, hash, version: version.stdout.trim(), pid: captured.pid, birth: captured.birth, ancestry: captured.ancestry, cwd: captured.cwd, childStartedAt: initialRuntime.child_started_at, hostStartedAt: initialRuntime.host_started_at }), contentType: "application/json" });
   } catch (error) {
     primaryError = error;
   } finally {
@@ -591,10 +684,10 @@ test("owned actual Codex PM retains genuine history and composer across Works re
     try {
       // Never infer ownership from a name alone; an exact birth and executable
       // must still match the record made before exec before sending a signal.
-      if (!captured && home) {
-        const lines = (await readFile(join(home, "native-owner"), "utf8").catch(() => "")).trim().split("\n");
-        const match = lines[3]?.trim().match(/^(.*?)\s+(\d+)$/);
-        if (match && ownedGuiPid) captured = { pid: Number(lines[0]), session: lines[1], cwd: lines[2], birth: match[1], parent: match[2], ancestry: lines.slice(4).map(Number) };
+      if (!captured && gateRequested) {
+        // No complete pre-exec record means no exact child can be signalled or
+        // declared exited. The wrapper deadline remains fail-closed.
+        cleanupErrors.push(new Error("Gate child identity unavailable; cleanup is unknown"));
       }
       if (captured && ownedNative()) {
         process.kill(captured.pid, "SIGTERM");
@@ -606,6 +699,13 @@ test("owned actual Codex PM retains genuine history and composer across Works re
     } finally {
       monitoring = false;
       try { await monitor; } catch (error) { cleanupErrors.push(error); }
+      if (monitor) {
+        try {
+          const finalRows = await nativeRows(join(home, ".codex", "sessions"), true);
+          if (!finalRows.length) throw new Error("Native rollout missing during final scan");
+          if (finalRows.some(row => row.type === "response_item" && typeof row.payload?.type === "string" && row.payload.type.endsWith("_call"))) unexpectedTool = true;
+        } catch (error) { cleanupErrors.push(error); }
+      }
       try { if (home) await rm(join(home, ".codex", "auth.json"), { force: true }); }
       catch (error) { cleanupErrors.push(error); }
     }
@@ -613,6 +713,7 @@ test("owned actual Codex PM retains genuine history and composer across Works re
     // after joining and cleanup so a late tool call cannot become a pass.
     if (unexpectedTool) cleanupErrors.push(new Error("Unexpected native tool call observed"));
     if (monitorError) cleanupErrors.push(monitorError);
+    if (errors.length) cleanupErrors.push(new Error(`Console/page errors including cleanup: ${JSON.stringify(errors)}`));
   }
   if (primaryError || cleanupErrors.length) throw new AggregateError(
     [...(primaryError ? [primaryError] : []), ...cleanupErrors], "Owned PM proof or cleanup failed");
