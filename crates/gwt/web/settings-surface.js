@@ -930,13 +930,19 @@ export function createSettingsSurface({
       let nextHookDoctorRequest = 0;
       function requestHookDoctor(projectRoot, repair = false, recovering = false) {
         if (!projectRoot || projectRoot !== activeProjectTab()?.project_root) return;
-        if (repair && hookRepairUnavailableReason(hookDoctorModel.read()[projectRoot])) return;
-        if (!recovering && hookDoctorModel.read()[projectRoot]?.pending) return;
+        const current = hookDoctorModel.read()[projectRoot];
+        if (repair && hookRepairUnavailableReason(current)) return;
+        if (!recovering && current?.pending) return;
         const requestId = ++nextHookDoctorRequest;
         hookDoctorModel.update(state => ({ ...state, [projectRoot]: {
           report: null, error: null, requestId, pending: true, repairRequested: repair,
+          lastRepairOutcome: repair ? "unknown" : current?.lastRepairOutcome ?? null,
         } }));
-        send({ kind: "get_hook_doctor", request_id: requestId, repair });
+        const result = send({ kind: "get_hook_doctor", request_id: requestId, repair });
+        if (repair && result === "unavailable") hookDoctorModel.update(state => ({ ...state, [projectRoot]: {
+          ...state[projectRoot], pending: false,
+          error: "Repair could not be confirmed on this connection. Reconnect and refresh the audit; the repair will not be retried automatically.",
+        } }));
       }
       function applyHookDoctorEvent(event) {
         const current = hookDoctorModel.read()[event.project_root];
@@ -944,6 +950,10 @@ export function createSettingsSurface({
         hookDoctorModel.update(state => ({ ...state, [event.project_root]: {
           ...current, pending: false, report: event.report || null,
           error: event.error || (event.report ? null : "Hook audit did not return a report."),
+          lastRepairOutcome: current.repairRequested
+            ? !event.error && event.report?.repair?.repaired === true ? "regenerated"
+              : !event.error && event.report?.repair?.repaired === false ? "no_changes" : "unknown"
+            : current.lastRepairOutcome,
         } }));
       }
       function renderHookCenterPanels(state = hookDoctorModel.read()) {

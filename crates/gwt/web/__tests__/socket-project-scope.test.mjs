@@ -526,6 +526,27 @@ test("switch mutations never queue or replay, and a closed-socket race retains a
 });
 
 
+test("Hook Doctor repair uses only the current live socket and never queues a replay", () => {
+  const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
+  context.connectSocket();
+  sockets[1].open();
+  const repair = { kind: "get_hook_doctor", request_id: 1, repair: true };
+  assert.equal(context.send(repair), "sent");
+  assert.deepEqual(sockets[1].sent.at(-1), repair, "a live explicit repair is allowed");
+  sockets[1].close();
+  assert.equal(context.send(repair), "unavailable");
+  assert.equal(context.pendingMessages.length, 0);
+  context.connectSocket();
+  sockets.at(-1).open();
+  assert.ok(sockets.at(-1).sent.every(message => message.kind !== "get_hook_doctor" || message.repair !== true));
+  context.socketProjectKey = projectB.project_key;
+  assert.equal(context.send(repair), "unavailable", "repair cannot use another project's socket");
+  context.socketProjectKey = projectA.project_key;
+  sockets.at(-1).send = () => { throw new Error("connection closed during repair send"); };
+  assert.doesNotThrow(() => assert.equal(context.send(repair), "unavailable"));
+  assert.equal(context.pendingMessages.length, 0, "a failed send is never retried after reconnect");
+});
+
 test("first project connection reads saved Works settings without a Settings host", () => {
   const { sockets, select } = fixture();
   select("0123456789abcdef"); sockets.at(-1).open();

@@ -623,6 +623,20 @@ impl BlockingTaskSpawner {
     }
 }
 
+struct HookDoctorFlight {
+    in_flight: Arc<Mutex<HashSet<PathBuf>>>,
+    project_root: PathBuf,
+}
+
+impl Drop for HookDoctorFlight {
+    fn drop(&mut self) {
+        self.in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.project_root);
+    }
+}
+
 static NEXT_WINDOW_RUNTIME_INCARNATION: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(1);
 
@@ -2013,6 +2027,7 @@ pub struct AppRuntime {
     pub(crate) project_log_scopes: HashMap<String, gwt_core::logging::ProjectLogScope>,
     pub(crate) proxy: AppEventProxy,
     pub(crate) blocking_tasks: BlockingTaskSpawner,
+    pub(crate) hook_doctor_in_flight: Arc<Mutex<HashSet<PathBuf>>>,
     pub(crate) agent_maintenance: agent_maintenance::AgentMaintenanceState,
     pub(crate) sessions_dir: PathBuf,
     pub(crate) launch_wizard_cache: LaunchWizardMemoryCache,
@@ -4906,6 +4921,7 @@ impl AppRuntime {
             project_log_scopes: HashMap::new(),
             proxy,
             blocking_tasks,
+            hook_doctor_in_flight: Default::default(),
             agent_maintenance: Default::default(),
             sessions_dir,
             launch_wizard_cache,
@@ -10912,11 +10928,35 @@ impl AppRuntime {
         client_id: ClientId,
         request_id: u64,
         repair: bool,
-    ) {
+    ) -> Vec<OutboundEvent> {
         let project_root = context.project_root.clone();
+        if !self
+            .hook_doctor_in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(project_root.clone())
+        {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::HookDoctor {
+                    project_root: project_root.to_string_lossy().into_owned(),
+                    request_id,
+                    report: None,
+                    error: Some("Hook audit or regeneration is already in progress for this project. Retry after it finishes.".to_string()),
+                },
+            )];
+        }
+        // Own the reservation before enqueue so a rejected or discarded task
+        // releases it as well as a completed or unwinding worker.
+        let flight = HookDoctorFlight {
+            in_flight: Arc::clone(&self.hook_doctor_in_flight),
+            project_root: project_root.clone(),
+        };
         let proxy = self.proxy.for_project(context.clone());
-        self.blocking_tasks.spawn(move || {
-            let mut input = gwt::cli::hook::health::ManagedHookHealthInput::new(&project_root);
+        let worker_root = project_root.clone();
+        let worker_client = client_id.clone();
+        if let Err(error) = self.blocking_tasks.try_spawn(move || {
+            let mut input = gwt::cli::hook::health::ManagedHookHealthInput::new(&worker_root);
             // This is a project audit, not an observation of the GUI parent's
             // agent Session or its runtime sidecar.
             input.runtime_state_path = None;
@@ -10925,16 +10965,28 @@ impl AppRuntime {
                     Ok(report) => (Some(report), None),
                     Err(error) => (None, Some(error.to_string())),
                 };
+            drop(flight);
             proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
-                client_id,
+                worker_client,
                 BackendEvent::HookDoctor {
-                    project_root: project_root.to_string_lossy().into_owned(),
+                    project_root: worker_root.to_string_lossy().into_owned(),
                     request_id,
                     report,
                     error,
                 },
             )]));
-        });
+        }) {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::HookDoctor {
+                    project_root: project_root.to_string_lossy().into_owned(),
+                    request_id,
+                    report: None,
+                    error: Some(format!("Hook audit worker could not start: {error}")),
+                },
+            )];
+        }
+        Vec::new()
     }
 
     fn spawn_agent_backend_connection_probe(
@@ -12474,8 +12526,7 @@ impl AppRuntime {
                 self.update_settings_event(Some(&context.project_root)),
             )],
             FrontendEvent::GetHookDoctor { request_id, repair } => {
-                self.spawn_hook_doctor(context, client_id, request_id, repair);
-                Vec::new()
+                self.spawn_hook_doctor(context, client_id, request_id, repair)
             }
             FrontendEvent::GetSystemSettings => self.system_settings_get_events(client_id),
             FrontendEvent::GetBoardAuthStatus => self.board_auth_status_events(client_id, None),

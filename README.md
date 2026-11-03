@@ -1403,6 +1403,10 @@ regeneration does not upgrade running sessions. An unknown binary observation
 does not imply trust or successful hook execution.
 If an audit reports invalid or unreadable configuration, fix the listed file
 and refresh the audit before regeneration is available.
+Repairs require the live project connection and are never replayed after
+reconnect. A lost repair reply leaves the outcome Unknown; a read-only refresh
+does not confirm completion. The latest audit and last repair outcome are shown
+separately.
 
 If an agent stop or pane close reports unread Board evidence, read the bodies
 in that same agent session with JSON operation `board.show` and

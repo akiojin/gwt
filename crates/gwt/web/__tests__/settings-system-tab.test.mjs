@@ -77,7 +77,7 @@ function createSettingsHarness({ scheduleFrame, onSend, activeProjectTab = () =>
   const surface = factory({
     scheduleFrame: frameScheduler,
     rosterModel,
-    send: message => { onSend?.(message); sent.push(message); },
+    send: message => { const result = onSend?.(message); sent.push(message); return result; },
     createNode(tag, className, text) {
       const node = document.createElement(tag);
       if (className) node.className = className;
@@ -165,7 +165,31 @@ test("Hook Center correlates immutable replies and keeps repair explicit through
   surface.applyHookDoctorEvent({ kind: "hook_doctor", project_root: "/projects/A", request_id: 5, report: { ...report, repair: { repaired: true } }, error: null });
   flush();
   assert.match(panel.textContent, /Managed configuration regenerated/);
+  assert.equal(surface.hookDoctorModel.read()["/projects/A"].lastRepairOutcome, "regenerated");
+  panel.querySelector('[data-action="refresh-hook-audit"]').click();
+  surface.applyHookDoctorEvent({ kind: "hook_doctor", project_root: "/projects/A", request_id: 6, report, error: null });
+  flush();
+  assert.match(panel.textContent, /Latest audit: Read-only/);
+  assert.match(panel.textContent, /Last repair: Managed configuration regenerated/);
+  assert.equal(surface.hookDoctorModel.read()["/projects/A"].lastRepairOutcome, "regenerated", "a later audit preserves the confirmed repair outcome");
   assert.match(panel.textContent, /Trust registration and a new agent session require separate verification/);
+});
+
+test("Hook Center unavailable repair send clears pending and reports its unconfirmed outcome", () => {
+  const { surface, body, flush } = createSettingsHarness({ onSend: message => message.kind === "get_hook_doctor" && message.repair ? "unavailable" : "sent" });
+  surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
+  body.querySelector('[data-settings-tab="hooks"]').click();
+  surface.applyHookDoctorEvent({ kind: "hook_doctor", project_root: "/projects/A", request_id: 1,
+    report: { health: { status: "ready" }, repair: null }, error: null });
+  flush();
+  const panel = body.querySelector('[data-settings-panel="hooks"]');
+  panel.querySelector('[data-action="repair-managed-hooks"]').click();
+  assert.equal(surface.hookDoctorModel.read()["/projects/A"].pending, false);
+  assert.equal(surface.hookDoctorModel.read()["/projects/A"].lastRepairOutcome, "unknown");
+  flush();
+  assert.match(panel.querySelector('[role="alert"]').textContent, /Reconnect and refresh/);
+  assert.match(panel.textContent, /will not be retried automatically/);
+  assert.equal(panel.querySelector('[data-action="refresh-hook-audit"]').disabled, false);
 });
 
 test("Hook Center has no audit or repair authority without an active project", () => {
@@ -213,7 +237,10 @@ test("Hook Center reconnect recovers pending reads independently of mounted view
   reply(4, { health: { status: "ready" }, repair: null });
   flush();
   assert.equal(surface.hookDoctorModel.read()["/projects/A"].pending, false);
-  assert.match(panel.textContent, /No repair requested/);
+  assert.equal(surface.hookDoctorModel.read()["/projects/A"].lastRepairOutcome, "unknown");
+  assert.match(panel.textContent, /Last repair: Outcome unknown/);
+  assert.match(panel.textContent, /Latest audit: Read-only/);
+  assert.doesNotMatch(panel.textContent, /No repair requested/);
   hooks.click();
   assert.equal(requests().at(-1).request_id, 5);
   body.remove();
@@ -234,6 +261,8 @@ test("Hook Center reconnect recovers pending reads independently of mounted view
   reply(7, { health: { status: "ready" }, repair: null });
   flush();
   assert.equal(reopened.querySelector('[data-settings-panel="hooks"]').dataset.hookAuditStatus, "loaded");
+  assert.equal(surface.hookDoctorModel.read()["/projects/A"].lastRepairOutcome, "unknown", "read recovery and reopening cannot clear an unconfirmed repair");
+  assert.match(reopened.textContent, /Last repair: Outcome unknown/);
 });
 
 test("Custom Agent replies commit immutable snapshots shared by all mounts and registration catalogs", () => {

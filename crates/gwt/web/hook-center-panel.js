@@ -65,6 +65,9 @@ export function renderHookCenterPanel(panel, { projectRoot, state = {}, availabl
     node(overview, "p", "settings-help", projectRoot ? "Switch to this project to audit managed hooks." : "Open a project to audit managed hooks.");
     return;
   }
+  if (state.lastRepairOutcome === "unknown" && !(state.pending && state.repairRequested)) {
+    node(overview, "p", "settings-help", "Repair outcome unknown. The previous request may still be running; this audit does not confirm completion. Refresh the audit before deciding whether to try regeneration again.");
+  }
   if (state.pending) {
     node(overview, "p", "settings-status", state.repairRequested ? "Regenerating managed hook configuration…" : "Loading hook audit…").setAttribute("role", "status");
     return;
@@ -130,8 +133,9 @@ export function renderHookCenterPanel(panel, { projectRoot, state = {}, availabl
   }
   const repair = section("Managed configuration repair");
   node(repair, "p", "settings-help", "Trust registration and a new agent session require separate verification. Regeneration does not confirm trust, launch success, or adoption by running sessions.");
-  field(repair, "Last request", report.repair == null ? "No repair requested" : report.repair.repaired === true
-    ? "Managed configuration regenerated" : "No managed configuration changes reported");
+  field(repair, "Latest audit", report.repair == null ? "Read-only" : "Included regeneration request");
+  field(repair, "Last repair", ({ unknown: "Outcome unknown", regenerated: "Managed configuration regenerated",
+    no_changes: "No managed configuration changes reported" })[state.lastRepairOutcome] || "No repair requested in this view");
   const plan = report.repair_plan;
   if (!plan) node(repair, "p", "settings-help", "Repair plan unavailable.");
   else {

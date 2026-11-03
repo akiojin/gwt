@@ -1,5 +1,6 @@
 import { test, expect } from "@playwright/test";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { gotoLiveGwt, withLiveGwtBackendLock, sendLiveGwtEvent } from "./_helpers/live-gwt";
 
 test("Hook Center audits and regenerates the selected project's managed configuration", async ({ page }, info) => {
@@ -73,20 +74,43 @@ test("Hook Center audits and regenerates the selected project's managed configur
     await expect.poll(async () => (await latest())?.request_id).toBeGreaterThan(beforeReconnect.request_id);
     await expect(panel).toHaveAttribute("data-hook-audit-status", "loaded");
     expect((await latest()).report.repair).toBeNull();
-    const beforeRepair = await latest();
-    await panel.getByRole("button", { name: "Regenerate managed hooks", exact: true }).click();
-    await expect.poll(async () => (await latest())?.request_id).toBeGreaterThan(beforeRepair.request_id);
-    await expect(panel).toHaveAttribute("data-hook-audit-status", "loaded");
-    const repaired = await latest();
-    expect(repaired.error).toBeNull();
-    expect(repaired.report.repair.repaired).toBe(true);
-    await expect(panel).toContainText("Managed configuration regenerated");
-    await expect(panel).toContainText("Regeneration does not confirm trust, launch success, or adoption by running sessions");
-    await panel.getByRole("button", { name: "Refresh audit", exact: true }).click();
-    await expect.poll(async () => (await latest())?.request_id).toBeGreaterThan(repaired.request_id);
-    await expect(panel).toHaveAttribute("data-hook-audit-status", "loaded");
-    expect((await latest()).report.repair).toBeNull();
-    await expect(panel).toContainText("No repair requested");
+    // Alter one worktree-local managed command, never the shared asset root.
+    const localConfigPath = join(root!, ".codex", "hooks.json");
+    expect(await realpath(localConfigPath)).toBe(join(await realpath(root!), ".codex", "hooks.json"));
+    const localOriginal = originals.get(localConfigPath);
+    expect(localOriginal, "the audited local Codex config must have saved expected bytes").toBeDefined();
+    const originalText = localOriginal!.bytes.toString("utf8");
+    const localConfig = JSON.parse(originalText);
+    const managedStop = localConfig.hooks.Stop.flatMap((group: any) => group.hooks || [])
+      .find((hook: any) => hook.type === "command" && typeof hook.command === "string" && hook.command.includes(" hook event Stop"));
+    expect(managedStop, "only a recognized managed Stop command may receive drift").toBeDefined();
+    const commandLiteral = JSON.stringify(managedStop.command);
+    expect(originalText).toContain(commandLiteral);
+    const drift = originalText.replace(commandLiteral, JSON.stringify(`${managedStop.command} `));
+    expect(drift).not.toBe(originalText);
+    expect(JSON.parse(drift).hooks.Stop).toBeDefined();
+    try {
+      await writeFile(localConfigPath, drift);
+      expect(await readFile(localConfigPath, "utf8")).toBe(drift);
+      const beforeRepair = await latest();
+      await panel.getByRole("button", { name: "Regenerate managed hooks", exact: true }).click();
+      await expect.poll(async () => (await latest())?.request_id).toBeGreaterThan(beforeRepair.request_id);
+      await expect(panel).toHaveAttribute("data-hook-audit-status", "loaded");
+      const repaired = await latest();
+      expect(repaired.error).toBeNull();
+      expect(repaired.report.repair.repaired).toBe(true);
+      expect(await readFile(localConfigPath)).toEqual(localOriginal!.bytes);
+      await expect(panel).toContainText("Last repair: Managed configuration regenerated");
+      await expect(panel).toContainText("Regeneration does not confirm trust, launch success, or adoption by running sessions");
+      await panel.getByRole("button", { name: "Refresh audit", exact: true }).click();
+      await expect.poll(async () => (await latest())?.request_id).toBeGreaterThan(repaired.request_id);
+      await expect(panel).toHaveAttribute("data-hook-audit-status", "loaded");
+      expect((await latest()).report.repair).toBeNull();
+      await expect(panel).toContainText("Latest audit: Read-only");
+      await expect(panel).toContainText("Last repair: Managed configuration regenerated");
+    } finally {
+      await writeFile(localConfigPath, localOriginal!.bytes);
+    }
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
     for (const name of ["Configuration and binaries", "Codex discovery and trust", "Managed configuration repair"]) {
       const heading = panel.getByRole("heading", { name, exact: true });

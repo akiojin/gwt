@@ -1272,6 +1272,9 @@ Board reminders、discussion/plan/build Stop checks、coordination-event summari
 バイナリ観測が Unknown の場合も、信頼済み・hook 実行成功とは扱いません。
 不正または読み取り不能の設定を検出した場合は、表示されたファイルを修正し、
 監査を更新するまで再生成は無効になります。
+修復は接続中のプロジェクトへだけ送信し、再接続後に自動再送しません。
+修復の応答を失った場合は結果を Unknown として保持し、監査の更新だけでは完了扱いにしません。
+最新の監査と前回の修復結果は別々に表示します。
 
 agent の停止や pane close が Board の未読を報告した場合は、同じ agent session で
 JSON operation `board.show` に `params:{"all":true}` を渡して本文を読み、再試行します。

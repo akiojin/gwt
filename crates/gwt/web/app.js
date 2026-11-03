@@ -900,10 +900,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           connectionOverlay.reportInputDropped();
           return "unavailable";
         }
-        // Revisioned names and switches belong to this live connection.
+        // These explicit writes belong to this live connection.
         // Never replay an unacknowledged write after reconnect.
         if ((message.kind === "agent_switch" && message.action.kind !== "read") ||
-            (message.kind === "agent_roster" && message.action.kind === "rename")) {
+            (message.kind === "agent_roster" && message.action.kind === "rename") ||
+            (message.kind === "get_hook_doctor" && message.repair === true)) {
           if (!socket || socket.readyState !== WebSocket.OPEN || socketProjectKey !== activeProjectKey()) return "unavailable";
           try { socket.send(JSON.stringify(message)); return "sent"; } catch (_err) { return "unavailable"; }
         }

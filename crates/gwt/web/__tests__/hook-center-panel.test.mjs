@@ -37,6 +37,7 @@ test("Hook Center renders observations, exact trust gaps and unexecuted repair s
   assert.match(panel.textContent, /does not imply managed or trusted/);
   assert.match(panel.textContent, /GUI caller.*agent session/s);
   assert.match(panel.textContent, /No repair requested/);
+  assert.match(panel.textContent, /Latest audit: Read-only/);
   assert.equal(panel.querySelectorAll("script").length, 0);
   assert.equal(panel.querySelectorAll('input[type="checkbox"]').length, 0, "profile inspection does not opt in collection");
 });
