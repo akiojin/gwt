@@ -2300,12 +2300,8 @@ enum UserEvent {
         data: Vec<u8>,
     },
     AttachmentPromptReady {
-        client_id: ClientId,
-        window_id: String,
-        operation_id: String,
+        operation: Box<app_runtime::AttachmentOperation>,
         prompt: String,
-        file_count: usize,
-        filename: Option<String>,
     },
     LaunchWizardRuntimeResolved {
         wizard_id: String,
@@ -10891,6 +10887,9 @@ fn main() -> std::io::Result<()> {
                 if let Some(id) = input_window {
                     let owner = app.project_key_for_window(id);
                     if !browser_project_input_allowed(Some(&scope), owner) {
+                        if let Some(events) = app.rejected_attachment_request(&client_id, &event) {
+                            clients.dispatch(events);
+                        }
                         return;
                     }
                 } else if matches!(scope, app_runtime::ClientScope::Hub)
@@ -11413,22 +11412,8 @@ fn main() -> std::io::Result<()> {
                     )]);
                 }
             }
-            Event::UserEvent(UserEvent::AttachmentPromptReady {
-                client_id,
-                window_id,
-                operation_id,
-                prompt,
-                file_count,
-                filename,
-            }) => {
-                let events = app.inject_attachment_prompt_events(
-                    client_id,
-                    window_id,
-                    operation_id,
-                    prompt,
-                    file_count,
-                    filename,
-                );
+            Event::UserEvent(UserEvent::AttachmentPromptReady { operation, prompt }) => {
+                let events = app.inject_attachment_prompt_events(*operation, prompt);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::LaunchWizardRuntimeResolved { wizard_id, result }) => {

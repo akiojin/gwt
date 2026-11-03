@@ -610,6 +610,10 @@ pub(crate) enum OwnerMessage {
         result: Result<(), String>,
         ack: mpsc::Sender<()>,
     },
+    AttachmentInputWritten {
+        reply: oneshot::Sender<OwnerReply>,
+        receipt: super::events::OwnerAttachmentInputReceipt,
+    },
     InputWritten {
         reply: oneshot::Sender<OwnerReply>,
         result: Result<Option<super::events::OwnerInputObservation>, String>,
@@ -1880,6 +1884,11 @@ impl OwnerState {
                         }
                     }
                 }
+                OwnerMessage::AttachmentInputWritten { reply, receipt } => {
+                    self.input_jobs -= 1;
+                    let _ = reply
+                        .send(serde_json::to_value(receipt).map_err(|error| error.to_string()));
+                }
                 OwnerMessage::InputWritten { reply, result } => {
                     self.input_jobs -= 1;
                     let _ = reply.send(
@@ -2552,6 +2561,81 @@ impl OwnerState {
             });
             return;
         }
+        if let OwnerCommand::AttachmentInput {
+            id,
+            incarnation,
+            session_id,
+            data,
+        } = request.command
+        {
+            use super::events::{
+                OwnerAttachmentInputOutcome as Outcome, OwnerAttachmentInputReason as Reason,
+                OwnerAttachmentInputReceipt,
+            };
+            let mut receipt = OwnerAttachmentInputReceipt {
+                tag: "attachment_input_receipt".into(),
+                schema_version: 1,
+                pane_id: id.clone(),
+                incarnation,
+                session_id: session_id.clone(),
+                outcome: Outcome::NotStarted,
+                reason: Some(Reason::TargetUnavailable),
+                input_observation: None,
+            };
+            let captured = self.exact(&id, incarnation).and_then(|runtime| {
+                let agent = runtime
+                    .agent
+                    .as_ref()
+                    .filter(|agent| {
+                        !session_id.is_empty()
+                            && agent.active.session_id == session_id
+                            && agent.current.load(Ordering::Acquire)
+                    })
+                    .ok_or("attachment Agent Session unavailable")?;
+                let writers = self.pty_writers.read().map_err(|error| error.to_string())?;
+                let entry = writers
+                    .get(&id)
+                    .filter(|entry| {
+                        entry.current.load(Ordering::Acquire)
+                            && Arc::ptr_eq(&entry.current, &runtime.current)
+                            && Arc::ptr_eq(&entry.handle, &runtime.pty)
+                    })
+                    .cloned()
+                    .ok_or("attachment physical writer unavailable")?;
+                Ok((entry, agent.current.clone()))
+            });
+            match captured {
+                Err(_) => {
+                    let _ = reply
+                        .send(serde_json::to_value(receipt).map_err(|error| error.to_string()));
+                }
+                Ok((entry, session_current)) => {
+                    self.begin_policy_input(&id, &data);
+                    self.input_jobs += 1;
+                    let writers = self.pty_writers.clone();
+                    let sender = self.sender.clone();
+                    spawn_owner_worker(move || {
+                        receipt.outcome = super::agent_dispatch::write_current_attachment_input(
+                            &writers,
+                            &id,
+                            &entry,
+                            &session_current,
+                            &data,
+                        );
+                        receipt.reason = match receipt.outcome {
+                            Outcome::Written => None,
+                            Outcome::NotStarted => Some(Reason::WriterUnavailable),
+                            Outcome::OutcomeUnknown => Some(Reason::WriteUncertain),
+                        };
+                        receipt.input_observation =
+                            super::events::OwnerInputObservation::capture(&entry.handle);
+                        let _ =
+                            sender.send(OwnerMessage::AttachmentInputWritten { reply, receipt });
+                    });
+                }
+            }
+            return;
+        }
         if matches!(
             request.command,
             OwnerCommand::Input { .. } | OwnerCommand::SendInput { .. }
@@ -2811,6 +2895,7 @@ impl OwnerState {
             | OwnerCommand::RestoreSavedSession { .. }
             | OwnerCommand::LaunchAgent { .. }
             | OwnerCommand::Input { .. }
+            | OwnerCommand::AttachmentInput { .. }
             | OwnerCommand::PrepareMobileInput { .. }
             | OwnerCommand::CommitMobileInput { .. }
             | OwnerCommand::CancelMobileInput { .. }

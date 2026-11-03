@@ -4210,6 +4210,7 @@ mod tests {
         BackendEvent::AttachmentProgress {
             id: pane.to_string(),
             operation_id: operation_id.to_string(),
+            expected_target: None,
             phase,
             file_index: Some(0),
             file_count: 1,

@@ -305,6 +305,15 @@ pub enum FileAttachment {
     },
 }
 
+/// Public comparison tuple captured at attachment intent; never grants authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachmentExpectedTarget {
+    pub project_key: String,
+    pub session_id: String,
+    pub host_id: String,
+    pub runtime_incarnation: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttachmentProgressPhase {
@@ -313,6 +322,7 @@ pub enum AttachmentProgressPhase {
     Injecting,
     Attached,
     Failed,
+    OutcomeUnknown,
 }
 
 /// Final, client-scoped result of one correlated `Continue work` operation.
@@ -714,6 +724,8 @@ pub enum FrontendEvent {
         id: String,
         #[serde(default)]
         operation_id: Option<String>,
+        #[serde(default)]
+        expected_target: Option<AttachmentExpectedTarget>,
         upload_id: String,
         mime_type: String,
         filename: Option<String>,
@@ -729,6 +741,8 @@ pub enum FrontendEvent {
         id: String,
         #[serde(default)]
         operation_id: Option<String>,
+        #[serde(default)]
+        expected_target: Option<AttachmentExpectedTarget>,
         files: Vec<FileAttachment>,
     },
     LoadBranches {
@@ -2552,6 +2566,8 @@ pub enum BackendEvent {
     AttachmentProgress {
         id: String,
         operation_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_target: Option<AttachmentExpectedTarget>,
         phase: AttachmentProgressPhase,
         file_index: Option<usize>,
         file_count: usize,
@@ -5916,6 +5932,7 @@ mod tests {
                     mime_type,
                     filename: Some(filename),
                     size,
+                    ..
                 } if id == "tab-1::agent-1"
                     && operation_id == "attachment-op-1"
                     && upload_id == "upload-1"
@@ -6043,6 +6060,7 @@ mod tests {
                 FrontendEvent::AttachFiles {
                     id,
                     operation_id: Some(operation_id),
+                    expected_target: None,
                     files,
                 }
                     if id == "tab-1::agent-1"
@@ -6091,10 +6109,45 @@ mod tests {
     }
 
     #[test]
+    fn attachment_target_and_unknown_progress_preserve_the_public_contract() {
+        let target = serde_json::json!({"project_key":"0123456789abcdef","session_id":"original-session",
+            "host_id":"42:1234","runtime_incarnation":3});
+        let request = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+            "kind":"attach_files","id":"original-window","operation_id":"original-op",
+            "expected_target":target,"files":[]
+        }))
+        .unwrap();
+        let FrontendEvent::AttachFiles {
+            expected_target: Some(captured),
+            ..
+        } = request
+        else {
+            panic!("captured target")
+        };
+        assert_eq!(serde_json::to_value(&captured).unwrap(), target);
+        let event = BackendEvent::AttachmentProgress {
+            id: "original-window".into(),
+            operation_id: "original-op".into(),
+            expected_target: Some(captured),
+            phase: AttachmentProgressPhase::OutcomeUnknown,
+            file_index: None,
+            file_count: 1,
+            filename: None,
+            bytes_done: None,
+            bytes_total: None,
+            message: Some("Outcome unknown".into()),
+        };
+        let value = serde_json::to_value(event).unwrap();
+        assert_eq!(value["phase"], "outcome_unknown");
+        assert_eq!(value["expected_target"], target);
+    }
+
+    #[test]
     fn backend_event_serializes_attachment_progress_contract() {
         let event = BackendEvent::AttachmentProgress {
             id: "tab-1::agent-1".to_string(),
             operation_id: "attachment-op-3".to_string(),
+            expected_target: None,
             phase: AttachmentProgressPhase::Staging,
             file_index: Some(0),
             file_count: 2,

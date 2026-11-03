@@ -49,6 +49,7 @@ impl AppRuntime {
                                 incarnation,
                                 kind: super::RemoteRuntimeCommandKind::Input { reply_client: None },
                                 approval_resolution_started: false,
+                                attachment_outcome: None,
                                 result: Ok(outcome.observation),
                             },
                         )));

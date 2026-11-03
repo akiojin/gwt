@@ -737,6 +737,7 @@ pub(crate) enum RemoteRuntimeCommandKind {
     Input { reply_client: Option<ClientId> },
     Resize,
     Stop,
+    AttachmentInput(Box<attachments::AttachmentOperation>),
 }
 
 #[derive(Debug, Clone)]
@@ -748,6 +749,8 @@ pub(crate) struct RemoteRuntimeCommandCompletion {
     pub(crate) incarnation: u64,
     pub(crate) kind: RemoteRuntimeCommandKind,
     pub(crate) approval_resolution_started: bool,
+    pub(crate) attachment_outcome:
+        Option<gwt::project_runtime::events::OwnerAttachmentInputReceipt>,
     pub(crate) result: Result<Option<gwt::project_runtime::events::OwnerInputObservation>, String>,
 }
 
@@ -1004,6 +1007,7 @@ pub(crate) use wizard::{
 mod work_scans;
 mod workspace;
 mod workspace_views;
+pub(crate) use attachments::AttachmentOperation;
 use attachments::UploadedImagePasteOperation;
 #[cfg(test)]
 use attachments::{
@@ -4525,8 +4529,22 @@ impl AppRuntime {
         } = event
         {
             if !self.project_context_is_current(&context) {
-                self.cleanup_stale_project_completion(&completion);
-                return None;
+                match *completion {
+                    UserEvent::AttachmentPromptReady { operation, .. } => return Some(UserEvent::Dispatch(vec![
+                        operation.progress(AttachmentProgressPhase::Failed, Some("Attachment target unavailable. Reload the current UI and try again."))
+                    ])),
+                    UserEvent::RemoteRuntimeCommandComplete(mut boxed)
+                        if matches!(&boxed.kind, RemoteRuntimeCommandKind::AttachmentInput(_)) => {
+                            // An outer stale scope cannot certify any physical receipt adoption.
+                            boxed.attachment_outcome = None;
+                            event = UserEvent::RemoteRuntimeCommandComplete(boxed);
+                            continue;
+                        }
+                    completion => {
+                        self.cleanup_stale_project_completion(&completion);
+                        return None;
+                    }
+                }
             }
             event = *completion;
         }
@@ -11098,6 +11116,7 @@ impl AppRuntime {
                         }
                         event => {
                             pm::rejected_member_settings_events(&client_id, key.as_str(), &event)
+                                .or_else(|| self.rejected_attachment_request(&client_id, &event))
                                 .or_else(|| {
                                     recovery_center::rejected_action_events(&client_id, &event)
                                 })
@@ -11289,7 +11308,9 @@ impl AppRuntime {
             FrontendEvent::UpdateAutostart { enabled } => {
                 self.autostart_update_events(client_id, enabled)
             }
-            _ => Vec::new(),
+            event => self
+                .rejected_attachment_request(&client_id, &event)
+                .unwrap_or_default(),
         }
     }
 
@@ -11419,6 +11440,7 @@ impl AppRuntime {
                 context.project_key.as_str(),
                 &event,
             )
+            .or_else(|| self.rejected_attachment_request(&client_id, &event))
             .or_else(|| recovery_center::rejected_action_events(&client_id, &event))
             .unwrap_or_default();
         }
@@ -11754,42 +11776,29 @@ impl AppRuntime {
                     ),
                 },
             )],
-            FrontendEvent::PasteImage {
-                id,
-                data_base64,
-                mime_type,
-                filename,
-            } => self.paste_image_events(&id, &data_base64, &mime_type, filename.as_deref()),
+            event @ FrontendEvent::PasteImage { .. } => self
+                .rejected_attachment_request(&client_id, &event)
+                .expect("attachment refusal"),
             FrontendEvent::PasteImageUploaded {
                 id,
                 operation_id,
+                expected_target,
                 upload_id,
                 mime_type,
                 filename,
                 size,
-            } => {
-                if operation_id.is_some() {
-                    self.paste_image_uploaded_operation_events(
-                        client_id,
-                        id,
-                        operation_id,
-                        UploadedImagePasteOperation {
-                            upload_id,
-                            mime_type,
-                            filename,
-                            size,
-                        },
-                    )
-                } else {
-                    self.paste_image_uploaded_events(
-                        &id,
-                        &upload_id,
-                        &mime_type,
-                        filename.as_deref(),
-                        size,
-                    )
-                }
-            }
+            } => self.paste_image_uploaded_operation_events(
+                client_id,
+                id,
+                operation_id,
+                expected_target,
+                UploadedImagePasteOperation {
+                    upload_id,
+                    mime_type,
+                    filename,
+                    size,
+                },
+            ),
             FrontendEvent::AttachmentUploadFailed {
                 id,
                 operation_id,
@@ -11798,14 +11807,15 @@ impl AppRuntime {
             FrontendEvent::AttachFiles {
                 id,
                 operation_id,
+                expected_target,
                 files,
-            } => {
-                if operation_id.is_some() {
-                    self.attach_files_operation_events(client_id, id, operation_id, files)
-                } else {
-                    self.attach_files_events(&id, files)
-                }
-            }
+            } => self.attach_files_operation_events(
+                client_id,
+                id,
+                operation_id,
+                expected_target,
+                files,
+            ),
             FrontendEvent::LoadBranches { id } => self.load_branches_events(&client_id, &id),
             FrontendEvent::RequestRemoteStartWorkBranches { id } => {
                 self.request_remote_start_work_branches_events(&client_id, &id)
