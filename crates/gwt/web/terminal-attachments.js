@@ -2,10 +2,9 @@
 // extracted from app.js: clipboard image paste, browser/native file drop
 // bridges, attachment upload progress UI, the upload token + XHR path,
 // clipboard read/write/copy helpers, and the per-terminal handler
-// installers called from createTerminalRuntime. Pure movement from app.js:
-// behavior, DOM output, and the WS protocol (paste_image_uploaded /
-// attach_files / attachment_progress) are unchanged; the moved code keeps
-// its original app.js indentation.
+// installers called from createTerminalRuntime. Attachment operations retain
+// their original target across upload and accept only correlated delivery
+// progress; reconnect never replays an attachment body.
 import { classifyTerminalCopyKeyEvent } from "/terminal-copy-shortcut.js";
 import { createTerminalContextMenuController } from "/terminal-context-menu.js";
 import { createUiStateStore } from "/ui-state-store.js";
@@ -22,6 +21,9 @@ import { createUiStateStore } from "/ui-state-store.js";
 //   shared with the app.js terminal selection handling.
 export function createTerminalAttachments({
   send,
+  captureAttachmentTarget,
+  reportAttachmentNotice,
+  dismissAttachmentNotice,
   terminalMap,
   windowMap,
   workspaceWindowById,
@@ -119,21 +121,31 @@ export function createTerminalAttachments({
       }
 
       const attachmentProgressControllers = new Map();
+      const currentAttachmentOperations = new Map();
       const attachmentProgressModel = createUiStateStore(null);
-      // This surface shares the app's document lifetime. Keep only the latest
-      // received snapshot; upload controllers and timers stay outside the model.
       attachmentProgressModel.subscribe(progress => progress, progress => {
         if (progress) renderAttachmentProgress(progress);
       });
 
-      function ensureAttachmentProgressSurface(windowId) {
+      function sameAttachmentTarget(left, right) {
+        return !!left && !!right && left.project_key === right.project_key
+          && left.session_id === right.session_id && left.host_id === right.host_id
+          && left.runtime_incarnation === right.runtime_incarnation;
+      }
+
+      function attachmentProgressHost(windowId) {
         const terminalHost = terminalMap.get(windowId)?.terminalContainer;
-        const host = terminalHost?.dataset.windowId === windowId
-          ? terminalHost : workspaceWindowElement(windowId) || document.body;
+        // A retained native root can be temporarily detached. Its cached chrome
+        // is not a second status host while that association survives.
+        if (terminalHost && !terminalHost.isConnected) return null;
+        if (terminalHost?.dataset.windowId === windowId) return terminalHost;
+        const workspaceHost = workspaceWindowElement(windowId);
+        return workspaceHost?.isConnected ? workspaceHost : null;
+      }
+
+      function ensureAttachmentProgressSurface(host) {
         let surface = host.querySelector(".attachment-progress");
-        if (surface) {
-          return surface;
-        }
+        if (surface) return surface;
         surface = document.createElement("div");
         surface.className = "attachment-progress";
         surface.hidden = true;
@@ -151,171 +163,180 @@ export function createTerminalAttachments({
         return surface;
       }
 
-      function attachmentPhaseLabel(phase, fallback = "") {
-        switch (phase) {
-          case "queued":
-            return "Queued";
-          case "staging":
-            return "Staging";
-          case "injecting":
-            return "Injecting";
-          case "attached":
-            return "Attached";
-          case "failed":
-            return fallback || "Could not attach";
-          default:
-            return fallback || "Uploading";
-        }
+      function attachmentPhaseLabel(phase) {
+        return { queued: "Queued", staging: "Staging", injecting: "Injecting" }[phase] || "Queued";
       }
 
-      function createAttachmentProgressController(windowId, files, operationId = createAttachmentOperationId()) {
-        const surface = ensureAttachmentProgressSurface(windowId);
-        const label = surface.querySelector(".attachment-progress__label");
-        const track = surface.querySelector(".attachment-progress__track");
-        const bar = surface.querySelector(".attachment-progress__bar");
+      function createAttachmentProgressController(windowId, files, intent) {
+        const operationId = createAttachmentOperationId();
+        const captured = intent === undefined ? captureAttachmentTarget?.(windowId) : intent?.captured;
+        const expectedTarget = captured?.expected_target ? { ...captured.expected_target } : null;
+        const connectionEpoch = captured?.connection_epoch;
+        if (intent !== undefined) {
+          const current = captureAttachmentTarget?.(windowId);
+          if (!sameAttachmentTarget(expectedTarget, current?.expected_target)
+              || connectionEpoch !== current?.connection_epoch) {
+            // A stale pending clipboard intent owns no replacement slot or DOM.
+            reportAttachmentNotice?.({ windowId, operationId, message: expectedTarget
+              ? "Attachment target changed. File not sent." : "Attachment target unavailable. File not sent." });
+            return { operationId, canUpload: () => false };
+          }
+        }
+        const previous = currentAttachmentOperations.get(windowId);
+        previous?.retire(false);
+        if (previous) attachmentProgressControllers.delete(previous.operationId);
+        dismissAttachmentNotice?.(windowId, previous?.operationId);
         const abortController = new AbortController();
         const fileCount = files.length;
+        let host = null, surface = null, successTimerHost = null;
         const state = {
-          phase: "Uploading",
-          filename: fileCount === 1 ? displayAttachmentBasename(files[0]?.name) : "",
-          totalBytes: totalFileBytes(files),
-          loadedBytes: 0,
-          failed: false,
-          done: false,
-          visible: true,
+          phase: "Uploading", filename: fileCount === 1 ? displayAttachmentBasename(files[0]?.name) : "",
+          totalBytes: totalFileBytes(files), loadedBytes: 0,
+          submission: "not_attempted", terminal: null, visible: true, retired: false,
         };
 
+        function isCurrent() { return currentAttachmentOperations.get(windowId) === controller; }
+        function targetIsCurrent() {
+          const current = captureAttachmentTarget?.(windowId);
+          return sameAttachmentTarget(expectedTarget, current?.expected_target)
+            && connectionEpoch === current.connection_epoch;
+        }
         function percent() {
-          if (state.totalBytes <= 0) {
-            return state.done ? 100 : 0;
-          }
-          return Math.max(
-            0,
-            Math.min(100, Math.round((state.loadedBytes / state.totalBytes) * 100)),
-          );
+          return state.totalBytes > 0 ? Math.max(0, Math.min(100, Math.round(state.loadedBytes / state.totalBytes * 100)))
+            : state.terminal === "attached" ? 100 : 0;
         }
-
+        function scheduleSuccessHide() {
+          if (state.terminal !== "attached" || !state.visible || !host || successTimerHost === host) return;
+          const ownHost = host, ownSurface = surface;
+          successTimerHost = host;
+          setTimeout(() => {
+            if (!isCurrent() || state.retired || state.terminal !== "attached" || host !== ownHost
+                || surface !== ownSurface || attachmentProgressHost(windowId) !== ownHost) return;
+            state.visible = false;
+            ownSurface.hidden = true;
+            attachmentProgressControllers.delete(operationId);
+          }, 700);
+        }
         function render() {
-          if (!state.visible) {
-            return;
+          if (!isCurrent() || state.retired) return;
+          if (expectedTarget && !targetIsCurrent()) { retire(); return; }
+          const currentHost = attachmentProgressHost(windowId);
+          if (currentHost !== host) {
+            if (surface) surface.hidden = true;
+            host = currentHost;
+            successTimerHost = null;
+            surface = host ? ensureAttachmentProgressSurface(host) : null;
           }
-          const value = percent();
-          const filename = state.filename ? ` · ${state.filename}` : "";
+          if (!surface) return;
+          surface.hidden = !state.visible;
+          if (!state.visible) return;
+          const value = percent(), filename = state.filename ? ` · ${state.filename}` : "";
           const suffix = state.totalBytes > 0 ? ` · ${value}%` : "";
-          surface.hidden = false;
-          surface.dataset.state = state.failed ? "error" : state.done ? "done" : "active";
-          label.textContent = `${state.phase} ${attachmentFileCountLabel(fileCount)}${filename}${suffix}`;
-          track.setAttribute("aria-valuenow", String(value));
-          bar.style.width = `${value}%`;
+          surface.dataset.state = state.terminal === "attached" ? "done" : state.terminal ? "error" : "active";
+          surface.querySelector(".attachment-progress__label").textContent = `${state.phase} ${attachmentFileCountLabel(fileCount)}${filename}${suffix}`;
+          surface.querySelector(".attachment-progress__track").setAttribute("aria-valuenow", String(value));
+          surface.querySelector(".attachment-progress__bar").style.width = `${value}%`;
+          scheduleSuccessHide();
         }
-
-        function showNow() {
-          state.visible = true;
-          render();
-        }
-
-        render();
-
-        function setPhase(phase) {
-          state.phase = phase;
-          render();
-        }
-
-        function setUploadProgress(loadedBytes, totalBytes = null) {
-          if (Number.isFinite(totalBytes) && totalBytes >= 0) {
-            state.totalBytes = totalBytes;
-          }
-          state.loadedBytes = Math.max(0, loadedBytes || 0);
-          render();
-        }
-
-        function succeed() {
-          state.done = true;
-          state.phase = "Attached";
-          state.loadedBytes = state.totalBytes;
-          if (state.visible) {
-            render();
-            setTimeout(() => {
-              if (surface.dataset.state === "done") {
-                surface.hidden = true;
-                attachmentProgressControllers.delete(operationId);
-              }
-            }, 700);
-          }
-        }
-
-        function fail(message) {
-          state.failed = true;
+        function settle(outcome, message) {
+          if (state.terminal || state.retired || !isCurrent()) return;
+          state.terminal = outcome;
           state.phase = message;
-          showNow();
+          if (outcome === "attached") state.loadedBytes = state.totalBytes;
+          render();
         }
-
+        function fail(message) { settle("failed", message); }
+        function unknown(message = "Outcome unknown. Check the original terminal before attaching again.") {
+          settle("outcome_unknown", message);
+        }
+        function retire(report = true) {
+          if (state.retired) return;
+          if (!state.terminal) {
+            state.terminal = state.submission === "not_attempted" ? "failed" : "outcome_unknown";
+            state.phase = state.terminal === "failed" ? "Attachment target changed. File not sent."
+              : "Outcome unknown. Check the original terminal before attaching again.";
+          }
+          // Retiring owns only the old surface: never render into a replacement.
+          state.retired = true;
+          abortController.abort();
+          if (surface) surface.hidden = true;
+          if (report && state.terminal !== "attached") reportAttachmentNotice?.({ windowId, operationId, message: state.phase });
+        }
+        function reconcile() {
+          if (state.retired || !isCurrent()) return;
+          if (!targetIsCurrent()) retire();
+          else render();
+        }
+        function submit(message) {
+          if (state.terminal || state.retired || !isCurrent()) return;
+          if (!targetIsCurrent()) { retire(); return; }
+          // The bridge distinguishes a known pre-send refusal from an invoked send.
+          let result;
+          try { result = send({ ...message, operation_id: operationId, expected_target: expectedTarget }); }
+          catch { result = "outcome_unknown"; }
+          if (result === "unavailable") { fail("Attachment not sent. Reconnect and try again."); return; }
+          state.submission = result === "sent" ? "sent" : "send_attempt_unknown";
+          if (result !== "sent") { unknown(); return; }
+          state.phase = "Queued";
+          render();
+        }
         function applyBackendProgress(event) {
-          if (event.filename) {
-            state.filename = displayAttachmentBasename(event.filename);
-          }
-          if (Number.isFinite(event.bytes_total)) {
-            state.totalBytes = event.bytes_total;
-          }
-          if (Number.isFinite(event.bytes_done)) {
-            state.loadedBytes = event.bytes_done;
-          }
-          if (event.phase === "failed") {
-            fail(event.message || "Could not attach");
-            return;
-          }
-          if (event.phase === "attached") {
-            succeed();
-            return;
-          }
-          setPhase(attachmentPhaseLabel(event.phase));
+          if (!isCurrent() || state.retired || state.terminal || event.id !== windowId || state.submission === "not_attempted") return;
+          if (!targetIsCurrent()) { retire(); return; }
+          if (!event.expected_target) { unknown("Outcome unknown. Refresh the application before attaching again."); return; }
+          if (!sameAttachmentTarget(expectedTarget, event.expected_target)) return;
+          if (!["queued", "staging", "injecting", "attached", "failed", "outcome_unknown"].includes(event.phase)) return;
+          if (event.filename) state.filename = displayAttachmentBasename(event.filename);
+          if (Number.isFinite(event.bytes_total)) state.totalBytes = event.bytes_total;
+          if (Number.isFinite(event.bytes_done)) state.loadedBytes = event.bytes_done;
+          if (event.phase === "attached") settle("attached", "Attached");
+          else if (event.phase === "failed") fail(event.message || "Could not attach");
+          else if (event.phase === "outcome_unknown") unknown(event.message ? `Outcome unknown. ${event.message}` : undefined);
+          else { state.phase = attachmentPhaseLabel(event.phase); render(); }
         }
-
         const controller = {
-          operationId,
-          signal: abortController.signal,
-          setPhase,
-          setUploadProgress,
-          succeed,
-          fail,
-          applyBackendProgress,
+          operationId, signal: abortController.signal, retire, reconcile, submit, fail, applyBackendProgress,
+          canUpload: () => !!expectedTarget && !state.terminal && !state.retired,
+          setUploadProgress(loadedBytes, totalBytes = null) {
+            if (state.terminal || state.retired || !isCurrent()) return;
+            if (Number.isFinite(totalBytes) && totalBytes >= 0) state.totalBytes = totalBytes;
+            state.loadedBytes = Math.max(0, loadedBytes || 0);
+            render();
+          },
+          transportLost() {
+            if (state.submission === "not_attempted") fail("Attachment not sent. Reconnect and try again.");
+            else unknown();
+            abortController.abort();
+          },
         };
+        currentAttachmentOperations.set(windowId, controller);
         attachmentProgressControllers.set(operationId, controller);
+        render();
+        if (!expectedTarget) {
+          fail("Attachment target unavailable. File not sent.");
+          if (!host) retire();
+        }
         return controller;
       }
 
       function handleAttachmentProgress(event) {
-        if (!event?.operation_id) return;
-        attachmentProgressModel.update(() => ({
-          id: event.id,
-          operation_id: event.operation_id,
-          phase: event.phase,
-          filename: event.filename,
-          bytes_total: event.bytes_total,
-          bytes_done: event.bytes_done,
-          message: event.message,
-        }));
+        if (!event?.operation_id || !attachmentProgressControllers.has(event.operation_id)) return;
+        attachmentProgressModel.update(() => ({ ...event }));
       }
-
       function renderAttachmentProgress(event) {
-        const operationId = event?.operation_id || "";
-        if (!operationId) {
-          return;
-        }
-        let controller = attachmentProgressControllers.get(operationId);
-        if (!controller) {
-          controller = createAttachmentProgressController(
-            event.id,
-            [
-              {
-                name: event.filename || "file",
-                size: event.bytes_total || 0,
-              },
-            ],
-            operationId,
-          );
-        }
-        controller.applyBackendProgress(event);
+        attachmentProgressControllers.get(event.operation_id)?.applyBackendProgress(event);
+      }
+      function reconcileAttachmentProgress() {
+        for (const controller of currentAttachmentOperations.values()) controller.reconcile();
+      }
+      function handleAttachmentTransportChange(connected) {
+        if (!connected) for (const controller of currentAttachmentOperations.values()) controller.transportLost();
+      }
+      function disposeAttachmentProgress() {
+        for (const controller of currentAttachmentOperations.values()) controller.retire(false);
+        currentAttachmentOperations.clear();
+        attachmentProgressControllers.clear();
+        attachmentProgressModel.dispose();
       }
 
       function attachmentFilesFromNativePaths(paths) {
@@ -427,16 +448,16 @@ export function createTerminalAttachments({
         return attachments;
       }
 
-      async function uploadPastedImage(windowId, blob, { mimeType, filename } = {}) {
+      async function uploadPastedImage(windowId, blob, { mimeType, filename, intent } = {}) {
         const file = uploadFileFromImageBlob(blob, mimeType, filename);
-        const progress = createAttachmentProgressController(windowId, [file]);
+        const progress = createAttachmentProgressController(windowId, [file], intent);
+        if (!progress.canUpload()) return;
         try {
           const uploaded = await uploadAttachmentFile(file, {
             signal: progress.signal,
             onProgress: ({ loaded, total }) => progress.setUploadProgress(loaded || 0, total),
           });
-          progress.setPhase("Queued");
-          send({
+          progress.submit({
             kind: "paste_image_uploaded",
             id: windowId,
             operation_id: progress.operationId,
@@ -446,6 +467,7 @@ export function createTerminalAttachments({
             size: uploaded.size ?? file.size ?? 0,
           });
         } catch (error) {
+          if (!progress.canUpload()) return;
           const message = `${IMAGE_PASTE_UPLOAD_FAILURE_MESSAGE} ${error?.message || String(error)}`;
           progress.fail(message);
           send({ kind: "attachment_upload_failed", id: windowId,
@@ -713,8 +735,13 @@ export function createTerminalAttachments({
           readClipboardItems: readNavigatorClipboardItems,
           supportedImageTypes: SUPPORTED_IMAGE_PASTE_MIME_TYPES,
           pasteText: (text) => terminal.paste(text),
-          pasteImage: ({ blob, mimeType, filename }) =>
-            uploadPastedImage(windowId, blob, { mimeType, filename }),
+          beforePaste: () => {
+            const captured = captureAttachmentTarget?.(windowId);
+            return { captured: captured ? { expected_target: { ...captured.expected_target },
+              connection_epoch: captured.connection_epoch } : null };
+          },
+          pasteImage: ({ blob, mimeType, filename }, intent) =>
+            uploadPastedImage(windowId, blob, { mimeType, filename, intent }),
           focusTerminal: () => terminal.focus(),
         });
         return () => {
@@ -802,16 +829,17 @@ export function createTerminalAttachments({
         }
 
         const progress = createAttachmentProgressController(windowId, files);
+        if (!progress.canUpload()) return;
         try {
           const attachments = await uploadFilesAsAttachments(files, progress);
-          progress.setPhase("Queued");
-          send({
+          progress.submit({
             kind: "attach_files",
             id: windowId,
             operation_id: progress.operationId,
             files: attachments,
           });
         } catch (_error) {
+          if (!progress.canUpload()) return;
           progress.fail(FILE_DROP_UPLOAD_FAILURE_MESSAGE);
           showFileDropAlert(FILE_DROP_UPLOAD_FAILURE_MESSAGE);
         } finally {
@@ -873,8 +901,7 @@ export function createTerminalAttachments({
             windowId,
             attachmentFilesFromNativePaths(paths),
           );
-          progress.setPhase("Queued");
-          send({
+          progress.submit({
             kind: "attach_files",
             id: windowId,
             operation_id: progress.operationId,
@@ -896,6 +923,9 @@ export function createTerminalAttachments({
         installTerminalContextMenuHandlers,
         installTerminalViewportRefreshHandlers,
         handleAttachmentProgress,
+        reconcileAttachmentProgress,
+        handleAttachmentTransportChange,
+        disposeAttachmentProgress,
         installBrowserFileDropBridge,
         installNativeFileDropBridge,
       };

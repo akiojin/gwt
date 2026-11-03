@@ -891,6 +891,13 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       }
 
       function sendOnSocket(message, socket) {
+        if (message.kind === "attach_files" || message.kind === "paste_image_uploaded") {
+          // Attachments belong to the captured target and this connection only.
+          if (!activeProjectKey() || message.expected_target?.project_key !== activeProjectKey()
+              || !socket || socket.readyState !== WebSocket.OPEN || socketProjectKey !== activeProjectKey()) return "unavailable";
+          try { socket.send(JSON.stringify(message)); return "sent"; }
+          catch { return "outcome_unknown"; }
+        }
         if (isHubNavigationMessage(message.kind)) {
           if (hubSocket?.readyState === WebSocket.OPEN) {
             hubSocket.send(JSON.stringify(message));
@@ -1395,6 +1402,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       }
 
       function handleSocketClose(recoverSnapshots = false) {
+        if (typeof handleAttachmentTransportChange === "function") handleAttachmentTransportChange(false);
         closeProjectController.connectionLost();
         socketReceiveDispatcherGeneration += 1;
         socketReceiveDispatcher?.dispose?.();
@@ -1479,6 +1487,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           return;
         }
         const previousSocket = socket;
+        if (typeof handleAttachmentTransportChange === "function") handleAttachmentTransportChange(false);
         if (force === true && socketProjectKey === projectKey) {
           if (previousSocket?.readyState === WebSocket.OPEN && previousSocket !== hubSocket) {
             closeSocketInputHandoff();
@@ -2889,6 +2898,20 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       // handling moved to /terminal-attachments.js. createTerminalRuntime,
       // applyStatus, mountWindowBody, receive(), and the boot-time bridge
       // installs keep their existing call sites wired through this factory.
+      function captureAttachmentTarget(windowId) {
+        const activity = agentActivityModel.read();
+        const snapshot = activity.snapshot;
+        const data = currentNativeWindow(windowId);
+        const agent = activity.agents.find(row => row.window_id === windowId && row.session_id === data?.session_id);
+        if (!snapshot || activity.count === null || snapshot.project_key !== routeProjectKey
+            || activeProjectKey() !== routeProjectKey || !snapshot.host_id || !data
+            || !isAgentWindowPreset(data.preset) || !agent || !agent.session_id
+            || !Number.isSafeInteger(agent.runtime_incarnation) || agent.runtime_incarnation < 1) return null;
+        return { expected_target: { project_key: routeProjectKey, session_id: agent.session_id,
+          host_id: snapshot.host_id, runtime_incarnation: agent.runtime_incarnation },
+          connection_epoch: socketReceiveDispatcherGeneration };
+      }
+
       const {
         updateTerminalOverlayCopyState,
         copyTerminalOverlayMessage,
@@ -2898,10 +2921,21 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         installTerminalContextMenuHandlers,
         installTerminalViewportRefreshHandlers,
         handleAttachmentProgress,
+        reconcileAttachmentProgress,
+        handleAttachmentTransportChange,
+        disposeAttachmentProgress,
         installBrowserFileDropBridge,
         installNativeFileDropBridge,
       } = createTerminalAttachments({
         send,
+        captureAttachmentTarget,
+        reportAttachmentNotice: ({ windowId, operationId, message }) => alertsToasts.push({
+          id: `attachment-${windowId}-${operationId}`, level: "warn", title: "Attachment status",
+          message, dismissible: true, timeoutMs: 0,
+        }),
+        dismissAttachmentNotice: (windowId, operationId) => {
+          if (operationId) alertsToasts.dismiss(`attachment-${windowId}-${operationId}`);
+        },
         terminalMap,
         windowMap,
         workspaceWindowById,
@@ -2910,6 +2944,9 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         scheduleTerminalViewportRefresh,
         TERMINAL_SELECTION_DRAG_THRESHOLD,
       });
+
+      agentActivityModel.subscribe(state => state, reconcileAttachmentProgress);
+      windowCatalogModel.subscribe(state => state.catalog, reconcileAttachmentProgress);
 
       // SPEC-2356 — xterm content stays on the Dark Operator palette even when
       // surrounding window chrome follows the app's light theme. High-contrast
@@ -3039,6 +3076,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           runtime.terminal,
           { readOnly },
         );
+        if (typeof reconcileAttachmentProgress === "function") reconcileAttachmentProgress();
         // Reparenting is a reveal even when Agents never selects this window.
         scheduleInitialFitHandshake(windowId);
         requestAnimationFrame(() => {
@@ -3077,6 +3115,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         expectedRuntime.cleanup?.();
         expectedRuntime.terminal.dispose();
         terminalMap.delete(windowId);
+        if (typeof reconcileAttachmentProgress === "function") reconcileAttachmentProgress();
         decoderMap.delete(windowId);
         pendingOutputMap.delete(windowId);
         pendingSnapshotMap.delete(windowId);
@@ -3270,6 +3309,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           readOnly: options.readOnly === true,
         };
         terminalMap.set(windowId, runtime);
+        if (typeof reconcileAttachmentProgress === "function") reconcileAttachmentProgress();
         decoderMap.set(windowId, new TextDecoder());
         runtime.snapshotWriteCoordinator = createTerminalSnapshotWriteCoordinator({
           terminal,
@@ -5501,6 +5541,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       installNativeFileDropBridge();
 
       window.addEventListener("unload", () => {
+        disposeAttachmentProgress();
         disposeProjectShellSurface();
 
         worksSurface?.dispose();

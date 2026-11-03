@@ -10,6 +10,7 @@ export function createTerminalContextMenuController({
   readClipboardItems = async () => [],
   pasteText = () => {},
   pasteImage = () => {},
+  beforePaste,
   focusTerminal = () => {},
   supportedImageTypes = DEFAULT_IMAGE_MIME_TYPES,
 } = {}) {
@@ -55,12 +56,15 @@ export function createTerminalContextMenuController({
   async function pasteFromClipboard() {
     hide();
     try {
+      const hasPasteContext = typeof beforePaste === "function";
+      const pasteContext = hasPasteContext ? beforePaste() : undefined;
       const image = await readClipboardImage({
         readClipboardItems,
         supportedImageTypes,
       });
       if (image) {
-        await pasteImage(image);
+        if (hasPasteContext) await pasteImage(image, pasteContext);
+        else await pasteImage(image);
         return true;
       }
 
