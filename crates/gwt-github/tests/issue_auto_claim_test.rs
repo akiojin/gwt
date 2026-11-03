@@ -247,6 +247,7 @@ fn claim(id: &str, owner: &str, heartbeat: &str, expires: &str) -> ClaimComment 
 
 fn snapshot(comments: Vec<CommentSnapshot>) -> IssueSnapshot {
     IssueSnapshot {
+        author_login: None,
         number: IssueNumber(42),
         title: "Improve automatically".to_string(),
         body: String::new(),

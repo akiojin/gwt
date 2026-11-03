@@ -19,6 +19,8 @@ impl AppRuntime {
         context: &ProjectContext,
         client_id: ClientId,
         window_id: &str,
+        request_id: u64,
+        version: Option<gwt::protocol::PmReportsVersion>,
     ) -> Vec<OutboundEvent> {
         let Some(session_id) = self.pm_chat_session_id(window_id).map(str::to_owned) else {
             return vec![OutboundEvent::reply(
@@ -26,6 +28,9 @@ impl AppRuntime {
                 BackendEvent::PmReports {
                     id: window_id.to_owned(),
                     session_id: None,
+                    request_id,
+                    version: None,
+                    snapshot: version.is_none(),
                     reports: Vec::new(),
                     current: None,
                     error: Some("This window has no registered PM.".to_owned()),
@@ -51,14 +56,18 @@ impl AppRuntime {
             let mut reader = reader
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let viewer = format!("{client_id}\0{window_id}\0{session_id}");
-            let Some(data) = reader.poll(&project_root, pending_update.as_ref(), &viewer) else {
+            let Some((next_version, data)) =
+                reader.poll(&project_root, pending_update.as_ref(), version.as_ref())
+            else {
                 return;
             };
             proxy.send(UserEvent::PmReportsLoaded {
                 client_id,
                 window_id,
                 session_id,
+                request_id,
+                version: Some(next_version),
+                snapshot: version.is_none(),
                 reports: data
                     .reports
                     .into_iter()
@@ -74,25 +83,20 @@ impl AppRuntime {
     pub(crate) fn pm_reports_loaded_events(
         &self,
         client_id: ClientId,
-        window_id: &str,
-        session_id: &str,
-        reports: Vec<gwt::protocol::PmReportView>,
-        current: Option<Box<gwt::pm_current::PmCurrentSnapshot>>,
-        error: Option<String>,
+        event: BackendEvent,
     ) -> Vec<OutboundEvent> {
-        if self.pm_chat_session_id(window_id) != Some(session_id) {
+        let BackendEvent::PmReports {
+            id,
+            session_id: Some(session_id),
+            ..
+        } = &event
+        else {
+            return Vec::new();
+        };
+        if self.pm_chat_session_id(id) != Some(session_id.as_str()) {
             return Vec::new();
         }
-        vec![OutboundEvent::reply(
-            client_id,
-            BackendEvent::PmReports {
-                id: window_id.to_owned(),
-                session_id: Some(session_id.to_owned()),
-                reports,
-                current,
-                error,
-            },
-        )]
+        vec![OutboundEvent::reply(client_id, event)]
     }
 
     fn pm_chat_session_id(&self, window_id: &str) -> Option<&str> {

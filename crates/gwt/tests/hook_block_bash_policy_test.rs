@@ -47,6 +47,7 @@ fn classify(command: &str) -> effect_classifier::EffectObservation {
 enum ExistingHookDecision {
     Allow,
     GithubWorkflowBlock,
+    DraftBlock,
     GithubMutationBlock,
     WorktreeBlock,
     BranchModificationBlock,
@@ -60,6 +61,12 @@ fn expected_existing_hook_output(
 ) -> Option<HookOutput> {
     match decision {
         ExistingHookDecision::Allow => None,
+        ExistingHookDecision::DraftBlock => Some(HookOutput::pre_tool_use_permission(
+            "Draft PRs are prohibited",
+            format!(
+                "Draft PRs are prohibited. Create a verified Ready PR; use `pr.ready` for an existing Draft.\n\nBlocked command: {command}"
+            ),
+        )),
         ExistingHookDecision::GithubWorkflowBlock => {
             Some(HookOutput::pre_tool_use_permission(
                 "🚫 Direct GitHub workflow mutations are not allowed",
@@ -73,8 +80,9 @@ Recommended alternatives:\n\
 - Release metadata: JSON operation `release.metadata.set`; publishing/assets/latest use the existing gated release workflow\n\
 - Automatic updates: JSON operation `update.settings.set`\n\
 - Issues/SPECs: JSON operations `issue.create`, `issue.edit`, `issue.comment`, `issue.close`, `issue.reopen`, `issue.spec.*`\n\
-- PRs: JSON operations `pr.create`, `pr.edit`, `pr.ready`, `pr.draft`, `pr.comment`, `pr.reopen`, `pr.review.submit`, `pr.review_threads.reply_and_resolve`; authorized `pr.close` uses `pm.operation.execute`\n\
+- PRs: JSON operations `pr.create`, `pr.edit`, `pr.ready`, `pr.comment`, `pr.reopen`, `pr.review.submit`, `pr.review_threads.reply_and_resolve`; authorized `pr.close` uses `pm.operation.execute`\n\
 - Merges: existing merge automation and CI/review gates decide delivery; gwtd has no direct merge operation\n\
+- External fork PRs: a delegated PM can use `pr.auto_merge.enable` with the exact PR number, reviewed_head_sha and scoped instruction_id or approval_id. Repository automation may exclude external forks; if this authorized route is unavailable, a human must merge the PR.\n\
 - Actions: JSON operations `actions.rerun` (`run_id` + `failed_only`, or `job_id`) and `actions.cancel` (`run_id`)\n\
 Use the corresponding JSON-envelope operation for other writes.\n\n\
 Blocked command: {command}"
@@ -91,7 +99,7 @@ Recommended alternatives:\n\
 - Repository settings/archive: JSON operation `repository.settings.set` (typed reversible fields; fixed repository)\n\
 - Discussions/Board: JSON operations `discussion.create`, `board.config.set`\n\
 - Required checks: JSON operation `repository.required_checks.update` (develop/main contexts only)\n\
-- PRs: JSON operations `pr.create`, `pr.edit`, `pr.ready`, `pr.draft`, `pr.comment`, `pr.reopen`, `pr.review.submit`, `pr.review_threads.reply_and_resolve`; authorized `pr.close` uses `pm.operation.execute`\n\
+- PRs: JSON operations `pr.create`, `pr.edit`, `pr.ready`, `pr.comment`, `pr.reopen`, `pr.review.submit`, `pr.review_threads.reply_and_resolve`; authorized `pr.close` uses `pm.operation.execute`\n\
 - Issues/SPECs: JSON operations `issue.create`, `issue.edit`, `issue.comment`, `issue.close`, `issue.reopen`, `issue.spec.*`\n\
 - Actions: JSON operations `actions.rerun` and `actions.cancel`\n\
 - lifecycle state: JSON operations `intake.outcome.record`, `execution.*`, `verify.*`\n\
@@ -213,15 +221,15 @@ fn semantic_classifier_covers_shell_target_and_effect_matrix() {
             "gh pr create --draft --title test --body body".to_string(),
             RepositoryTarget::ManagedCurrent,
             "gh.pr.create",
-            GovernanceEffect::Reversible,
-            ExistingHookDecision::GithubWorkflowBlock,
+            GovernanceEffect::Protected,
+            ExistingHookDecision::DraftBlock,
         ),
         (
             "gh pr create -d --title test --body body".to_string(),
             RepositoryTarget::ManagedCurrent,
             "gh.pr.create",
-            GovernanceEffect::Reversible,
-            ExistingHookDecision::GithubWorkflowBlock,
+            GovernanceEffect::Protected,
+            ExistingHookDecision::DraftBlock,
         ),
         (
             "gh pr create --title ready --body body".to_string(),
@@ -787,6 +795,62 @@ fn blocks_github_workflow_mutations() {
 }
 
 #[test]
+fn blocks_github_writes_inside_execution_wrappers() {
+    for command in [
+        "timeout 60 gh pr merge 481 --auto --merge",
+        "env -u GH_TOKEN CI=1 timeout --signal TERM 60 nice -n 10 command gh pr merge 481",
+        "command -- gh issue close 481",
+        "xargs -I {} gh pr merge {} --auto",
+        "bash -lc 'gh pr merge 481 --auto'",
+        "sh -c 'timeout 60 gh pr merge 481'",
+        "pwsh -NoProfile -c \"gh pr merge 481 --auto\"",
+        "(gh pr merge 481 --auto)",
+        "printf 481 | xargs gh pr merge --auto",
+        "for n in 478 481 479; do timeout 60 gh pr merge $n --auto --merge; done",
+        "timeout 60 gh api -X PATCH repos/o/r/pulls/481 -f title=updated",
+        "bash -c 'gh api graphql -f query=\"mutation { closeIssue(input: {}) { clientMutationId } }\"'",
+        "nice -n 10 curl -X DELETE https://api.github.com/repos/o/r/issues/481",
+        r#"gh issue comment 481 --body "say \"hi""#,
+        "timeout 60 gh pr comment 481 --body can\\'t",
+        "for n in 481; do (gh pr merge $n); done",
+        "if (gh pr merge 481); then echo done; fi",
+        "bash -ec 'gh pr merge 481'",
+        "xargs --replace gh pr merge {}",
+        "env -S 'gh pr merge 481'",
+        r#"pwsh -c 'gh issue comment 481 --body "say `"hi"'"#,
+    ] {
+        block(command);
+    }
+}
+
+#[test]
+fn execution_wrapper_reads_and_quoted_command_data_stay_allowed() {
+    for command in [
+        "timeout 60 gh pr view 481",
+        "env -u GH_TOKEN nice -n 10 command gh issue list",
+        "xargs -I {} gh pr view {}",
+        "bash -lc 'gh pr view 481'",
+        "pwsh -NoProfile -c \"gh pr checks 481\"",
+        "echo 'timeout 60 gh pr merge 481'",
+        "printf '%s' 'bash -c gh pr merge 481'",
+        "bash -c 'echo \"gh pr merge 481\"'",
+        "timeout 60 gh issue list --search 'x; gh pr merge 481'",
+        "nice echo 'gh pr merge 481'",
+        "command -v gh pr merge",
+        "command -p -v gh pr merge",
+        "command -pv gh pr merge",
+        "bash script.sh -c 'gh pr merge 481'",
+        "env -S \"echo 'gh pr merge 481'\"",
+        r#"C:\tools\gh.exe pr view 481"#,
+        r#"echo gh\ pr\ merge"#,
+        r#"pwsh -c 'Write-Output "say `"hi; gh pr merge 481"'"#,
+        r#"pwsh -c 'gh pr view 481 --jq "say `"hi; gh pr merge 481"'"#,
+    ] {
+        allow(command);
+    }
+}
+
+#[test]
 fn github_workflow_policy_normalizes_executable_names() {
     for executable in ["/usr/bin/gh", "gh.exe", "./bin/gh", "./bin/gh.exe"] {
         allow(&format!("{executable} pr view 1949"));
@@ -828,7 +892,6 @@ fn github_workflow_block_message_points_to_canonical_gwt_surfaces() {
         "issue.edit",
         "pr.edit",
         "pr.ready",
-        "pr.draft",
         "actions.rerun",
         "Blocked command: gh pr edit 1949 --title updated",
     ] {
@@ -837,6 +900,7 @@ fn github_workflow_block_message_points_to_canonical_gwt_surfaces() {
             "{required:?} missing from permission_decision_reason: {visible}"
         );
     }
+    assert!(!visible.contains("pr.draft"), "{visible}");
 }
 
 #[test]
@@ -852,10 +916,35 @@ fn github_workflow_cli_blocks_gh_pr_merge_and_names_the_automation_path() {
         "block message must name the real merge path: {visible}"
     );
     assert!(!visible.contains("`pr.merge`"), "{visible}");
+    for alternative in [
+        "pr.auto_merge.enable",
+        "reviewed_head_sha",
+        "external forks",
+        "human must merge",
+    ] {
+        assert!(visible.contains(alternative), "{visible}");
+    }
     assert!(
         visible.contains("Blocked command: gh pr merge 1949"),
         "{visible}"
     );
+}
+
+#[test]
+fn github_draft_paths_are_refused_without_a_draft_alternative() {
+    for command in [
+        "gh pr create --draft --title test --body body",
+        "gh pr create -d --title test --body body",
+        "gh pr ready 1949 --undo",
+    ] {
+        let decision = block_bash_policy::evaluate_bash_command(command, &root())
+            .expect("Draft path must block");
+        let visible = decision.permission_decision_reason();
+        assert!(visible.contains("Draft PRs are prohibited"), "{visible}");
+        assert!(visible.contains("pr.ready"), "{visible}");
+        assert!(!visible.contains("pr.draft"), "{visible}");
+        assert_eq!(classify(command).effect, GovernanceEffect::Protected);
+    }
 }
 
 #[test]

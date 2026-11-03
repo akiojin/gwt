@@ -71,6 +71,17 @@ impl Arena {
     }
 
     fn spawn(&self, repo: &Path, session: &str, params: &Value, pane: Option<&str>) -> Child {
+        self.spawn_operation(repo, session, "verify.run", params, pane)
+    }
+
+    fn spawn_operation(
+        &self,
+        repo: &Path,
+        session: &str,
+        operation: &str,
+        params: &Value,
+        pane: Option<&str>,
+    ) -> Child {
         let mut command = hidden_command(env!("CARGO_BIN_EXE_gwtd"));
         // Every child has its own home and only the explicitly supplied launch context.
         for (key, _) in std::env::vars_os() {
@@ -110,7 +121,7 @@ impl Arena {
             .take()
             .unwrap()
             .write_all(
-                json!({"schema_version": 1, "operation": "verify.run", "params": params})
+                json!({"schema_version": 1, "operation": operation, "params": params})
                     .to_string()
                     .as_bytes(),
             )
@@ -238,6 +249,7 @@ async fn own_pane(
 #[test]
 fn three_deferred_agents_resume_through_their_own_panes_and_finish() {
     let arena = Arena::new();
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(&arena.home);
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let holder_repo = arena.repo("holder");
     let mut holder = Holder {
@@ -270,20 +282,43 @@ fn three_deferred_agents_resume_through_their_own_panes_and_finish() {
     for index in 0..3 {
         let session = format!("resume-agent-{index}");
         let repo = arena.repo(&session);
-        let pane = runtime.block_on(own_pane(
-            &repo,
-            &session,
-            sent.clone(),
-            Arc::new(AtomicBool::new(true)),
-        ));
+        seed_active_owner(&repo, &session);
+        assert_stop_gates(&repo, &session, false);
+        let idle = Arc::new(AtomicBool::new(false));
+        let pane = runtime.block_on(own_pane(&repo, &session, sent.clone(), Arc::clone(&idle)));
         let mut deferred = params.clone();
         deferred["max_wait_secs"] = json!(0);
         waiters.push(arena.spawn(&repo, &session, &deferred, Some(&pane)));
-        agents.insert(session, (repo, pane));
+        agents.insert(session, (repo, pane, idle));
     }
     for waiter in waiters {
         let result = collect(waiter);
         assert_eq!(result["status"], "deferred", "{result}");
+    }
+    for (session, (repo, _, idle)) in &agents {
+        let result = collect(arena.spawn_operation(
+            repo,
+            session,
+            "issue.monitor.wait",
+            &json!({"number": 5630, "reason": "verification admission deferred", "resume_condition": "watchdog reports capacity"}),
+            None,
+        ));
+        assert_eq!(result["ok"], true, "{result}");
+        assert_stop_gates(repo, session, true);
+        assert!(
+            gwt::cli::execution_state::load(repo)
+                .unwrap()
+                .unwrap()
+                .status
+                == gwt::cli::execution_state::ExecutionControlStatus::Active
+        );
+        assert!(
+            gwt_core::skill_state::load(repo, "build-spec")
+                .unwrap()
+                .unwrap()
+                .active
+        );
+        idle.store(true, Ordering::SeqCst);
     }
     assert!(
         received.try_recv().is_err(),
@@ -297,7 +332,7 @@ fn three_deferred_agents_resume_through_their_own_panes_and_finish() {
         let (session, text) = received
             .recv_timeout(Duration::from_secs(30))
             .expect("watchdog self-resume notification");
-        let (repo, pane) = agents
+        let (repo, pane, _) = agents
             .get(&session)
             .expect("only a fixture agent may be notified");
         if !text.contains("Requested commands:") {
@@ -313,6 +348,15 @@ fn three_deferred_agents_resume_through_their_own_panes_and_finish() {
         );
         // Only deferred capacity notifications retry; live admission waits for
         // the existing tool result instead of starting a duplicate run.
+        let result = collect(arena.spawn_operation(
+            repo,
+            &session,
+            "issue.monitor.wait",
+            &json!({"number": 5630, "clear": true}),
+            None,
+        ));
+        assert_eq!(result["ok"], true, "{result}");
+        assert_stop_gates(repo, &session, false);
         retries.push((
             repo.clone(),
             arena.spawn(repo, &session, &params, Some(pane)),
@@ -344,6 +388,59 @@ fn three_deferred_agents_resume_through_their_own_panes_and_finish() {
             "deferred notification replayed for {session}"
         );
         assert!(text.contains("Do not start another verify.run"), "{text}");
+    }
+}
+
+fn seed_active_owner(repo: &Path, session: &str) {
+    let _env_lock = gwt_core::test_support::env_lock().lock().unwrap();
+    let _session = gwt_core::test_support::ScopedEnvVar::set("GWT_SESSION_ID", session);
+    gwt::cli::execution_state::materialize_at_launch(
+        repo,
+        gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        5630,
+        session,
+        "$gwt-execute",
+        false,
+    )
+    .unwrap();
+    gwt_core::skill_state::save(
+        repo,
+        "build-spec",
+        &gwt_core::skill_state::SkillState {
+            start_evidence: None,
+            active: true,
+            owner_spec: Some(5630),
+            started_at: chrono::Utc::now(),
+            phase: Some("verify".into()),
+            session_id: session.into(),
+        },
+    )
+    .unwrap();
+    gwt::cli::hook::action_obligation_stop_check::handle_user_prompt_submit(
+        repo,
+        &json!({"prompt": "Fix the bug and verify it"}).to_string(),
+    );
+    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
+    monitor.complete_active_launch(5630, format!("tab::{session}"));
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(repo),
+        &monitor.prefs(),
+    )
+    .unwrap();
+}
+
+fn assert_stop_gates(repo: &Path, session: &str, silent: bool) {
+    use gwt::cli::hook::{
+        action_obligation_stop_check, execution_control_stop_check, skill_build_spec_stop_check,
+        HookOutput,
+    };
+    for gate in [
+        skill_build_spec_stop_check::handle_with_input,
+        execution_control_stop_check::handle_with_input,
+        action_obligation_stop_check::handle_with_input,
+    ] {
+        let result = gate(repo, "{}", Some(session));
+        assert_eq!(matches!(result, HookOutput::Silent), silent, "{result:?}");
     }
 }
 

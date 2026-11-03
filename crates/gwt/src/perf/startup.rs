@@ -22,7 +22,9 @@ pub enum StartupPhase {
     ProjectStateLoad,
     SessionLoad,
     BrowserInit,
-    CanvasReady,
+    /// The frontend mounted its initial terminal surfaces.
+    #[serde(alias = "canvas_ready")]
+    SurfaceReady,
     FirstFrame,
     RestoreDrain,
     /// Issue #4520 AC-3: the restore drain's own phases, so a slow drain is
@@ -63,7 +65,7 @@ impl StartupPhase {
             Self::ProjectStateLoad => "project_state_load",
             Self::SessionLoad => "session_load",
             Self::BrowserInit => "browser_init",
-            Self::CanvasReady => "canvas_ready",
+            Self::SurfaceReady => "surface_ready",
             Self::FirstFrame => "first_frame",
             Self::RestoreDrain => "restore_drain",
             Self::RestoreDrainResume => "restore_drain_resume",
@@ -87,7 +89,7 @@ impl StartupPhase {
         Self::ProjectStateLoad,
         Self::SessionLoad,
         Self::BrowserInit,
-        Self::CanvasReady,
+        Self::SurfaceReady,
         Self::FirstFrame,
         Self::RestoreDrain,
         Self::PtyStart,

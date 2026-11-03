@@ -274,6 +274,7 @@ mod tests {
         let (_dir, _home) = isolated_home();
         record_backend_event(&BackendEvent::IssueMonitorToast {
             notification_transition: None,
+            notification_transition_id: None,
             level: "error".into(),
             message: "stale generation launch failed".into(),
             issue_number: Some(3778),
@@ -328,6 +329,7 @@ mod tests {
         let (_dir, _home) = isolated_home();
         record_backend_event(&BackendEvent::IssueMonitorToast {
             notification_transition: None,
+            notification_transition_id: None,
             level: "info".into(),
             message: "scan complete".into(),
             issue_number: None,
@@ -352,6 +354,7 @@ mod tests {
         let (_dir, _home) = isolated_home();
         let event = BackendEvent::IssueMonitorToast {
             notification_transition: None,
+            notification_transition_id: None,
             level: "error".into(),
             message: "same failure".into(),
             issue_number: Some(1),

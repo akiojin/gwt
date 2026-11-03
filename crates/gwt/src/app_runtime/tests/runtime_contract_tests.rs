@@ -15,28 +15,22 @@ fn app_runtime_surface_owner_keeps_pm_settings_separate_and_reuses_them() {
     ] {
         let request = serde_json::from_value(serde_json::json!({
             "kind": "create_window", "preset": "settings",
-            "surface_owner": owner, "bounds": canvas_bounds()
+            "surface_owner": owner
         }))
         .expect("create request");
         runtime.handle_frontend_event("client-1".to_string(), request);
     }
-    runtime.create_window_events(
-        &runtime.test_context(),
-        WindowPreset::Work,
-        canvas_bounds(),
-        None,
-    );
+    runtime.create_window_events(&runtime.test_context(), WindowPreset::Work, None);
     let tab = runtime.tab("tab-1").expect("tab");
     let windows = &tab.workspace.persisted().windows;
     assert_eq!(
         windows.len(),
-        2,
-        "PM Settings reuse must not steal ordinary Settings"
+        3,
+        "PM Settings reuse must not steal ordinary Settings or Issues"
     );
-    assert!(
-        windows[0].z_index > windows[1].z_index,
-        "Work must reuse the ordinary view"
-    );
+    assert_eq!(windows[0].preset, WindowPreset::Settings);
+    assert_eq!(windows[1].preset, WindowPreset::Settings);
+    assert_eq!(windows[2].preset, WindowPreset::Issue);
     let snapshot = serde_json::to_value(runtime.workspace_view_for_tab(tab)).expect("snapshot");
     assert_eq!(snapshot["windows"][1]["surface_owner"], "pm");
     assert!(windows.iter().all(|window| !window.is_pm));
@@ -55,8 +49,7 @@ fn app_runtime_surface_owner_cannot_promote_an_agent_to_pm() {
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::NonRepo, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let request = serde_json::from_value(serde_json::json!({
-        "kind": "create_window", "preset": "codex", "surface_owner": "pm",
-        "bounds": canvas_bounds()
+        "kind": "create_window", "preset": "codex", "surface_owner": "pm"
     }))
     .expect("agent request");
     runtime.handle_frontend_event("client-1".to_string(), request);
@@ -93,13 +86,13 @@ fn app_runtime_surface_owner_start_work_shell_is_agents_and_temporary() {
         command_args_override: None,
     };
     runtime
-        .spawn_wizard_shell_window("tab-1", config, canvas_bounds())
+        .spawn_wizard_shell_window("tab-1", config)
         .expect("Shell window");
     let deadline = Instant::now() + Duration::from_secs(5);
     while !recorded_events.lock().expect("events").iter().any(|event| {
         matches!(
             recorded_project_payload(event),
-            UserEvent::ShellLaunchComplete { .. }
+            UserEvent::RemoteOwnerLaunchComplete(_)
         )
     }) {
         assert!(
@@ -122,9 +115,9 @@ fn app_runtime_surface_owner_start_work_shell_is_agents_and_temporary() {
 fn agent_bootstrap_spawn_routes_apply_resource_policy_before_release() {
     let source = include_str!("../../project_runtime.rs");
     let direct = source
-        .split("pub fn spawn_unbound_pane")
+        .split("pub fn spawn_unbound_pane(")
         .nth(1)
-        .and_then(|tail| tail.split("pub fn spawn_bound_pane").next())
+        .and_then(|tail| tail.split("pub fn spawn_bound_pane(").next())
         .expect("direct spawn route body");
     assert!(
         direct.contains("policy_gate"),
@@ -143,7 +136,7 @@ fn agent_bootstrap_spawn_routes_apply_resource_policy_before_release() {
     assert!(apply < release, "policy must be applied before release");
 
     let bound = source
-        .split("pub fn spawn_bound_pane")
+        .split("pub fn spawn_bound_pane(")
         .nth(1)
         .and_then(|tail| tail.split("#[cfg(test)]").next())
         .expect("bound spawn route body");
@@ -162,12 +155,12 @@ fn agent_bootstrap_spawn_routes_apply_resource_policy_before_release() {
 fn agent_resource_policy_failure_never_fails_the_spawn_routes() {
     let source = include_str!("../../project_runtime.rs");
     let direct = source
-        .split("pub fn spawn_unbound_pane")
+        .split("pub fn spawn_unbound_pane(")
         .nth(1)
-        .and_then(|tail| tail.split("pub fn spawn_bound_pane").next())
+        .and_then(|tail| tail.split("pub fn spawn_bound_pane(").next())
         .expect("direct spawn route body");
     let bound = source
-        .split("pub fn spawn_bound_pane")
+        .split("pub fn spawn_bound_pane(")
         .nth(1)
         .and_then(|tail| tail.split("#[cfg(test)]").next())
         .expect("bound spawn route body");
@@ -261,6 +254,10 @@ fn gwt_input_trace_markers_exclude_payload_lengths_and_raw_errors() {
             include_str!("../../embedded_server.rs"),
         ),
         ("app_runtime/pty_io.rs", include_str!("../pty_io.rs")),
+        (
+            "project_runtime/agent_dispatch.rs",
+            include_str!("../../project_runtime/agent_dispatch.rs"),
+        ),
         ("pane_runtime.rs", include_str!("../../pane_runtime.rs")),
     ] {
         for (index, tail) in source
@@ -282,39 +279,10 @@ fn gwt_input_trace_markers_exclude_payload_lengths_and_raw_errors() {
 #[test]
 fn backend_gwt_input_trace_markers_use_stage_local_exact_allowlists() {
     let expected = HashMap::from([
-        (
-            "app_runtime/pty_io.rs",
-            HashMap::from([
-                (
-                    "event_loop_runtime_missing",
-                    vec!["outcome", "stage", "window_id"],
-                ),
-                (
-                    "pty_write",
-                    vec!["lock_wait_us", "ok", "stage", "window_id", "write_us"],
-                ),
-                (
-                    "pane_lock_failed",
-                    vec!["lock_wait_us", "outcome", "stage", "window_id"],
-                ),
-                (
-                    "registry_replacement_barrier_spawn_failed",
-                    vec!["outcome", "stage", "window_id"],
-                ),
-                (
-                    "registry_write_poisoned",
-                    vec!["outcome", "stage", "window_id"],
-                ),
-                (
-                    "registry_deregister_poisoned",
-                    vec!["outcome", "stage", "window_id"],
-                ),
-                (
-                    "close_finalizer_registry_deregister_poisoned",
-                    vec!["outcome", "stage", "window_id"],
-                ),
-            ]),
-        ),
+        // Physical GUI input and its fast path were removed. Future markers
+        // in either adapter still require an explicit privacy allowlist.
+        ("app_runtime/pty_io.rs", HashMap::new()),
+        ("project_runtime/agent_dispatch.rs", HashMap::new()),
         (
             "pane_runtime.rs",
             HashMap::from([(
@@ -324,37 +292,10 @@ fn backend_gwt_input_trace_markers_use_stage_local_exact_allowlists() {
         ),
         (
             "embedded_server.rs",
-            HashMap::from([
-                ("ws_recv", vec!["client_id", "seq", "stage", "window_id"]),
-                (
-                    "fast_path_lock_poisoned",
-                    vec!["client_id", "seq", "stage", "window_id"],
-                ),
-                (
-                    "fast_path_write",
-                    vec![
-                        "client_id",
-                        "elapsed_ms",
-                        "pty_writer_count",
-                        "seq",
-                        "stage",
-                        "window_id",
-                        "write_us",
-                    ],
-                ),
-                (
-                    "fast_path_write_err",
-                    vec!["client_id", "seq", "stage", "window_id"],
-                ),
-                (
-                    "fast_path_miss",
-                    vec!["client_id", "seq", "stage", "window_id"],
-                ),
-                (
-                    "ws_dispatch",
-                    vec!["client_id", "ok", "seq", "stage", "window_id"],
-                ),
-            ]),
+            HashMap::from([(
+                "ws_dispatch",
+                vec!["client_id", "seq", "stage", "window_id"],
+            )]),
         ),
     ]);
     for (source_name, source) in [
@@ -363,6 +304,10 @@ fn backend_gwt_input_trace_markers_use_stage_local_exact_allowlists() {
             include_str!("../../embedded_server.rs"),
         ),
         ("app_runtime/pty_io.rs", include_str!("../pty_io.rs")),
+        (
+            "project_runtime/agent_dispatch.rs",
+            include_str!("../../project_runtime/agent_dispatch.rs"),
+        ),
         ("pane_runtime.rs", include_str!("../../pane_runtime.rs")),
     ] {
         let mut actual = HashMap::new();
@@ -412,47 +357,6 @@ fn backend_gwt_input_trace_markers_use_stage_local_exact_allowlists() {
 }
 
 #[test]
-fn process_launch_debug_redacts_agent_capability_and_session_identity() {
-    let secret = "agent-capability-secret-sentinel";
-    let readiness = "continue-readiness-secret-sentinel";
-    let launch = ProcessLaunch {
-        initial_prompt_file: None,
-        command: "docker".to_string(),
-        args: vec![
-            format!("{}={secret}", gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV),
-            format!("{}=session-private", gwt_agent::GWT_SESSION_ID_ENV),
-            format!(
-                "{}={readiness}",
-                gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV
-            ),
-        ],
-        env: HashMap::from([
-            (
-                gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV.to_string(),
-                secret.to_string(),
-            ),
-            (
-                gwt_agent::GWT_SESSION_ID_ENV.to_string(),
-                "session-private".to_string(),
-            ),
-            (
-                gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV.to_string(),
-                readiness.to_string(),
-            ),
-        ]),
-        remove_env: Vec::new(),
-        cwd: None,
-        resource_policy: None,
-    };
-
-    let debug = format!("{launch:?}");
-    assert!(!debug.contains(secret));
-    assert!(!debug.contains(readiness));
-    assert!(!debug.contains("session-private"));
-    assert!(debug.contains("<redacted>"));
-}
-
-#[test]
 fn recovery_center_project_reload_preserves_other_project_handles() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
@@ -482,6 +386,7 @@ fn recovery_center_project_reload_preserves_other_project_handles() {
         .insert(
             "handle-a".to_string(),
             super::super::RecoveryCenterAction {
+                client_id: "client-a".to_string(),
                 generation: 1,
                 board_entry_id: Some("entry-a".to_string()),
             },
@@ -500,6 +405,80 @@ fn recovery_center_project_reload_preserves_other_project_handles() {
             board_entry_id: None,
             ..
         }
+    ));
+}
+
+#[test]
+fn recovery_center_missing_authority_is_not_found_without_creating_storage() {
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let session = gwt_agent::Session::new(&repo, "work/issue-4252", gwt_agent::AgentId::Codex);
+    session.save(&runtime.sessions_dir).unwrap();
+    // The project has recovery storage, but this Session has none.
+    RecoveryStore::for_repo(&repo, "another-session").unwrap();
+    let intents = gwt_core::paths::gwt_project_dir_for_repo_path(&repo).join("recovery/intents");
+    for _ in 0..2 {
+        let context = runtime.project_context("tab-1").unwrap();
+        let events = runtime.load_recovery_center_events(&context, "client", "load");
+        assert_eq!(
+            serde_json::to_value(&events[0].event).unwrap()["status"],
+            "not_found"
+        );
+        assert_eq!(fs::read_dir(&intents).unwrap().count(), 1);
+    }
+}
+
+#[test]
+fn recovery_center_discovers_saved_project_store_after_worktree_deletion() {
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let worktree = temp.path().join("deleted-worktree");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/recovery",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut session =
+        gwt_agent::Session::new(&worktree, "work/recovery", gwt_agent::AgentId::Codex);
+    session.project_state_root = Some(repo.clone());
+    session.repo_hash = Some(
+        gwt_core::paths::project_scope_hash(&repo)
+            .as_str()
+            .to_owned(),
+    );
+    session.save(&runtime.sessions_dir).unwrap();
+    RecoveryStore::for_repo(&worktree, &session.id)
+        .unwrap()
+        .prepare(
+            "prepare-deleted",
+            recovery_center_test_intent(
+                &session.id,
+                "recovery-deleted",
+                "board-deleted",
+                BoardWorktreeForm::BranchBacked,
+                "Retained delivery",
+            ),
+        )
+        .unwrap();
+    fs::remove_dir_all(&worktree).unwrap();
+    let context = runtime.project_context("tab-1").unwrap();
+    let events = runtime.load_recovery_center_events(&context, "client", "load");
+    assert!(matches!(&events[0].event,
+        BackendEvent::RecoveryCenterState { items, .. } if items.len() == 1
     ));
 }
 
@@ -769,10 +748,34 @@ fn recovery_center_resolves_board_history_only_for_current_acknowledged_handle()
             ..
         } if entry_id == "board-ack-action"
     ));
+
+    let context = runtime.project_context("tab-1").unwrap();
+    let foreign_result = runtime.open_recovery_center_board_entry_events(
+        &context,
+        "client-other",
+        "foreign-open",
+        generation,
+        &acknowledged_handle,
+    );
+    let foreign_wire = serde_json::to_value(&foreign_result[0].event).unwrap();
+    assert!(foreign_wire.get("board_entry_id").is_none());
+    assert!(foreign_wire["error"]
+        .as_str()
+        .is_some_and(|error| error.contains(&acknowledged_handle) && error.contains("client")));
+
+    runtime.load_recovery_center_events(&context, "client-other", "other-load");
+    assert!(
+        matches!(
+            &open(&mut runtime, generation, acknowledged_handle.clone())[0].event,
+            BackendEvent::RecoveryCenterBoardEntry { board_entry_id: Some(id), .. }
+                if id == "board-ack-action"
+        ),
+        "another client's load must preserve the original client's handle"
+    );
     let stale_result = open(
         &mut runtime,
         generation.saturating_sub(1),
-        acknowledged_handle,
+        acknowledged_handle.clone(),
     );
     assert!(matches!(
         &stale_result[0].event,
@@ -781,100 +784,184 @@ fn recovery_center_resolves_board_history_only_for_current_acknowledged_handle()
             ..
         }
     ));
+    let stale_wire = serde_json::to_value(&stale_result[0].event).unwrap();
+    assert!(stale_wire["error"]
+        .as_str()
+        .is_some_and(|error| error.contains(&acknowledged_handle) && error.contains("generation")));
+
+    runtime.load_recovery_center_events(&context, "client-recovery", "reload");
+    let reloaded = open(&mut runtime, generation, acknowledged_handle.clone());
+    let reloaded_wire = serde_json::to_value(&reloaded[0].event).unwrap();
+    assert!(reloaded_wire.get("board_entry_id").is_none());
+    assert!(reloaded_wire["error"]
+        .as_str()
+        .is_some_and(|error| error.contains(&acknowledged_handle) && error.contains("handle")));
+
+    // A captured context cannot authorize actions after the tab is closed.
+    runtime.project_tab_incarnations.remove("tab-1");
+    for closed in [
+        runtime.handle_frontend_event_in_scope(
+            "client-recovery".into(),
+            FrontendEvent::OpenRecoveryCenterBoardEntry {
+                request_id: "closed-open".into(),
+                generation,
+                action_handle: acknowledged_handle.clone(),
+            },
+            &ClientScope::Project(context.project_key.clone()),
+        ),
+        runtime.handle_frontend_event_for_project(
+            &context,
+            "client-recovery".into(),
+            FrontendEvent::OpenRecoveryCenterBoardEntry {
+                request_id: "stale-open".into(),
+                generation,
+                action_handle: acknowledged_handle.clone(),
+            },
+        ),
+    ] {
+        assert_eq!(
+            closed.len(),
+            1,
+            "closed project actions require an explicit refusal"
+        );
+        let closed_wire = serde_json::to_value(&closed[0].event).unwrap();
+        assert!(
+            closed_wire["error"].as_str().is_some_and(
+                |error| error.contains(&acknowledged_handle) && error.contains("project")
+            )
+        );
+    }
     assert_eq!(pending.state, RecoveryState::Pending);
 }
 
 #[test]
 fn resumed_agent_window_accepts_terminal_input_and_attachment_staging() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
+    let _custom = ScopedEnvVar::unset(gwt_agent::DISABLE_GLOBAL_CUSTOM_AGENTS_ENV);
     let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).expect("create repo");
-    let tab = sample_project_tab_with_window_at(
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let base = git_stdout(&repo, &["branch", "--show-current"]);
+    let worktree = temp.path().join("resumed-worktree");
+    gwt_git::WorktreeManager::new(&repo)
+        .create_from_base(&base, "work/resumed-input", &worktree)
+        .unwrap();
+    let custom = pane_control_tests::control_custom_agent();
+    persist_owner_fixture_agent(custom.command, custom.default_args);
+    let mut source = gwt_agent::Session::new(
+        &worktree,
+        "work/resumed-input",
+        gwt_agent::AgentId::Custom("fixture".into()),
+    );
+    source.project_state_root = Some(repo.clone());
+    source.agent_session_id = Some("fixture-native-conversation".into());
+    source.status = gwt_agent::AgentStatus::Stopped;
+    source.restore_window_on_startup = true;
+    source.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+    let mut tab = sample_project_tab_with_window_at(
         "tab-1",
         "agent-1",
-        repo.clone(),
+        repo,
         WindowPreset::Agent,
-        WindowProcessStatus::Running,
+        WindowProcessStatus::Stopped,
     );
+    tab.workspace
+        .set_session_id("agent-1", Some(source.id.clone()));
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
     let window_id = combined_window_id("tab-1", "agent-1");
-    let mut session = sample_active_agent_session("tab-1", &window_id);
-    session.worktree_path = repo.clone();
-    session.agent_project_root = repo.display().to_string();
-    runtime
-        .active_agent_sessions
-        .insert(window_id.clone(), session);
-    insert_test_pane_runtime(&mut runtime, &window_id);
-
-    runtime.register_pty_writer(&window_id, None);
-
-    assert!(
-        runtime
-            .pty_writers
-            .read()
-            .expect("PTY writer registry")
-            .contains_key(&window_id),
-        "a resumed agent window must register its PTY writer so the WebSocket fast path delivers input"
+    let (executor, owner, _events, error, pane_id) = drive_owner_restore_fixture(
+        &mut runtime,
+        &window_id,
+        source,
+        gwt_agent::SessionLaunchOrigin::UserRestart,
     );
-
+    assert!(
+        error.is_none(),
+        "actual configured Custom restore: {error:?}"
+    );
+    let incarnation = runtime.runtimes[&window_id].incarnation;
+    let probe = executor
+        .block_on(owner.probe(&pane_id, incarnation))
+        .unwrap();
+    assert_eq!(
+        probe.session.as_ref().unwrap().session_mode,
+        gwt_agent::SessionMode::Resume
+    );
+    assert!(
+        probe.writer.is_some(),
+        "the restored physical owner registers its current writer"
+    );
+    let context = runtime.test_context();
+    let state = runtime.project_state_mut(&context).unwrap();
+    state.project_owner_connection_id = 1;
+    state.project_owner_identity = owner.client().identity().cloned();
+    let before = probe.pty.ordinary_input_revision().unwrap();
     let terminal_events = runtime.terminal_input_events(&window_id, "mutating prompt\r");
     assert!(
         terminal_events.is_empty(),
-        "terminal input into a resumed agent window must reach the PTY without a denial event: {terminal_events:?}"
+        "restored input enters the exact owner adapter: {terminal_events:?}"
     );
-
-    let pane_send_events = runtime.pane_send_input_to_window_events(
-        "client-1".to_string(),
-        &window_id,
-        "pane input\r",
-    );
+    assert!(drain_browser_owner_input(&mut runtime).is_empty());
+    assert!(probe.pty.ordinary_input_revision().unwrap() > before);
+    let queued =
+        runtime.pane_send_input_to_window_events("client-1".into(), &window_id, "pane input\r");
+    assert!(queued.is_empty(), "pane input waits for its real owner ACK");
+    let pane_send_events = drain_browser_owner_input(&mut runtime);
     assert!(
         pane_send_events
             .iter()
             .any(|event| matches!(&event.event, BackendEvent::PaneSendResult { ok: true, .. })),
-        "pane.write into a resumed agent window must succeed: {pane_send_events:?}"
+        "pane.write into the actual resumed agent must succeed: {pane_send_events:?}"
     );
-
     let attachment_events =
         runtime.paste_image_events(&window_id, "AQ==", "image/png", Some("pasted.png"));
     assert!(
         attachment_events.is_empty(),
-        "attachment staging into a resumed agent window must inject its prompt without denial: {attachment_events:?}"
+        "restored attachment staging must not be denied: {attachment_events:?}"
     );
+    assert!(drain_browser_owner_input(&mut runtime).is_empty());
     assert!(
-        repo.join(".gwt").join("drop-files").exists(),
-        "attachment bytes must be staged for a resumed agent window"
+        worktree.join(".gwt/drop-files").exists(),
+        "attachment bytes are staged in the actual resumed worktree"
     );
+    executor
+        .block_on(
+            owner.command(gwt::project_runtime::events::OwnerCommand::Close {
+                id: pane_id,
+                incarnation,
+            }),
+        )
+        .unwrap();
+    assert!(probe.pty.tree_exit_confirmed());
+    executor.block_on(owner.shutdown());
 }
 
 #[test]
 fn browser_pane_send_input_requires_the_session_owning_project() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let mut tab = sample_project_tab_with_window_at(
-        "b",
-        "agent",
-        temp.path().join("b"),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    assert!(tab
-        .workspace
-        .set_session_id("agent", Some("session-b".to_string())));
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("b"));
-    let window_id = "b::agent";
-    insert_test_pane_runtime(&mut runtime, window_id);
-    let b = runtime.project_tab_incarnations["b"].project_key.clone();
-    let a = gwt_core::paths::resolve_project_scope(&temp.path().join("a")).hash;
+    let (mut runtime, probe, _window_id) = owner_browser_input_fixture(temp.path());
+    let session_id = &probe.session.as_ref().unwrap().id;
+    let b = runtime.test_context().project_key;
+    let a = gwt_core::paths::resolve_project_scope(&temp.path().join("foreign")).hash;
     let refused =
-        runtime.pane_send_input_for_project_events("client-a".into(), &a, "session-b", "foreign");
+        runtime.pane_send_input_for_project_events("client-a".into(), &a, session_id, "foreign");
     assert!(matches!(
         &refused[0].event,
         BackendEvent::PaneSendResult { ok: false, .. }
     ));
     let accepted =
-        runtime.pane_send_input_for_project_events("client-b".into(), &b, "session-b", "own");
+        runtime.pane_send_input_for_project_events("client-b".into(), &b, session_id, "own");
+    assert!(
+        accepted.is_empty(),
+        "own input is queued to the actual owner"
+    );
+    let accepted = drain_browser_owner_input(&mut runtime);
     assert!(matches!(
         &accepted[0].event,
         BackendEvent::PaneSendResult { ok: true, .. }
@@ -888,6 +975,7 @@ fn pty_writer_registration_preserves_inactive_project_ownership() {
     let tabs = ["a", "b"]
         .into_iter()
         .map(|id| {
+            fs::create_dir_all(temp.path().join(id)).unwrap();
             sample_project_tab_with_window_at(
                 id,
                 "agent",
@@ -900,40 +988,45 @@ fn pty_writer_registration_preserves_inactive_project_ownership() {
     let mut runtime = sample_runtime(temp.path(), tabs, Some("b"));
     let window_id = "a::agent";
     insert_test_pane_runtime(&mut runtime, window_id);
-    let pane = runtime.runtimes[window_id].pane.clone();
-
-    runtime.register_pty_writer(window_id, None);
-
-    let writers = runtime.pty_writers.read().expect("registry");
+    let probe = owner_runtime_probe(&runtime, window_id);
+    let writer = probe.writer.as_ref().expect("actual owner writer");
     assert_eq!(
-        writers[window_id].project_key,
+        writer.project_key,
         runtime.project_tab_incarnations["a"].project_key
     );
     assert_ne!(
-        writers[window_id].project_key,
+        writer.project_key,
         runtime.project_tab_incarnations["b"].project_key
     );
-    assert!(Arc::ptr_eq(
-        &writers[window_id].handle,
-        &pane.lock().expect("pane").shared_pty()
-    ));
+    assert!(Arc::ptr_eq(&writer.handle, &probe.pty));
 }
 
 #[test]
 fn pty_writer_registration_rejects_a_window_without_project_ownership() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    let owner = owner_fixture_block_on(
+        gwt::project_runtime::test_support::ProjectOwnerHarness::start(&project),
+    )
+    .unwrap();
     let window_id = "unknown::agent";
-    insert_test_pane_runtime(&mut runtime, window_id);
-
-    runtime.register_pty_writer(window_id, None);
-
-    assert!(!runtime
-        .pty_writers
-        .read()
-        .expect("registry")
-        .contains_key(window_id));
+    let (command, args) = long_running_test_command();
+    let launched = owner_fixture_block_on(owner.command(
+        gwt::project_runtime::events::OwnerCommand::LaunchShell {
+            id: window_id.into(),
+            command,
+            args,
+            cols: 80,
+            rows: 24,
+        },
+    ));
+    assert!(
+        launched.is_err(),
+        "a foreign pane must be refused before writer installation"
+    );
+    assert!(owner_fixture_block_on(owner.probe(window_id, 1)).is_err());
 }
 
 #[test]
@@ -950,17 +1043,12 @@ fn deregistering_pty_writer_invalidates_the_removed_generation() {
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let window_id = "tab-1::agent-1";
     insert_test_pane_runtime(&mut runtime, window_id);
-    runtime.register_pty_writer(window_id, None);
-    let old_generation = runtime
-        .pty_writers
-        .read()
-        .expect("PTY writer registry")
-        .get(window_id)
-        .map(|entry| Arc::clone(&entry.handle))
-        .expect("registered writer");
-
-    runtime.deregister_pty_writer(window_id);
-
+    let old_generation = owner_runtime_probe(&runtime, window_id)
+        .writer
+        .expect("actual owner writer")
+        .handle
+        .clone();
+    close_test_owner_runtime(&mut runtime, window_id);
     assert!(
         old_generation.write_input(b"late submit").is_err(),
         "a detached PM worker must not write into a deregistered PTY generation"
@@ -981,89 +1069,169 @@ fn deregistering_pty_writer_can_finish_while_a_reserved_submit_is_settling() {
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let window_id = "tab-1::agent-1";
     insert_test_pane_runtime(&mut runtime, window_id);
-    runtime.register_pty_writer(window_id, None);
-    let old_generation = runtime
-        .pty_writers
-        .read()
-        .expect("PTY writer registry")
-        .get(window_id)
-        .map(|entry| Arc::clone(&entry.handle))
-        .expect("registered writer");
-    let _reservation = Arc::clone(&old_generation)
+    let probe = owner_runtime_probe(&runtime, window_id);
+    let old_generation = probe.writer.expect("actual owner writer").handle.clone();
+    let reservation = Arc::clone(&old_generation)
         .reserve_input_transaction()
         .expect("reserve protected submit");
-
-    let started = Instant::now();
-    runtime.deregister_pty_writer(window_id);
-
+    let owner = project_owner_fixture(&mut runtime, window_id);
+    let closed_while_reserved = owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Bound the actual owner Close IPC/finalizer while the captured PTY reservation remains held.
+        tokio::time::timeout(
+            gwt_core::deadline_budget::HANG_GUARD,
+            owner.command(gwt::project_runtime::events::OwnerCommand::Close {
+                id: probe.id,
+                incarnation: probe.incarnation,
+            }),
+        )
+        .await
+    });
+    drop(reservation);
     assert!(
-        started.elapsed() < Duration::from_millis(200),
-        "registry teardown must not wait for a worker-held reservation"
+        closed_while_reserved.is_ok(),
+        "owner writer teardown must finish while the worker-held reservation is still held"
     );
+    closed_while_reserved.unwrap().expect("actual owner close");
+    assert!(old_generation.write_input(b"late submit").is_err());
 }
 
 #[test]
 fn terminal_agent_error_invalidates_input_even_when_pane_is_kept_for_diagnostics() {
-    let _env_lock = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let temp = tempdir().expect("tempdir");
-    let _home = ScopedEnvVar::set("HOME", temp.path());
-    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    use gwt::project_runtime::{
+        events::{OwnerCommand, OwnerEvent},
+        test_support::ProjectOwnerHarness,
+    };
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).expect("create repo");
+    fs::create_dir_all(&repo).unwrap();
     init_repo(&repo);
-    let tab = sample_project_tab_with_window_at(
+    run_git(
+        &repo,
+        &[
+            "-c",
+            "user.name=Prompt fixture",
+            "-c",
+            "user.email=prompt@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "prompt fixture",
+        ],
+    );
+    seed_owner_fixture_roster(&repo, 1);
+    let owner = owner_fixture_block_on(ProjectOwnerHarness::start(&repo)).unwrap();
+    let mut config = super::pane_control_tests::control_launch_config(&repo, 42);
+    config.pending_initial_prompt =
+        Some("Retain this actual launch prompt until physical exit.".into());
+    config.args = if cfg!(windows) {
+        vec![
+            "-NoProfile".into(),
+            "-Command".into(),
+            "[Console]::WriteLine('GWT_INPUT_CLOSE_PROVIDER_READY'); while ($null -ne [Console]::ReadLine()) {}".into(),
+        ]
+    } else {
+        vec![
+            "-c".into(),
+            "stty -echo -icanon -isig; printf 'GWT_INPUT_CLOSE_PROVIDER_READY\\n'; exec cat >/dev/null".into(),
+        ]
+    };
+    let worktree = config.working_dir.clone().unwrap();
+    let probe = super::pane_control_tests::control_owner_launch(&owner, "diagnostic", config);
+    owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Observe the actual provider, rather than killing its pre-exec start gate; the marker establishes ordering.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let snapshot = owner
+                    .command(OwnerCommand::Snapshot {
+                        id: probe.id.clone(),
+                        incarnation: probe.incarnation,
+                    })
+                    .await
+                    .unwrap();
+                if snapshot["screen"]
+                    .as_str()
+                    .is_some_and(|screen| screen.contains("GWT_INPUT_CLOSE_PROVIDER_READY"))
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the actual diagnostic provider must start");
+    });
+    let tab = sample_project_tab(
         "tab-1",
-        "agent-1",
-        repo,
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
+        "Repo",
+        repo.clone(),
+        ProjectKind::Git,
+        &[WindowPreset::Agent],
     );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "agent-1");
-    runtime.active_agent_sessions.insert(
-        window_id.clone(),
-        sample_active_agent_session("tab-1", &window_id),
+    let mut gui = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let gui_id = combined_window_id("tab-1", &gui.tabs[0].workspace.persisted().windows[0].id);
+    let context = gui.test_context();
+    let identity = owner.client().identity().unwrap().clone();
+    let state = gui.project_state_mut(&context).unwrap();
+    state.project_owner_connection_id = 1;
+    state.project_owner_identity = Some(identity.clone());
+    let snapshot = owner_fixture_block_on(owner.command(OwnerCommand::Snapshot {
+        id: probe.id.clone(),
+        incarnation: probe.incarnation,
+    }))
+    .unwrap();
+    gui.install_remote_owner_projection(
+        &context,
+        &gui_id,
+        owner.client(),
+        serde_json::from_value(snapshot).unwrap(),
+        probe.session.clone(),
     );
-    insert_test_pane_runtime(&mut runtime, &window_id);
-    let prompt_file = tempfile::NamedTempFile::new_in(temp.path())
-        .expect("initial prompt")
-        .into_temp_path();
-    let prompt_path = prompt_file.to_path_buf();
-    let window_runtime = runtime.runtimes.get_mut(&window_id).expect("runtime");
-    let incarnation = window_runtime.incarnation;
-    window_runtime._initial_prompt_file = Some(Arc::new(prompt_file));
-    runtime.register_pty_writer(&window_id, None);
-    let generation = runtime
-        .pty_writers
-        .read()
-        .expect("PTY writer registry")
-        .get(&window_id)
-        .map(|entry| Arc::clone(&entry.handle))
-        .expect("registered generation");
-    let _ = runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
-        "Idle",
-        "Stop",
-        "session-1",
-    ));
-
-    let _ = runtime.handle_runtime_status(
-        window_id.clone(),
-        WindowProcessStatus::Error,
-        Some("PTY process exited".to_string()),
+    let mut observed = owner.subscribe();
+    let generation = probe
+        .writer
+        .as_ref()
+        .expect("actual owner writer")
+        .handle
+        .clone();
+    let prompt_paths: Vec<_> = fs::read_dir(worktree.join(".gwt/tmp"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("initial-prompt-")
+        })
+        .collect();
+    assert_eq!(
+        prompt_paths.len(),
+        1,
+        "the production launch must own its prompt file"
     );
-
+    let prompt_path = &prompt_paths[0];
+    let session = probe.session.as_ref().unwrap();
+    let mut idle = runtime_hook_state_for_event("Idle", "Stop", &session.id);
+    idle.project_root = Some(repo.display().to_string());
+    idle.branch = Some(session.branch.clone());
+    owner.transport_event(gwt::project_transport::TransportEvent::RuntimeHook(idle));
+    owner_fixture_block_on(
+        owner.pane_event(gwt::pane_runtime::PaneRuntimeEvent::Status {
+            id: probe.id.clone(),
+            incarnation: probe.incarnation,
+            status: WindowProcessStatus::Error,
+            detail: Some("PTY process read failed".into()),
+            exit_confirmed: false,
+        }),
+    )
+    .unwrap();
+    let retained = owner_fixture_block_on(owner.probe(&probe.id, probe.incarnation)).unwrap();
     assert!(
-        runtime.runtimes.contains_key(&window_id),
+        Arc::ptr_eq(&retained.pane, &probe.pane),
         "the final pane remains available for diagnostics"
     );
-    assert!(runtime.recoverable_agent_error_windows.contains(&window_id));
-    assert!(!runtime
-        .pty_writers
-        .read()
-        .expect("PTY writer registry")
-        .contains_key(&window_id));
+    assert!(retained.policy.recoverable_error);
+    assert!(retained.writer.is_none());
     assert!(
         generation.write_input(b"late PM body").is_err(),
         "a delivery prepared before terminal status must not begin a later physical write"
@@ -1072,18 +1240,91 @@ fn terminal_agent_error_invalidates_input_even_when_pane_is_kept_for_diagnostics
         prompt_path.exists(),
         "an unconfirmed transport error must retain the prompt"
     );
-    runtime.handle_runtime_status_event(
-        window_id.clone(),
-        incarnation,
-        WindowProcessStatus::Error,
-        Some("PTY process exited".to_string()),
-        true,
+
+    {
+        // Keep EOF from copying a pre-reap Running status while the actual
+        // process exits; terminal retirement must not depend on that race.
+        let mut exited = probe.pane.lock().unwrap();
+        assert!(probe
+            .pty
+            .terminate_and_wait_for_tree(Duration::from_secs(2))
+            .unwrap());
+        probe.pty.wait().unwrap();
+        exited.check_status().unwrap();
+    }
+    assert_ne!(probe.pane.lock().unwrap().last_exit().unwrap().exit_code, 0);
+    owner_fixture_block_on(
+        owner.pane_event(gwt::pane_runtime::PaneRuntimeEvent::Status {
+            id: probe.id.clone(),
+            incarnation: probe.incarnation,
+            status: WindowProcessStatus::Error,
+            detail: Some("PTY process exited".into()),
+            exit_confirmed: true,
+        }),
+    )
+    .unwrap();
+    owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Observe confirmed exit before testing the retained diagnostic; recovery intentionally waits for an explicit close.
+        tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+            loop {
+                let event = observed.recv().await.unwrap();
+                let terminal = matches!(&event, OwnerEvent::Status { id, incarnation, exit_confirmed: true, .. }
+                    if id == &probe.id && *incarnation == probe.incarnation);
+                gui.handle_project_owner_event(&context, 1, &identity, event);
+                if terminal {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("the exact native diagnostic exit must be confirmed");
+    });
+    let retained = owner_fixture_block_on(owner.probe(&probe.id, probe.incarnation)).unwrap();
+    assert!(retained.policy.recoverable_error);
+    assert!(retained.writer.is_none());
+    assert!(probe.pty.try_wait().unwrap().is_some());
+    assert!(gui.tracked_window_exists(&gui_id));
+    assert_eq!(gui.runtimes[&gui_id].incarnation, probe.incarnation);
+    assert_eq!(gui.runtimes[&gui_id].owner_pane_id, probe.id);
+    let reconnect =
+        gui.handle_frontend_event("diagnostic-client".into(), FrontendEvent::FrontendReady);
+    assert!(
+        reconnect.iter().any(|event| matches!(&event.event,
+        BackendEvent::TerminalSnapshot { id, .. } if id == &gui_id)),
+        "the read-only diagnostic screen must survive the physical process exit"
     );
-    assert!(runtime.runtimes.contains_key(&window_id));
     assert!(
         !prompt_path.exists(),
         "confirmed exit must release the prompt even while diagnostics remain"
     );
+    assert!(generation
+        .write_input(b"late input after confirmed exit")
+        .is_err());
+    owner_fixture_block_on(owner.command(OwnerCommand::Close {
+        id: probe.id.clone(),
+        incarnation: probe.incarnation,
+    }))
+    .unwrap();
+    owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Await the exact explicit-close receipt after all retained-diagnostic assertions.
+        tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+            loop {
+                let event = observed.recv().await.unwrap();
+                let closed = matches!(&event, OwnerEvent::Closed { id, incarnation, error: None, .. }
+                    if id == &probe.id && *incarnation == probe.incarnation);
+                gui.handle_project_owner_event(&context, 1, &identity, event);
+                if closed {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("the exact retained diagnostic must close");
+    });
+    assert!(owner_fixture_block_on(owner.probe(&probe.id, probe.incarnation)).is_err());
+    assert!(!gui.active_agent_sessions.contains_key(&gui_id));
+    assert!(generation.write_input(b"late input after Closed").is_err());
+    owner_fixture_block_on(owner.shutdown());
 }
 
 #[test]
@@ -1159,12 +1400,7 @@ fn app_runtime_rejects_removed_legacy_memo_window_creation() {
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
-    let events = runtime.create_window_events(
-        &runtime.test_context(),
-        WindowPreset::Memo,
-        canvas_bounds(),
-        None,
-    );
+    let events = runtime.create_window_events(&runtime.test_context(), WindowPreset::Memo, None);
 
     assert!(events.is_empty());
     assert!(runtime.window_lookup.is_empty());
@@ -1178,7 +1414,7 @@ fn app_runtime_rejects_removed_legacy_memo_window_creation() {
 }
 
 #[test]
-fn app_runtime_legacy_issue_create_routes_to_settings_and_keeps_distinct_views() {
+fn app_runtime_legacy_issue_create_routes_to_issues_and_keeps_distinct_views() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
@@ -1192,8 +1428,7 @@ fn app_runtime_legacy_issue_create_routes_to_settings_and_keeps_distinct_views()
         WindowPreset::Work,
         WindowPreset::Branches,
     ] {
-        let events =
-            runtime.create_window_events(&runtime.test_context(), preset, canvas_bounds(), None);
+        let events = runtime.create_window_events(&runtime.test_context(), preset, None);
         assert!(!events.is_empty());
         for window in &runtime
             .tab("tab-1")
@@ -1202,8 +1437,8 @@ fn app_runtime_legacy_issue_create_routes_to_settings_and_keeps_distinct_views()
             .persisted()
             .windows
         {
-            assert_eq!(window.preset, WindowPreset::Settings);
-            assert_eq!(window.title, "Settings");
+            assert_eq!(window.preset, WindowPreset::Issue);
+            assert_eq!(window.title, "Issues");
         }
     }
     let before = runtime
@@ -1214,12 +1449,7 @@ fn app_runtime_legacy_issue_create_routes_to_settings_and_keeps_distinct_views()
         .windows
         .len();
     for _ in 0..2 {
-        runtime.create_window_events(
-            &runtime.test_context(),
-            WindowPreset::Settings,
-            canvas_bounds(),
-            None,
-        );
+        runtime.create_window_events(&runtime.test_context(), WindowPreset::Settings, None);
     }
     assert_eq!(
         runtime
@@ -1242,17 +1472,16 @@ fn app_runtime_work_singleton_reuses_create_before_hydration() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
+    let owner = Arc::new(owner_fixture_block_on(production_owner_fixture(&repo)));
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.test_project_owners.insert(repo.clone(), owner);
 
-    let first_events = runtime.create_window_events(
-        &runtime.test_context(),
-        WindowPreset::Work,
-        canvas_bounds(),
-        None,
-    );
+    let first_events =
+        runtime.create_window_events(&runtime.test_context(), WindowPreset::Work, None);
     let first = runtime
         .tab("tab-1")
         .expect("tab")
@@ -1263,12 +1492,8 @@ fn app_runtime_work_singleton_reuses_create_before_hydration() {
         .expect("first Work window")
         .clone();
 
-    let repeated_events = runtime.create_window_events(
-        &runtime.test_context(),
-        WindowPreset::Work,
-        canvas_bounds(),
-        None,
-    );
+    let repeated_events =
+        runtime.create_window_events(&runtime.test_context(), WindowPreset::Work, None);
     let windows = &runtime
         .tab("tab-1")
         .expect("tab")
@@ -1282,7 +1507,7 @@ fn app_runtime_work_singleton_reuses_create_before_hydration() {
         "repeated Work create must reuse the window"
     );
     assert_eq!(windows[0].id, first.id);
-    assert_eq!(windows[0].preset, WindowPreset::Settings);
+    assert_eq!(windows[0].preset, WindowPreset::Issue);
     assert!(
         windows[0].z_index > first.z_index,
         "reuse must raise the existing Work window"
@@ -1294,10 +1519,10 @@ fn app_runtime_work_singleton_reuses_create_before_hydration() {
     );
     assert!(first_events
         .iter()
-        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
+        .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })));
     assert!(repeated_events
         .iter()
-        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
+        .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })));
     assert!(
         !repeated_events
             .iter()

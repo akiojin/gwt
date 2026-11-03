@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { createAgentActivityModel } from "../agent-activity-model.js";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -132,11 +133,8 @@ test("non-coalesce kinds preserve order and multiplicity", () => {
   assert.deepEqual(coalesced, queue);
 });
 
-// Issue #3164 retired the only production members of
-// DEFAULT_ORDERED_STATE_KINDS, so these fence tests exercise the generic
-// "activation state must precede scoped outcomes" mechanism with an
-// explicit ordered-state kind set rather than relying on the (now empty)
-// default.
+// These fence tests exercise caller-supplied scoped outcomes independently
+// of the production census snapshot's default ordered-state policy.
 const SAMPLE_ORDERED_STATE_KINDS = new Set([
   "project_scoped_notice",
   "project_scoped_alert",
@@ -246,6 +244,7 @@ test("default coalescing policy mirrors backend latest-wins event policy", () =>
     "terminal_output",
     "terminal_snapshot",
     "runtime_hook_event",
+    "local_agent_activity",
   ]) {
     assert.equal(
       DEFAULT_COALESCE_KINDS.has(kind),
@@ -349,6 +348,102 @@ test("budget overflow defers remaining events to the next frame", () => {
   assert.equal(scheduler.pendingCount(), 0, "all events drained across two frames");
 });
 
+test("budget deferral moves only linear work for growing backlogs", (t) => {
+  for (const count of [64, 256, 1024]) {
+    const scheduler = manualScheduler();
+    const received = [];
+    let clock = 0;
+    let moved = 0;
+    const unshift = Array.prototype.unshift;
+    const slice = Array.prototype.slice;
+    const concat = Array.prototype.concat;
+    const dispatcher = createSocketReceiveDispatcher({
+      receive(event) { received.push(event.index); clock += 10; },
+      schedule: scheduler.schedule,
+      now: () => clock,
+    });
+    for (let index = 0; index < count; index += 1) {
+      dispatcher.enqueue({ kind: "terminal_output", index });
+    }
+    // Count copied/shifted elements rather than timing the runner. A repeated
+    // single-item prepend performs 1+2+...+N moves; bulk copies stay linear.
+    Array.prototype.unshift = function (...items) {
+      moved += this.length + items.length;
+      return unshift.apply(this, items);
+    };
+    Array.prototype.slice = function (start = 0, end = this.length) {
+      const result = slice.call(this, start, end);
+      moved += result.length;
+      return result;
+    };
+    Array.prototype.concat = function (...items) {
+      const result = concat.apply(this, items);
+      moved += result.length;
+      return result;
+    };
+    try { scheduler.runOnce(); }
+    finally {
+      Array.prototype.unshift = unshift;
+      Array.prototype.slice = slice;
+      Array.prototype.concat = concat;
+    }
+    assert.ok(moved <= count * 4, `${count} entries required ${moved} element moves`);
+    t.diagnostic(`${count} queued entries: ${moved} copied/shifted elements in one budgeted flush`);
+    assert.equal(dispatcher.pendingCount(), count - 1);
+    scheduler.runAll();
+    assert.deepEqual(received, Array.from({ length: count }, (_, index) => index));
+  }
+});
+
+test("overflow replaces a bounded backlog with one snapshot recovery", () => {
+  const scheduler = manualScheduler();
+  const received = [];
+  const recovery = [];
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (event) => received.push(event),
+    schedule: scheduler.schedule,
+    now: () => 0,
+    maxQueueSize: 8,
+    onResync(reason) {
+      recovery.push(reason);
+      dispatcher.enqueue({ kind: "terminal_snapshot", id: "pane", revision: 99 });
+    },
+  });
+  for (let index = 0; index < 1000; index += 1) {
+    if (index % 2) dispatcher.handle({ data: JSON.stringify({ kind: "terminal_output", index }) });
+    else dispatcher.enqueue({ kind: "terminal_output", index });
+    assert.ok(dispatcher.pendingCount() <= 8, "all inbound paths share the limit");
+  }
+  scheduler.runAll();
+  assert.deepEqual(recovery, ["overflow"]);
+  assert.deepEqual(received, [{ kind: "terminal_snapshot", id: "pane", revision: 99 }]);
+});
+
+test("resume discards stale frames before requesting authoritative state and dispose cancels delivery", () => {
+  const scheduler = manualScheduler();
+  const received = [];
+  const recovery = [];
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (event) => received.push(event),
+    schedule: scheduler.schedule,
+    now: () => 0,
+    onResync: (reason) => recovery.push(reason),
+  });
+  dispatcher.enqueue({ kind: "terminal_output", data: "stale" });
+  dispatcher.resume();
+  dispatcher.enqueue({ kind: "terminal_snapshot", data: "fresh" });
+  scheduler.runAll();
+  assert.deepEqual(recovery, ["visible"]);
+  assert.deepEqual(received, [{ kind: "terminal_snapshot", data: "fresh" }]);
+  dispatcher.enqueue({ kind: "terminal_output", data: "old socket" });
+  dispatcher.dispose();
+  dispatcher.resume();
+  scheduler.runAll();
+  assert.equal(received.length, 1);
+  assert.equal(recovery.length, 1);
+  assert.equal(dispatcher.pendingCount(), 0);
+});
+
 test("handle() accepts both WebSocket message events and pre-parsed payloads", () => {
   const received = [];
   const scheduler = manualScheduler();
@@ -433,6 +528,30 @@ test("string idempotent events coalesce before full JSON.parse", () => {
   } finally {
     JSON.parse = originalParse;
   }
+});
+
+test("raw live census reaches its timestamp authority before an older empty replay", () => {
+  const scheduler = manualScheduler(), received = [];
+  const { model, applyAgentActivitySnapshot } = createAgentActivityModel("project");
+  const fresh = { project_key: "project", host_id: "host", observed_at: "2026-10-26T02:25:02.118Z",
+    agents: [{ window_id: "one", session_id: "session", runtime_incarnation: 4, issue_number: 4777, is_pm: false }] };
+  const old = { ...fresh, observed_at: "2026-10-26T02:25:01.666Z", agents: [] };
+  const dispatcher = createSocketReceiveDispatcher({ schedule: scheduler.schedule, now: () => 0,
+    receive(event) { received.push(event); applyAgentActivitySnapshot(event.activity ?? event.projection?.local_agent_activity); } });
+  for (const event of [{ kind: "local_agent_activity", activity: fresh }, { kind: "workspace_state" },
+    { kind: "local_agent_activity", activity: old }, { kind: "active_work_projection", projection: { local_agent_activity: old } }]) {
+    dispatcher.handle({ data: JSON.stringify(event) });
+  }
+  scheduler.runAll();
+  assert.equal(received[0].kind, "workspace_state", "activate the project before scoped observations");
+  assert.equal(model.read().count, 1, "an older replay cannot discard unseen live proof in the receive buffer");
+  assert.deepEqual(received.filter(event => event.kind === "local_agent_activity").map(event => event.activity.observed_at),
+    [fresh.observed_at, old.observed_at], "both observations reach the model in arrival order");
+  dispatcher.handle({ data: JSON.stringify({ kind: "local_agent_activity", activity: { ...fresh, observed_at: "2026-10-26T02:25:03.000Z", agents: null } }) });
+  dispatcher.handle({ data: JSON.stringify({ kind: "local_agent_activity", activity: fresh }) });
+  scheduler.runAll();
+  assert.equal(model.read().count, null, "new observed unknown must reach the same timestamp authority");
+  dispatcher.dispose(); model.dispose();
 });
 
 test("flushNow synchronously drains pending events without waiting for the scheduler", () => {

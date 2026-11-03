@@ -29,28 +29,40 @@ pub const SKILL_NAME: &str = "gwt-coordination";
 /// gwt-managed worktree, independent of project documentation.
 pub const SKILL_DESCRIPTION: &str = "Use at the start of a gwt-managed session and when coordinating Board or Work updates, regardless of project AGENTS.md / CLAUDE.md content.";
 
+// Keep the first operation shared by the startup command and identity gate.
+macro_rules! pane_name_first_action_operation {
+    () => {
+        "pane.name"
+    };
+}
+
+/// Startup operation admitted before an Agent has set its Workspace identity.
+pub const PANE_NAME_FIRST_ACTION_OPERATION: &str = pane_name_first_action_operation!();
+
 // Expand the same literal into the generated skill and the hook reminder.
 macro_rules! pane_name_first_action_guidance {
     () => {
-        r#"## Agent name — first action
+        concat!(
+            r#"## Agent name — first action
 
-For every new non-PM Agent, your first action must name your own window
+For every new non-PM Agent, your first action must read your own window's name
 before responding to the user or starting normal work.
-Invent a short one-word ASCII English proper-name candidate using your own AI reasoning.
-Keep it unrelated to the task, Issue, branch, pane id, or provider.
-Do not choose from a static name vocabulary or make a second LLM request.
+gwt assigns a random, project-unique name in the project's output language
+when the window starts. Do not invent or submit an AI-generated candidate.
 
     gwtd <<'JSON'
-    {"schema_version":1,"operation":"pane.name","params":{"candidate":"<your candidate>"}}
+    {"schema_version":1,"operation":""#,
+            pane_name_first_action_operation!(),
+            r#"","params":{}}
     JSON
 
 Use the exact assigned name returned by `pane.name` in reports and handoffs,
 including any collision suffix. If your window is already assigned a name,
-retrying returns that existing name without renaming it. If an invalid candidate
-is rejected, invent another candidate and retry.
+retrying returns that existing name without renaming it.
 
 The PM is exempt: do not call `pane.name` from the PM window.
 "#
+        )
     };
 }
 
@@ -80,6 +92,55 @@ Always write numbers as `Issue #N` / `PR #N` in Board posts, Work summaries,
 window titles, and reports. Never use bare `#N`: GitHub shares one number
 space between Issues and pull requests. Preserve the resource kind when
 copying output; use the `kind` field rather than guessing from a number.
+
+## Autonomous continuation
+
+Read the launch route from `execution.status`. With `launch_route: autonomous`,
+resolve reversible, in-scope choices yourself using the smallest safe default,
+including merge strategy, test scope, and verification order.
+Do not stop to wait for a PM reply or say "ready for the next instruction"
+after posting your decision. Record a Board decision as
+`PM default ruling (override available): <choice and rationale>` and continue.
+After receiving a Board ruling, resume the next implementation, verification,
+PR, or settlement step without another `pm.message.send`.
+
+Stop for a decision only at irreversible decisions or `needs_human` boundaries
+(security/credentials, external side effects, or a genuine scope conflict).
+Existing permissions and delivery gates still apply. Temporary verification
+admission or CI waits remain active under `issue.monitor.wait`; resume when
+the recorded condition clears instead of declaring completion or blocked.
+
+## Autonomous investigation authority
+
+Read the launch route from `execution.status`. When it reports
+`launch_route: autonomous`, Investigation-First still requires investigating
+the root cause, upstream assumptions, downstream impact, and files that must
+change together. Pause edits during investigation, then compare the proposed
+fix with the owner Issue's purpose and acceptance criteria.
+
+If the root-cause fix stays within that scope, do not wait for `進めて` or
+new PM approval. Update the plan/tasks before resuming implementation,
+including any newly required file boundaries, and continue the same owner
+through verification and delivery. An Investigation-First trigger alone does
+not require entering `gwt-discussion`; continue the implementation workflow
+directly rather than entering its approval handoff for an in-scope fix.
+Do not call `execution.blocked` merely to wait for approval of such a fix.
+Do not change the owner's purpose or acceptance criteria to justify a fix.
+
+Request a scope ruling from `agent:pm` only when the proposed change adds a
+new feature, a change to the SPEC's purpose, or another Issue's domain.
+Provide the investigation evidence and proposed boundary; keep the execution
+active while that decision is pending.
+
+Examples, when the repair is necessary to meet the same owner's existing AC:
+
+- Issue #5566: post-delivery measurement identifies the root cause within the original scope: update plan/tasks and continue without PM approval.
+- Issue #5016: slice verification exposes an existing lifecycle defect within the slice's AC: update plan/tasks and continue without PM approval.
+
+Manual or unknown launch routes keep the existing interactive
+Investigation-First discussion and approval contract.
+Permission, safety, and verification gates still apply, as do existing
+lifecycle ownership and recovery requirements.
 
 ## Board (coordination history)
 
@@ -238,18 +299,34 @@ Board with the registered Issue number, threaded under your proposal via
 
 Commenting on an existing Issue with `issue.comment` is never restricted
 - add evidence, propose acceptance criteria, and share analysis freely.
-Only creating a new Issue routes through the PM.
+New project work routes through the PM; gwt feedback uses the path below.
 
-### Friction in gwt itself takes the same route
+### Report gwt feedback from any agent
 
 Friction and capability gaps in gwt itself - a hook, launch, skill, index,
 verification, coordination, or Issue/SPEC workflow that contradicts what gwt
-told you to do - is reported the same way: post it to the Board for the PM,
-who registers it with `gwt-register-issue`. Never file an Issue upstream in
-the gwt repository yourself, and never work around it silently. Include the
-contract you were following, what you observed instead, and the primary
-evidence (command, output, file and line). gwt has no automatic capture for
-this; the Board post is the intake.
+told you to do - uses `gwt-feedback` and JSON operation `feedback.create`.
+PM and implementation agents share this path from every project; do not wait
+for a Board proposal or PM registration. The destination is always
+`akiojin/gwt`, separate from the current project's Issue intake.
+
+Collect the affected operation, complete refusal verbatim, reproduction steps
+(or `unconfirmed`), and workaround. With canonical Autonomous ON, gwtd discards
+free text before persistence/logging and sends a closed safe structured snapshot
+in a detached hidden worker. No consent, authentication or failure dialog,
+browser or console opens. Revoked/unreadable policy withholds the safe job.
+Missing/false preferences retain Manual; an I/O/decode failure is safe-only
+withheld intake with no worker or send authority. Auto uses existing GH_TOKEN/GITHUB_TOKEN
+only; a GitHub CLI login alone leaves feedback unsent.
+No extra opt-in is required; Auto capacity is unrelated. Manual mode (missing/false preferences)
+keeps native **Send feedback** consent for external projects and the actual
+gwt repository's synchronous exemption. Raw Manual receipts never become Auto
+reports. JSON/env/repository flags cannot grant Auto authority. Continue project
+work independently of feedback; cancellation/no desktop retains Manual reports.
+Keep the request id and use `feedback.status` when needed. Retry declined/failed
+Manual receipts or failed/withheld Auto snapshots through `feedback.retry`;
+never automatically resend an
+uncertain outcome. Use the Board separately for local blockers/coordination.
 
 ## Work (current state)
 
@@ -308,6 +385,44 @@ automatically. Completion and PR
 mutations remain blocked until the current HEAD is confirmed on the configured
 upstream, and verification must be run fresh after that commit/push.
 
+## Issue relationship markers
+
+When registration or discussion selects multiple owners, choose exactly one
+Primary Execution Owner and classify each related Issue before persisting the
+artifacts. For example, with Primary Issue #700 and related Issues #701–#703:
+
+| Classification | Marker destination | Standalone body line |
+| --- | --- | --- |
+| `bundled-required` | Primary | `Bundle-with: #701` |
+| `dependent-follow-up` | Dependent | `Blocked-by: #700` |
+| `reference-only` | Neither | No marker |
+
+Emit `Blocked-by:` only when the dependent actually must wait for its blocker;
+separately deliverable work without that ordering needs no dependency marker.
+Copy or summarize bundled-required tasks and acceptance into the Primary;
+the marker does not replace that scope. Keep reference-only links as context.
+
+Write the applicable markers as standalone lines in a Dependencies section,
+outside Markdown fences and HTML comments. Use space-separated `#N` tokens
+with positive, unique Issue numbers, sorted ascending; omit self references
+and empty markers. Do not put bullets, URLs, commas or explanations on marker
+lines. Merge existing relationships instead of discarding unrelated markers;
+when an agreed classification changes, remove its obsolete marker membership.
+
+Persist plain Issue bodies through `issue.edit`, then read `issue.view` back.
+For a `gwt-spec` owner, use `issue.spec.edit` on its `spec` section and read
+`issue.spec.section` back, including when that section is stored in comments.
+Preserve the remaining sections and acceptance criteria. Confirm the saved
+marker destination and membership for every changed owner before handoff;
+conversation text, a Board post or the Primary's list alone is insufficient.
+If an owner number does not exist yet, finish authorized registration before
+writing its marker; do not persist placeholders.
+
+Markers are relationship data and do not grant execution or mutation authority.
+Keep the existing PM registration, Issue adoption, readiness, launch, verification
+and merge gates. Recording `Bundle-with:` does not claim that bundle launch,
+claim fan-out or completion fan-out is implemented or enabled.
+
 ## Git environment
 
 Do not manually create, switch, or delete branches/worktrees:
@@ -337,7 +452,7 @@ There is no standalone `gwt-search` executable.
 
 ## Delivery: Ready PRs only, always auto-merge
 
-**Draft PRs are retired in this project (owner ruling, 2026-09-16).** Create
+**Draft PRs are prohibited (owner ruling, 2026-10-23).** Create
 every PR non-draft and enable `auto-merge` on it. Never open a Draft, and mark
 any Draft you inherit ready with `pr.ready`. "It is still in progress, so keep
 it a Draft" is no longer a valid state.
@@ -352,8 +467,10 @@ Read the launch route from `execution.status`. With `launch_route: autonomous`,
 record `User Verification Result: n/a (autonomous)` and continue verified work
 through the PR and the CI auto-merge path until merged. Do not request human
 visual confirmation or send a verification URL merely because nobody performed
-a human check. Manual launches retain their user-verification contract and
-require an explicit request to drive to merge.
+a human check. User Verification Result is optional in every launch mode.
+A human handoff is mandatory only when the owner explicitly requests it;
+a missing, pending, or legacy deferred field is not such a request. Manual
+launches still require an explicit delivery request to drive to merge.
 
 Automated test / headed E2E / CI failures, known blockers, and all other Ready
 Gate conditions still require repair. For UI work, use the project's isolated
@@ -376,8 +493,8 @@ ledger. This includes Issue, PR, and Actions inspection, REST GET requests,
 and GraphQL queries. Prefer gwtd `pr.list` and `issue.view` when cached data
 or workflow lifecycle context is useful.
 
-Mutations must use gwtd JSON-envelope operations, such as `pr.ready`,
-`pr.draft`, and `actions.rerun`; direct `gh` writes and API mutations are
+Mutations must use gwtd JSON-envelope operations, such as `pr.ready` and
+`actions.rerun`; direct `gh` writes and API mutations are
 blocked. Read permission does not bypass PR gates or the long PR/CI polling
 restriction.
 
@@ -385,9 +502,11 @@ gwtd has no merge operation. A PR is merged by the repository's own merge
 automation (GitHub auto-merge, or a workflow that merges non-Draft PRs) or by
 a human. Keep auto-merge enabled across routine pushes; verify code changes
 before pushing. For a BEHIND PR use `pr.update_branch`, or hand synchronization
-to the PM when assigned. An explicit owner-requested hold uses `pr.draft`:
-a Draft PR cannot be merged. Resume with `pr.ready` only after the Ready PR
-Gate passes again; routine pushes do not require a Draft/Ready cycle.
+to the PM when assigned. Draft creation and demotion are unavailable; repair
+failed verification before creating a PR. Promote an inherited Draft with
+`pr.ready`. The registered PM can promote a verified existing Draft using its
+exact head evidence; another session owning that evidence is not a blocker.
+CI, review, and measured UI evidence requirements still apply.
 
 ## Canonical verification admission
 
@@ -533,6 +652,19 @@ apply regardless of what the target project's AGENTS.md or CLAUDE.md
 says (or does not say) about Board / Work — gwt's coordination
 contract supersedes project-local documentation.
 
+## Autonomous continuation
+
+`execution.status` の `launch_route: autonomous` では、merge 方針・test 範囲・
+verify 順序など可逆で in-scope の判断を最小の安全な default で決めます。
+PM の返答待ちや自分の decision 投稿後に "ready for the next instruction" で
+停止しません。Board に `PM default ruling (override available): <判断と理由>`
+を記録して続行します。Board 裁定を受けたら追加の `pm.message.send` を待たず
+implementation / verification / PR / settlement の次工程へ進みます。
+判断待ちで停止できるのは不可逆な判断または `needs_human` 相当の境界
+（security/credentials、外部副作用、真の scope conflict）だけです。
+既存 permission / delivery gate は維持し、一時的な admission / CI 待ちは
+`issue.monitor.wait` で active のまま宣言し、条件が満たされたら再開します。
+
 ## Board (coordination history)
 
 推論の節目（phase change / alternative chosen / concern raised）または
@@ -673,19 +805,35 @@ agent をブロックしているか）。PM は登録した Issue 番号を返�
 の返信を確認してください。
 
 既存 Issue への `issue.comment` は一切制限しません。証拠の追記、AC の提案、
-分析の共有は自由に行ってください。制限するのは新規 Issue の登録だけです。
+分析の共有は自由に行ってください。通常の新規作業は PM を通し、gwt 自体の
+feedback は次の専用経路を使います。
 PM は登録した Issue 番号を、提案投稿の entry id を `params.parent` に
 指定した Board 返信で返します。
 
-### gwt 自体の摩擦・機能ギャップも同じ経路
+### どの agent からも gwt feedback を報告する
 
 gwt 自体の摩擦や機能ギャップ（hook、launch、skill、index、verification、
-coordination、Issue/SPEC workflow が gwt の指示と食い違う）も同じ経路で
-扱います。Board に投稿して PM へ報告し、PM が `gwt-register-issue` で
-起票します。gwt リポジトリに自分で Issue を作らないでください。黙って
-回避するのも禁止です。投稿には、従っていた契約、実際に観測した挙動、
-一次証拠（コマンド、出力、ファイルと行）を含めます。自動捕捉の仕組みは
-無く、この Board 投稿が唯一の intake です。
+coordination、Issue/SPEC workflow が gwt の指示と食い違う）は
+`gwt-feedback` と JSON operation `feedback.create` で報告します。
+PM と実装 agent がどのプロジェクトからも同じ経路を使えます。Board 提案や
+PM の起票を待たないでください。宛先は常に `akiojin/gwt` で、現在の
+プロジェクトの通常 Issue intake とは別です。
+
+対象 operation、拒否文の原文全体、再現手順（不明なら `unconfirmed`）、
+回避策を集めます。canonical Autonomous ON では自由文を保存・log の前に破棄し、
+固定型の安全な構造だけを独立 hidden worker で送ります。同意・認証・失敗
+dialog/browser/console は開かず、設定失効・読取不能は safe job を withheld にします。
+欠落/正常 false は Manual を維持し、I/O/decode 失敗は worker/送信権限のない安全な保留だけにします。
+Auto は既存 GH_TOKEN/GITHUB_TOKEN だけを使い、GitHub CLI ログインだけでは未送信になります。
+追加 opt-in は不要で、容量 Auto とは別です。設定欠落/false の Manual では外部 project の
+native **Send feedback** 同意と実 gwt の同期送信免除を維持します。原文 receipt を
+Auto へ昇格しません。JSON/env/repository flag は Auto 権限になりません。
+feedback の受付・送信とは独立して本作業を続けてください。
+取消や desktop 不在でも報告は保全されます。request id を保持し、必要時に
+`feedback.status` で確認します。Manual の declined/failed または Auto の
+failed/withheld だけ `feedback.retry` で再試行し、uncertain は自動再送しません。
+ローカルの blocker や連携には
+別途 Board を使ってください。
 
 ## Work (current state)
 
@@ -875,6 +1023,8 @@ Use for every gwt-managed session, independent of project instructions.
 The current Work state is accurate, milestones and ownership decisions are on
 the Board, and delivery or a genuine escalation is settled through the canonical
 operations. A temporary wait stays active with its resume condition recorded.
+Autonomous sessions continue after reversible decisions and Board rulings;
+record `PM default ruling (override available)` under the Board authority contract.
 
 ## References
 

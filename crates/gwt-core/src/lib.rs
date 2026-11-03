@@ -16,6 +16,7 @@ pub mod deadline_budget;
 pub mod error;
 pub mod error_ledger;
 pub mod fd_limit;
+pub mod feedback;
 pub mod github_budget;
 pub mod github_quota;
 pub mod index;
@@ -25,6 +26,7 @@ pub mod migration;
 #[cfg(windows)]
 pub mod named_pipe;
 pub mod operation_deadline;
+pub mod pane_health;
 pub mod paths;
 pub mod pm_authorization;
 pub mod pm_peer;

@@ -1,40 +1,57 @@
 import { createFocusTrap } from "./focus-trap.js";
+import { createUiStateStore } from "./ui-state-store.js";
 
 const focusReturnMap = new WeakMap();
 const focusTrapMap = new WeakMap();
 
 // One native picker may be pending on each client, across both entry points.
 export function createFolderPickerController({ send, onChange, onSelected }) {
-  let pending = null;
-  function update(message = "") { onChange(pending, message); }
+  const model = createUiStateStore({ pending: null, feedback: null, selected: null });
+  // Request acknowledgement changes authority without rebuilding focused forms.
+  const unsubscribeChanges = model.subscribe(current => current.feedback, feedback => {
+    if (feedback) onChange(model.read().pending, feedback.message);
+  });
+  const unsubscribeSelected = model.subscribe(current => current.selected, event => {
+    if (event) onSelected(event);
+  });
+
+  function applyFolderPickerReceiveEvent(event) {
+    if (!event.kind?.startsWith("picker_")) return false;
+    model.update(current => {
+      const pending = current.pending;
+      if (event.kind === "picker_busy") {
+        return { ...current, pending: pending?.request_id === null ? null : pending,
+          feedback: { message: event.message ?? "" } };
+      }
+      if (!pending || event.purpose !== pending.purpose) return current;
+      if (event.kind === "picker_started") {
+        return pending.request_id === null
+          ? { ...current, pending: { ...pending, request_id: event.request_id } } : current;
+      }
+      if (pending.request_id === null || event.request_id !== pending.request_id) return current;
+      if (!["picker_selected", "picker_cancelled", "picker_error"].includes(event.kind)) return current;
+      return { ...current, pending: null,
+        feedback: { message: event.kind === "picker_error" ? event.message ?? "" : "" },
+        selected: event.kind === "picker_selected" ? event : current.selected };
+    });
+    return true;
+  }
+
   return {
     begin(purpose) {
-      if (pending) { update("A folder picker is already open. Finish or cancel it first."); return false; }
-      pending = { purpose, request_id: null };
-      update();
+      if (model.read().pending) {
+        model.update(current => ({ ...current,
+          feedback: { message: "A folder picker is already open. Finish or cancel it first." },
+        }));
+        return false;
+      }
+      model.update(current => ({ ...current, pending: { purpose, request_id: null }, feedback: { message: "" } }));
       send({ kind: purpose === "open" ? "open_project_dialog" : "select_clone_project_parent" });
       return true;
     },
-    receive(event) {
-      if (!event.kind?.startsWith("picker_")) return false;
-      if (event.kind === "picker_busy") {
-        if (pending?.request_id === null) pending = null;
-        update(event.message);
-        return true;
-      }
-      if (!pending || event.purpose !== pending.purpose) return true;
-      if (event.kind === "picker_started") {
-        if (pending.request_id === null) pending.request_id = event.request_id;
-        return true;
-      }
-      if (pending.request_id === null || event.request_id !== pending.request_id) return true;
-      if (!["picker_selected", "picker_cancelled", "picker_error"].includes(event.kind)) return true;
-      pending = null;
-      update(event.kind === "picker_error" ? event.message : "");
-      if (event.kind === "picker_selected") onSelected(event);
-      return true;
-    },
-    connectionLost() { pending = null; update(); },
+    receive: applyFolderPickerReceiveEvent,
+    connectionLost() { model.update(current => ({ ...current, pending: null, feedback: { message: "" } })); },
+    dispose() { unsubscribeChanges(); unsubscribeSelected(); model.dispose(); },
   };
 }
 
@@ -58,7 +75,7 @@ export function createOpenProjectPathForm(ownerDoc, onOpen) {
 }
 
 export function createOpenProjectPathDialog(ownerDoc, { onChoose, onOpen }) {
-  let awaitingOpen = null;
+  const model = createUiStateStore({ open: false, awaitingOpen: null, pending: false, message: "" });
   const node = (tag, className, text) => {
     const element = ownerDoc.createElement(tag);
     element.className = className;
@@ -94,38 +111,42 @@ export function createOpenProjectPathDialog(ownerDoc, { onChoose, onOpen }) {
   footer.append(button(ownerDoc, "Close", "text-button", hide), choose);
   dialog.append(header, body, footer);
   modal.append(dialog);
-  function hide() { awaitingOpen = null; closeModal(modal, dialog); }
+  function hide() { model.update(current => ({ ...current, open: false, awaitingOpen: null })); }
   function waitForOpen(path, requestId) {
-    awaitingOpen = requestId;
     const input = form.querySelector('[data-open-project-path]');
     input.value = path;
     form.querySelector('[data-open-project-submit]').disabled = !path.trim();
-    status.textContent = "Opening project…";
-    status.hidden = false;
-    openModal(modal, dialog, ownerDoc);
+    model.update(current => ({ ...current, open: true, awaitingOpen: requestId, message: "Opening project…" }));
+  }
+  function applyOpenProjectPathResultReceiveEvent(event) {
+    model.update(current => {
+      if (!current.awaitingOpen || event.request_id !== current.awaitingOpen || !["project_opened", "project_open_error"].includes(event.kind)) return current;
+      return { ...current, awaitingOpen: null, open: event.kind !== "project_opened",
+        message: event.kind === "project_open_error" ? event.message || "Could not open the project." : current.message };
+    });
   }
   modal.addEventListener("click", (event) => { if (event.target === modal) hide(); });
   modal.addEventListener("keydown", (event) => {
     if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); hide(); }
   });
+  const unsubscribe = model.subscribe(current => current, current => {
+    if (current.open && !modal.classList.contains("open")) openModal(modal, dialog, ownerDoc);
+    if (!current.open && modal.classList.contains("open")) closeModal(modal, dialog);
+    choose.textContent = current.pending ? "Choosing folder…" : "Choose Folder…";
+    dialog.setAttribute("aria-busy", String(current.open && current.pending));
+    status.textContent = current.message;
+    status.hidden = !current.message;
+  });
   return {
     modal,
     hide,
     waitForOpen,
-    receive(event) {
-      if (!awaitingOpen || event.request_id !== awaitingOpen || !["project_opened", "project_open_error"].includes(event.kind)) return;
-      awaitingOpen = null;
-      if (event.kind === "project_opened") { hide(); return; }
-      openModal(modal, dialog, ownerDoc);
-      status.textContent = event.message || "Could not open the project.";
-      status.hidden = false;
-    },
-    open() { openModal(modal, dialog, ownerDoc); },
+    receive: applyOpenProjectPathResultReceiveEvent,
+    dispose() { unsubscribe(); model.dispose(); },
+    open() { model.update(current => ({ ...current, open: true })); },
     update(pending, message) {
-      choose.textContent = pending ? "Choosing folder…" : "Choose Folder…";
-      dialog.setAttribute("aria-busy", String(Boolean(pending)));
-      status.textContent = message || (pending ? "Choose a folder in the system dialog, or cancel to return." : "");
-      status.hidden = !status.textContent;
+      model.update(current => ({ ...current, pending: Boolean(pending),
+        message: message || (pending ? "Choose a folder in the system dialog, or cancel to return." : "") }));
     },
   };
 }
@@ -245,7 +266,8 @@ export function renderProjectCloneModal({
   onClone,
 }) {
   const ownerDoc = modalEl.ownerDocument;
-  const current = state || { open: false };
+  // Input handlers edit a view-local draft, never the immutable model snapshot.
+  const current = { ...(state || { open: false }) };
   dialogEl.innerHTML = "";
   if (!current.open) {
     closeModal(modalEl, dialogEl);
@@ -356,6 +378,13 @@ export function renderProjectCloneModal({
   }
   if (current.error) {
     body.appendChild(createNode("div", "clone-project-error", current.error));
+  }
+  if (current.existingProjectUrl) {
+    const link = createNode("a", "", "Open existing project");
+    link.href = current.existingProjectUrl;
+    link.target = "_blank";
+    link.rel = "noopener";
+    body.appendChild(link);
   }
 
   const selectedUrl =

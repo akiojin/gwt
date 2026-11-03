@@ -1,0 +1,7 @@
+{"phase":"input_ready","live_bytes":73600056,"peak_bytes":73600056}
+{"phase":"prelock_map_built","live_bytes":89040700,"peak_bytes":113560396}
+{"cache_entries":1,"cache_capacity":3}
+{"prelock_entries":0,"prelock_capacity":140972}
+{"phase":"loader_before_return","live_bytes":69840700,"peak_bytes":113560396}
+{"phase":"returned","live_bytes":52801080,"peak_bytes":113560396}
+{"phase":"all_inputs_released","live_bytes":1024,"peak_bytes":113560396}

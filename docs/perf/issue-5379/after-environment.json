@@ -1,0 +1,344 @@
+{
+  "schema_version": 1,
+  "decision_id": "33031353-c4f9-4cad-963b-afd327090da2",
+  "environment_owner": 5816,
+  "gui_pid": 33388,
+  "gui_started_at": "2026-10-20T09:18:15.9595753Z",
+  "gui_stopped_at": "2026-10-20T09:59:01.7477966Z",
+  "measured_source": {
+    "captured_at": "2026-10-20T09:19:16.4172207Z",
+    "head": "a4e24a94fe1b693d91b84d26b29e11a23411cfc6",
+    "worktree_clean": true,
+    "source_sha256": {
+      "crates/gwt/src/app_runtime/priority_events_tests.rs": "568a37a52372d8161c700cc0c4989f5a01ce85e39620b783c7bfad4d49070871",
+      "crates/gwt/src/app_runtime/pty_io.rs": "0e0a7424f90458a73398de0f501b61acfe9b6d8d8e6f337a8500c77acf1761de",
+      "crates/gwt/src/app_runtime/runtime_events.rs": "cf7789f1852245d34b05931275149d83762d04f516aeee286fdc624adb53f97c",
+      "crates/gwt/src/app_runtime/tests.rs": "063ddaf29e47b7b7b066e391fa0339be0c081b3f7f7ab4463314967916ad0664",
+      "crates/gwt/src/app_runtime/tests/managed_launch_tests.rs": "d4e4bdc8719afa47793a8045af488bd427def3f7037852d27304fb176196bf57",
+      "crates/gwt/src/app_runtime/tests/terminal_lifecycle_tests.rs": "a7ffd4466c560e3de6d2c52392c0404bf25dc3099724439ef092ab92fb3a6a94",
+      "crates/gwt/src/main.rs": "4b1a37742fd48770fc89261c96e0261212662edb6b6b14e317133522695d83e0",
+      "crates/gwt/src/pane_runtime.rs": "99be9ba07d98a4603a6edf2501f14c1175f24703c038ee78e3b8a45ffddee5d9",
+      "scripts/diagnostics/issue-5379-browser-check.ps1": "04e5329df36d9d3830c6abb2642e651a64576337fe22093fed5cce0cd0539d4f",
+      "crates/gwt/playwright/tests/runtime-output-batch-live.spec.ts": "6aaaf3489e84948ae6353e99ba2b435de00f04ebcb3c42f0054d29b5238af487",
+      "crates/gwt-core/src/usage/limit_notice.rs": "9c7c8a24ab7124cc260f4bb11a8e14d1a85630f9de4ca1df8742c4f352553d99"
+    },
+    "binary_sha256": "836f34a3b57ea69d3bb6ef9a0544d772d13ef31378c7eba7fa4fe6e86a1f82d6",
+    "gwtd_sha256": "7c925346ffe88dfba175583203ea10ab7088b7d10dfab0bd458217a6ab05c0b1",
+    "pm_decision": "33031353-c4f9-4cad-963b-afd327090da2",
+    "environment_owner": 5816,
+    "trace": "on",
+    "retries": 0,
+    "duration_seconds": 1800,
+    "threshold_ms": 100
+  },
+  "job_observations": [
+    {
+      "schema_version": 1,
+      "read_only": true,
+      "status": "observed",
+      "target_pid": 33388,
+      "target_started_at_utc": "2026-10-20T09:18:15.9595753Z",
+      "observed_at_utc": "2026-10-20T09:19:55.4501912Z",
+      "observable_ancestor_count": 7,
+      "matching_jobs": [
+        {
+          "owner_pid": 13508,
+          "owner_name": "gwt.exe",
+          "owner_started_at_utc": "2026-10-20T00:34:05.0529880Z",
+          "target_membership_confirmed": true,
+          "cpu_rate": {
+            "status": "observed",
+            "control_flags": 5,
+            "control_flags_hex": "0x00000005",
+            "enabled": true,
+            "hard_cap_enabled": true,
+            "weight_based": false,
+            "min_max_rate": false,
+            "cpu_rate_raw": 800,
+            "cpu_rate_percent": 8,
+            "weight": null,
+            "min_rate": null,
+            "max_rate": null
+          },
+          "basic_limits": {
+            "status": "observed",
+            "limit_flags": 8192,
+            "limit_flags_hex": "0x00002000",
+            "active_process_limit": 0,
+            "priority_class_limit_enabled": false,
+            "priority_class": 32,
+            "scheduling_class_limit_enabled": false,
+            "scheduling_class": 5,
+            "minimum_working_set": 0,
+            "maximum_working_set": 0
+          },
+          "extended_limits": {
+            "status": "observed",
+            "limit_flags": 8192,
+            "process_memory_limit_bytes": 0,
+            "job_memory_limit_bytes": 0
+          }
+        },
+        {
+          "owner_pid": 32580,
+          "owner_name": "codex.exe",
+          "owner_started_at_utc": "2026-10-20T00:36:27.1603348Z",
+          "target_membership_confirmed": true,
+          "cpu_rate": {
+            "status": "observed",
+            "control_flags": 0,
+            "control_flags_hex": "0x00000000",
+            "enabled": false,
+            "hard_cap_enabled": false,
+            "weight_based": false,
+            "min_max_rate": false,
+            "cpu_rate_raw": 0,
+            "cpu_rate_percent": null,
+            "weight": null,
+            "min_rate": null,
+            "max_rate": null
+          },
+          "basic_limits": {
+            "status": "observed",
+            "limit_flags": 10240,
+            "limit_flags_hex": "0x00002800",
+            "active_process_limit": 0,
+            "priority_class_limit_enabled": false,
+            "priority_class": 32,
+            "scheduling_class_limit_enabled": false,
+            "scheduling_class": 5,
+            "minimum_working_set": 0,
+            "maximum_working_set": 0
+          },
+          "extended_limits": {
+            "status": "observed",
+            "limit_flags": 10240,
+            "process_memory_limit_bytes": 0,
+            "job_memory_limit_bytes": 0
+          }
+        }
+      ],
+      "limitations": [
+        {
+          "stage": "ancestor_exited_or_unobservable",
+          "pid": 31680
+        }
+      ],
+      "interpretation": "Only observed containing Job handles held by verified ancestors are reported. A present enabled hard cap is evidence for that Job at observation time. Absence cannot exclude unobservable ancestors/handles or other containing Jobs; nested Job limits may combine. No scheduling cause is inferred."
+    },
+    {
+      "schema_version": 1,
+      "read_only": true,
+      "status": "observed",
+      "target_pid": 33388,
+      "target_started_at_utc": "2026-10-20T09:18:15.9595753Z",
+      "observed_at_utc": "2026-10-20T09:35:14.9446453Z",
+      "observable_ancestor_count": 7,
+      "matching_jobs": [
+        {
+          "owner_pid": 13508,
+          "owner_name": "gwt.exe",
+          "owner_started_at_utc": "2026-10-20T00:34:05.0529880Z",
+          "target_membership_confirmed": true,
+          "cpu_rate": {
+            "status": "observed",
+            "control_flags": 5,
+            "control_flags_hex": "0x00000005",
+            "enabled": true,
+            "hard_cap_enabled": true,
+            "weight_based": false,
+            "min_max_rate": false,
+            "cpu_rate_raw": 800,
+            "cpu_rate_percent": 8,
+            "weight": null,
+            "min_rate": null,
+            "max_rate": null
+          },
+          "basic_limits": {
+            "status": "observed",
+            "limit_flags": 8192,
+            "limit_flags_hex": "0x00002000",
+            "active_process_limit": 0,
+            "priority_class_limit_enabled": false,
+            "priority_class": 32,
+            "scheduling_class_limit_enabled": false,
+            "scheduling_class": 5,
+            "minimum_working_set": 0,
+            "maximum_working_set": 0
+          },
+          "extended_limits": {
+            "status": "observed",
+            "limit_flags": 8192,
+            "process_memory_limit_bytes": 0,
+            "job_memory_limit_bytes": 0
+          }
+        },
+        {
+          "owner_pid": 32580,
+          "owner_name": "codex.exe",
+          "owner_started_at_utc": "2026-10-20T00:36:27.1603348Z",
+          "target_membership_confirmed": true,
+          "cpu_rate": {
+            "status": "observed",
+            "control_flags": 0,
+            "control_flags_hex": "0x00000000",
+            "enabled": false,
+            "hard_cap_enabled": false,
+            "weight_based": false,
+            "min_max_rate": false,
+            "cpu_rate_raw": 0,
+            "cpu_rate_percent": null,
+            "weight": null,
+            "min_rate": null,
+            "max_rate": null
+          },
+          "basic_limits": {
+            "status": "observed",
+            "limit_flags": 10240,
+            "limit_flags_hex": "0x00002800",
+            "active_process_limit": 0,
+            "priority_class_limit_enabled": false,
+            "priority_class": 32,
+            "scheduling_class_limit_enabled": false,
+            "scheduling_class": 5,
+            "minimum_working_set": 0,
+            "maximum_working_set": 0
+          },
+          "extended_limits": {
+            "status": "observed",
+            "limit_flags": 10240,
+            "process_memory_limit_bytes": 0,
+            "job_memory_limit_bytes": 0
+          }
+        }
+      ],
+      "limitations": [
+        {
+          "stage": "ancestor_exited_or_unobservable",
+          "pid": 31680
+        }
+      ],
+      "interpretation": "Only observed containing Job handles held by verified ancestors are reported. A present enabled hard cap is evidence for that Job at observation time. Absence cannot exclude unobservable ancestors/handles or other containing Jobs; nested Job limits may combine. No scheduling cause is inferred."
+    },
+    {
+      "schema_version": 1,
+      "read_only": true,
+      "status": "observed",
+      "target_pid": 33388,
+      "target_started_at_utc": "2026-10-20T09:18:15.9595753Z",
+      "observed_at_utc": "2026-10-20T09:48:23.6257156Z",
+      "observable_ancestor_count": 7,
+      "matching_jobs": [
+        {
+          "owner_pid": 13508,
+          "owner_name": "gwt.exe",
+          "owner_started_at_utc": "2026-10-20T00:34:05.0529880Z",
+          "target_membership_confirmed": true,
+          "cpu_rate": {
+            "status": "observed",
+            "control_flags": 5,
+            "control_flags_hex": "0x00000005",
+            "enabled": true,
+            "hard_cap_enabled": true,
+            "weight_based": false,
+            "min_max_rate": false,
+            "cpu_rate_raw": 800,
+            "cpu_rate_percent": 8,
+            "weight": null,
+            "min_rate": null,
+            "max_rate": null
+          },
+          "basic_limits": {
+            "status": "observed",
+            "limit_flags": 8192,
+            "limit_flags_hex": "0x00002000",
+            "active_process_limit": 0,
+            "priority_class_limit_enabled": false,
+            "priority_class": 32,
+            "scheduling_class_limit_enabled": false,
+            "scheduling_class": 5,
+            "minimum_working_set": 0,
+            "maximum_working_set": 0
+          },
+          "extended_limits": {
+            "status": "observed",
+            "limit_flags": 8192,
+            "process_memory_limit_bytes": 0,
+            "job_memory_limit_bytes": 0
+          }
+        },
+        {
+          "owner_pid": 32580,
+          "owner_name": "codex.exe",
+          "owner_started_at_utc": "2026-10-20T00:36:27.1603348Z",
+          "target_membership_confirmed": true,
+          "cpu_rate": {
+            "status": "observed",
+            "control_flags": 0,
+            "control_flags_hex": "0x00000000",
+            "enabled": false,
+            "hard_cap_enabled": false,
+            "weight_based": false,
+            "min_max_rate": false,
+            "cpu_rate_raw": 0,
+            "cpu_rate_percent": null,
+            "weight": null,
+            "min_rate": null,
+            "max_rate": null
+          },
+          "basic_limits": {
+            "status": "observed",
+            "limit_flags": 10240,
+            "limit_flags_hex": "0x00002800",
+            "active_process_limit": 0,
+            "priority_class_limit_enabled": false,
+            "priority_class": 32,
+            "scheduling_class_limit_enabled": false,
+            "scheduling_class": 5,
+            "minimum_working_set": 0,
+            "maximum_working_set": 0
+          },
+          "extended_limits": {
+            "status": "observed",
+            "limit_flags": 10240,
+            "process_memory_limit_bytes": 0,
+            "job_memory_limit_bytes": 0
+          }
+        }
+      ],
+      "limitations": [
+        {
+          "stage": "ancestor_exited_or_unobservable",
+          "pid": 31680
+        },
+        {
+          "stage": "ancestor_job_handle_unavailable_or_raced",
+          "count": 1
+        }
+      ],
+      "interpretation": "Only observed containing Job handles held by verified ancestors are reported. A present enabled hard cap is evidence for that Job at observation time. Absence cannot exclude unobservable ancestors/handles or other containing Jobs; nested Job limits may combine. No scheduling cause is inferred."
+    }
+  ],
+  "measurement_failures": [
+    {
+      "type": "error",
+      "message": "Error: RuntimeOutput dispatch stays below 100ms\n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBeLessThan\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m\n\nExpected: < \u001b[32m100\u001b[39m\nReceived:   \u001b[31m345\u001b[39m",
+      "stack": [
+        {
+          "file": "E:\\gwt\\work\\issue-5379\\crates\\gwt\\playwright\\tests\\runtime-output-batch-live.spec.ts",
+          "line": 112,
+          "column": 76
+        }
+      ],
+      "theme": "dark",
+      "source": "Playwright test.trace",
+      "trace_sha256": "00c7517b3743d727932a659c5d2b5226c865c756f351704efa2e80c178d94ccb"
+    }
+  ],
+  "trace_archive": {
+    "sha256": "00c7517b3743d727932a659c5d2b5226c865c756f351704efa2e80c178d94ccb",
+    "bytes": 2065101664,
+    "retained_path": "C:\\Users\\AKIOJI~1\\AppData\\Local\\Temp\\gwt-5379-after-4563f29215494e67b040c7e99c56a7d8\\playwright\\runtime-output-batch-live--ae165-native-dispatch-is-measured-chromium-dark\\trace.zip"
+  },
+  "limitations": "Cap readbacks are snapshots for this exact GUI, not a continuous trace or causal attribution. No cap claim is transferred to historical failed GUI PIDs. The unchanged latency test failed and its passed:false / visual:fail / exit1 are retained; final AC-1 awaits Issue #5816."
+}

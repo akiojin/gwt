@@ -9,8 +9,4 @@ description = "Voice input backend abstraction for gwt"
 publish = false
 
 [dependencies]
-gwt-core.workspace = true
 thiserror.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true

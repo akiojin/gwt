@@ -1,0 +1,9 @@
+{
+  "converted_at": "2026-10-17T00:20:03.1568970Z",
+  "acceptance": false,
+  "reason": "Passive interim106.717s at0.532952cores and following30.087s at0.443501cores remain above0.2. Convert the whole run to diagnostic before any native dumps; no AC or final budget claim.",
+  "owned_pid": 13432,
+  "owned_started_at": "2026-10-17T00:00:41.6646545Z",
+  "original_run_label": "after-a7d3d924163f4bbfb34913e381ae5a74",
+  "label": "diagnostic-seven"
+}

@@ -17,6 +17,52 @@ thread_local! {
     static CURRENT_DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
     #[cfg(any(test, feature = "test-support"))]
     static TEST_NOW: Cell<Option<Instant>> = const { Cell::new(None) };
+    #[cfg(any(test, feature = "test-support"))]
+    static TEST_NAMED_LOCK_CONTENTION: std::cell::RefCell<Option<NamedLockContentionObserver>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+type NamedLockContentionObserver = (PathBuf, Box<dyn FnOnce()>);
+
+/// Observe the first actual contention on one named lock in this thread.
+/// Restores the preceding observer on drop, including during unwinding.
+#[cfg(any(test, feature = "test-support"))]
+pub struct ScopedNamedLockContentionObserver {
+    previous: Option<NamedLockContentionObserver>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl ScopedNamedLockContentionObserver {
+    pub fn set(path: &Path, on_contention: impl FnOnce() + 'static) -> Self {
+        Self {
+            previous: TEST_NAMED_LOCK_CONTENTION.with(|observer| {
+                observer.replace(Some((path.to_path_buf(), Box::new(on_contention))))
+            }),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for ScopedNamedLockContentionObserver {
+    fn drop(&mut self) {
+        TEST_NAMED_LOCK_CONTENTION.with(|observer| observer.replace(self.previous.take()));
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn notify_named_lock_contention(path: &Path) {
+    let observer = TEST_NAMED_LOCK_CONTENTION.with(|observer| {
+        let mut observer = observer.borrow_mut();
+        if observer.as_ref().is_some_and(|(target, _)| target == path) {
+            observer.take()
+        } else {
+            None
+        }
+    });
+    if let Some((_, on_contention)) = observer {
+        on_contention();
+    }
 }
 
 /// Read the operation clock used both to create and to enforce a deadline.
@@ -38,6 +84,12 @@ pub struct ScopedOperationClock {
 
 #[cfg(any(test, feature = "test-support"))]
 impl ScopedOperationClock {
+    /// Capture an explicitly fixed clock for a synchronous scoped worker.
+    /// `None` preserves the host clock when the parent has no test override.
+    pub fn current() -> Option<Instant> {
+        TEST_NOW.with(Cell::get)
+    }
+
     pub fn set(now: Instant) -> Self {
         Self {
             previous: TEST_NOW.with(|current| current.replace(Some(now))),
@@ -170,6 +222,8 @@ impl NamedFileLock {
         let mut contention_observed = false;
         let result = lock_exclusive_with_observer(&file, || {
             contention_observed = true;
+            #[cfg(any(test, feature = "test-support"))]
+            notify_named_lock_contention(path);
             on_first_contention();
             if report_contention {
                 let _ = named_lock_error(
@@ -617,10 +671,20 @@ mod tests {
             let _clock = ScopedOperationClock::set(start);
             let expiry = start + Duration::from_secs(1);
             let _deadline = ScopedOperationDeadline::enter(expiry);
+            let notifications = std::rc::Rc::new(Cell::new(0));
+            let observed = notifications.clone();
+            let _observer = ScopedNamedLockContentionObserver::set(&contender_path, move || {
+                observed.set(observed.get() + 1);
+            });
             let error = NamedFileLock::acquire_observed(&contender_path, "pm_prefs", || {
                 TEST_NOW.with(|clock| clock.set(Some(expiry)));
             })
             .unwrap_err();
+            assert_eq!(
+                notifications.get(),
+                1,
+                "the named observer sees real contention once"
+            );
             let message = error.to_string();
             assert!(message.contains("board.append"), "{message}");
             assert!(
@@ -813,6 +877,7 @@ mod tests {
 
     #[test]
     fn fixed_operation_clock_controls_expiry_without_spending_wall_time() {
+        assert!(ScopedOperationClock::current().is_none());
         let directory = tempfile::tempdir().expect("tempdir");
         let file = File::create(directory.path().join("lock")).expect("lock file");
         // This deadline is already expired on the host clock. Only the
@@ -821,6 +886,7 @@ mod tests {
         let expiry = start + Duration::from_millis(250);
         let _clock = ScopedOperationClock::set(start);
         let _deadline = ScopedOperationDeadline::enter(expiry);
+        assert_eq!(ScopedOperationClock::current(), Some(start));
         assert_eq!(now(), start);
         lock_exclusive(&file).expect("logical budget remains");
         FileExt::unlock(&file).expect("unlock");
@@ -828,6 +894,7 @@ mod tests {
 
         {
             let _expired = ScopedOperationClock::set(expiry);
+            assert_eq!(ScopedOperationClock::current(), Some(expiry));
             assert_eq!(
                 lock_exclusive(&file).unwrap_err().kind(),
                 io::ErrorKind::TimedOut
@@ -840,6 +907,7 @@ mod tests {
         assert_eq!(now(), start, "nested clock restores the previous instant");
         assert!(std::thread::spawn(now).join().expect("other thread") > start);
         drop(_clock);
+        assert!(ScopedOperationClock::current().is_none());
         assert!(now() > start, "leaving the scope restores the host clock");
     }
 

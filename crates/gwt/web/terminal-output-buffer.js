@@ -10,10 +10,22 @@ export const DEFAULT_MAX_WINDOWS_PER_FLUSH = 8;
 export const DEFAULT_MAX_TOTAL_CHARS_PER_FLUSH = DEFAULT_MAX_CHARS_PER_FLUSH;
 
 function defaultSchedule(callback) {
-  if (typeof requestAnimationFrame === "function") {
-    return requestAnimationFrame(callback);
-  }
-  return setTimeout(callback, 0);
+  const hasFrames = typeof requestAnimationFrame === "function";
+  let finished = false;
+  const run = () => {
+    if (finished) return;
+    finished = true;
+    clearTimeout(timer);
+    if (frame !== null && typeof cancelAnimationFrame === "function") {
+      cancelAnimationFrame(frame);
+    }
+    callback();
+  };
+  // Receive dispatch also has a fallback: the downstream xterm buffer must
+  // keep advancing when an inactive WebView stops delivering animation frames.
+  const timer = setTimeout(run, hasFrames ? 100 : 0);
+  const frame = hasFrames ? requestAnimationFrame(run) : null;
+  return frame ?? timer;
 }
 
 function normalizeMaxCharsPerFlush(value) {

@@ -7,8 +7,8 @@
 //! - **Ledger** ([`BudgetLedger`]): a machine-local directory under
 //!   `~/.gwt/github-budget/` shared by every gwt process on the machine (GUI,
 //!   every `gwtd` invocation, every worktree). Each budget-spending `gh` spawn
-//!   appends one line to `spawns.jsonl`; the newest `gh api rate_limit` payload
-//!   is kept in `probe.json`; the newest rate-limit refusal in `block.json`.
+//!   appends one line to `spawns.jsonl`; REST and GraphQL budget observations
+//!   are merged in `probe.json`; the newest rate-limit refusal in `block.json`.
 //!   The gwt processes are short-lived and independent, so an in-process
 //!   counter would see almost nothing — the file is the only place the
 //!   machine's whole consumption is visible.
@@ -44,6 +44,7 @@ use crate::github_quota::{self, GitHubQuota, QuotaGate, RateLimitBlock, RATE_LIM
 pub const BUDGET_DIR_NAME: &str = "github-budget";
 const SPAWNS_FILE: &str = "spawns.jsonl";
 const PROBE_FILE: &str = "probe.json";
+const PROBE_LOCK_FILE: &str = "probe.lock";
 const BLOCK_FILE: &str = "block.json";
 
 /// Retention of the spawn ledger; nothing older than this is reported.
@@ -88,7 +89,7 @@ pub struct ResourceWindow {
     pub reset_at: DateTime<Utc>,
 }
 
-/// The newest `gh api rate_limit` payload, reduced to the reported resources.
+/// Budget observations, reduced to the reported resources.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProbeSnapshot {
     pub probed_at: DateTime<Utc>,
@@ -281,6 +282,14 @@ pub fn spawn_source<S: AsRef<str>>(args: &[S]) -> String {
     format!("{} {shape}", process_origin())
 }
 
+/// Attribute an otherwise identical command shape to a stable internal caller.
+/// Callers should use fixed labels rather than per-request identifiers so the
+/// budget breakdown remains bounded. Unlabelled and existing ledger records
+/// retain the source produced by [`spawn_source`].
+pub fn spawn_source_for_caller<S: AsRef<str>>(args: &[S], caller: &str) -> String {
+    format!("{} [{caller}]", spawn_source(args))
+}
+
 /// SPEC #4093 FR-004: the source label for a call this process makes over
 /// HTTP (the `gwt-github` client) rather than through a `gh` spawn, in the
 /// same shape as [`spawn_source`] so the two transports line up in a
@@ -386,27 +395,21 @@ impl BudgetLedger {
                 cost: rate_limit.cost - 1,
             });
         }
-        let mut probe: ProbeSnapshot =
-            read_json(&self.dir.join(PROBE_FILE)).unwrap_or(ProbeSnapshot {
-                probed_at: now,
-                resources: BTreeMap::new(),
-            });
-        let limit = probe
-            .resources
-            .get(resource)
-            .map(|window| window.limit)
+        let limit = read_json::<ProbeSnapshot>(&self.dir.join(PROBE_FILE))
+            .and_then(|probe| probe.resources.get(resource).map(|window| window.limit))
             .filter(|limit| *limit > 0)
             .unwrap_or(DEFAULT_GRAPHQL_POINT_LIMIT);
-        probe.resources.insert(
-            resource.to_string(),
-            ResourceWindow {
-                limit,
-                remaining: rate_limit.remaining,
-                reset_at: rate_limit.reset_at,
-            },
-        );
-        probe.probed_at = now;
-        self.record_probe(&probe);
+        self.record_probe(&ProbeSnapshot {
+            probed_at: now,
+            resources: BTreeMap::from([(
+                resource.to_string(),
+                ResourceWindow {
+                    limit,
+                    remaining: rate_limit.remaining,
+                    reset_at: rate_limit.reset_at,
+                },
+            )]),
+        });
     }
 
     fn append_record(&self, record: SpawnRecord) {
@@ -429,9 +432,40 @@ impl BudgetLedger {
         }
     }
 
-    /// Persist the newest probe so every process sees the same primary budget.
+    /// Merge observations so a larger REST value cannot reopen a GraphQL
+    /// reset window. A newer window recovers; delayed older windows do not
+    /// replace it. Serialize the entire merge across processes and threads.
     pub fn record_probe(&self, probe: &ProbeSnapshot) {
-        let _ = write_json_atomic(&self.dir.join(PROBE_FILE), probe);
+        if std::fs::create_dir_all(&self.dir).is_err() {
+            return;
+        }
+        let Ok(_lock) = crate::operation_deadline::NamedFileLock::acquire(
+            &self.dir.join(PROBE_LOCK_FILE),
+            "github_budget.probe",
+        ) else {
+            return;
+        };
+        let path = self.dir.join(PROBE_FILE);
+        let mut merged: ProbeSnapshot = read_json(&path).unwrap_or(ProbeSnapshot {
+            probed_at: probe.probed_at,
+            resources: BTreeMap::new(),
+        });
+        merged.probed_at = merged.probed_at.max(probe.probed_at);
+        for (resource, observed) in &probe.resources {
+            let mut window = observed.clone();
+            if resource == "graphql" {
+                if let Some(previous) = merged.resources.get(resource) {
+                    if previous.reset_at > window.reset_at {
+                        continue;
+                    }
+                    if previous.reset_at == window.reset_at {
+                        window.remaining = window.remaining.min(previous.remaining);
+                    }
+                }
+            }
+            merged.resources.insert(resource.clone(), window);
+        }
+        let _ = write_json_atomic(&path, &merged);
     }
 
     /// Persist the newest refusal so a later process can throttle before it
@@ -728,12 +762,37 @@ impl From<&gwt_config::GitHubBudgetConfig> for ThrottlePolicy {
     }
 }
 
-/// Whether the snapshot's probe is missing or older than the policy allows —
+/// Whether the probe is missing, older than policy allows, or spans a reset —
 /// the caller should take a fresh (free) probe before deciding.
 pub fn probe_is_stale(snapshot: &BudgetSnapshot, policy: &ThrottlePolicy) -> bool {
     snapshot
         .probe_age_secs
         .is_none_or(|age| age > policy.probe_max_age_secs)
+        || snapshot.probe.as_ref().is_some_and(|probe| {
+            probe
+                .resources
+                .values()
+                .any(|window| window.reset_at <= snapshot.taken_at)
+        })
+}
+
+fn fresh_resource_window<'a>(
+    snapshot: &'a BudgetSnapshot,
+    resource: &str,
+    policy: &ThrottlePolicy,
+    now: DateTime<Utc>,
+) -> Option<&'a ResourceWindow> {
+    snapshot
+        .probe
+        .as_ref()?
+        .resources
+        .get(resource)
+        .filter(|window| {
+            window.reset_at > now
+                && snapshot
+                    .probe_age_secs
+                    .is_some_and(|age| age <= policy.probe_max_age_secs)
+        })
 }
 
 /// Why a non-essential call against `quota` should be skipped right now, or
@@ -760,21 +819,15 @@ pub fn throttle_reason(
             (block.reset_at - now).num_seconds().max(0)
         ));
     }
-    if !probe_is_stale(snapshot, policy) {
-        if let Some(window) = snapshot
-            .probe
-            .as_ref()
-            .and_then(|probe| probe.resources.get(resource))
-        {
-            let reserve = policy.reserve_for(window.limit);
-            if window.remaining < reserve {
-                return Some(format!(
+    if let Some(window) = fresh_resource_window(snapshot, resource, policy, now) {
+        let reserve = policy.reserve_for(window.limit);
+        if window.remaining < reserve {
+            return Some(format!(
                     "budget_reserve: resource={resource} remaining={} reserve={reserve} limit={} reset_at={}",
                     window.remaining,
                     window.limit,
                     window.reset_at.to_rfc3339_opts(SecondsFormat::Secs, true)
                 ));
-            }
         }
     }
     if let Some(local) = snapshot.local.get(resource) {
@@ -844,7 +897,7 @@ pub struct ResourceBudgetStatus {
     /// The [`throttle_reason`], when throttled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    /// End of the persisted refusal window, when one is open.
+    /// End of the active refusal or reserve window, when one is open.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backoff_until: Option<DateTime<Utc>>,
     /// Seconds until that window ends.
@@ -885,15 +938,19 @@ pub fn status_by_resource(
                 .blocks
                 .get(resource)
                 .filter(|block| block.reset_at > now);
+            let backoff_until = window.map(|block| block.reset_at).or_else(|| {
+                fresh_resource_window(snapshot, resource, policy, now)
+                    .filter(|window| window.remaining < policy.reserve_for(window.limit))
+                    .map(|window| window.reset_at)
+            });
             let local = snapshot.local.get(resource).cloned().unwrap_or_default();
             Some((
                 resource.to_string(),
                 ResourceBudgetStatus {
                     throttled: reason.is_some(),
                     reason,
-                    backoff_until: window.map(|block| block.reset_at),
-                    retry_after_secs: window
-                        .map(|block| (block.reset_at - now).num_seconds().max(0)),
+                    backoff_until,
+                    retry_after_secs: backoff_until.map(|until| (until - now).num_seconds().max(0)),
                     consecutive_refusals: window
                         .map(|block| block.consecutive_refusals)
                         .unwrap_or(0),

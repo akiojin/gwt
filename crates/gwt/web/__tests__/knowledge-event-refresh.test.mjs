@@ -9,10 +9,13 @@ async function surfaceModule() {
       'from "data:text/javascript,export function createFocusTrap(){return()=>{}}"')
     .replace('from "./launch-pending-controller.js"',
       `from "${new URL("../launch-pending-controller.js", import.meta.url).href}"`)
+    .replace('from "./agent-kanban-surface.js"',
+      `from "${new URL("../agent-kanban-surface.js", import.meta.url).href}"`)
     .replace('from "./control-explanations.js"',
       `from "${new URL("../control-explanations.js", import.meta.url).href}"`)
     .replace('from "./ui-state-store.js"',
-      `from "${new URL("../ui-state-store.js", import.meta.url).href}"`);
+      `from "${new URL("../ui-state-store.js", import.meta.url).href}"`).replace('from "./ui-content.js"',
+      `from "${new URL("../ui-content.js", import.meta.url).href}"`);
   return import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
 }
 
@@ -49,6 +52,7 @@ async function harness(count = 1) {
   const sent = [];
   const windowMap = new Map();
   const surface = mod.createKnowledgeKanbanSurface({
+    scheduleFrame: run => { run(); return () => {}; },
     send(message) {
       sent.push(message);
       if (message.kind === "load_knowledge_bridge") surface.applyKnowledgeReceiveEvent({

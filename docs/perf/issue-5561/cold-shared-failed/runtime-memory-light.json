@@ -1,0 +1,220 @@
+{
+  "issue": 5561,
+  "theme": "light",
+  "passed": false,
+  "failure": {
+    "message": "owned GUI RSS budget\n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBeLessThanOrEqual\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m\n\nExpected: <= \u001b[32m1500000000\u001b[39m\nReceived:    \u001b[31m1677410304\u001b[39m",
+    "stack": "Error: owned GUI RSS budget\n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBeLessThanOrEqual\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m\n\nExpected: <= \u001b[32m1500000000\u001b[39m\nReceived:    \u001b[31m1677410304\u001b[39m\n    at E:\\gwt\\work\\issue-5561\\crates\\gwt\\playwright\\tests\\runtime-memory-budget-live.spec.ts:85:67"
+  },
+  "gui_pid": 61908,
+  "checkout_sha": "109b7c5b74e8754218be886869421f391bcc1fbd",
+  "checkout": "E:\\gwt\\work\\issue-5561",
+  "checkout_binary": "E:\\gwt\\work\\issue-5561\\target\\debug\\gwt.exe",
+  "checkout_branch": "work/issue-5561",
+  "source_worktree_count": 520,
+  "isolated_home": "C:\\Users\\<redacted>\\AppData\\Local\\Temp\\gwt-runtime-memory-4040b494-4d68-49a5-bb8f-d853a043b7b7",
+  "started_at": "2026-10-16T18:46:16.686Z",
+  "ended_at": "2026-10-16T18:49:02.903Z",
+  "observation_started_at": "2026-10-16T18:49:02.867Z",
+  "requested_duration_seconds": 60,
+  "budget_bytes": 1500000000,
+  "pane_ids": [
+    "memory-workload-0::agent-1",
+    "memory-workload-1::agent-1",
+    "memory-workload-2::agent-1",
+    "memory-workload-3::agent-1",
+    "memory-workload-4::agent-1",
+    "memory-workload-5::agent-1",
+    "memory-workload-6::agent-1",
+    "memory-workload-7::agent-1",
+    "memory-workload-8::agent-1",
+    "memory-workload-9::agent-1",
+    "memory-workload-10::agent-1",
+    "memory-workload-11::agent-1"
+  ],
+  "workload": "12 custom command Agent panes; node heartbeat and 512-byte PTY output every second; no model-provider calls",
+  "limitations": "12 deterministic PTYs in separate fresh folder Projects with isolated fixture Git metadata plus the real checkout source-history Project. Provider inference, provider hooks and implementation builds are not covered. This is not same-condition real model-agent fleet evidence.",
+  "user_verification_result": "n/a (autonomous)",
+  "agent_visual_check": "fail",
+  "initial_producers": [
+    {
+      "pid": 11768,
+      "started_at": 1792176386743.545,
+      "session": "d17957e7-ed17-4b84-9e5a-01817c1dfb04",
+      "tick": 143,
+      "observed_at": "2026-10-16T18:49:01.451Z"
+    },
+    {
+      "pid": 12176,
+      "started_at": 1792176449142.1199,
+      "session": "164248a9-f85d-4870-abfd-aedd4b0f195c",
+      "tick": 83,
+      "observed_at": "2026-10-16T18:49:01.293Z"
+    },
+    {
+      "pid": 16468,
+      "started_at": 1792176395114.5364,
+      "session": "53776b19-017c-417b-a9be-4c8a0f408b22",
+      "tick": 134,
+      "observed_at": "2026-10-16T18:49:01.493Z"
+    },
+    {
+      "pid": 55168,
+      "started_at": 1792176508519.9253,
+      "session": "886b9cba-a62d-460f-bf26-2644f76147ed",
+      "tick": 30,
+      "observed_at": "2026-10-16T18:49:01.490Z"
+    },
+    {
+      "pid": 56220,
+      "started_at": 1792176457540.4597,
+      "session": "b84ff0ec-7886-4e11-bbd3-32efc8b185b1",
+      "tick": 76,
+      "observed_at": "2026-10-16T18:49:01.467Z"
+    },
+    {
+      "pid": 58776,
+      "started_at": 1792176523951.844,
+      "session": "009ba605-16b1-46bd-90c0-9641505d0a86",
+      "tick": 16,
+      "observed_at": "2026-10-16T18:49:01.085Z"
+    },
+    {
+      "pid": 62028,
+      "started_at": 1792176408256.1277,
+      "session": "02c61c62-6088-4b2e-8730-33556d31f5d2",
+      "tick": 123,
+      "observed_at": "2026-10-16T18:49:01.448Z"
+    },
+    {
+      "pid": 63392,
+      "started_at": 1792176439986.6772,
+      "session": "26542aa3-b5f4-40a0-ba7b-51a1271c072a",
+      "tick": 93,
+      "observed_at": "2026-10-16T18:49:01.449Z"
+    },
+    {
+      "pid": 65564,
+      "started_at": 1792176472652.158,
+      "session": "9d1b9bcb-0c09-4d3b-a15b-fb8930e406cd",
+      "tick": 60,
+      "observed_at": "2026-10-16T18:49:01.505Z"
+    },
+    {
+      "pid": 65676,
+      "started_at": 1792176423480.5964,
+      "session": "ec359d53-422a-4885-a524-f29bdaacc8c7",
+      "tick": 106,
+      "observed_at": "2026-10-16T18:49:01.448Z"
+    },
+    {
+      "pid": 66928,
+      "started_at": 1792176489918.4375,
+      "session": "8f17774a-8aa2-4b23-aca8-b121b94400da",
+      "tick": 45,
+      "observed_at": "2026-10-16T18:49:01.504Z"
+    },
+    {
+      "pid": 68596,
+      "started_at": 1792176539559.8918,
+      "session": "31e23ab7-9d14-4b24-ad45-c5cf6a46bfe7",
+      "tick": 2,
+      "observed_at": "2026-10-16T18:49:01.619Z"
+    }
+  ],
+  "final_producers": [],
+  "rss_samples": [
+    {
+      "timestamp": "2026-10-16T18:46:29.1070454Z",
+      "cpu_seconds": 5914.375,
+      "rss_bytes": 1331245056,
+      "private_bytes": 1346977792,
+      "elapsed_ms": 0
+    },
+    {
+      "timestamp": "2026-10-16T18:46:37.2993902Z",
+      "cpu_seconds": 5922.8125,
+      "rss_bytes": 1366257664,
+      "private_bytes": 1380175872,
+      "elapsed_ms": 0
+    },
+    {
+      "timestamp": "2026-10-16T18:46:50.2329604Z",
+      "cpu_seconds": 5936.421875,
+      "rss_bytes": 1212882944,
+      "private_bytes": 1364725760,
+      "elapsed_ms": 0
+    },
+    {
+      "timestamp": "2026-10-16T18:47:05.2739851Z",
+      "cpu_seconds": 5952.203125,
+      "rss_bytes": 1260146688,
+      "private_bytes": 1374834688,
+      "elapsed_ms": 0
+    },
+    {
+      "timestamp": "2026-10-16T18:47:22.0325813Z",
+      "cpu_seconds": 5965.921875,
+      "rss_bytes": 1655988224,
+      "private_bytes": 2037444608,
+      "elapsed_ms": 0
+    },
+    {
+      "timestamp": "2026-10-16T18:47:30.5620429Z",
+      "cpu_seconds": 5977.984375,
+      "rss_bytes": 1660940288,
+      "private_bytes": 2036838400,
+      "elapsed_ms": 0
+    },
+    {
+      "timestamp": "2026-10-16T18:47:38.6635608Z",
+      "cpu_seconds": 5987.875,
+      "rss_bytes": 1664385024,
+      "private_bytes": 2037362688,
+      "elapsed_ms": 0
+    },
+    {
+      "timestamp": "2026-10-16T18:47:54.7057385Z",
+      "cpu_seconds": 6003.296875,
+      "rss_bytes": 1669394432,
+      "private_bytes": 2041090048,
+      "elapsed_ms": 0
+    },
+    {
+      "timestamp": "2026-10-16T18:48:11.6901437Z",
+      "cpu_seconds": 6018.15625,
+      "rss_bytes": 1669668864,
+      "private_bytes": 2039672832,
+      "elapsed_ms": 0
+    },
+    {
+      "timestamp": "2026-10-16T18:48:30.7135524Z",
+      "cpu_seconds": 6028.734375,
+      "rss_bytes": 1671135232,
+      "private_bytes": 2039803904,
+      "elapsed_ms": 0
+    },
+    {
+      "timestamp": "2026-10-16T18:48:45.7698272Z",
+      "cpu_seconds": 6042.109375,
+      "rss_bytes": 1673457664,
+      "private_bytes": 2041737216,
+      "elapsed_ms": 0
+    },
+    {
+      "timestamp": "2026-10-16T18:49:01.5658589Z",
+      "cpu_seconds": 6057.859375,
+      "rss_bytes": 1676312576,
+      "private_bytes": 2042884096,
+      "elapsed_ms": 0
+    },
+    {
+      "timestamp": "2026-10-16T18:49:02.8723933Z",
+      "cpu_seconds": 6059.125,
+      "rss_bytes": 1677410304,
+      "private_bytes": 2044260352,
+      "elapsed_ms": 0.001799999998183921
+    }
+  ],
+  "browser_errors": []
+}

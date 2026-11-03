@@ -13,7 +13,7 @@
 //!    magnitude above what the path actually costs.
 //! 3. Aggregation scaling — a same-run relative check that catches an
 //!    accidentally quadratic `summarize`.
-//! 4. Session census — cumulative allocation bytes and an abnormal pass ceiling
+//! 4. Session census — cumulative allocation bytes and no Session ledger decode
 //!    for six thousand historical runtime namespaces.
 
 use std::{
@@ -87,8 +87,8 @@ unsafe impl GlobalAlloc for CensusCountingAllocator {
 }
 
 /// Issue #5383 AC-2: historical namespaces must not pay for Session TOML decode.
-/// One second is the target, while five seconds catches an obviously abnormal
-/// pass without making scheduler or filesystem variability a tight CI gate.
+/// Elapsed time is diagnostic only: instrumentation and filesystem contention
+/// do not change the read/allocation work this fixture accepts.
 #[test]
 fn session_census_with_six_thousand_dead_namespaces_stays_within_read_budget() {
     let temp = tempfile::tempdir().expect("isolated census fixture");
@@ -102,6 +102,11 @@ fn session_census_with_six_thousand_dead_namespaces_stays_within_read_budget() {
     // A representative ledger is shared: the old path decoded it once per namespace.
     session.launch_args = vec!["x".repeat(5 * 1024)];
     session.save(&sessions).expect("valid Session ledger");
+    // A dead namespace must be pruned before decoding its ledger. An invalid
+    // ledger makes an accidental read observable as an inventory uncertainty,
+    // independent of the runner's speed.
+    std::fs::write(sessions.join("dead-history.toml"), "invalid TOML = [")
+        .expect("poison historical Session ledger");
     let mut runtime = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Stopped);
     runtime.host_started_at = Some(1);
     let runtime_json = serde_json::to_vec(&runtime).expect("valid runtime JSON");
@@ -126,17 +131,13 @@ fn session_census_with_six_thousand_dead_namespaces_stays_within_read_budget() {
         .with(|counter| counter.replace(None))
         .expect("active allocation measurement");
     eprintln!(
-        "6000 dead namespace census: {elapsed:?}, {allocated_bytes} allocated bytes (target <1s, <50MB)"
+        "6000 dead namespace census: {elapsed:?}, {allocated_bytes} allocated bytes (allocation budget <50MB)"
     );
     assert!(inventory.sessions.is_empty());
     assert!(inventory.uncertainties.is_empty());
     assert!(
         allocated_bytes < 50_000_000,
         "dead namespace census allocation budget exceeded: {allocated_bytes} bytes"
-    );
-    assert!(
-        elapsed < Duration::from_secs(5),
-        "dead namespace census exceeded the abnormal pass ceiling: {elapsed:?}"
     );
 }
 

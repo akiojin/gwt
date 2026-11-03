@@ -24,6 +24,7 @@ fn global_broadcast_allows_host_settings_payloads() {
             codex_trust_managed_hooks: None,
             board_provider: None,
             agent_resource: None,
+            works_preview_lines: None,
         },
         BackendEvent::SystemSettingsUpdated {
             language: "ja".into(),
@@ -31,6 +32,7 @@ fn global_broadcast_allows_host_settings_payloads() {
             codex_trust_managed_hooks: None,
             board_provider: None,
             agent_resource: None,
+            works_preview_lines: None,
         },
         BackendEvent::SystemSettingsError {
             message: "settings".into(),
@@ -57,12 +59,14 @@ fn global_broadcast_host_update_notice_is_an_ownerless_exception() {
     assert!(matches!(notice.target, DispatchTarget::All));
     assert!(matches!(notice.event, BackendEvent::IssueMonitorToast {
         notification_transition: None,
+        notification_transition_id: None,
         issue_number: None, ref level, ref message,
     } if level == "info" && message == "Host update ready"));
     assert!(
         std::panic::catch_unwind(
             || OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
                 notification_transition: None,
+                notification_transition_id: None,
                 issue_number: None,
                 level: "info".into(),
                 message: "Unscoped producer".into(),
@@ -86,11 +90,18 @@ fn global_broadcast_settings_requests_remain_client_replies() {
             None,
             None,
             None,
+            Some(7),
         ),
     ] {
         assert_eq!(events.len(), 1);
         assert!(matches!(&events[0].target, DispatchTarget::Client(id) if id == "settings-client"));
     }
+    assert_eq!(
+        gwt_config::Settings::load_from_path(&temp.path().join(".gwt/config.toml"))
+            .unwrap()
+            .works_preview_lines,
+        Some(7)
+    );
 }
 
 #[test]

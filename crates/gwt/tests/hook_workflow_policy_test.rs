@@ -65,10 +65,12 @@ fn evaluate(event: &HookEvent, context: workflow_policy::WorkflowContext) -> Opt
 fn semantic_classifier_distinguishes_json_operation_effects() {
     let cases = [
         ("issue.view", json!({}), GovernanceEffect::Observe),
+        ("pm.plan.status", json!({}), GovernanceEffect::Observe),
+        ("pm.plan.apply", json!({}), GovernanceEffect::Protected),
         (
             "pr.create",
             json!({ "draft": true }),
-            GovernanceEffect::Reversible,
+            GovernanceEffect::Protected,
         ),
         ("pr.create", json!({}), GovernanceEffect::Protected),
         (
@@ -82,7 +84,7 @@ fn semantic_classifier_distinguishes_json_operation_effects() {
             GovernanceEffect::Protected,
         ),
         ("pr.edit", json!({}), GovernanceEffect::Reversible),
-        ("pr.draft", json!({}), GovernanceEffect::Reversible),
+        ("pr.draft", json!({}), GovernanceEffect::Protected),
         (
             "pr.close",
             json!({"number": 42}),
@@ -685,6 +687,7 @@ fn allows_json_envelope_discovery_and_linking_without_owner() {
         // SPEC-3431: PM diagnostics must stay diagnosable before an owner is
         // linked (ownerless-safe, read-only).
         ("pm.status", json!({})),
+        ("pm.plan.status", json!({})),
     ] {
         let event = event(
             "Bash",

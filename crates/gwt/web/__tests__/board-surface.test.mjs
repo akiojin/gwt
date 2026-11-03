@@ -15,6 +15,7 @@ import {
   mentionsForBoardSubmit,
   visibleBoardEntries,
 } from "../board-surface.js";
+import * as boardSurface from "../board-surface.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 // SPEC-3064 Phase 3 (E6c): the Board renderers moved from app.js into
@@ -69,7 +70,7 @@ test("Board surface exposes origin Agent focus and resume affordances", () => {
   assert.match(appSource, /open_board_origin_agent/);
   assert.match(appSource, /board-origin-badge/);
   assert.match(appSource, /board-origin-button/);
-  assert.match(appSource, /visibleBounds\(\)/);
+  assert.doesNotMatch(appSource, /bounds:\s*visibleBounds\(\)/);
 });
 
 test("Board surface exposes a Workspace audience filter toggle (SPEC-2359 FR-101)", () => {
@@ -90,11 +91,11 @@ test("Board message body renders sanitized server Markdown with a plaintext fall
   // ui-content.test.mjs; this contract preserves the shared wiring and styles.
   assert.match(
     appSource,
-    /createKnowledgeMarkdownBody\(entry,\s*"board-message-body"\)/,
+    /renderUiContent\(document, entry\.content,\s*"board-message-body"\)/,
   );
   assert.match(
     appSource,
-    /function createKnowledgeMarkdownBody[\s\S]{0,200}renderUiContent\(document, markdownContent\(section\)/,
+    /content: \{ type: "markdown", body: entry\.body/,
   );
   // Only the plaintext fallback forces pre-wrap; rendered HTML lays itself out.
   assert.match(
@@ -296,4 +297,18 @@ test("Board origin helpers label live focus versus exact resume actions", () => 
   assert.equal(boardEntryOriginActionLabel(entry, liveAgents), "Focus Agent");
   assert.equal(boardEntryOriginActionLabel(entry, []), "Resume Agent");
   assert.equal(boardEntryOriginActionLabel({ author_kind: "user" }, liveAgents), "");
+});
+
+
+test("Board author names survive closed windows and lead provider context", () => {
+  assert.equal(typeof boardSurface.boardEntryAuthorLabel, "function");
+  const { boardEntryAuthorLabel } = boardSurface;
+  const named = { author_kind: "agent", author: "Codex", origin_agent_name: "ミオ",
+    origin_agent_id: "codex", origin_session_id: "closed-session", origin_branch: "work/task" };
+  assert.equal(boardEntryAuthorLabel(named), "ミオ (Codex)");
+  assert.equal(boardEntryOriginLabel(named), "From ミオ (Codex) · work/task · closed-s");
+  assert.equal(boardEntryAuthorLabel({ author_kind: "agent", author: "Codex" }), "Codex");
+  assert.equal(boardEntryAuthorLabel({ author_kind: "user", author: "You" }), "You");
+  assert.match(appSource, /Reply to \$\{boardEntryAuthorLabel\(parent\)\}/);
+  assert.match(appSource, /Replying to \$\{boardEntryAuthorLabel\(parent\)\}/);
 });

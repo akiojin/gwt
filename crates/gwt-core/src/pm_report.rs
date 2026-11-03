@@ -1,5 +1,10 @@
 //! Durable PM-authored reports, separate from terminal and conversation history.
 
+mod structured;
+#[cfg(test)]
+mod structured_tests;
+pub use structured::*;
+
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write},
@@ -29,6 +34,8 @@ pub struct PmReport {
     pub question: Option<String>,
     pub body: String,
     pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured: Option<StructuredReport>,
 }
 
 impl From<&crate::user_instruction::UserInstruction> for PmReport {
@@ -39,6 +46,7 @@ impl From<&crate::user_instruction::UserInstruction> for PmReport {
             question: Some(record.summary.clone()),
             body: record.answer.clone(),
             created_at: record.created_at,
+            structured: None,
         }
     }
 }
@@ -96,6 +104,7 @@ pub fn post_report(
         question: question.map(str::to_owned),
         body: body.to_owned(),
         created_at: Utc::now(),
+        structured: None,
     };
     append_report(&mut file, &path, &report, |file, encoded| {
         file.write_all(encoded)
@@ -109,17 +118,38 @@ fn append_report(
     report: &PmReport,
     append: impl FnOnce(&mut File, &[u8]) -> io::Result<()>,
 ) -> Result<()> {
+    append_record(file, path, report, append)
+}
+
+fn append_record<T: Serialize + serde::de::DeserializeOwned + PartialEq>(
+    file: &mut File,
+    path: &Path,
+    report: &T,
+    append: impl FnOnce(&mut File, &[u8]) -> io::Result<()>,
+) -> Result<()> {
+    append_record_with_sync(file, path, report, append, |file, path| {
+        file.sync_all()?;
+        sync_report_parent(path)
+    })
+}
+
+fn append_record_with_sync<T: Serialize + serde::de::DeserializeOwned + PartialEq>(
+    file: &mut File,
+    path: &Path,
+    report: &T,
+    append: impl FnOnce(&mut File, &[u8]) -> io::Result<()>,
+    sync: impl FnOnce(&File, &Path) -> io::Result<()>,
+) -> Result<()> {
     let offset = file.seek(SeekFrom::End(0))?;
     let result = (|| -> Result<()> {
         let mut encoded = serde_json::to_vec(report).map_err(invalid_report_data)?;
         encoded.push(b'\n');
         append(file, &encoded)?;
-        file.sync_all()?;
-        sync_report_parent(path)?;
+        sync(file, path)?;
         file.seek(SeekFrom::Start(offset))?;
         let mut persisted = String::new();
         file.read_to_string(&mut persisted)?;
-        let readback: PmReport = serde_json::from_str(&persisted).map_err(invalid_report_data)?;
+        let readback: T = serde_json::from_str(&persisted).map_err(invalid_report_data)?;
         if &readback != report {
             return Err(invalid_report_data(
                 "PM report readback did not match the submitted report",
@@ -160,15 +190,20 @@ pub fn load_reports(repo_path: &Path) -> Result<Vec<PmReport>> {
 pub fn load_reports_with_deadline(
     repo_path: &Path,
 ) -> Result<(Vec<PmReport>, Option<DateTime<Utc>>)> {
-    let path = reports_path(repo_path);
-    let mut reports = match File::open(&path) {
-        Ok(mut file) => {
-            FileExt::lock_shared(&file)?;
-            read_reports(&mut file, &path)?
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => return Err(error.into()),
-    };
+    project_reports(repo_path, load_report_journal(repo_path)?.reports)
+}
+
+/// Read native cards, decisions and revisions from one locked snapshot.
+pub fn load_reports_and_journal(repo_path: &Path) -> Result<(Vec<PmReport>, ReportJournal)> {
+    let journal = load_report_journal(repo_path)?;
+    let (reports, _) = project_reports(repo_path, journal.reports.clone())?;
+    Ok((reports, journal))
+}
+
+fn project_reports(
+    repo_path: &Path,
+    mut reports: Vec<PmReport>,
+) -> Result<(Vec<PmReport>, Option<DateTime<Utc>>)> {
     // Captured Q&A and its instruction share one durable source. Legacy
     // reports remain readable without introducing a second write transaction.
     reports.extend(
@@ -197,27 +232,7 @@ pub fn load_reports_with_deadline(
 }
 
 fn read_reports(file: &mut File, path: &Path) -> Result<Vec<PmReport>> {
-    let mut reports = Vec::new();
-    let mut reader = BufReader::new(file);
-    let mut line = String::new();
-    let mut line_number = 0;
-    while reader.read_line(&mut line)? != 0 {
-        line_number += 1;
-        if !line.ends_with('\n') {
-            return Err(invalid_report_data(format!(
-                "{} line {line_number}: incomplete PM report record (missing newline)",
-                path.display()
-            ))
-            .into());
-        }
-        if !line.trim().is_empty() {
-            reports.push(serde_json::from_str(&line).map_err(|error| {
-                invalid_report_data(format!("{} line {line_number}: {error}", path.display()))
-            })?);
-        }
-        line.clear();
-    }
-    Ok(reports)
+    Ok(structured::read_journal(file, path)?.reports)
 }
 
 fn invalid_report_data(message: impl std::fmt::Display) -> io::Error {

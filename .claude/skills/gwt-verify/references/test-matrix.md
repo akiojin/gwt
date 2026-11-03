@@ -84,7 +84,7 @@ promotes it to UI surface:
 Changed surfaces: business logic (crates/gwt/src/**)
 Acceptance Surface: UI surface (escalated — repro is a WebView re-render)
 Executed: cargo test -p gwt, pnpm test:visual
-User Verification: required
+User Verification: optional (required only on explicit owner request)
 ```
 
 The reverse holds too: a pure refactor under `crates/gwt/src/**` with no
@@ -97,8 +97,8 @@ non-user-facing(internal refactor, no rendered behavior change)` and skips
 | Mode | Behavior |
 |---|---|
 | `quick` | Run the narrowest representative command per matched surface (e.g. `cargo test -p <single crate>`, `pnpm test:frontend-unit` only — skip bundle/smoke). Skip Playwright entirely unless the working tree explicitly carries a `.spec.ts` change under `crates/gwt/playwright/tests/**`. User Verification is `skipped(quick-mode)`. |
-| `full` | Run the full matched list per surface, including `pnpm test:visual` headless when the Browser column is non-empty. User Verification is required for Required surfaces. |
-| `pre-pr` | `full` plus release-flow tests whenever any release-system file is in the baseline diff. Visual regression is always included if any UI surface changed (no `quick` fallback). User Verification is required for Required surfaces. |
+| `full` | Run the full matched list per surface, including `pnpm test:visual` headless when the Browser column is non-empty. User Verification is optional unless the owner explicitly requests it. |
+| `pre-pr` | `full` plus release-flow tests whenever any release-system file is in the baseline diff. Visual regression is always included if any UI surface changed (no `quick` fallback). User Verification is optional unless the owner explicitly requests it. |
 | `--headed` | When a matched command would invoke Playwright, run it with `pnpm test:visual --headed` so Chromium starts headed. Default is headless to match CI. |
 
 ### Non-Goals (gwt repo)

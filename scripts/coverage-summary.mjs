@@ -4,6 +4,10 @@
 // profile apart from a failing test (Issue #4628).
 //
 //   node scripts/coverage-summary.mjs --output-path <summary.json> -- <cargo llvm-cov args>
+// Add --nextest before -- to run the same inventory in isolated parallel processes.
+// Export a shard with --nextest --partition slice:N/M --export-dir DIR.
+// Aggregate downloaded workspace-tests-N directories with --report-from ROOT
+// --shards M --output-path summary.json [--lcov-output-path lcov.info].
 //
 // `cargo llvm-cov` fails the whole run when one raw profile cannot be merged,
 // which reads exactly like a test regression. This script runs the tests with
@@ -26,6 +30,7 @@
 // same way cargo-llvm-cov honours them.
 
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -54,11 +59,11 @@ function hasRawMagic(file) {
   return RAW_MAGICS.some((magic) => magic.equals(header));
 }
 
-// cargo-llvm-cov names profiles `<name>-%p-%Nm.profraw`; the `%m` token is
-// the instrumented module's signature, shared by every process of one binary.
+// `%Nm` expands to `<module signature>_<pool slot>`. Ignore the slot for
+// both pooled names and cargo-llvm-cov's default `<name>-%p-%Nm.profraw`.
 function moduleOf(name) {
   const stem = name.replace(/\.profraw$/, "");
-  return stem.slice(stem.lastIndexOf("-") + 1);
+  return stem.slice(stem.lastIndexOf("-") + 1).replace(/_\d+$/, "");
 }
 
 function readsCleanly(profdata, file) {
@@ -239,7 +244,7 @@ function cargoLlvmCov(cargo, args, env = process.env) {
   return result.status ?? 1;
 }
 
-function currentObjects(cargo, runArgs, profileDir) {
+function coverageEnvironment(cargo, runArgs, profileDir) {
   const args = runArgs.slice(
     0,
     runArgs.includes("--") ? runArgs.indexOf("--") : runArgs.length,
@@ -285,6 +290,15 @@ function currentObjects(cargo, runArgs, profileDir) {
       ? value.slice(1, -1).replaceAll("'\\''", "'")
       : value;
   }
+  return env;
+}
+
+function currentObjects(cargo, runArgs, profileDir, env) {
+  const args = runArgs.slice(
+    0,
+    runArgs.includes("--") ? runArgs.indexOf("--") : runArgs.length,
+  );
+  env ??= coverageEnvironment(cargo, runArgs, profileDir);
   // These switches configure llvm-cov rather than cargo test. The remaining
   // package, feature, profile and target selectors must match the test run.
   const llvmFlags = new Set([
@@ -379,6 +393,211 @@ function describe(profiles) {
     .join("\n");
 }
 
+function writeJson(file, value) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+async function sha256(file) {
+  const hash = createHash("sha256");
+  for await (const chunk of fs.createReadStream(file)) hash.update(chunk);
+  return hash.digest("hex");
+}
+
+function commandOutput(command, args) {
+  const result = spawnSync(command, args, { encoding: "utf8" });
+  if (result.status !== 0) throw new Error(`${command} ${args.join(" ")} failed`);
+  return result.stdout.trim();
+}
+
+function sourceIdentity() {
+  const source = commandOutput("git", ["rev-parse", "HEAD"]);
+  if (!/^[0-9a-f]{40}$/.test(source)) throw new Error("invalid source commit");
+  return { source_sha: source, toolchain: commandOutput("rustc", ["-vV"]) };
+}
+
+function containedPath(root, relative) {
+  if (
+    typeof relative !== "string" || !relative ||
+    path.isAbsolute(relative) || relative.includes("\\") ||
+    relative.split("/").some((part) => !part || part === "." || part === "..")
+  ) throw new Error(`invalid artifact path: ${relative}`);
+  const resolved = path.resolve(root, relative);
+  if (!resolved.startsWith(`${path.resolve(root)}${path.sep}`)) {
+    throw new Error(`artifact is outside its root: ${relative}`);
+  }
+  return resolved;
+}
+
+async function checkedProfiles(profileDir) {
+  const { profiles } = await inspectProfiles(profileDir, resolveProfdata());
+  const damaged = profiles.filter((entry) => entry.kind !== "healthy");
+  const recoverable = damaged.length > 0 &&
+    damaged.every((entry) => entry.kind === "truncated") &&
+    profiles.some((entry) => entry.kind === "healthy");
+  if (!profiles.length || (damaged.length && !recoverable)) {
+    console.error(`coverage-summary: FAIL [profile-damage] tests passed; no healthy profiles or unrecoverable damage:\n${describe(damaged)}`);
+    return undefined;
+  }
+  return { profiles, damaged, recoverable };
+}
+
+function mergeProfiles(files, output, recoverable = false) {
+  const result = spawnSync(resolveProfdata(), [
+    "merge", "-sparse", ...(recoverable ? ["--failure-mode=all"] : []),
+    ...files, "-o", output,
+  ], { stdio: "inherit" });
+  if (result.status !== 0) throw new Error("could not merge coverage profiles");
+}
+
+async function exportShard(cargo, profileDir, runArgs, partition, destination) {
+  const match = /^slice:([1-9]\d*)\/([1-9]\d*)$/.exec(partition ?? "");
+  if (!match || Number(match[1]) > Number(match[2])) {
+    throw new Error("--export-dir requires --nextest --partition slice:N/M");
+  }
+  const shard = Number(match[1]), count = Number(match[2]);
+  // A failed retry must not leave a predecessor's success manifest uploadable.
+  fs.rmSync(path.join(destination, "manifest.json"), { force: true });
+  fs.mkdirSync(destination, { recursive: true });
+  if (cargoLlvmCov(cargo, ["clean", "--workspace", "--profraw-only"]) !== 0) {
+    throw new Error("could not clear old profiles");
+  }
+  const env = coverageEnvironment(cargo, runArgs, profileDir);
+  const objects = currentObjects(cargo, runArgs, profileDir, env);
+  const inventory = spawnSync(cargo, [
+    "nextest", "list", ...runArgs, "--message-format", "json",
+  ], { encoding: "utf8", env, maxBuffer: 64 * 1024 * 1024 });
+  if (inventory.status !== 0) throw new Error("could not inventory coverage tests");
+  writeJson(path.join(destination, "workspace-test-evidence/inventory.json"), JSON.parse(inventory.stdout));
+  // Nextest's default store is workspace-relative even when llvm-cov redirects
+  // Cargo's build artifacts into a separate instrumented target directory.
+  const workspace = JSON.parse(commandOutput(cargo, ["metadata", "--format-version", "1", "--no-deps"]));
+  const sourceJunit = path.join(workspace.workspace_root, "target/nextest", process.env.NEXTEST_PROFILE || "default", "junit.xml");
+  fs.rmSync(sourceJunit, { force: true });
+  const testExit = cargoLlvmCov(cargo, [
+    "nextest", "--no-report", "--retries", "0", "--partition", partition, ...runArgs,
+  ]);
+  if (testExit !== 0) {
+    console.error(`coverage-summary: FAIL [test-failure] shard exited ${testExit}; nothing was exported`);
+    return testExit;
+  }
+  const junit = path.join(destination, "nextest/ci/junit.xml");
+  fs.mkdirSync(path.dirname(junit), { recursive: true });
+  fs.copyFileSync(sourceJunit, junit);
+  const health = await checkedProfiles(profileDir);
+  if (!health) return PROFILE_DAMAGE_EXIT;
+  const profile = path.join(destination, "profiles.profdata");
+  mergeProfiles(health.profiles.map((entry) => path.join(profileDir, entry.name)), profile, health.recoverable);
+  writeJson(path.join(destination, "profiles.json"), {
+    classification: health.recoverable ? "profile-truncated" : "healthy",
+    recovered: health.recoverable, profiles: health.profiles.length, damaged: health.damaged,
+  });
+  const identities = [];
+  for (const object of objects) {
+    const relative = path.relative(path.resolve(profileDir), object).split(path.sep).join("/");
+    containedPath(profileDir, relative);
+    identities.push({ path: relative, sha256: await sha256(object) });
+    if (shard === 1) {
+      const target = containedPath(path.join(destination, "objects"), relative);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.copyFileSync(object, target);
+    }
+  }
+  writeJson(path.join(destination, "manifest.json"), {
+    schema_version: 1, success: true, shard, count, ...sourceIdentity(),
+    run_args: runArgs, nextest_profile: process.env.NEXTEST_PROFILE || "default",
+    profile_directory: path.resolve(profileDir),
+    build_environment: Object.fromEntries(Object.entries(env).filter(([key]) =>
+      /^(RUSTFLAGS|RUSTDOCFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_BUILD_TARGET|CARGO_INCREMENTAL|CARGO_PROFILE_.+)$/.test(key)).sort()),
+    objects: identities, profile_sha256: await sha256(profile),
+  });
+  console.log(`coverage-summary: ${health.recoverable ? "RECOVERED [profile-truncated]" : "PASS"} shard ${shard}/${count} exported`);
+  return 0;
+}
+
+async function reportShards(cargo, root, count, output, lcovOutput) {
+  if (!Number.isSafeInteger(count) || count < 1) throw new Error("invalid --shards count");
+  const expected = Array.from({ length: count }, (_, index) => `workspace-tests-${index + 1}`);
+  const found = fs.readdirSync(root).filter((name) => name.startsWith("workspace-tests-")).sort();
+  if (JSON.stringify(found) !== JSON.stringify([...expected].sort())) {
+    throw new Error("missing or unexpected coverage shard artifacts");
+  }
+  const identity = sourceIdentity();
+  let baseline;
+  const profiles = [];
+  const recoveries = [];
+  for (let index = 0; index < count; index += 1) {
+    const dir = path.join(root, expected[index]);
+    const manifest = JSON.parse(fs.readFileSync(path.join(dir, "manifest.json"), "utf8"));
+    if (manifest.schema_version !== 1 || manifest.success !== true ||
+      manifest.shard !== index + 1 || manifest.count !== count ||
+      manifest.source_sha !== identity.source_sha || manifest.toolchain !== identity.toolchain ||
+      !Array.isArray(manifest.objects) || !manifest.objects.length ||
+      !Array.isArray(manifest.run_args) || !manifest.run_args.every((arg) => typeof arg === "string") ||
+      typeof manifest.nextest_profile !== "string" || typeof manifest.profile_directory !== "string" ||
+      !manifest.build_environment || typeof manifest.build_environment !== "object") {
+      throw new Error(`invalid or mismatched coverage manifest: ${expected[index]}`);
+    }
+    const common = JSON.stringify({ source_sha: manifest.source_sha, toolchain: manifest.toolchain,
+      run_args: manifest.run_args, nextest_profile: manifest.nextest_profile,
+      profile_directory: manifest.profile_directory,
+      build_environment: manifest.build_environment, objects: manifest.objects });
+    if (baseline && baseline !== common) throw new Error("coverage shard build identities differ");
+    baseline = common;
+    for (const file of ["workspace-test-evidence/inventory.json", "nextest/ci/junit.xml"]) {
+      if (!fs.statSync(path.join(dir, file)).isFile()) throw new Error(`missing coverage evidence: ${file}`);
+    }
+    const health = JSON.parse(fs.readFileSync(path.join(dir, "profiles.json"), "utf8"));
+    if (health.recovered === true) recoveries.push({ ...health, shard: index + 1 });
+    const profile = path.join(dir, "profiles.profdata");
+    if (await sha256(profile) !== manifest.profile_sha256) throw new Error("coverage profile hash differs");
+    profiles.push(profile);
+  }
+  const manifest = JSON.parse(baseline);
+  const objectRoot = path.join(root, expected[0], "objects");
+  const workspace = JSON.parse(commandOutput(cargo, ["metadata", "--format-version", "1", "--no-deps"]));
+  // Keep the single current object inventory separate from caches and raw files.
+  const target = fs.mkdtempSync(path.join(os.tmpdir(), "gwt-coverage-report-"));
+  let reportDir;
+  try {
+    const objects = [];
+    for (const object of manifest.objects) {
+      const source = containedPath(objectRoot, object.path);
+      if (await sha256(source) !== object.sha256) throw new Error("coverage object hash differs");
+      const destination = containedPath(target, object.path);
+      fs.mkdirSync(path.dirname(destination), { recursive: true });
+      fs.copyFileSync(source, destination);
+      // Actions artifacts restore files as 0644; cargo-llvm-cov discovers Unix
+      // objects by their execute bit. Restore it only after checking identity.
+      fs.chmodSync(destination, 0o755);
+      objects.push(destination);
+    }
+    mergeProfiles(profiles, path.join(target, `${path.basename(workspace.workspace_root)}.profdata`));
+    reportDir = stageReportArtifacts(target, objects);
+    const env = { ...process.env, CARGO_LLVM_COV_TARGET_DIR: reportDir, CARGO_LLVM_COV_BUILD_DIR: reportDir };
+    for (const [file, format] of [[output, "--json"], [lcovOutput, "--lcov"]]) {
+      if (!file) continue;
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      const result = cargoLlvmCov(cargo, ["report", ...reportScope(manifest.run_args), format,
+        ...(format === "--json" ? ["--summary-only"] : []),
+        "--ignore-filename-regex", `^${manifest.profile_directory.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[/\\\\]`,
+        "--output-path", file], env);
+      if (result !== 0) throw new Error(`coverage ${format} report failed`);
+    }
+    writeJson(`${output}.objects.json`, { objects: manifest.objects });
+    if (recoveries.length) {
+      writeJson(`${output}.profiles.json`, {
+        classification: "profile-truncated", recovered: true, shards: recoveries,
+      });
+    }
+  } finally {
+    if (reportDir) fs.rmSync(reportDir, { recursive: true, force: true });
+    fs.rmSync(target, { recursive: true, force: true });
+  }
+  console.log(`coverage-summary: ${recoveries.length ? "RECOVERED [profile-truncated]" : "PASS"} ${count} coverage shards aggregated into ${output}`);
+  return 0;
+}
+
 async function main() {
   const argv = process.argv.slice(2);
   const split = argv.indexOf("--");
@@ -386,6 +605,30 @@ async function main() {
   const runArgs = split === -1 ? [] : argv.slice(split + 1);
   const outputIndex = own.indexOf("--output-path");
   const output = outputIndex === -1 ? undefined : own[outputIndex + 1];
+  const value = (flag) => own.includes(flag) ? own[own.indexOf(flag) + 1] : undefined;
+  const exportDir = value("--export-dir");
+  const reportRoot = value("--report-from");
+  const lcovOutput = value("--lcov-output-path");
+  if (exportDir || reportRoot) {
+    for (const file of [output, output && `${output}.profiles.json`, output && `${output}.objects.json`, lcovOutput]) {
+      if (file) fs.rmSync(file, { force: true });
+    }
+    try {
+      if (exportDir && reportRoot) throw new Error("export and report modes are mutually exclusive");
+      const cargo = process.env.CARGO || "cargo";
+      if (exportDir) {
+        if (!own.includes("--nextest")) throw new Error("export requires --nextest");
+        return await exportShard(cargo, resolveProfileDir(cargo), runArgs, value("--partition"), exportDir);
+      }
+      if (!output || runArgs.length) throw new Error("report mode requires --output-path and no test arguments");
+      return await reportShards(cargo, reportRoot, Number(value("--shards")), output, lcovOutput);
+    } catch (error) {
+      if (output) fs.rmSync(output, { force: true });
+      if (lcovOutput) fs.rmSync(lcovOutput, { force: true });
+      console.error(`coverage-summary: FAIL [report-failure] ${error.message}`);
+      return REPORT_FAILURE_EXIT;
+    }
+  }
   if (!output) {
     console.error(
       "Usage: node scripts/coverage-summary.mjs --output-path <summary.json> -- <cargo llvm-cov args>",
@@ -413,7 +656,12 @@ async function main() {
     return REPORT_FAILURE_EXIT;
   }
 
-  const testExit = cargoLlvmCov(cargo, ["--no-report", ...runArgs]);
+  const testExit = cargoLlvmCov(cargo, [
+    ...(own.includes("--nextest") ? ["nextest"] : []),
+    "--no-report",
+    ...(own.includes("--nextest") ? ["--retries", "0"] : []),
+    ...runArgs,
+  ]);
   if (testExit !== 0) {
     console.error(
       `coverage-summary: FAIL [test-failure] cargo llvm-cov exited ${testExit} while running tests; nothing was aggregated`,
@@ -428,18 +676,9 @@ async function main() {
     console.error(`coverage-summary: FAIL [report-failure] ${error.message}`);
     return REPORT_FAILURE_EXIT;
   }
-  const { profiles } = await inspectProfiles(profileDir, resolveProfdata());
-  const damaged = profiles.filter((entry) => entry.kind !== "healthy");
-  const truncatedOnly =
-    damaged.length > 0 && damaged.every((entry) => entry.kind === "truncated");
-  const recoverable =
-    truncatedOnly && profiles.some((entry) => entry.kind === "healthy");
-  if (damaged.length > 0 && !recoverable) {
-    console.error(
-      `coverage-summary: FAIL [profile-damage] tests passed; ${damaged.length} of ${profiles.length} raw profile(s) cannot be aggregated and are not a recoverable truncation:\n${describe(damaged)}`,
-    );
-    return PROFILE_DAMAGE_EXIT;
-  }
+  const health = await checkedProfiles(profileDir);
+  if (!health) return PROFILE_DAMAGE_EXIT;
+  const { profiles, damaged, recoverable } = health;
 
   const reportArgs = [
     "report",

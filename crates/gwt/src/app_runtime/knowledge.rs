@@ -22,6 +22,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
+    time::Instant,
 };
 
 use gwt::KnowledgeKind;
@@ -320,6 +321,48 @@ mod related_snapshot_cache_tests {
         }
     }
 
+    #[test]
+    fn related_session_dedupe_preserves_work_identity_without_remaining_agents() {
+        let mut older = related_work("work-session-older-ledger");
+        older.agents.push(gwt::KnowledgeRelatedAgentView {
+            session_id: "older-ledger".to_string(),
+            agent_id: Some("codex".to_string()),
+            display_name: None,
+            updated_at: older.updated_at.clone(),
+            sessions: vec![gwt::KnowledgeRelatedSessionView {
+                agent_session_id: "same-conversation".to_string(),
+                started_at: older.updated_at.clone(),
+                is_active: false,
+                resumable: true,
+            }],
+        });
+        let mut newer = older.clone();
+        newer.id = "newer-work".to_string();
+        newer.updated_at = "2026-08-04T00:00:00Z".to_string();
+        newer.agents[0].session_id = "newer-ledger".to_string();
+        let mut synthetic = older.clone();
+        synthetic.id = "work-session-synthetic-ledger".to_string();
+        let mut works = vec![older, newer, synthetic];
+
+        dedupe_related_work_sessions(
+            &mut works,
+            &HashMap::new(),
+            &HashSet::from(["work-session-older-ledger", "newer-work"]),
+        );
+
+        assert_eq!(
+            works
+                .iter()
+                .map(|work| work.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["work-session-older-ledger", "newer-work"],
+            "deduplicating conversations must not hide a persisted Work"
+        );
+        assert!(works[0].agents.is_empty());
+        assert_eq!(related_session_count(&works), 1);
+        assert_eq!(works[1].agents[0].session_id, "newer-ledger");
+    }
+
     fn search_view(number: u64) -> gwt::KnowledgeBridgeView {
         gwt::KnowledgeBridgeView {
             kind: KnowledgeKind::Issue,
@@ -525,7 +568,9 @@ mod monitor_snapshot_cache_tests {
         exclusion_reason: Option<&str>,
     ) -> gwt::IssueMonitorInboxItem {
         gwt::IssueMonitorInboxItem {
+            dependency: None,
             issue: gwt::IssueMonitorIssue {
+                author_login: None,
                 number,
                 title: format!("Issue {number}"),
                 labels: Vec::new(),
@@ -614,8 +659,8 @@ mod monitor_snapshot_cache_tests {
                 inbox_item(30, gwt::MonitorInboxState::Queued, None),
                 inbox_item(
                     40,
-                    gwt::MonitorInboxState::HoldExcluded,
-                    Some("Excluded by label: hold"),
+                    gwt::MonitorInboxState::SourceExcluded,
+                    Some("Untrusted source; PM triage required"),
                 ),
             ],
         );
@@ -645,9 +690,9 @@ mod monitor_snapshot_cache_tests {
                 filtered_entries[1].exclusion_reason.as_deref(),
             ),
             (
-                Some(gwt::MonitorInboxState::HoldExcluded),
+                Some(gwt::MonitorInboxState::SourceExcluded),
                 None,
-                Some("Excluded by label: hold"),
+                Some("Untrusted source; PM triage required"),
             ),
         );
         assert_eq!(
@@ -687,7 +732,7 @@ mod monitor_snapshot_cache_tests {
         let states = [
             gwt::MonitorInboxState::Queued,
             gwt::MonitorInboxState::NotReady,
-            gwt::MonitorInboxState::HoldExcluded,
+            gwt::MonitorInboxState::SourceExcluded,
             gwt::MonitorInboxState::Launching,
             gwt::MonitorInboxState::Launched,
             gwt::MonitorInboxState::Merged,
@@ -845,6 +890,20 @@ fn knowledge_phase_update_error_event(
 fn knowledge_cache_revision(project_root: &Path) -> Option<String> {
     let root = gwt::issue_cache::issue_cache_root_for_repo_path(project_root)?;
     gwt_github::Cache::new(root).revision().ok()
+}
+
+/// Correlate the first cache response with its worker and transport phases.
+/// The frontend's cache-load deadline remains 60 seconds (#5413).
+fn knowledge_load_phase<T>(stage: &'static str, queued_at: Instant, run: impl FnOnce() -> T) -> T {
+    let started = Instant::now();
+    tracing::info!(target: "gwt::knowledge_load", stage, status = "started",
+        elapsed_ms = queued_at.elapsed().as_secs_f64() * 1000.0, "Issue cache load phase");
+    let result = run();
+    let elapsed_ms = queued_at.elapsed().as_secs_f64() * 1000.0;
+    tracing::info!(target: "gwt::knowledge_load", stage, status = "completed", elapsed_ms,
+        duration_ms = started.elapsed().as_secs_f64() * 1000.0,
+        deadline_exceeded_stage = (elapsed_ms >= 60_000.0).then_some(stage), "Issue cache load phase");
+    result
 }
 
 fn knowledge_view_events(
@@ -1073,9 +1132,13 @@ fn augment_knowledge_bridge_related_works(
             .push(knowledge_related_work_from_session(session));
     }
 
+    let persisted_work_ids = work_items
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect::<HashSet<_>>();
     for works in related_by_number.values_mut() {
         works.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
-        dedupe_related_work_sessions(works, &session_index);
+        dedupe_related_work_sessions(works, &session_index, &persisted_work_ids);
     }
 
     apply_knowledge_bridge_related_works(view, &related_by_number);
@@ -1316,6 +1379,7 @@ struct RelatedSessionRank {
 fn dedupe_related_work_sessions(
     works: &mut Vec<gwt::KnowledgeRelatedWorkView>,
     session_index: &HashMap<&str, &gwt_agent::Session>,
+    persisted_work_ids: &HashSet<&str>,
 ) {
     let mut best_by_conversation: HashMap<String, (RelatedSessionRank, RelatedSessionSlot)> =
         HashMap::new();
@@ -1420,7 +1484,11 @@ fn dedupe_related_work_sessions(
             related_action_key_from_parts(&worktree, &branch, agent)
                 .is_none_or(|action_key| !action_keys_with_kept_sessions.contains(&action_key))
         });
-        !work_had_sessions || !work.agents.is_empty()
+        // Session dedupe must not erase a persisted Work's lifecycle identity.
+        // Synthetic Session-only rows may still disappear with their duplicates.
+        persisted_work_ids.contains(work.id.as_str())
+            || !work_had_sessions
+            || !work.agents.is_empty()
     });
 }
 
@@ -1687,10 +1755,53 @@ impl AppRuntime {
         let related_snapshot_generation =
             reserve_related_snapshot_generation(&related_snapshot, &project_root, kind);
         let proxy = self.proxy.clone();
+        let queued_at = Instant::now();
+        let span = tracing::info_span!(target: "gwt::knowledge_load", "knowledge_load",
+            window_id = %id, client_id = %client_id, request_id = ?request_id);
+        span.in_scope(|| {
+            tracing::info!(target: "gwt::knowledge_load", stage = "queue", status = "started",
+                elapsed_ms = 0.0, "Issue cache load phase");
+        });
         self.blocking_tasks.spawn(move || {
-            let cache_revision = knowledge_cache_revision(&project_root);
-            let view = match load_knowledge_bridge(&project_root, kind, selected_number, false) {
+            let _span = span.enter();
+            let queue_ms = queued_at.elapsed().as_secs_f64() * 1000.0;
+            tracing::info!(target: "gwt::knowledge_load", stage = "queue", status = "completed",
+                elapsed_ms = queue_ms, duration_ms = queue_ms,
+                deadline_exceeded_stage = (queue_ms >= 60_000.0).then_some("queue"), "Issue cache load phase");
+            let (cache_revision, loaded) = knowledge_load_phase("cache_read", queued_at, || (
+                knowledge_cache_revision(&project_root),
+                load_knowledge_bridge(&project_root, kind, selected_number, false),
+            ));
+            let view = match loaded {
                 Ok(mut view) => {
+                    // The current frontend owns a correlated cache-load deadline.
+                    // Historical Session/Work enrichment can take minutes on a
+                    // cold ledger: publish usable rows first, keeping any prior
+                    // associations until the complete snapshot arrives below.
+                    // Uncorrelated legacy callers retain their single reply.
+                    if request_id.is_some() {
+                        let mut events = knowledge_load_phase("assembly", queued_at, || {
+                            let mut cached = view.clone();
+                            apply_latest_knowledge_bridge_related_works(
+                                &project_root, &mut cached, &related_snapshot,
+                            );
+                            apply_latest_knowledge_monitor_projection(
+                                &project_root, &mut cached, &monitor_snapshot,
+                            );
+                            knowledge_view_events(client_id.clone(), id.clone(), kind,
+                                request_id, cached, cache_revision.clone())
+                        });
+                        events[0].knowledge_load_timing = Some(gwt::project_transport::KnowledgeLoadTiming {
+                            queued_at,
+                            dispatch_enqueued_at: Instant::now(),
+                        });
+                        knowledge_load_phase("dispatch_enqueue", queued_at, || {
+                            proxy.send(UserEvent::Dispatch(events));
+                        });
+                    }
+                    let related_started = Instant::now();
+                    tracing::info!(target: "gwt::knowledge_load", stage = "related_assembly",
+                        status = "started", initial_response_sent = request_id.is_some(), "Issue related-work enrichment");
                     augment_and_publish_knowledge_bridge_related_works(
                         &project_root,
                         &sessions_dir,
@@ -1704,6 +1815,9 @@ impl AppRuntime {
                         &mut view,
                         &monitor_snapshot,
                     );
+                    tracing::info!(target: "gwt::knowledge_load", stage = "related_assembly",
+                        status = "completed", duration_ms = related_started.elapsed().as_secs_f64() * 1000.0,
+                        initial_response_sent = request_id.is_some(), "Issue related-work enrichment");
                     view
                 }
                 Err(error) => {

@@ -163,7 +163,7 @@ export function buildSegmentedField(doc, { label, options, selectedValue, onChan
 
 // --- native select fallback ------------------------------------------------
 
-export function buildSelectField(
+function buildSelectField(
   doc,
   { label, options, selectedValue, onChange, wide, emptyLabel = "Unavailable" },
 ) {

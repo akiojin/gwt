@@ -1,6 +1,19 @@
 import { createLaunchOperationId } from "./launch-pending-controller.js";
+import { createUiStateStore } from "./ui-state-store.js";
 
-export function compactText(value, fallback = "") {
+export function createActiveWorkProjectionModel() {
+  const model = createUiStateStore(null);
+  function applyActiveWorkProjectionReceiveEvent(event) {
+    model.update(state => ({
+      projection: event.kind === "active_work_projection_patch"
+        ? mergeActiveWorkProjectionPatch(state?.projection, event.projection || null)
+        : event.projection || null,
+    }));
+  }
+  return { model, applyActiveWorkProjectionReceiveEvent };
+}
+
+function compactText(value, fallback = "") {
   const text = String(value || "").replace(/\s+/g, " ").trim();
   return text || fallback;
 }
@@ -162,8 +175,6 @@ export function createIssueOtherSurface({
   openWorkspaceCleanup,
   send,
   windowMap,
-  openWorkspaceResumePicker,
-  getResumeBounds,
   focusBoardEntry,
   launchPending,
   continueWork,
@@ -839,7 +850,8 @@ export function createIssueOtherSurface({
         createNode(
           "div",
           "workspace-overview-agent-name",
-          agent.agent_name || "Naming…",
+          agent.agent_name || agent.title_summary || agent.current_focus || agent.branch
+            || agent.display_name || agent.agent_id || "Agent",
         ),
       );
       const meta = createNode("div", "workspace-overview-agent-meta");
@@ -1228,6 +1240,10 @@ export function createIssueOtherSurface({
 
       let renderedSessionCount = 0;
       for (const agent of displayedAgents) {
+        if (agent.agent_name) {
+          group.appendChild(createNode("div", "workspace-detail-work-heading",
+            `${agent.agent_name} (${agent.display_name || agent.agent_id || "Agent"})`));
+        }
         const sessions = Array.isArray(agent.sessions) ? agent.sessions : [];
         if (sessions.length === 0) continue;
         // Multiple Session rows per agent read as noise — render only that
@@ -1278,6 +1294,9 @@ export function createIssueOtherSurface({
   }
 
   function displayedWorkAgentIdentity(agent, index) {
+    if (agent?.agent_name) {
+      return agent.session_id ? `session:${agent.session_id}` : `name:${agent.agent_name}`;
+    }
     const raw = String(agent?.agent_id || agent?.display_name || "").trim();
     if (!raw) return `session:${agent?.session_id || index}`;
 
@@ -1381,11 +1400,10 @@ export function createIssueOtherSurface({
       if (launchPending?.isPending(`continue:${workId}`)) {
         return;
       }
-      const bounds = typeof getResumeBounds === "function" ? getResumeBounds() : null;
-      if (!bounds || typeof continueWork !== "function") {
+      if (typeof continueWork !== "function") {
         return;
       }
-      if (continueWork(workId, bounds)) {
+      if (continueWork(workId)) {
         const focusRoot = button.closest?.(".window") || button.ownerDocument;
         renderWindows(true);
         const replacement = Array.from(
@@ -1475,10 +1493,6 @@ export function createIssueOtherSurface({
     if (!sessionId) {
       return;
     }
-    const bounds = typeof getResumeBounds === "function" ? getResumeBounds() : null;
-    if (!bounds) {
-      return;
-    }
     const operationId = createLaunchOperationId("resume");
     // resume_workspace_agent loads the launch config from the gwt session id
     // (the Work) and resumes the specific conversation named by
@@ -1495,7 +1509,6 @@ export function createIssueOtherSurface({
       operation_id: operationId,
       session_id: sessionId,
       agent_session_id: agentSessionId,
-      bounds,
     });
     renderWindows(true);
   }
@@ -1651,18 +1664,6 @@ export function createIssueOtherSurface({
       list.appendChild(item);
   }
 
-  function resumeWorkspace(workspace) {
-    const workspaceId = workspace?.id ?? null;
-    let operationId = "";
-    if (typeof openWorkspaceResumePicker === "function") {
-      operationId = String(openWorkspaceResumePicker(workspaceId) || "");
-    }
-    send({
-      kind: "list_resumable_agents",
-      operation_id: operationId,
-      workspace_id: workspaceId ?? undefined,
-    });
-  }
 
   function renderWorkspaceDetail(container, workspace, windowId) {
     container.innerHTML = "";

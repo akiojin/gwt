@@ -235,6 +235,10 @@ impl ProjectLogRouter {
 
     pub(crate) fn write(&self, scope: Option<&str>, bytes: &[u8]) -> std::io::Result<()> {
         use std::io::Write;
+        // Machine events must not wait for project writer creation/housekeeping.
+        if scope.is_none() {
+            return self.machine.clone().write_all(bytes);
+        }
         let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(writer) = scope
             .and_then(|token| projects.get_mut(token))
@@ -286,5 +290,33 @@ mod tests {
         assert!(!nested.exists());
         let (_writer, _guard) = build(&nested).expect("build writer");
         assert!(nested.is_dir());
+    }
+
+    #[test]
+    fn machine_log_does_not_wait_for_project_writer_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let (machine, guard) = build(dir.path()).unwrap();
+        let router = ProjectLogRouter::new(machine, 7, dir.path().to_path_buf());
+        let registry = router.projects.lock().unwrap();
+        let worker_router = router.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            tx.send(worker_router.write(None, b"machine marker\n"))
+                .unwrap();
+        });
+        // test-hygiene: allow-wall-clock-deadline hang guard; completion must precede releasing the unrelated registry lock
+        let result = rx.recv_timeout(std::time::Duration::from_secs(30));
+        // Release even on failure so the blocked worker can join before assert.
+        drop(registry);
+        worker.join().unwrap();
+        result
+            .expect("machine log waited for the project writer registry")
+            .unwrap();
+        drop(router);
+        drop(guard);
+        assert_eq!(
+            std::fs::read_to_string(current_log_file(dir.path())).unwrap(),
+            "machine marker\n"
+        );
     }
 }

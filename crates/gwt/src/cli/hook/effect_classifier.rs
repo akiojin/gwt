@@ -210,15 +210,7 @@ fn classify_json_operation(
     target: TargetClassification,
 ) -> EffectObservation {
     let (effect, reason) = if operation == "pr.create" {
-        if params
-            .and_then(|value| value.get("draft"))
-            .and_then(serde_json::Value::as_bool)
-            .is_some_and(|draft| draft)
-        {
-            (GovernanceEffect::Reversible, REASON_KNOWN_REVERSIBLE)
-        } else {
-            (GovernanceEffect::Protected, REASON_KNOWN_PROTECTED)
-        }
+        (GovernanceEffect::Protected, REASON_KNOWN_PROTECTED)
     } else if operation == "issue.label" {
         if issue_label_is_safety_sensitive(params) {
             (GovernanceEffect::Protected, REASON_KNOWN_PROTECTED)
@@ -275,10 +267,7 @@ fn issue_label_is_safety_sensitive(params: Option<&serde_json::Value>) -> bool {
 }
 
 fn is_explicitly_reversible_json_operation(operation: &str) -> bool {
-    matches!(
-        operation,
-        "pr.edit" | "pr.draft" | "pr.close" | "workspace.update"
-    )
+    matches!(operation, "pr.edit" | "pr.close" | "workspace.update")
 }
 
 fn classify_segment(segment: &str, cwd: &Path, managed_root: &Path) -> Option<EffectObservation> {
@@ -404,16 +393,10 @@ fn classify_gh_segment(tokens: &[&str], default_target: TargetClassification) ->
             | ("release", "view" | "list" | "download")
     ) || (category == "api"
         && !block_bash_policy::is_github_remote_mutation(&tokens.join(" ")));
-    let draft_reversible = category == "pr"
-        && (action == "edit"
-            || (action == "create"
-                && tokens
-                    .iter()
-                    .any(|token| matches!(*token, "--draft" | "-d")))
-            || (action == "ready" && tokens.contains(&"--undo")));
+    let reversible = category == "pr" && action == "edit";
     let effect = if read_only {
         GovernanceEffect::Observe
-    } else if draft_reversible {
+    } else if reversible {
         GovernanceEffect::Reversible
     } else {
         GovernanceEffect::Protected

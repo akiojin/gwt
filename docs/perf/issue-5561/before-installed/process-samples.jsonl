@@ -1,0 +1,7 @@
+{"rss_bytes":3091365888,"elapsed_seconds":0.1563099,"timestamp":"2026-10-15T21:48:50.8738878Z","cpu_seconds":28728.71875,"started_at":"2026-10-15T14:11:46.6269894Z","pid":36240,"private_bytes":3626115072}
+{"rss_bytes":3230183424,"elapsed_seconds":1800.3825316,"timestamp":"2026-10-15T22:18:51.1547041Z","cpu_seconds":30637.296875,"started_at":"2026-10-15T14:11:46.6269894Z","pid":36240,"private_bytes":3690770432}
+{"rss_bytes":2700505088,"elapsed_seconds":3600.4212912,"timestamp":"2026-10-15T22:48:51.1849080Z","cpu_seconds":32723.84375,"started_at":"2026-10-15T14:11:46.6269894Z","pid":36240,"private_bytes":3063697408}
+{"rss_bytes":3275272192,"elapsed_seconds":5400.4424759,"timestamp":"2026-10-15T23:18:51.2150581Z","cpu_seconds":34692.140625,"started_at":"2026-10-15T14:11:46.6269894Z","pid":36240,"private_bytes":3539689472}
+{"rss_bytes":3327528960,"elapsed_seconds":7200.5735232,"timestamp":"2026-10-15T23:48:51.2660610Z","cpu_seconds":36446.515625,"started_at":"2026-10-15T14:11:46.6269894Z","pid":36240,"private_bytes":3884994560}
+{"rss_bytes":3448827904,"elapsed_seconds":9000.8072916,"timestamp":"2026-10-16T00:18:51.5345663Z","cpu_seconds":38282.734375,"started_at":"2026-10-15T14:11:46.6269894Z","pid":36240,"private_bytes":3949670400}
+{"rss_bytes":1629564928,"elapsed_seconds":10800.8483203,"timestamp":"2026-10-16T00:48:51.6214571Z","cpu_seconds":40283.171875,"started_at":"2026-10-15T14:11:46.6269894Z","pid":36240,"private_bytes":1852911616}

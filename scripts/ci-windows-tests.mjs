@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Issue #4821: build each Windows CI feature set once, then run its harnesses.
+// Issue #4821: build each Windows CI harness once, then run its filters.
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -22,6 +22,8 @@ const defaultTargets = [
 
 export function targets(group) {
   if (group === "default") return defaultTargets;
+  if (group === "default-lib") return defaultTargets.filter(([, kind]) => kind === "lib");
+  if (group === "default-runtime") return defaultTargets.filter(([, kind]) => kind !== "lib");
   if (group === "warm") return [["gwt", "lib", "gwt"]];
   // Cargo discovers all integration targets; do not maintain a second list.
   if (group === "core") return [["gwt-core", "lib", "gwt_core"]];
@@ -35,11 +37,13 @@ export function build(group, repo = root, spawn = spawnSync) {
   const selected = targets(group);
   const manifest = manifestFile(repo, group);
   fs.rmSync(manifest, { force: true });
-  const packages = [...new Set(selected.map(([pkg]) => pkg))];
+  // Keep the same roots in both default slices: agent dev-dependencies enable
+  // gwt-docker/test-support even when only runtime harnesses are selected.
+  const packages = [...new Set((group.startsWith("default") ? defaultTargets : selected).map(([pkg]) => pkg))];
   const selectors = [...new Map(selected.map(([, kind, name]) =>
     [kind === "lib" ? kind : `${kind}|${name}`, kind === "lib" ? ["--lib"] : [`--${kind}`, name]])).values()].flat();
   const args = ["test", ...packages.flatMap((pkg) => ["-p", pkg]), ...(group === "core" ? [] : selectors),
-    ...(group !== "default" ? ["--all-features"] : []), "--no-run", "--message-format=json"];
+    ...(group === "warm" || group === "core" ? ["--all-features"] : []), "--no-run", "--message-format=json"];
   console.log(`cargo ${args.join(" ")}`);
   const result = spawn("cargo", args, { cwd: repo, encoding: "utf8", stdio: ["ignore", "pipe", "inherit"], maxBuffer: 64 * 1024 * 1024 });
   if (result.error) throw result.error;
@@ -100,8 +104,10 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     if (operation === "build") process.exitCode = build(args[0]);
     else if (operation === "run-core") process.exitCode = runCore(root, spawnSync, args);
     else if (operation === "run-core-index") process.exitCode = run("core", ["gwt-core", "test", "index_coordinator"]);
-    else if (operation === "run" || operation === "run-warm") process.exitCode = run(operation === "run" ? "default" : "warm", args);
-    else throw new Error("Usage: ci-windows-tests.mjs build <default|warm|core> | <run|run-warm> <package> <kind> <target> [filter] -- [libtest args] | run-core [libtest args] | run-core-index");
+    else if (["run", "run-lib", "run-runtime", "run-warm"].includes(operation)) {
+      const group = { run: "default", "run-lib": "default-lib", "run-runtime": "default-runtime", "run-warm": "warm" }[operation];
+      process.exitCode = run(group, args);
+    } else throw new Error("Usage: ci-windows-tests.mjs build <default|default-lib|default-runtime|warm|core> | <run|run-lib|run-runtime|run-warm> <package> <kind> <target> [filter] -- [libtest args] | run-core [libtest args] | run-core-index");
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;

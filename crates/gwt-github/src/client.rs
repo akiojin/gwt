@@ -101,6 +101,8 @@ impl IssueCloseReason {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IssueSnapshot {
     pub number: IssueNumber,
+    /// Original creator reported by GitHub; absent in legacy caches.
+    pub author_login: Option<String>,
     pub title: String,
     pub body: String,
     pub labels: Vec<String>,

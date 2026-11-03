@@ -15,18 +15,16 @@ Response steps. Deliver only adds "make it merge, then watch until it does."
 gwtd has no merge operation, and the agent never merges a PR itself. The merge
 is performed by the repository's merge automation — GitHub auto-merge enabled
 on the PR, or a repository workflow that merges non-Draft PRs once their checks
-pass — or by a human. Deliver works through two JSON operations:
-
-- `pr.ready` hands the PR to that automation (arms the merge).
-- `pr.draft` explicitly holds a merge when the owner requests it: a Draft PR
-  cannot be merged. Resume with `pr.ready` after the Ready PR Gate passes.
-  Routine pushes do not require this hold.
+pass — or by a human. `pr.ready` hands the PR to that automation (arms the merge).
+Draft PRs are prohibited; creation and demotion are unavailable. Recover an
+inherited Draft through `pr.ready` after its automated gates pass.
 
 ## Preserve enabled auto-merge
 
 Keep auto-merge enabled across routine pushes and base synchronization. Before
 every code-changing push, run fresh `gwt-verify --mode pre-pr` and satisfy the
-User Verification Result gate. CI checks the pushed snapshot before merging.
+automated Ready PR Gate and any explicitly requested human check. CI checks
+the pushed snapshot before merging.
 
 For a BEHIND PR, use JSON operation `pr.update_branch`. If the PM owns base
 synchronization, post the delivery handoff on the Board and let the PM perform
@@ -43,47 +41,35 @@ because code or the base branch changed.
   "drive to merge", "merge it", "land the PR", "ship it", or an equivalent
   direct request. Manual auto-detection does not select Deliver.
 - If no open PR exists for the current branch, fall back to Create mode first
-  (Ready PR Gate applies). If Create can only produce a **Draft** (the Ready PR
-  Gate is not satisfied), **stop with NO ACTION** — do not enter the drive loop
-  on a Draft. Only drive a PR that Create produced as Ready.
+  (Ready PR Gate applies). If the gate is not satisfied, repair it before
+  creating a PR; return **NO ACTION** if no safe in-scope repair can proceed.
 
 ## Step 1: Hard PR Gate (mandatory before handing the PR to merge automation)
 
 Do **not** hand the PR to merge automation until the Ready PR Gate passes for
-the PR scope. Deliver applies a stricter gate than Create/Fix because merge
-automation removes the last human checkpoint:
+the PR scope:
 
 - `gwt-verify --mode pre-pr` returns `Overall: PASS`.
-- `User Verification Result` is `confirmed` (user visually verified), `n/a`
-  (the change has no user-visible surface, so visual verification does not
-  apply), or `n/a (autonomous)` (an unattended gwt Issue Monitor launch, where
-  the handoff is waived). UI work requires `Agent Visual Check: pass` and
-  actual passing headed Chromium results for dark and light themes in the same
-  fresh `verify.run` record, selected with `params.headed_e2e_commands`.
+- User Verification Result is optional unless the owner explicitly requests
+  a human check. A missing, `pending`, or legacy deferred field does not
+  establish that request. An actual `rejected(<reason>)` is a known blocker
+  whose reason must be preserved and repaired.
+- UI work requires `Agent Visual Check: pass` and actual passing headed
+  Chromium dark/light results in the same fresh `verify.run` record, selected
+  with `params.headed_e2e_commands`.
 - Existing autonomous PRs may retain the legacy
   `deferred (autonomous execution)` body value and pass with fresh evidence;
-  no body rewrite or human confirmation is required.
+  no body rewrite or human confirmation is required. Record new autonomous
+  results as `n/a (autonomous)` only from the launch route stamped on the
+  Session (`execution.status` → `launch_route: autonomous`; the legacy
+  `GWT_AUTONOMOUS_EXECUTION` marker counts when present, but its absence
+  proves nothing). Never write human `confirmed` for the agent's own check.
 - The PR is a releaseable slice with no known blockers in its scope.
 
-Refuse to hand the PR over when any of these hold:
-
-- `User Verification Result` is `pending` (the verification handoff never
-  completed) or `rejected(<reason>)` (the user declined).
-- `User Verification Result` is `skipped(<reason>)`. A skip is acceptable for
-  *creating* a Draft/Ready PR per the shared Ready PR Gate, but it is **not**
-  sufficient to merge unattended — Deliver requires `confirmed`, `n/a`, or
-  `n/a (autonomous)`. Never relabel a `skipped(<reason>)` as
-  `n/a (autonomous)`: the waiver comes from the launch route recorded on the
-  Session (`execution.status` → `launch_route: autonomous`; the legacy
-  `GWT_AUTONOMOUS_EXECUTION` marker still counts when present, but its absence
-  proves nothing), not from the agent finding the check inconvenient.
-- `gwt-verify --mode pre-pr` returns `Overall: FAIL` or `failed: tooling-missing`.
-
-On gate failure, do not push unverified code or hand new work over through
-`pr.ready`. Route the failure for repair (back to the TDD loop, `gwt-verify`,
-or `gwt-discussion`) and report
-`NO ACTION` with the failing gate item. Never downgrade a `pending` result to
-`skipped` to get past the gate.
+On automated verification failure, a known blocker, or a pending explicitly
+requested human check, repair the failure before a code-changing push or
+`pr.ready`. Report `NO ACTION` with the failed gate if repair cannot proceed.
+Never invent a skip to satisfy an explicit owner request.
 
 Re-run this gate before every code-changing push during the drive loop.
 
@@ -147,8 +133,7 @@ status checks pass.
 
 Merge automation follows the repository's required checks and review rules.
 Resolve review blockers through Fix and preserve the existing protection
-settings and enabled auto-merge. An explicit owner-requested hold is the
-separate `pr.draft` operation described above.
+settings and enabled auto-merge. Draft creation and demotion are unavailable.
 
 ## Step 6: Watch for merge, re-gate on any new blocker
 
@@ -272,7 +257,8 @@ Report using the skill's Final Report Contract. When the PR reached the
   such as `pr.list` and `issue.view` for cached data and workflow lifecycle
   context.
 - **Mutations require JSON-envelope operations**: `gh pr ready` -> `pr.ready`;
-  `gh pr ready --undo` -> `pr.draft`; `gh pr comment` -> `pr.comment`;
+  Draft-creating `gh pr create --draft` and `gh pr ready --undo` are prohibited;
+  `gh pr comment` -> `pr.comment`;
   `gh run rerun` -> `actions.rerun`. `gh pr merge` has no gwtd counterpart:
   gwtd has no merge operation, so merging stays with the repository's merge
   automation or a human. Other writes, including API mutations, also require
@@ -284,7 +270,7 @@ Report using the skill's Final Report Contract. When the PR reached the
 
 | Prohibited | Required alternative |
 |---|---|
-| Enable auto-merge on `pending` / `skipped` verification | Gate on `confirmed` or `n/a` (Step 1) |
+| Treat a missing or legacy `pending` field as an owner request | Require fresh automated PASS and honor only explicit owner requests (Step 1) |
 | Require disabling auto-merge before routine pushes | Keep auto-merge enabled and verify before each code-changing push |
 | Arm auto-merge while a blocker still exists | Resolve all blockers first, arm from a clear snapshot (Step 5) |
 | Leave review blockers unresolved | Resolve threads through Fix and preserve repository protection settings |

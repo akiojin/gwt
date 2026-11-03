@@ -269,6 +269,22 @@ fn declaring_execution_blocked_raises_the_escalation_too() {
         body.contains("cargo test -p gwt --bin gwt"),
         "the verification it could not run must travel with the ask: {body}"
     );
+
+    // Issue #4363 AC-2: no Monitor launch row exists in this fixture. The
+    // status must carry the reason itself, without a pane or Board lookup.
+    let status = run(
+        &fixture,
+        r#"{"schema_version":1,"operation":"issue.monitor.status","params":{}}"#,
+    );
+    let status: Value = serde_json::from_str(&output_text(&status)).expect("monitor status");
+    assert_eq!(status["active_launches"], serde_json::json!([]));
+    let details = status["needs_human_authority"]["board_escalation_details"]
+        .as_array()
+        .expect("Board escalation details");
+    assert_eq!(details.len(), 1);
+    assert_eq!(details[0]["issue_number"], 2338);
+    assert_eq!(details[0]["error_message"], body);
+    assert_eq!(details[0]["entry_id"], open_escalation_ids(&fixture)[0]);
 }
 
 /// AC-2 again: an ordinary failure stays quiet, or the signal is worthless.

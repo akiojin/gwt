@@ -2,6 +2,8 @@
 param(
     [ValidateSet('baseline', 'after')][string]$Label = 'after',
     [switch]$AllowBaselineLatencyFailure,
+    [string]$DependencyPython = '',
+    [string]$RepoHash = '',
     [Parameter(ValueFromRemainingArguments = $true)][string[]]$PlaywrightArguments
 )
 
@@ -42,7 +44,9 @@ try {
     }
     $realRuntime = Join-Path $realProfile '.gwt/runtime'
     $manifest = Get-Content (Join-Path $realRuntime 'project_index_runtime_manifest.json') -Raw | ConvertFrom-Json
-    $python = Join-Path (Join-Path $realRuntime $manifest.venv.path) 'Scripts/python.exe'
+    $python = if ($DependencyPython) { (Resolve-Path -LiteralPath $DependencyPython).Path } else {
+        Join-Path (Join-Path $realRuntime $manifest.venv.path) 'Scripts/python.exe'
+    }
     if (!(Test-Path $python)) { throw 'The current runtime manifest does not resolve an installed Python.' }
     $modelCache = if ($env:HF_HOME) { $env:HF_HOME } else { Join-Path $realProfile '.cache/huggingface' }
     if (!(Test-Path $modelCache)) { throw 'The real embedding model must already be cached for this offline browser-check.' }
@@ -50,10 +54,23 @@ try {
     New-Item -ItemType Directory -Path $runtime, $artifacts -Force | Out-Null
     # Share installed dependencies only. A runtime-root junction also shares
     # Rust's fixed coordinator path and resident workers with production.
-    New-Item -ItemType Junction -Path "$runtime/venvs" -Target "$realRuntime/venvs" | Out-Null
-    Copy-Item -LiteralPath "$realRuntime/project_index_requirements.txt" -Destination "$runtime/project_index_requirements.txt"
-    $monitor = Invoke-CheckoutEnvelope 'issue.monitor.status' @{}
-    $repoHash = $monitor.project_store.hash
+    # The runtime may rebuild a failed probe. Keep its writable venv private;
+    # only import dependencies from the supplied or installed environment.
+    $requirements = "$checkout/crates/gwt-core/runtime/project_index_requirements.txt"
+    $requirementsHash = (Get-FileHash -LiteralPath $requirements -Algorithm SHA256).Hash.Substring(0,16).ToLowerInvariant()
+    $privateVenv = "$runtime/venvs/chroma-venv-$requirementsHash"
+    & $python -m venv --without-pip $privateVenv
+    if ($LASTEXITCODE -ne 0) { throw 'Private browser-check venv creation failed' }
+    $dependencySite = Join-Path (Split-Path (Split-Path $python -Parent) -Parent) 'Lib/site-packages'
+    $siteLiteral = ($dependencySite.Replace('\','/') | ConvertTo-Json -Compress)
+    "import site; site.addsitedir($siteLiteral)" | Set-Content "$privateVenv/Lib/site-packages/gwt-dependencies.pth" -Encoding utf8NoBOM
+    Copy-Item -LiteralPath $requirements -Destination "$runtime/project_index_requirements.txt"
+    $python = (Resolve-Path -LiteralPath "$privateVenv/Scripts/python.exe").Path
+    $repoHash = $RepoHash
+    if (!$repoHash) {
+        $monitor = Invoke-CheckoutEnvelope 'issue.monitor.status' @{}
+        $repoHash = $monitor.project_store.hash
+    }
     if (!$repoHash) { throw 'project_store.hash missing' }
     $projectHome = "$checkHome/.gwt/projects/$repoHash"
     New-Item -ItemType Directory -Path "$projectHome/project-state", "$projectHome/work-notes" -Force | Out-Null

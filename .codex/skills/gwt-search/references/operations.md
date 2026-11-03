@@ -14,6 +14,14 @@ layout plus SPEC-2805 Memory):
 | Discussions | Git-managed discussion notes | Repo-local discussion notes + auto-build on first search |
 | Reports | Durable PM digest and Q&A reports, including their question, answer, and Issue references | Report-ledger mtime+size refresh + auto-build on first search |
 
+SPECs and plain Issues share the repo-scoped `issues` generation store. SPECs
+appear once as heading chunks; they are excluded from plain Issue records.
+The existing `specs` and `issues` scopes filter that same collection by kind.
+Omitting scopes includes both kinds (and the other scopes); use
+`["specs","issues"]` to search only Work Items. Result fields stay compatible.
+The first rebuild of either scope upgrades the old Issue layout from the cache.
+Old separate SPEC stores are no longer read; no manual deletion is required.
+
 All vector data is stored under `~/.gwt/index/<repo-hash>/...`. Issues,
 SPECs, Memory, and Reports are repo-scoped and shared across worktrees; Files
 (code + docs) is worktree-scoped under `worktrees/<worktree-hash>/`. The legacy
@@ -75,7 +83,7 @@ JSON
 |----------------|-------|
 | omit `params.scopes` | All scopes merged (same default as the GUI search window) |
 | `"scopes":["specs"]` | SPEC Issues only |
-| `"scopes":["issues"]` | GitHub Issues only |
+| `"scopes":["issues"]` | Plain GitHub Issues only (excludes `gwt-spec`) |
 | `"scopes":["files"]` | Implementation files only |
 | `"scopes":["files_docs"]` | Project docs only |
 | `"scopes":["memory"]` | Post-mortem memory only |

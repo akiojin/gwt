@@ -38,6 +38,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use tracing::Instrument;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,8 +50,6 @@ pub enum ClientScope {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DispatchTarget {
     All,
-    // Explicit Hub recipients are part of the routing contract; producers migrate separately.
-    #[allow(dead_code)]
     Hub,
     Project(gwt_core::repo_hash::ProjectKey),
     Client(String),
@@ -60,6 +59,12 @@ pub enum DispatchTarget {
 pub enum KnowledgeWireMetadata {
     SemanticRetry(crate::KnowledgeSemanticRetry),
     NonSemanticError,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct KnowledgeLoadTiming {
+    pub queued_at: Instant,
+    pub dispatch_enqueued_at: Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +83,8 @@ pub struct OutboundEvent {
     pub terminal_stream_seq: Option<u64>,
     /// Error provenance only; never serialized or inferred from dispatch targets.
     pub error_origin: Option<crate::error_report::ErrorOrigin>,
+    /// First cache response timing across the GUI dispatch queue; never serialized.
+    pub knowledge_load_timing: Option<KnowledgeLoadTiming>,
 }
 
 impl OutboundEvent {
@@ -88,6 +95,7 @@ impl OutboundEvent {
             knowledge_wire_metadata: None,
             terminal_stream_seq: None,
             error_origin: None,
+            knowledge_load_timing: None,
         }
     }
 
@@ -133,6 +141,7 @@ impl OutboundEvent {
             knowledge_wire_metadata: None,
             terminal_stream_seq: None,
             error_origin: None,
+            knowledge_load_timing: None,
         }
     }
 
@@ -145,6 +154,7 @@ impl OutboundEvent {
             target: DispatchTarget::All,
             event: BackendEvent::IssueMonitorToast {
                 notification_transition: None,
+                notification_transition_id: None,
                 level: level.into(),
                 message: message.into(),
                 issue_number: None,
@@ -152,6 +162,7 @@ impl OutboundEvent {
             knowledge_wire_metadata: None,
             terminal_stream_seq: None,
             error_origin: Some(crate::error_report::ErrorOrigin::Host),
+            knowledge_load_timing: None,
         }
     }
 
@@ -169,6 +180,7 @@ impl OutboundEvent {
             knowledge_wire_metadata: None,
             terminal_stream_seq: None,
             error_origin: None,
+            knowledge_load_timing: None,
         }
     }
 
@@ -187,6 +199,7 @@ impl OutboundEvent {
             knowledge_wire_metadata: semantic_retry.map(KnowledgeWireMetadata::SemanticRetry),
             terminal_stream_seq: None,
             error_origin: None,
+            knowledge_load_timing: None,
         }
     }
 
@@ -211,6 +224,7 @@ impl OutboundEvent {
             knowledge_wire_metadata: Some(KnowledgeWireMetadata::NonSemanticError),
             terminal_stream_seq: None,
             error_origin: None,
+            knowledge_load_timing: None,
         }
     }
 
@@ -248,8 +262,15 @@ impl TransportState {
     fn send(&self, event: TransportEvent) {
         (self.sink)(event);
     }
+
+    /// Host-only handoff from an authenticated encrypted mobile transport.
+    /// Queueing does not authorize, consume a sequence, or use browser fast paths.
+    pub fn send_mobile_input(&self, request: Arc<crate::mobile_connection::MobileInputRequest>) {
+        self.send(TransportEvent::MobileInput(request));
+    }
 }
 pub enum TransportEvent {
+    MobileInput(Arc<crate::mobile_connection::MobileInputRequest>),
     FreshExecutionReadyResend {
         grant: AgentCapabilityGrant,
         request: crate::AgentExecutionContinuationRequest,
@@ -659,16 +680,31 @@ pub enum DrainStep {
 /// bounded mpsc channel whose overflow disconnected the client — under an
 /// agent-startup output flood that evicted the very client that initiated
 /// the launch and lost its lossless replies.
-#[derive(Default)]
 pub struct ClientQueue {
     state: Mutex<ClientQueueState>,
     notify: tokio::sync::Notify,
+    input_liveness: std::sync::RwLock<bool>,
+    input_close_requested: std::sync::atomic::AtomicBool,
+}
+
+impl Default for ClientQueue {
+    fn default() -> Self {
+        Self {
+            state: Mutex::default(),
+            notify: tokio::sync::Notify::new(),
+            input_liveness: std::sync::RwLock::new(true),
+            input_close_requested: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
 }
 
 impl ClientQueue {
     /// Enqueue one prepared event. Returns `true` when the client crossed
     /// the lossless hard cap and must be unregistered by the caller.
     pub fn enqueue(&self, message: &PreparedOutbound) -> bool {
+        if self.input_close_requested.load(Ordering::Acquire) {
+            return true;
+        }
         let mut state = self
             .state
             .lock()
@@ -712,9 +748,8 @@ impl ClientQueue {
                     entry.stream_seq = message.stream_seq;
                 } else {
                     if state.entries.len() >= LOSSLESS_HARD_CAP {
-                        state.dead = true;
                         drop(state);
-                        self.notify.notify_one();
+                        self.close();
                         return true;
                     }
                     state.entries.push_back(Self::queued(message));
@@ -736,9 +771,8 @@ impl ClientQueue {
             }
             QueueClass::Lossless => {
                 if state.entries.len() >= LOSSLESS_HARD_CAP {
-                    state.dead = true;
                     drop(state);
-                    self.notify.notify_one();
+                    self.close();
                     return true;
                 }
                 state.entries.push_back(Self::queued(message));
@@ -874,13 +908,33 @@ impl ClientQueue {
     }
 
     fn close_with_frame(&self, close_frame: Option<ClientCloseFrame>) {
+        self.input_close_requested.store(true, Ordering::Release);
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.dead = true;
         state.close_frame = close_frame;
         drop(state);
+        self.finish_input_close();
+    }
+
+    fn finish_input_close(&self) {
+        if !self.input_close_requested.load(Ordering::Acquire) {
+            return;
+        }
+        // The GUI's outbound dispatch must never wait for a native input ACK.
+        // Its existing queue publishes Closed after the last accepted lease
+        // ends; closing immediately refuses every new input lease.
+        let mut live = match self.input_liveness.try_write() {
+            Ok(live) => live,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return,
+        };
+        *live = false;
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .dead = true;
         self.notify.notify_one();
     }
 
@@ -961,6 +1015,47 @@ struct ClientRegistration {
     scope: ClientScope,
 }
 
+/// An immutable registration snapshot, sharing the existing queue lifetime.
+/// It cannot authorize mobile input; the Host authority still owns that check.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct ClientProjectBinding {
+    queue: Arc<ClientQueue>,
+    scope: ClientScope,
+}
+
+impl ClientProjectBinding {
+    pub fn while_current<T>(
+        &self,
+        project: &gwt_core::repo_hash::ProjectKey,
+        effect: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let live = self.queue.input_liveness.read().ok()?;
+        let is_live = *live;
+        struct Lease<'a> {
+            queue: &'a ClientQueue,
+            live: Option<std::sync::RwLockReadGuard<'a, bool>>,
+        }
+        impl Drop for Lease<'_> {
+            fn drop(&mut self) {
+                self.live.take();
+                self.queue.finish_input_close();
+            }
+        }
+        let _lease = Lease {
+            queue: &self.queue,
+            live: Some(live),
+        };
+        if !is_live
+            || self.queue.input_close_requested.load(Ordering::Acquire)
+            || !matches!(&self.scope, ClientScope::Project(key) if key == project)
+        {
+            return None;
+        }
+        Some(effect())
+    }
+}
+
 fn target_selects(
     target: &DispatchTarget,
     client_id: &str,
@@ -979,6 +1074,15 @@ fn target_selects(
 }
 
 impl ClientHub {
+    #[doc(hidden)]
+    pub fn capture_project_binding(&self, client_id: &str) -> Option<ClientProjectBinding> {
+        let clients = self.clients.lock().ok()?;
+        let registration = clients.get(client_id)?;
+        Some(ClientProjectBinding {
+            queue: registration.queue.clone(),
+            scope: registration.scope.clone(),
+        })
+    }
     #[cfg(test)]
     fn set_before_dispatch_enqueue_hook(&self, hook: ClientHubDispatchHook) {
         *self
@@ -1004,6 +1108,31 @@ impl ClientHub {
             .map(|registration| registration.scope.clone())
     }
 
+    /// Only browser views bound to this Project participate in notification delivery.
+    pub fn project_browser_client_ids(&self, key: &gwt_core::repo_hash::ProjectKey) -> Vec<String> {
+        self.clients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|(_, client)| {
+                client.receives_broadcasts
+                    && matches!(&client.scope, ClientScope::Project(project) if project == key)
+            })
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    pub fn has_project_browser_clients(&self, key: &gwt_core::repo_hash::ProjectKey) -> bool {
+        self.clients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .any(|client| {
+                client.receives_broadcasts
+                    && matches!(&client.scope, ClientScope::Project(project) if project == key)
+            })
+    }
+
     fn register_pane(&self, client_id: String) -> Arc<ClientQueue> {
         self.register_with_broadcasts(client_id, false, ClientScope::Hub)
     }
@@ -1018,7 +1147,8 @@ impl ClientHub {
         if receives_broadcasts {
             self.browser_generation.fetch_add(1, Ordering::Relaxed);
         }
-        self.clients
+        let previous = self
+            .clients
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(
@@ -1029,6 +1159,9 @@ impl ClientHub {
                     scope,
                 },
             );
+        if let Some(previous) = previous {
+            previous.queue.close();
+        }
         queue
     }
 
@@ -1141,11 +1274,32 @@ impl ClientHub {
 
         let mut dead_clients: Vec<String> = Vec::new();
         for outbound in events {
+            let target = outbound.target.clone();
+            let client_id = match &target {
+                DispatchTarget::Client(id) => Some(id.as_str()),
+                _ => None,
+            };
+            let knowledge_load = match &outbound.event {
+                BackendEvent::KnowledgeEntries { id, request_id, .. } => Some((
+                    id.clone(),
+                    *request_id,
+                    Instant::now(),
+                    outbound.knowledge_load_timing,
+                )),
+                _ => None,
+            };
+            if let Some((window_id, request_id, started, Some(timing))) = &knowledge_load {
+                let elapsed_ms = started.duration_since(timing.queued_at).as_secs_f64() * 1000.0;
+                tracing::info!(target: "gwt::knowledge_load", stage = "dispatch_wait", status = "completed",
+                    %window_id, ?request_id, client_id, elapsed_ms,
+                    duration_ms = started.duration_since(timing.dispatch_enqueued_at).as_secs_f64() * 1000.0,
+                    deadline_exceeded_stage = (elapsed_ms >= 60_000.0).then_some("dispatch_wait"),
+                    "Issue cache response dispatch queue wait");
+            }
             crate::error_report::queue_backend_event_with_origin(
                 &outbound.event,
                 outbound.error_origin.as_ref(),
             );
-            let target = outbound.target.clone();
             let prepared = prepare_owned_outbound(outbound);
             for (client_id, queue, receives_broadcasts, scope) in &snapshot {
                 if target_selects(&target, client_id, *receives_broadcasts, scope)
@@ -1153,6 +1307,15 @@ impl ClientHub {
                 {
                     dead_clients.push(client_id.clone());
                 }
+            }
+            if let Some((window_id, request_id, started, timing)) = knowledge_load {
+                let elapsed_ms =
+                    timing.map(|timing| timing.queued_at.elapsed().as_secs_f64() * 1000.0);
+                tracing::info!(target: "gwt::knowledge_load", stage = "send", status = "completed",
+                    %window_id, ?request_id, client_id, elapsed_ms,
+                    duration_ms = started.elapsed().as_secs_f64() * 1000.0,
+                    deadline_exceeded_stage = elapsed_ms.filter(|elapsed| *elapsed >= 60_000.0).map(|_| "send"),
+                    boundary = "serialize_and_socket_queue", "Issue cache response queued");
             }
         }
 
@@ -1169,14 +1332,18 @@ impl ClientHub {
                 dead_clients = ?dead_clients,
                 "disconnecting websocket clients stuck past the lossless hard cap; reconnect will replay latest state"
             );
-            let mut clients = self
-                .clients
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for client_id in dead_clients {
-                if let Some(registration) = clients.remove(&client_id) {
-                    registration.queue.close();
-                }
+            let removed: Vec<_> = {
+                let mut clients = self
+                    .clients
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                dead_clients
+                    .into_iter()
+                    .filter_map(|id| clients.remove(&id))
+                    .collect()
+            };
+            for registration in removed {
+                registration.queue.close();
             }
         }
     }
@@ -1221,14 +1388,18 @@ impl ClientHub {
             }
         }
         if !dead_clients.is_empty() {
-            let mut clients = self
-                .clients
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for client_id in dead_clients {
-                if let Some(registration) = clients.remove(&client_id) {
-                    registration.queue.close();
-                }
+            let removed: Vec<_> = {
+                let mut clients = self
+                    .clients
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                dead_clients
+                    .into_iter()
+                    .filter_map(|id| clients.remove(&id))
+                    .collect()
+            };
+            for registration in removed {
+                registration.queue.close();
             }
         }
     }
@@ -1311,7 +1482,30 @@ pub async fn access_log_middleware(
     let user_agent = user_agent.flatten();
 
     let started = Instant::now();
-    let response = next.run(request).await;
+    let response = if path == "/internal/work-materialization-probe" {
+        // The access record below exists only after a reply. Keep entry and
+        // progress observable even when a probe never produces that reply.
+        let span = tracing::info_span!(
+            target: "gwt.work_materialization_probe",
+            "work_materialization_probe",
+            request_id = %Uuid::new_v4()
+        );
+        async {
+            tracing::info!(target: "gwt.work_materialization_probe", stage = "request");
+            let response = next.run(request).await;
+            tracing::info!(
+                target: "gwt.work_materialization_probe",
+                stage = "reply",
+                status = response.status().as_u16(),
+                elapsed_ms = started.elapsed().as_millis() as u64,
+            );
+            response
+        }
+        .instrument(span)
+        .await
+    } else {
+        next.run(request).await
+    };
     let elapsed_ms = started.elapsed().as_millis() as u64;
     let status = response.status().as_u16();
 
@@ -1609,6 +1803,7 @@ async fn work_materialization_probe_handler(
     State(state): State<TransportState>,
     Json(request): Json<AgentWorkMaterializationProbeRequest>,
 ) -> Response {
+    tracing::info!(target: "gwt.work_materialization_probe", stage = "authentication");
     let Some(principal) = agent_capability_principal(&headers, &state) else {
         return workspace_update_error_response(
             StatusCode::UNAUTHORIZED,
@@ -1624,15 +1819,35 @@ async fn work_materialization_probe_handler(
             "work_materialization_probe_requires_active_execution_authority",
         );
     };
+    tracing::info!(
+        target: "gwt.work_materialization_probe",
+        stage = "authenticated",
+        gwt_session_id = principal.session_id(),
+        owner_number = execution_binding.owner_number,
+    );
     let project_root = principal.canonical_project_root().to_path_buf();
     let session_id = principal.session_id().to_string();
+    let span = tracing::Span::current();
+    let dispatcher = tracing::dispatcher::get_default(Clone::clone);
+    tracing::info!(target: "gwt.work_materialization_probe", stage = "dispatch");
     let result = tokio::task::spawn_blocking(move || {
-        crate::probe_bound_authenticated_work_materialization(
-            &project_root,
-            &session_id,
-            &execution_binding,
-            request,
-        )
+        tracing::dispatcher::with_default(&dispatcher, || {
+            span.in_scope(|| {
+                tracing::info!(target: "gwt.work_materialization_probe", stage = "worker");
+                let result = crate::probe_bound_authenticated_work_materialization(
+                    &project_root,
+                    &session_id,
+                    &execution_binding,
+                    request,
+                );
+                tracing::info!(
+                    target: "gwt.work_materialization_probe",
+                    stage = "worker_complete",
+                    success = result.is_ok(),
+                );
+                result
+            })
+        })
     })
     .await;
 
@@ -1964,6 +2179,7 @@ impl AgentPaneSessionScope {
         match event {
             FrontendEvent::FrontendReady => Some(AgentFrontendRequest::Ready),
             FrontendEvent::ListWindows => Some(AgentFrontendRequest::ListWindows),
+            FrontendEvent::ListFleetPanes => Some(AgentFrontendRequest::ListFleetPanes),
             FrontendEvent::CloseWork {
                 work_id,
                 close_kind,
@@ -1980,6 +2196,9 @@ impl AgentPaneSessionScope {
                     request_id,
                 })
             }
+            FrontendEvent::PaneName { request_id, .. } => {
+                Some(AgentFrontendRequest::ReadName { request_id })
+            }
             // Issue #3629 AC-9: closing a scoped peer pane is a window
             // lifecycle operation, not a producing Work mutation — the PM
             // holds only an observation grant and pane.close is its everyday
@@ -1993,6 +2212,21 @@ impl AgentPaneSessionScope {
                     id,
                     request_id,
                     responder: None,
+                })
+            }
+            FrontendEvent::CloseFleetPane {
+                request_id,
+                id,
+                session_id,
+                child_pid,
+                child_started_at,
+            } if self.allowed_window_ids.contains(&id) => {
+                Some(AgentFrontendRequest::CloseFleetPane {
+                    request_id,
+                    id,
+                    session_id,
+                    child_pid,
+                    child_started_at,
                 })
             }
             FrontendEvent::PaneSendInput { session_id, text }
@@ -2044,6 +2278,26 @@ impl AgentPaneSessionScope {
                 self.filter_workspace_state(&mut value)?;
                 serde_json::to_string(&value).ok()
             }
+            "fleet_pane_list" => {
+                // Fleet inventory is independently scoped and may be the
+                // first response on this socket, without workspace hydration.
+                let panes = value.get_mut("panes")?.as_array_mut()?;
+                panes.retain(|pane| {
+                    pane.get("window_id")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some()
+                        && self.authorizes_tab(pane)
+                });
+                self.allowed_window_ids = panes
+                    .iter()
+                    .filter_map(|pane| {
+                        pane.get("window_id")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string)
+                    })
+                    .collect();
+                serde_json::to_string(&value).ok()
+            }
             "terminal_snapshot" => value
                 .get("id")
                 .and_then(serde_json::Value::as_str)
@@ -2073,7 +2327,8 @@ impl AgentPaneSessionScope {
             // Issue #3629 AC-12: the close reply is already client-scoped by
             // its dispatch target; passing it through lets the requester hear
             // the outcome even after the window left the projection.
-            "pane_close_result" => Some(payload),
+            "pane_close_result" | "pane_husk_removed" => Some(payload),
+            "fleet_pane_close_result" => Some(payload),
             "work_close_result" => Some(payload),
             _ => None,
         }
@@ -2291,7 +2546,7 @@ async fn send_agent_self_close_response<S>(
     match response {
         Ok(acceptance) => send_agent_self_close_acceptance(sender, acceptance, deadline).await,
         Err(refusal) => {
-            send_agent_pm_terminal_result(
+            send_agent_terminal_result(
                 sender,
                 BackendEvent::PaneCloseResult {
                     ok: false,
@@ -2305,7 +2560,7 @@ async fn send_agent_self_close_response<S>(
     }
 }
 
-async fn send_agent_pm_terminal_result<S>(
+async fn send_agent_terminal_result<S>(
     sender: &mut S,
     event: BackendEvent,
     deadline_after: Duration,
@@ -2319,7 +2574,7 @@ async fn send_agent_pm_terminal_result<S>(
                     .await;
         }
         Err(error) => {
-            tracing::error!(%error, "failed to serialize direct PM message result");
+            tracing::error!(%error, "failed to serialize direct agent result");
         }
     }
 }
@@ -2365,10 +2620,47 @@ fn opaque_agent_pm_target_refusal(operation_id: String, window_id: String) -> Ba
     }
 }
 
-async fn send_agent_fence_close<S>(sender: &mut S, close_frame: ClientCloseFrame)
-where
+fn pane_name_correlation(payload: &str, kind: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(payload).ok()?;
+    (value.get("kind")?.as_str()? == kind)
+        .then(|| value.get("request_id")?.as_str().map(str::to_owned))?
+}
+
+async fn refuse_pending_agent_names<S>(
+    sender: &mut S,
+    pending_names: &mut HashSet<String>,
+    error: &str,
+) where
     S: futures_util::Sink<Message> + Unpin,
 {
+    for request_id in pending_names.drain() {
+        send_agent_terminal_result(
+            sender,
+            BackendEvent::PaneNameResult {
+                request_id,
+                ok: false,
+                agent_name: None,
+                error: Some(error.to_string()),
+            },
+            Duration::from_secs(1),
+        )
+        .await;
+    }
+}
+
+async fn send_agent_fence_close<S>(
+    sender: &mut S,
+    close_frame: ClientCloseFrame,
+    pending_names: &mut HashSet<String>,
+) where
+    S: futures_util::Sink<Message> + Unpin,
+{
+    refuse_pending_agent_names(
+        sender,
+        pending_names,
+        "Agent capability is missing, stale, or unavailable",
+    )
+    .await;
     let _ = tokio::time::timeout(
         Duration::from_secs(1),
         sender.send(Message::Close(Some(axum::extract::ws::CloseFrame {
@@ -2392,6 +2684,10 @@ async fn client_session_with_scope(
         ClientSessionScope::Agent(_) => state.clients.register_pane(client_id.clone()),
     };
     let (mut sender, mut receiver) = socket.split();
+    // A fence can fire on an unrelated outbound message before the name
+    // result reaches the front of the queue. Retain each accepted correlation
+    // until its reply is sent so revocation never becomes a silent timeout.
+    let mut pending_names = HashSet::new();
 
     let input_seq = Arc::new(AtomicU64::new(0));
 
@@ -2404,6 +2700,7 @@ async fn client_session_with_scope(
                             send_agent_fence_close(
                                 &mut sender,
                                 AGENT_STALE_BINDING_CLOSE,
+                                &mut pending_names,
                             )
                             .await;
                             break;
@@ -2411,8 +2708,14 @@ async fn client_session_with_scope(
                         let Some(payload) = scope.filter_outbound(payload) else {
                             continue;
                         };
+                        let name_result = if pending_names.is_empty() { None } else {
+                            pane_name_correlation(&payload, "pane_name_result")
+                        };
                         if sender.send(Message::Text(payload.into())).await.is_err() {
                             break;
+                        }
+                        if let Some(request_id) = name_result {
+                            pending_names.remove(&request_id);
                         }
                         let repair_panes = scope.filter_repair_panes(repair_panes);
                         if !repair_panes.is_empty() {
@@ -2428,12 +2731,10 @@ async fn client_session_with_scope(
                     }
                     DrainStep::Closed(close_frame) => {
                         if let Some(close_frame) = close_frame {
-                            let _ = sender
-                                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
-                                    code: close_frame.code,
-                                    reason: close_frame.reason.into(),
-                                })))
-                                .await;
+                            send_agent_fence_close(&mut sender, close_frame, &mut pending_names).await;
+                        } else {
+                            refuse_pending_agent_names(&mut sender, &mut pending_names,
+                                "Agent connection closed before name lookup completed").await;
                         }
                         break;
                     }
@@ -2443,10 +2744,18 @@ async fn client_session_with_scope(
                 match maybe_message {
                     Some(Ok(Message::Text(text))) => {
                         let received_at = Instant::now();
+                        let name_request_id = match &scope {
+                            ClientSessionScope::Agent(_) => pane_name_correlation(text.as_ref(), "pane_name"),
+                            ClientSessionScope::Browser(_) => None,
+                        };
+                        if let Some(request_id) = &name_request_id {
+                            pending_names.insert(request_id.clone());
+                        }
                         if !scope.refresh_agent_grant(&state.agent_capabilities) {
                             send_agent_fence_close(
                                 &mut sender,
                                 AGENT_STALE_BINDING_CLOSE,
+                                &mut pending_names,
                             )
                             .await;
                             break;
@@ -2463,7 +2772,7 @@ async fn client_session_with_scope(
                                         operation_id,
                                         window_id,
                                     }) => {
-                                        send_agent_pm_terminal_result(
+                                        send_agent_terminal_result(
                                             &mut sender,
                                             opaque_agent_pm_target_refusal(operation_id, window_id),
                                             AGENT_PM_TERMINAL_SEND_DEADLINE,
@@ -2500,11 +2809,12 @@ async fn client_session_with_scope(
                                                     send_agent_fence_close(
                                                         &mut sender,
                                                         AGENT_STALE_BINDING_CLOSE,
+                                                        &mut pending_names,
                                                     )
                                                     .await;
                                                     break;
                                                 }
-                                                AgentDurableAuthority::Unavailable => {
+                                                AgentDurableAuthority::PendingActivation | AgentDurableAuthority::Unavailable => {
                                                     tracing::warn!(
                                                         target: "gwt_security",
                                                         "agent pane WebSocket execution authority is unavailable"
@@ -2512,6 +2822,7 @@ async fn client_session_with_scope(
                                                     send_agent_fence_close(
                                                         &mut sender,
                                                         AGENT_AUTHORITY_UNAVAILABLE_CLOSE,
+                                                        &mut pending_names,
                                                     )
                                                     .await;
                                                     break;
@@ -2520,6 +2831,7 @@ async fn client_session_with_scope(
                                                     send_agent_fence_close(
                                                         &mut sender,
                                                         AGENT_STALE_BINDING_CLOSE,
+                                                        &mut pending_names,
                                                     )
                                                     .await;
                                                     break;
@@ -2581,7 +2893,7 @@ async fn client_session_with_scope(
                                             )) = direct_pm_result.take()
                                             {
                                                 let _ = cancellation.cancel();
-                                                send_agent_pm_terminal_result(
+                                                send_agent_terminal_result(
                                                     &mut sender,
                                                     BackendEvent::PmMessageSendResult {
                                                         operation_id,
@@ -2599,6 +2911,7 @@ async fn client_session_with_scope(
                                                 send_agent_fence_close(
                                                     &mut sender,
                                                     AGENT_STALE_BINDING_CLOSE,
+                                                    &mut pending_names,
                                                 )
                                                 .await;
                                             }
@@ -2669,7 +2982,7 @@ async fn client_session_with_scope(
                                                 }
                                             };
                                             if connected {
-                                                send_agent_pm_terminal_result(
+                                                send_agent_terminal_result(
                                                     &mut sender,
                                                     event,
                                                     AGENT_PM_TERMINAL_SEND_DEADLINE,
@@ -2720,6 +3033,13 @@ async fn client_session_with_scope(
                                 }
                             }
                             Err(error) => {
+                                if let Some(request_id) = name_request_id {
+                                    pending_names.remove(&request_id);
+                                    send_agent_terminal_result(&mut sender, BackendEvent::PaneNameResult {
+                                        request_id, ok: false, agent_name: None,
+                                        error: Some(format!("Invalid pane.name request: {error}")),
+                                    }, Duration::from_secs(1)).await;
+                                }
                                 eprintln!("invalid frontend message: {error}");
                             }
                         }
@@ -2897,7 +3217,8 @@ mod tests {
         }
         assert!(std::panic::catch_unwind(|| OutboundEvent::broadcast(
             BackendEvent::CloneProjectError {
-                message: "project error".into()
+                message: "project error".into(),
+                existing_project_key: None,
             }
         ))
         .is_err());
@@ -2920,6 +3241,23 @@ mod tests {
         assert_eq!(clients.browser_session_state(), (2, false));
         assert!(clients.has_clients());
     }
+
+    #[test]
+    fn project_browser_membership_excludes_hub_panes_and_disconnected_clients() {
+        let clients = ClientHub::default();
+        let key = project_a();
+        clients.register_pane("agent".into());
+        clients.register_scoped("hub".into(), ClientScope::Hub);
+        clients.register_scoped("a".into(), ClientScope::Project(key.clone()));
+        clients.register_scoped(
+            "b".into(),
+            ClientScope::Project(ProjectKey::parse("fedcba9876543210").unwrap()),
+        );
+        assert_eq!(clients.project_browser_client_ids(&key), ["a"]);
+        assert!(clients.has_project_browser_clients(&key));
+        clients.unregister("a");
+        assert!(!clients.has_project_browser_clients(&key));
+    }
     fn project_a() -> ProjectKey {
         ProjectKey::parse("0123456789abcdef").unwrap()
     }
@@ -2930,7 +3268,66 @@ mod tests {
             knowledge_wire_metadata: None,
             terminal_stream_seq: None,
             error_origin: None,
+            knowledge_load_timing: None,
         }
+    }
+
+    #[test]
+    fn knowledge_load_transport_records_dispatch_wait_and_send_deadlines() {
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(log.reopen().unwrap())
+            .finish();
+        let _log_guard = tracing::subscriber::set_default(subscriber);
+        let event = BackendEvent::KnowledgeEntries {
+            id: "tab-1::issue-1".into(),
+            knowledge_kind: KnowledgeKind::Issue,
+            request_id: Some(5543),
+            revision: "cached".into(),
+            entries: Vec::new(),
+            selected_number: None,
+            empty_message: None,
+            refresh_enabled: false,
+            cache_revision: None,
+        };
+        let now = Instant::now();
+        let mut outbound = OutboundEvent::reply("client", event.clone());
+        outbound.knowledge_load_timing = Some(KnowledgeLoadTiming {
+            queued_at: now - Duration::from_secs(61),
+            dispatch_enqueued_at: now - Duration::from_secs(60),
+        });
+        assert_eq!(
+            prepare_outbound_event(&outbound).payload.as_ref(),
+            serde_json::to_string(&event).unwrap(),
+            "request timing is internal and must not change the wire payload"
+        );
+        ClientHub::default().dispatch(vec![outbound]);
+        let records: Vec<serde_json::Value> = std::fs::read_to_string(log.path())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .filter(|record: &serde_json::Value| record["target"] == "gwt::knowledge_load")
+            .collect();
+        for stage in ["dispatch_wait", "send"] {
+            let fields = &records
+                .iter()
+                .find(|record| record["fields"]["stage"] == stage)
+                .unwrap_or_else(|| panic!("missing {stage} timing"))["fields"];
+            assert_eq!(fields["window_id"], "tab-1::issue-1");
+            assert_eq!(fields["request_id"], "Some(5543)");
+            assert_eq!(fields["client_id"], "client");
+            assert_eq!(fields["status"], "completed");
+            assert_eq!(fields["deadline_exceeded_stage"], stage);
+            assert!(fields["elapsed_ms"].as_f64().unwrap() >= 61_000.0);
+            assert!(fields["duration_ms"].as_f64().unwrap() >= 0.0);
+        }
+        let wait = records
+            .iter()
+            .find(|record| record["fields"]["stage"] == "dispatch_wait")
+            .unwrap();
+        assert!(wait["fields"]["duration_ms"].as_f64().unwrap() >= 60_000.0);
     }
 
     #[tokio::test]
@@ -3054,7 +3451,7 @@ mod tests {
     }
 
     #[test]
-    fn pane_name_requires_producing_agent_authority_and_refuses_browser_dispatch() {
+    fn pane_name_separates_metadata_read_from_producing_assignment_and_refuses_browser() {
         let project = tempfile::tempdir().expect("project");
         let request = || {
             serde_json::from_value::<FrontendEvent>(serde_json::json!({
@@ -3088,7 +3485,11 @@ mod tests {
                 "observation-capability".to_string(),
                 principal,
             ));
-            assert!(scope.filter_inbound(request()).is_none());
+            let read = scope
+                .filter_inbound(request())
+                .expect("own-name metadata read");
+            assert!(!read.mutates_host_state());
+            assert!(!read.requires_producing_authority());
         }
         let scope = AgentPaneSessionScope::new(AgentCapabilityGrant::new(
             "producing-capability".to_string(),
@@ -3188,10 +3589,75 @@ mod tests {
         assert_eq!(bearer_token(&headers), Some("capability"));
     }
 
-    /// Issue #3629 AC-9/AC-12: an authenticated observation grant (the PM has
-    /// no Active execution binding) must be able to request close of a peer
-    /// pane inside its own project scope, and the close reply kind must pass
-    /// the outbound filter so the caller hears the outcome.
+    /// Fleet inventory is the first message on a lightweight socket. Its
+    /// authoritative project scope also seeds the following exact close.
+    #[test]
+    fn agent_pane_scope_limits_fleet_inventory_and_generation_close() {
+        let project = tempfile::tempdir().unwrap();
+        let foreign = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(project.path());
+        let principal = AgentSessionPrincipal::for_test(project.path(), "pm-session").unwrap();
+        let mut scope = AgentPaneSessionScope::new(AgentCapabilityGrant::new(
+            "test-capability".into(),
+            principal,
+        ));
+        assert!(
+            scope.allowed_window_ids.is_empty(),
+            "a fresh fleet socket has no workspace projection"
+        );
+        let list = serde_json::from_value(serde_json::json!({"kind":"list_fleet_panes"})).unwrap();
+        assert!(scope
+            .filter_inbound(list)
+            .is_some_and(|request| !request.mutates_host_state()));
+        let close = |id| {
+            serde_json::from_value(serde_json::json!({
+                "kind":"close_fleet_pane", "request_id":"84ef22cc-44ef-415d-b4c4-06a6d4cc7416",
+                "id":id, "session_id":"target-session", "child_pid":123, "child_started_at":456
+            }))
+            .unwrap()
+        };
+        let inventory = scope
+            .filter_outbound(
+                serde_json::json!({
+                    "kind":"fleet_pane_list", "project_root":project.path(), "panes":[
+                        {"window_id":"owned-window", "session_id":"owned-session", "project_root":project.path()},
+                        {"window_id":"foreign-window", "session_id":"foreign-session", "project_root":foreign.path()},
+                        {"window_id":"unscoped-window", "session_id":"unscoped-session"}
+                    ]
+                })
+                .to_string(),
+            )
+            .expect("fleet inventory reaches its client");
+        let inventory: serde_json::Value = serde_json::from_str(&inventory).unwrap();
+        assert_eq!(inventory["panes"].as_array().unwrap().len(), 1);
+        assert_eq!(inventory["panes"][0]["window_id"], "owned-window");
+        assert!(scope
+            .filter_inbound(close("owned-window"))
+            .is_some_and(
+                |request| request.mutates_host_state() && !request.requires_producing_authority()
+            ));
+        assert!(scope.filter_inbound(close("foreign-window")).is_none());
+        assert!(scope.filter_inbound(close("unscoped-window")).is_none());
+        scope
+            .filter_outbound(
+                serde_json::json!({
+                    "kind":"fleet_pane_list", "project_root":project.path(), "panes":[
+                        {"window_id":"new-owned-window", "project_root":project.path()}
+                    ]
+                })
+                .to_string(),
+            )
+            .expect("a fresh atomic inventory replaces stale membership");
+        assert!(scope.filter_inbound(close("new-owned-window")).is_some());
+        assert!(scope.filter_inbound(close("owned-window")).is_none());
+        let result = serde_json::json!({
+            "kind":"fleet_pane_close_result", "request_id":"84ef22cc-44ef-415d-b4c4-06a6d4cc7416",
+            "window_id":"owned-window", "ok":false, "reason":"runtime changed"
+        })
+        .to_string();
+        assert_eq!(scope.filter_outbound(result.clone()), Some(result));
+    }
+
     #[test]
     fn agent_pane_scope_limits_recovery_to_project_windows() {
         let project = tempfile::tempdir().expect("project");
@@ -3282,20 +3748,26 @@ mod tests {
                 .is_none(),
             "a foreign-project window stays out of reach"
         );
-        assert!(
-            scope
-                .filter_outbound(
-                    serde_json::json!({
-                        "kind": "pane_close_result",
-                        "ok": true,
-                        "window_id": "tab-owned::agent-1",
-                        "reason": null
-                    })
-                    .to_string()
-                )
-                .is_some(),
-            "the close reply must reach the requesting client (Issue #3629 AC-12)"
-        );
+        scope.allowed_window_ids.clear();
+        for reply in [
+            serde_json::json!({
+                "kind": "pane_close_result",
+                "ok": true,
+                "window_id": "tab-owned::agent-1",
+                "reason": null
+            }),
+            serde_json::json!({
+                "kind": "pane_husk_removed",
+                "window_id": "tab-owned::agent-1"
+            }),
+        ] {
+            let payload = reply.to_string();
+            assert_eq!(
+                scope.filter_outbound(payload.clone()),
+                Some(payload),
+                "both close outcomes must reach the client after window removal"
+            );
+        }
     }
 
     #[test]
@@ -4079,6 +4551,7 @@ mod tests {
         let _home = ScopedGwtHome::set(home.path());
         let event = BackendEvent::IssueMonitorToast {
             notification_transition: None,
+            notification_transition_id: None,
             level: "error".into(),
             message: "project launch error".into(),
             issue_number: Some(4735),
@@ -4144,6 +4617,7 @@ mod tests {
             )),
             terminal_stream_seq: None,
             error_origin: None,
+            knowledge_load_timing: None,
         };
         let prepared = prepare_outbound_event(&outbound);
         let value: serde_json::Value =
@@ -5054,6 +5528,7 @@ mod tests {
                     knowledge_wire_metadata: None,
                     terminal_stream_seq: None,
                     error_origin: None,
+                    knowledge_load_timing: None,
                 },
             };
             hub.dispatch(vec![outbound]);

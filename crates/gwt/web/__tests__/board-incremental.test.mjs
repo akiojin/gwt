@@ -1,23 +1,28 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { parseHTML } from "linkedom";
 
 const source = readFileSync(new URL("../board-logs-surface.js", import.meta.url), "utf8")
   .replace('from "/board-surface.js"', `from "${new URL("../board-surface.js", import.meta.url).href}"`)
-  .replace('from "/ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`);
+  .replace('from "/ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`).replace('from "/ui-content.js"', `from "${new URL("../ui-content.js", import.meta.url).href}"`);
 const { createBoardLogsSurface } = await import(
   `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`,
 );
 
-function fixture() {
+function fixture(onNotification) {
   const sent = [], notifications = [];
   const surface = createBoardLogsSurface({
     send: event => sent.push(event),
     windowMap: new Map(),
-    pushAlertToast: notice => notifications.push(notice),
+    pushAlertToast: notice => {
+      notifications.push(notice);
+      onNotification?.(surface.ensureBoardState("board"));
+    },
     activeWorkspace: () => ({ windows: [{ id: "board", preset: "board" }] }),
     focusOrSpawnPreset: () => {},
     activeProjectTab: () => null,
+    projectWindowContextById: () => null,
     getActiveWorkProjection: () => null,
   });
   const state = surface.ensureBoardState("board");
@@ -31,8 +36,119 @@ function entry(id, body = id) {
   return { id, body, created_at: `2026-10-15T00:00:0${id}Z` };
 }
 
+test("Board destination batches settings while mount and popover read the latest cache", t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { document } = parseHTML('<div id="board"><div class="window-body"></div></div><div id="second"><div class="window-body"></div></div>');
+  const previousDocument = globalThis.document;
+  globalThis.document = document;
+  t.after(() => { globalThis.document = previousDocument; });
+  const frames = new Map();
+  const previousRequestFrame = globalThis.requestAnimationFrame;
+  const previousCancelFrame = globalThis.cancelAnimationFrame;
+  globalThis.requestAnimationFrame = callback => { frames.set(callback, callback); return callback; };
+  globalThis.cancelAnimationFrame = callback => frames.delete(callback);
+  t.after(() => {
+    globalThis.requestAnimationFrame = previousRequestFrame;
+    globalThis.cancelAnimationFrame = previousCancelFrame;
+  });
+  const flush = () => { for (const callback of [...frames.values()]) callback(); };
+  // Match the writable select.value browser contract (linkedom is getter-only).
+  const selectPrototype = Object.getPrototypeOf(document.createElement("select"));
+  const selectValue = Object.getOwnPropertyDescriptor(selectPrototype, "value");
+  Object.defineProperty(selectPrototype, "value", {
+    configurable: true,
+    get() { return this.__testValue ?? selectValue.get.call(this); },
+    set(value) { this.__testValue = String(value); },
+  });
+  t.after(() => Object.defineProperty(selectPrototype, "value", selectValue));
+  const sent = [];
+  const windows = [];
+  let destinationRenders = 0;
+  let projectRoot = "/project-a";
+  const surface = createBoardLogsSurface({
+    send: event => sent.push(event),
+    createNode: (tag, className, text) => {
+      if (className === "board-destination-text") destinationRenders++;
+      const node = document.createElement(tag);
+      node.className = className;
+      if (text != null) node.textContent = text;
+      return node;
+    },
+    windowMap: new Map([["board", document.getElementById("board")], ["second", document.getElementById("second")]]),
+    activeWorkspace: () => ({ windows }),
+    activeProjectTab: () => ({ project_root: projectRoot }),
+    getActiveWorkProjection: () => null,
+  });
+  for (const [root, channel] of [["/project-a", "#alpha"], ["/project-b", "#beta"]]) {
+    surface.applyProjectBoardConfigEventToBoard({ project_root: root, provider: "slack",
+      channel, resolved_provider: "slack", resolved_channel: channel });
+  }
+  const body = document.querySelector(".window-body");
+  for (const [root, channel] of [["/project-a", "#alpha"], ["/project-b", "#beta"]]) {
+    projectRoot = root;
+    surface.mountBoardWindow({ id: "board", preset: "board" }, body);
+    assert.equal(body.querySelector(".board-destination-text").textContent, `Slack ${channel}`);
+  }
+  flush();
+  assert.ok(!sent.some(event => event.kind === "get_project_board_config"));
+  projectRoot = "/project-a";
+  surface.mountBoardWindow({ id: "second", preset: "board" }, document.querySelector("#second .window-body"));
+  windows.push({ id: "board", preset: "board" }, { id: "second", preset: "board" });
+  const before = [...document.querySelectorAll(".board-destination-text")];
+  destinationRenders = 0;
+  for (let index = 0; index < 50; index++) {
+    surface.applyProjectBoardConfigEventToBoard({ project_root: projectRoot, provider: "slack",
+      channel: `#burst-${index}`, resolved_provider: "slack", resolved_channel: `#burst-${index}` });
+  }
+  assert.equal(destinationRenders, 0, "receipt must not render before the frame");
+  assert.deepEqual([...document.querySelectorAll(".board-destination-text")], before);
+  assert.equal(frames.size, 1, "all updates share one scheduled frame");
+  document.querySelector("[data-action='board-destination']").click();
+  assert.equal(document.querySelector(".board-destination-popover input").value, "#burst-49",
+    "the model is already current before its render frame");
+  t.mock.timers.tick(0);
+  document.querySelector(".board-destination-popover-close").click();
+  flush();
+  assert.equal(destinationRenders, 2, "each Board renders once from the latest configuration");
+  assert.equal(frames.size, 0);
+  for (const chip of document.querySelectorAll(".board-destination-text")) {
+    assert.equal(chip.textContent, "Slack #burst-49");
+  }
+  surface.applyProjectBoardConfigEventToBoard({ project_root: "", resolved_channel: "#invalid" });
+  assert.equal(frames.size, 0);
+});
+
+test("Issue #5531: resync reissues lost Board and Logs reads without clearing the composer", () => {
+  const { surface, state, sent } = fixture();
+  state.loading = true;
+  state.loadingOlder = true;
+  state.composerBody = "Unsent draft";
+  state.pendingSubmit = { body: "Submitted draft" };
+  const log = surface.ensureLogState("logs");
+  log.loading = true;
+  log.scope = "global";
+  log.query = "retained filter";
+  surface.ensureBoardState("other-project").loading = true;
+
+  surface.resyncBoardLogs(["board", "logs"]);
+
+  assert.deepEqual(sent, [
+    { kind: "load_board", id: "board", all: false },
+    { kind: "load_logs", id: "logs", scope: "global" },
+  ]);
+  assert.equal(state.loadingOlder, false);
+  assert.equal(state.resetToLatest, true, "a lost history page must not create a gap with the latest window");
+  assert.equal(state.composerBody, "Unsent draft");
+  assert.equal(state.pendingSubmit.body, "Submitted draft");
+  assert.equal(log.query, "retained filter");
+});
+
 test("Board incremental entries preserve history, update IDs, and ignore repeated mention notifications", () => {
-  const { surface, state, receive, notifications } = fixture();
+  const { surface, state, receive, notifications } = fixture(state => {
+    assert.ok(Object.isFrozen(state.entries), "notify only after the shared snapshot is committed");
+    assert.ok(Object.isFrozen(state.entries.at(-1).mentions));
+    assert.equal(state.entries.at(-1).content.body, "3");
+  });
   receive([entry("2")], true);
   surface.applyBoardLogsReceiveEvent({
     kind: "board_history_page", id: "board", entries: [entry("1")], has_more_before: true,
@@ -45,10 +161,31 @@ test("Board incremental entries preserve history, update IDs, and ignore repeate
   assert.deepEqual(state.entries.map(row => [row.id, row.body]), [
     ["1", "1"], ["2", "edited"], ["3", "3"],
   ]);
+  assert.deepEqual(state.entries.map(row => row.content), [
+    { type: "markdown", body: "1", body_html: "" },
+    { type: "markdown", body: "edited", body_html: "" },
+    { type: "markdown", body: "3", body_html: "" },
+  ], "both history and current entries commit their content type before rendering");
+  assert.ok(state.entries.every(row => Object.isFrozen(row.content)));
   assert.equal(state.oldestEntryId, "1");
   assert.equal(state.hasMoreBefore, true);
   assert.equal(state.forYouUnread, 1);
   assert.equal(notifications.length, 1);
+});
+
+test("Issue #5531: a lost post reply settles from the recovered Board without losing the draft", () => {
+  for (const delivered of [false, true]) {
+    const { surface, state, receive } = fixture();
+    state.composerBody = "Submitted draft";
+    state.submitting = true;
+    state.pendingSubmit = { body: state.composerBody, parentId: null, existingEntryIds: new Set() };
+    surface.resyncBoardLogs(["board"]);
+    receive(delivered ? [{ ...entry("posted", state.composerBody), author_kind: "user" }] : []);
+    assert.equal(state.submitting, false, "a dropped failure cannot lock Post forever");
+    assert.equal(state.pendingSubmit, null);
+    assert.equal(state.composerBody, delivered ? "" : "Submitted draft");
+    assert.equal(Boolean(state.error), !delivered, "an unconfirmed write must be explicit");
+  }
 });
 
 test("Board scope changes request a fresh projection through the existing all flag", () => {

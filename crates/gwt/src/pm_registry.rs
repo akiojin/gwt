@@ -20,6 +20,13 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+/// Bootstrap prompt: invokes the materialized gwt-pm guidance skill.
+///
+/// Issue #3965: the restore path rebuilds a launch config from structured
+/// `Session` fields, so it re-applies this shared value rather than recovering it
+/// out of the persisted `launch_args`.
+pub const PM_BOOTSTRAP_PROMPT: &str = "$gwt-pm";
+
 /// Issue #3632 FR-1/FR-2/FR-3 (user ruling 2026-08-17): how every prompt gwt
 /// injects into the resident PM must end.
 ///
@@ -37,19 +44,24 @@ use sha2::{Digest, Sha256};
 /// `pm-loop.json`'s `last_wake_at`, which is how a silent-but-alive loop stays
 /// distinguishable from a dead one without a keepalive line in the
 /// conversation (FR-4).
-/// Issue #3868 AC-3: a red, conflicted, or escalation-due open PR is never a
-/// no-change cycle. SPEC #3835 AC-7 adds the promotable Draft: leaving one
-/// unpromoted is exactly how PR #4507 sat Draft until a human rescued it.
+/// Issue #3431 RPT-F: PR recovery and supervision remain mandatory, while
+/// unchanged material state must not force another Report on every wake.
 /// Kept terse on purpose — this clause rides the PTY wake prompts, which must
 /// stay under the 1024-byte canonical queue (#3825).
 pub const PM_CYCLE_REPORTING_CLAUSE: &str =
-    "Report a digest only for a milestone or an escalation; end the cycle with no user-facing \
-     output only if nothing changed and no open PR is CI-RED, CONFLICTED, READY_TO_PROMOTE, or \
-     escalation_due.";
+    "Full supervision continues; submit material changes through `pm.report.post` `submission` \
+     (max 6 summary lines, full details); unchanged state stays silent, including open PRs and waits.";
 
 /// Physical wake decorations shared by producers and human-prompt classification.
 pub const PM_ESCALATION_PROMPT_PREFIX: &str = " UNRESOLVED BLOCKED ESCALATIONS (";
 pub const PM_AGENT_IDLE_WAKE_PREFIX: &str = "[gwt] Agent idle: ";
+
+/// Canonical periodic instruction shared by delivery and prompt classification.
+/// ASCII punctuation preserves the exact text through Windows terminal input.
+pub const PM_PERIODIC_WAKE_INSTRUCTION: &str =
+    "[gwt] Scheduled supervision tick: reconcile now: read a fresh \
+     `issue.monitor.status` snapshot and inventory open PRs with `pr.list` \
+     (stale / SUPERSEDED / owner-Issue-closed rows: digest escalations, never auto-close).";
 
 /// Issue #3776 / SPEC-3431 FR-148 and Issue #3825: compact execution budget
 /// and subscribe-ordering reminder for the Stop-gate continuation. The
@@ -434,7 +446,10 @@ pub fn pm_autonomous_bootstrap_allowed(worktree: &Path) -> bool {
 }
 
 pub fn pm_delivery_receipts_path_for_repo_path(repo_path: &Path) -> PathBuf {
-    gwt_core::paths::gwt_project_dir_for_repo_path(repo_path)
+    // A local-only PM worktree has a different path-fallback hash from its
+    // project, but its canonical store already identifies the receipt owner.
+    pm_worktree_store_dir(repo_path)
+        .unwrap_or_else(|| gwt_core::paths::gwt_project_dir_for_repo_path(repo_path))
         .join("project-state/pm-delivery-receipts.jsonl")
 }
 
@@ -444,7 +459,14 @@ pub enum PmDeliveryReceiptStatus {
     Prepared,
     Verified,
     Refused,
+    /// Legacy outcome: absence of acknowledgement was previously ambiguous.
     Ambiguous,
+    /// The bounded attempt ended without an exact target acknowledgement.
+    /// Same-operation readback may still upgrade this observation to Verified.
+    Unconfirmed,
+    /// The original target is unavailable for recovery. This does not prove
+    /// that the prompt never ran; a late exact acknowledgement still wins.
+    Lost,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -619,7 +641,17 @@ fn validated_pm_delivery_operation<'a>(
             {
                 true
             }
-            (PmDeliveryReceiptStatus::Ambiguous, PmDeliveryReceiptStatus::Verified) => true,
+            (
+                PmDeliveryReceiptStatus::Ambiguous
+                | PmDeliveryReceiptStatus::Unconfirmed
+                | PmDeliveryReceiptStatus::Lost,
+                PmDeliveryReceiptStatus::Verified,
+            ) => true,
+            (
+                PmDeliveryReceiptStatus::Ambiguous | PmDeliveryReceiptStatus::Unconfirmed,
+                PmDeliveryReceiptStatus::Lost,
+            ) => true,
+            (PmDeliveryReceiptStatus::Ambiguous, PmDeliveryReceiptStatus::Unconfirmed) => true,
             _ => false,
         };
         if !transition_is_valid {
@@ -729,10 +761,27 @@ pub fn finish_pm_delivery_receipt(
         {
             match (existing.status, status) {
                 (existing, requested) if existing == requested => return Ok(existing),
-                (PmDeliveryReceiptStatus::Verified, PmDeliveryReceiptStatus::Ambiguous) => {
-                    return Ok(PmDeliveryReceiptStatus::Verified)
-                }
-                (PmDeliveryReceiptStatus::Ambiguous, PmDeliveryReceiptStatus::Verified) => {}
+                (
+                    PmDeliveryReceiptStatus::Lost,
+                    PmDeliveryReceiptStatus::Ambiguous | PmDeliveryReceiptStatus::Unconfirmed,
+                ) => return Ok(PmDeliveryReceiptStatus::Lost),
+                (
+                    PmDeliveryReceiptStatus::Verified,
+                    PmDeliveryReceiptStatus::Ambiguous
+                    | PmDeliveryReceiptStatus::Unconfirmed
+                    | PmDeliveryReceiptStatus::Lost,
+                ) => return Ok(PmDeliveryReceiptStatus::Verified),
+                (
+                    PmDeliveryReceiptStatus::Ambiguous
+                    | PmDeliveryReceiptStatus::Unconfirmed
+                    | PmDeliveryReceiptStatus::Lost,
+                    PmDeliveryReceiptStatus::Verified,
+                ) => {}
+                (
+                    PmDeliveryReceiptStatus::Ambiguous | PmDeliveryReceiptStatus::Unconfirmed,
+                    PmDeliveryReceiptStatus::Lost,
+                ) => {}
+                (PmDeliveryReceiptStatus::Ambiguous, PmDeliveryReceiptStatus::Unconfirmed) => {}
                 _ => {
                     return Err(io::Error::new(
                         io::ErrorKind::AlreadyExists,
@@ -4504,6 +4553,16 @@ pub fn is_pm_worktree(path: &Path) -> bool {
 /// and the plain shape test rejects a genuine PM worktree. Comparing both
 /// spellings keeps the answer about the path, not about how it was spelled.
 pub fn is_canonical_pm_worktree(path: &Path) -> bool {
+    let Some(pm_dir) = path.parent() else {
+        return false;
+    };
+    // Ordinary Work rows cannot be PM worktrees. Exclude them before resolving
+    // the shared home (and validating its isolation in tests) for every row.
+    if path.file_name() != Some(std::ffi::OsStr::new("worktree"))
+        || pm_dir.file_name() != Some(std::ffi::OsStr::new("pm"))
+    {
+        return false;
+    }
     if is_pm_worktree(path) {
         return true;
     }
@@ -4512,14 +4571,6 @@ pub fn is_canonical_pm_worktree(path: &Path) -> bool {
     else {
         return false;
     };
-    let Some(pm_dir) = path.parent() else {
-        return false;
-    };
-    if path.file_name() != Some(std::ffi::OsStr::new("worktree"))
-        || pm_dir.file_name() != Some(std::ffi::OsStr::new("pm"))
-    {
-        return false;
-    }
     pm_dir
         .parent()
         .and_then(Path::parent)
@@ -5268,6 +5319,19 @@ mod tests {
         }
         assert!(PM_STEERING_CLAUSE.contains("before you judge the cycle unchanged"));
         assert!(PM_STEERING_WAKE_CLAUSE.contains("before judging no change"));
+    }
+
+    #[test]
+    fn cycle_reporting_clause_keeps_supervision_without_duplicate_reports() {
+        assert!(PM_CYCLE_REPORTING_CLAUSE.contains("Full supervision continues"));
+        assert!(PM_CYCLE_REPORTING_CLAUSE.contains("material changes"));
+        assert!(PM_CYCLE_REPORTING_CLAUSE.contains("`submission`"));
+        assert!(PM_CYCLE_REPORTING_CLAUSE.contains("unchanged state stays silent"));
+        assert!(!PM_CYCLE_REPORTING_CLAUSE.contains("no open PR"));
+        assert!(
+            PM_CYCLE_REPORTING_CLAUSE.len() <= 220,
+            "preserve the wake byte budget"
+        );
     }
 
     /// Issue #3825 AC-1 / AC-4: the terse wake clause and the full Stop-gate
@@ -8344,6 +8408,60 @@ mod tests {
         assert!(!fs::read_to_string(path)
             .expect("receipt file")
             .contains(body));
+    }
+
+    #[test]
+    fn delivery_receipt_target_loss_still_accepts_a_late_exact_ack() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("receipts.jsonl");
+        let prepared = PmDeliveryReceipt {
+            operation_id: "72fc3cd4-ad49-43e3-bf3d-d79135763897".into(),
+            recorded_at: "2026-10-22T00:00:00Z".into(),
+            status: PmDeliveryReceiptStatus::Prepared,
+            principal_session_id: "pm".into(),
+            target_window_id: "tab::agent".into(),
+            target_session_id: "agent".into(),
+            body_sha256: pm_delivery_prompt_sha256("one prompt"),
+            reason: None,
+        };
+        prepare_pm_delivery_receipt(&path, &prepared).unwrap();
+        let settle = |status, reason| {
+            finish_pm_delivery_receipt(
+                &path,
+                &prepared.operation_id,
+                &prepared.target_session_id,
+                &prepared.body_sha256,
+                status,
+                reason,
+            )
+            .unwrap()
+        };
+        settle(
+            PmDeliveryReceiptStatus::Ambiguous,
+            Some("submit_unconfirmed"),
+        );
+        settle(
+            PmDeliveryReceiptStatus::Unconfirmed,
+            Some("submit_unconfirmed"),
+        );
+        // Target loss proves recovery unavailable, not that the turn never ran.
+        let lost: PmDeliveryReceiptStatus = serde_json::from_str("\"lost\"").unwrap();
+        assert_eq!(settle(lost, Some("target_unavailable")), lost);
+        assert_eq!(
+            settle(PmDeliveryReceiptStatus::Verified, None),
+            PmDeliveryReceiptStatus::Verified
+        );
+        assert_eq!(
+            settle(lost, Some("target_unavailable")),
+            PmDeliveryReceiptStatus::Verified
+        );
+        assert_eq!(
+            pm_delivery_receipt_for_operation(&path, &prepared.operation_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            PmDeliveryReceiptStatus::Verified
+        );
     }
 
     #[test]

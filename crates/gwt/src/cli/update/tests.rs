@@ -390,6 +390,7 @@ fn run_with_covers_ci_and_non_available_states() {
     failed.state = UpdateState::Failed {
         message: "network down".to_string(),
         failed_at: chrono::Utc::now(),
+        retry_at: None,
     };
     assert!(matches!(
         run_with(&mut failed, UpdateRunMode::Apply),

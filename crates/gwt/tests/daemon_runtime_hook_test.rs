@@ -65,7 +65,7 @@ struct CaptureState {
 struct CaptureServer {
     // SPEC #4740: every test that starts a capture server asserts delivery.
     // Hook-live is fail-open, so an attempt that outlives its production
-    // 100 ms budget on a loaded host drops the event silently. Pinning the
+    // bounded budget on a loaded host drops the event silently. Pinning the
     // hang guard makes the verdict independent of how slow the host is.
     _attempt_budget: ScopedDeadlineBudget,
     runtime: Runtime,
@@ -140,6 +140,7 @@ async fn capture_hook_live(
 
 fn sample_issue_snapshot(number: u64, title: &str, labels: Vec<&str>) -> IssueSnapshot {
     IssueSnapshot {
+        author_login: None,
         number: IssueNumber(number),
         title: title.to_string(),
         body: String::new(),

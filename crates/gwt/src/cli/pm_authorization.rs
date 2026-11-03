@@ -38,7 +38,9 @@ struct DiscussionInput {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BindingInput {
+    #[serde(default)]
     github_discussion: u64,
+    category: Option<String>,
     provider: Option<String>,
 }
 #[derive(Deserialize)]
@@ -54,6 +56,12 @@ struct ChecksInput {
 #[serde(deny_unknown_fields)]
 struct UpdateInput {
     auto_apply_updates: bool,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AutoMergeInput {
+    number: u64,
+    reviewed_head_sha: String,
 }
 
 fn decode<T: serde::de::DeserializeOwned>(params: &Value) -> io::Result<T> {
@@ -88,7 +96,9 @@ fn validate(intent: &OperationIntent) -> io::Result<()> {
         }
         "board.config.set" => {
             let p: BindingInput = decode(&intent.params)?;
-            if p.github_discussion == 0
+            if p.category
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty())
                 || p.provider.as_deref().is_some_and(|value| value != "local")
             {
                 return Err(invalid());
@@ -109,6 +119,18 @@ fn validate(intent: &OperationIntent) -> io::Result<()> {
         }
         "update.settings.set" => {
             let _: UpdateInput = decode(&intent.params)?;
+        }
+        "pr.auto_merge.enable" => {
+            let p: AutoMergeInput = decode(&intent.params)?;
+            if p.number == 0
+                || p.reviewed_head_sha.len() != 40
+                || !p
+                    .reviewed_head_sha
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit())
+            {
+                return Err(invalid());
+            }
         }
         "pr.reopen" | "pr.review.submit" | "release.metadata.set" | "repository.settings.set" => {
             gwt_github::client::http::validate_pm_settings(&intent.operation, &intent.params)
@@ -262,9 +284,15 @@ fn request_with(
         "update.settings.set" => "This preference affects automatic updates for the entire app.",
         "board.config.set" | "discussion.create" => "Board synchronization can publish this project's Board entries to its repository Discussion.",
         "repository.required_checks.update" => "This changes required check contexts on the selected develop/main branch.",
+        "pr.auto_merge.enable" => "Enables GitHub auto-merge for this reviewed external fork head. It can merge immediately when GitHub's gates pass. Remembered approval remains fixed to this PR and reviewed SHA.",
         _ => "The existing operation's ownership and safety checks still apply.",
     };
-    let prompt=format!("Repository: {}\nOperation: {}\nParameters: {}\nWhy: {reason}\nUndo: {rollback}\n\n{effect}\n\nAfter approval, you can optionally allow future parameters for this same operation in this repository. Revoke with pm.approval.revoke.",repo.display(),intent.operation,intent.params);
+    let approval_scope = if intent.operation == "pr.auto_merge.enable" {
+        "Permission applies only to this PR number and reviewed head SHA, including remembered approval. A changed head requires another review and authorization."
+    } else {
+        "After approval, you can optionally allow future parameters for this same operation in this repository."
+    };
+    let prompt=format!("Repository: {}\nOperation: {}\nParameters: {}\nWhy: {reason}\nUndo: {rollback}\n\n{effect}\n\n{approval_scope} Revoke with pm.approval.revoke.",repo.display(),intent.operation,intent.params);
     let standing = confirm(&prompt).map_err(io::Error::other)?.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -380,6 +408,7 @@ fn bind_board(
     owner: String,
     name: String,
     number: u64,
+    category: Option<String>,
     switch_to_local: bool,
 ) -> io::Result<Value> {
     let work_dir = gwt_core::paths::gwt_repo_local_work_dir(repo);
@@ -397,6 +426,7 @@ fn bind_board(
         owner,
         repo: name,
         number,
+        category: category.unwrap_or_else(|| "General".into()),
     });
     let path = work_dir.join(gwt_config::board_config::PROJECT_BOARD_FILE);
     gwt_github::cache::write_atomic(
@@ -467,6 +497,55 @@ fn validate_checks_response(desired: &Value, after: &Value) -> io::Result<()> {
     Ok(())
 }
 
+fn reviewed_external_pr<E: CliEnv>(env: &mut E, p: &AutoMergeInput) -> io::Result<Value> {
+    let snapshot = env.fetch_auto_merge_pr(p.number)?;
+    let pr = &snapshot.inventory;
+    let refuse = |reason| {
+        io::Error::new(io::ErrorKind::PermissionDenied, format!(
+        "external fork auto-merge refused: {reason}; review the current PR before retrying. If this scoped route is unavailable, human merge required: repository automation may exclude external forks"
+    ))
+    };
+    if pr.number != p.number
+        || snapshot.state != gwt_git::pr_status::PrState::Open
+        || pr.is_draft
+        || pr.is_cross_repository != Some(true)
+    {
+        return Err(refuse("a current OPEN, Ready external fork PR is required"));
+    }
+    if snapshot.head_sha != p.reviewed_head_sha
+        || pr.head_sha.as_deref() != Some(p.reviewed_head_sha.as_str())
+    {
+        return Err(refuse(
+            "the PR head differs from the authorized reviewed SHA",
+        ));
+    }
+    let merge_ready = pr.mergeable.eq_ignore_ascii_case("MERGEABLE")
+        && (pr.merge_state_status.eq_ignore_ascii_case("CLEAN")
+            || (pr.merge_state_status.eq_ignore_ascii_case("BEHIND")
+                && pr.required_status_checks_strict == Some(false)));
+    if !merge_ready
+        || !pr.ci_status.eq_ignore_ascii_case("SUCCESS")
+        || !pr.check_counts.is_some_and(|counts| {
+            counts.success > 0 && counts.failure == 0 && counts.in_progress == 0
+        })
+    {
+        return Err(refuse(
+            "current mergeability and passing CI must be measured",
+        ));
+    }
+    if !pr.review_status.eq_ignore_ascii_case("APPROVED") || pr.unresolved_review_threads != Some(0)
+    {
+        return Err(refuse(
+            "current approval and zero unresolved review threads must be measured",
+        ));
+    }
+    Ok(
+        json!({"number":p.number,"reviewed_head_sha":snapshot.head_sha,"is_cross_repository":true,
+        "state":"OPEN","ci_status":pr.ci_status,"review_status":pr.review_status,
+        "auto_merge_enabled":pr.auto_merge_enabled}),
+    )
+}
+
 fn execute<E: CliEnv>(
     env: &mut E,
     repo: &Path,
@@ -481,7 +560,7 @@ fn execute<E: CliEnv>(
     } else {
         Some(env.github_repository()?)
     };
-    let before = match intent.operation.as_str() {
+    let mut before = match intent.operation.as_str() {
         "update.settings.set" => {
             serde_json::to_value(crate::update_settings::status(repo)?).map_err(io::Error::other)?
         }
@@ -489,6 +568,7 @@ fn execute<E: CliEnv>(
             let p: ChecksInput = decode(&intent.params)?;
             checks_projection(&env.required_status_checks(&p.branch)?)?
         }
+        "pr.auto_merge.enable" => reviewed_external_pr(env, &decode(&intent.params)?)?,
         "pr.reopen" | "pr.review.submit" | "release.metadata.set" | "repository.settings.set" => {
             env.pm_settings_snapshot(&intent.operation, &intent.params)?
         }
@@ -509,6 +589,10 @@ fn execute<E: CliEnv>(
         }
         _ => unreachable!(),
     };
+    if intent.operation == "pr.auto_merge.enable" {
+        let (owner, name) = coordinates.as_ref().expect("repo preflight");
+        before["repository"] = format!("{owner}/{name}").into();
+    }
     let attempt = authority::authorize(
         repo,
         intent,
@@ -525,7 +609,14 @@ fn execute<E: CliEnv>(
         "board.config.set" => {
             let p: BindingInput = decode(&intent.params)?;
             let (owner, name) = coordinates.clone().expect("repo preflight");
-            bind_board(repo, owner, name, p.github_discussion, p.provider.is_some())
+            bind_board(
+                repo,
+                owner,
+                name,
+                p.github_discussion,
+                p.category,
+                p.provider.is_some(),
+            )
         }
         "discussion.create" => {
             let p: DiscussionInput = decode(&intent.params)?;
@@ -539,6 +630,7 @@ fn execute<E: CliEnv>(
                     owner,
                     name,
                     discussion.number,
+                    Some(p.category),
                     p.board_provider.is_some(),
                 ) {
                     Ok(binding) => json!({"status":"bound","binding":binding}),
@@ -572,6 +664,10 @@ fn execute<E: CliEnv>(
                 env.update_required_status_checks(&p.branch, &json!({"checks":desired["checks"]}))?;
             validate_checks_response(&desired, &after)?;
             Ok(after)
+        }
+        "pr.auto_merge.enable" => {
+            let p: AutoMergeInput = decode(&intent.params)?;
+            env.enable_pr_auto_merge(p.number, &p.reviewed_head_sha)
         }
         "pr.reopen" | "pr.review.submit" | "release.metadata.set" | "repository.settings.set" => {
             env.pm_settings_mutate(&intent.operation, &intent.params, &before)
@@ -618,6 +714,133 @@ mod tests {
         )
         .unwrap();
         ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-settings-test")
+    }
+
+    #[test]
+    fn auto_merge_enable_accepts_only_an_explicit_pr_and_reviewed_sha() {
+        let params = json!({"number":17,"reviewed_head_sha":"a".repeat(40)});
+        assert!(super::parse("pr.auto_merge.enable", &params).is_ok());
+        for invalid in [
+            json!({"number":0,"reviewed_head_sha":"a".repeat(40)}),
+            json!({"number":17,"reviewed_head_sha":""}),
+            json!({"number":17,"reviewed_head_sha":"HEAD"}),
+            json!({"number":17,"reviewed_head_sha":"z".repeat(40)}),
+            json!({"number":17,"reviewed_head_sha":"a".repeat(40),"admin":true}),
+            json!({"number":17,"reviewed_head_sha":"a".repeat(40),"repo":"other/repo"}),
+        ] {
+            assert!(
+                super::parse("pr.auto_merge.enable", &invalid).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn external_auto_merge_requires_fresh_gates_and_audits_exact_permission() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let _session = registered_pm(&repo);
+        let sha = "a".repeat(40);
+        let intent = OperationIntent {
+            operation: "pr.auto_merge.enable".into(),
+            params: json!({"number":17,"reviewed_head_sha":sha}),
+        };
+        let mut inventory = gwt_git::pr_status::parse_pr_inventory_json(
+            &json!([{
+                "number":17,"state":"OPEN","isDraft":false,"isCrossRepository":true,
+                "headRefName":"contribution","headRefOid":sha,"mergeable":"MERGEABLE",
+                "mergeStateStatus":"CLEAN","reviewDecision":"APPROVED",
+                "statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],
+            }])
+            .to_string(),
+            chrono::Utc::now(),
+        )
+        .unwrap()
+        .remove(0);
+        inventory.unresolved_review_threads = Some(0);
+        let snapshot = gwt_git::pr_status::PrCompletionSnapshot {
+            state: gwt_git::pr_status::PrState::Open,
+            head_sha: sha.clone(),
+            inventory,
+        };
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        env.completion_prs.insert(17, snapshot.clone());
+        let envelope = |params| {
+            json!({"schema_version":1,"operation":intent.operation,"params":params}).to_string()
+        };
+        env.stdin = envelope(intent.params.clone());
+        assert_ne!(
+            crate::cli::json_envelope::dispatch(&mut env, "gwtd"),
+            0,
+            "no authority"
+        );
+        assert!(env.pr_auto_merge_call_log.is_empty());
+        let approval = pm_authorization::record_approval(
+            &repo,
+            &intent,
+            "Reviewed external PR",
+            "Disable auto-merge before merge",
+            false,
+        )
+        .unwrap();
+        let mut params = intent.params.clone();
+        params["approval_id"] = approval.id.clone().into();
+        for blocker in [
+            "head_changed",
+            "draft",
+            "same_repository",
+            "ci_unknown",
+            "checks_unknown",
+            "review_unknown",
+            "review_threads_unknown",
+        ] {
+            let mut invalid = snapshot.clone();
+            match blocker {
+                "head_changed" => invalid.head_sha = "b".repeat(40),
+                "draft" => invalid.inventory.is_draft = true,
+                "same_repository" => invalid.inventory.is_cross_repository = Some(false),
+                "ci_unknown" => invalid.inventory.ci_status = "UNKNOWN".into(),
+                "checks_unknown" => invalid.inventory.check_counts = None,
+                "review_unknown" => invalid.inventory.review_status = "UNKNOWN".into(),
+                "review_threads_unknown" => invalid.inventory.unresolved_review_threads = None,
+                _ => unreachable!(),
+            }
+            env.completion_prs.insert(17, invalid);
+            env.stdin = envelope(params.clone());
+            assert_ne!(
+                crate::cli::json_envelope::dispatch(&mut env, "gwtd"),
+                0,
+                "{blocker}"
+            );
+            assert!(env.pr_auto_merge_call_log.is_empty(), "{blocker}");
+        }
+        assert!(!pm_authorization::approvals(&repo).unwrap()[0].consumed);
+        env.completion_prs.insert(17, snapshot);
+        env.stdin = envelope(params);
+        env.stdout.clear();
+        env.stderr.clear();
+        assert_eq!(
+            crate::cli::json_envelope::dispatch(&mut env, "gwtd"),
+            0,
+            "{}",
+            String::from_utf8_lossy(&env.stderr)
+        );
+        assert_eq!(env.pr_auto_merge_call_log, vec![(17, sha.clone())]);
+        let audit = std::fs::read_to_string(pm_authorization::audit_path(&repo)).unwrap();
+        assert!(
+            audit.contains(&sha) && audit.contains(&approval.id) && audit.contains("succeeded")
+        );
+        let reply: Value = serde_json::from_slice(&env.stdout).unwrap();
+        let output: Value = serde_json::from_str(reply["output"].as_str().unwrap()).unwrap();
+        assert_eq!(output["before"]["number"], 17);
+        assert_eq!(output["before"]["repository"], "owner/repo");
+        assert_eq!(output["after"]["reviewed_head_sha"], sha);
+        assert_eq!(output["after"]["auto_merge_enabled"], true);
     }
 
     #[test]
@@ -797,6 +1020,46 @@ mod tests {
         assert_eq!(config.channel.as_deref(), Some("existing"));
         assert_eq!(config.github_discussion.unwrap().number, 17);
         assert_eq!(env.discussion_create_call_log.len(), 1);
+    }
+
+    #[test]
+    fn board_topics_can_be_enabled_with_category_without_creating_a_discussion() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let _session = registered_pm(&repo);
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let intent = OperationIntent {
+            operation: "board.config.set".into(),
+            params: json!({"category":"Announcements"}),
+        };
+        let approval = pm_authorization::record_approval(
+            &repo,
+            &intent,
+            "Enable Board topics",
+            "Remove opt-in",
+            false,
+        )
+        .unwrap();
+        let mut params = intent.params.clone();
+        params["approval_id"] = approval.id.into();
+        env.stdin = json!({"operation":intent.operation,"params":params}).to_string();
+        assert_eq!(
+            crate::cli::json_envelope::dispatch(&mut env, "gwtd"),
+            0,
+            "{}",
+            String::from_utf8_lossy(&env.stderr)
+        );
+        let config = gwt_config::ProjectBoardConfig::load_from_work_dir(
+            &gwt_core::paths::gwt_repo_local_work_dir(&repo),
+        );
+        let serialized = serde_json::to_value(config.github_discussion.unwrap()).unwrap();
+        assert_eq!(serialized["category"], "Announcements");
+        assert!(env.discussion_create_call_log.is_empty());
     }
 
     #[test]

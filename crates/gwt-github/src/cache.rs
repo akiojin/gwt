@@ -64,6 +64,8 @@ pub enum CacheError {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CacheMeta {
     pub number: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_login: Option<String>,
     pub title: String,
     pub labels: Vec<String>,
     pub state: String,
@@ -77,6 +79,7 @@ impl CacheMeta {
     fn from_snapshot(snapshot: &IssueSnapshot, generation: String) -> Self {
         CacheMeta {
             number: snapshot.number.0,
+            author_login: snapshot.author_login.clone(),
             title: snapshot.title.clone(),
             labels: snapshot.labels.clone(),
             state: match snapshot.state {
@@ -708,6 +711,7 @@ impl Cache {
 
         let snapshot = IssueSnapshot {
             number: IssueNumber(meta.number),
+            author_login: meta.author_login.clone(),
             title: meta.title.clone(),
             body,
             labels: meta.labels.clone(),
@@ -964,6 +968,7 @@ fn take_payload_reads() -> PayloadReads {
 
 fn persisted_snapshots_match(left: &IssueSnapshot, right: &IssueSnapshot) -> bool {
     left.number == right.number
+        && left.author_login == right.author_login
         && left.title == right.title
         && left.body == right.body
         && left.labels == right.labels
@@ -1104,6 +1109,7 @@ mod summary_tests {
         fs::write(
             directory.join("meta.json"),
             serde_json::to_vec(&CacheMeta {
+                author_login: None,
                 number,
                 title: format!("Issue {number}"),
                 labels: vec!["phase/ready".to_owned()],

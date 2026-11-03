@@ -54,6 +54,7 @@ fn sample_pr_status() -> PrStatus {
 
 fn sample_issue_snapshot(number: u64, labels: &[&str]) -> gwt_github::client::IssueSnapshot {
     gwt_github::client::IssueSnapshot {
+        author_login: None,
         number: IssueNumber(number),
         title: format!("Issue {number}"),
         body: "Body".to_string(),
@@ -81,6 +82,15 @@ format!(
 fn main() -> ExitCode {
 let args: Vec<String> = env::args().skip(1).collect();
 match args.as_slice() {
+    [pr, view, _number, json_flag, fields, ..]
+        if pr == "pr" && view == "view" && json_flag == "--json" && fields.contains("headRefOid") =>
+    {
+        if let Ok(path) = env::var("GWT_FAKE_GH_ARGV_FILE") {
+            std::fs::write(path, args.join("\n")).unwrap();
+        }
+        println!("{}", r#"{"number":12,"title":"Completion PR","state":"OPEN","url":"https://github.com/akiojin/gwt/pull/12","isDraft":true,"headRefName":"feature/coverage","headRefOid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","baseRefName":"develop","isCrossRepository":false,"body":"Agent Visual Check: n/a (no UI surface)","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[],"reviewDecision":"APPROVED"}"#);
+        ExitCode::SUCCESS
+    }
     [pr, view, json_flag, ..] if pr == "pr" && view == "view" && json_flag == "--json" => {
         let mut pr = pr_json("12", "Current PR");
         pr.pop();
@@ -1058,13 +1068,13 @@ fn test_env_records_io_and_pr_side_effects() {
     );
     assert_eq!(env.fetch_pr_review_threads(7).expect("threads").len(), 3);
     assert_eq!(
-        env.reply_and_resolve_pr_review_threads(7, "done")
+        env.reply_and_resolve_pr_review_threads(7, "done", None)
             .expect("reply"),
         2
     );
     assert_eq!(
         env.pr_reply_and_resolve_call_log,
-        vec![(7, "done".to_string())]
+        vec![(7, "done".to_string(), None)]
     );
 
     env.seed_pr_checks(
@@ -1226,11 +1236,31 @@ fn dispatch_json_envelope_hook_health_returns_managed_health_json() {
 }
 
 #[test]
+fn hook_doctor_managed_browser_fails_closed_without_current_source() {
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempfile::tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join(".gwt"));
+    let _session = crate::cli::test_support::ScopedEnvVar::unset("GWT_SESSION_ID");
+    let mut env = TestEnv::new(temp.path().to_path_buf());
+    env.stdin = serde_json::json!({"schema_version":1, "operation":"hook.doctor", "params":{"purpose":"managed_browser"}}).to_string();
+    assert_eq!(dispatch(&mut env, &["gwtd".to_string()]), 0);
+    let envelope: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
+    let doctor: serde_json::Value =
+        serde_json::from_str(envelope["output"].as_str().unwrap()).unwrap();
+    assert_eq!(doctor["preflight"]["result"], "unknown");
+    assert_eq!(doctor["preflight"]["context"], "missing");
+    assert!(doctor["health"].is_object());
+}
+
+#[test]
 fn hook_doctor_reports_codex_trust_command_mismatch_without_registering_it() {
     let _env_lock = crate::env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::tempdir().expect("tempdir");
+    let _runtime = crate::cli::test_support::ScopedEnvVar::unset("GWT_SESSION_RUNTIME_PATH");
     let codex_home = temp.path().join("codex-home");
     let _codex_home =
         crate::cli::test_support::ScopedEnvVar::set("CODEX_HOME", codex_home.as_os_str());
@@ -1247,6 +1277,7 @@ fn hook_doctor_reports_codex_trust_command_mismatch_without_registering_it() {
     hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"] =
         serde_json::json!("gwtd hook event SessionStart");
     fs::write(&hooks_path, serde_json::to_string(&hooks).unwrap()).unwrap();
+    let hooks_before = fs::read(&hooks_path).unwrap();
     let mut env = TestEnv::new(temp.path().to_path_buf());
     env.stdin = serde_json::json!({
         "schema_version": 1,
@@ -1258,6 +1289,21 @@ fn hook_doctor_reports_codex_trust_command_mismatch_without_registering_it() {
     let envelope: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
     let doctor: serde_json::Value =
         serde_json::from_str(envelope["output"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        doctor["repair_plan"],
+        serde_json::json!({
+            "automatic": ["materialize_managed_git_hooks", "regenerate_managed_provider_configs"],
+            "user_actions": ["verify_codex_hook_trust"],
+            "new_session_actions": ["start_new_agent_session"]
+        })
+    );
+    let audit = &doctor["codex_hook_audit"];
+    assert_eq!(audit["discovery_mode"], "both");
+    assert_eq!(
+        audit["expected_hook_paths"],
+        serde_json::json!([hooks_path])
+    );
+    assert_eq!(audit["trust"]["wrote_trust_state"], false);
     assert_eq!(
         doctor["managed_hook_bin"].as_str(),
         Some(stable_hook_bin.to_str().unwrap()),
@@ -1291,6 +1337,11 @@ fn hook_doctor_reports_codex_trust_command_mismatch_without_registering_it() {
     );
     assert!(issues.contains("command mismatch") && issues.contains("expected_command="));
     assert!(issues.contains("actual_command=`gwtd hook event SessionStart`"));
+    assert_eq!(
+        audit["trust"]["modified_gwt_hooks"],
+        serde_json::json!([session_start_key])
+    );
+    assert_eq!(fs::read(&hooks_path).unwrap(), hooks_before);
     assert!(!codex_home.join("config.toml").exists());
 }
 
@@ -1299,7 +1350,9 @@ fn hook_doctor_keeps_unmaterialized_worktree_inactive_with_shared_hooks() {
     let _env_lock = crate::env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _hook_bin = gwt_skills::settings_local::ScopedHookBin::set("gwtd");
     let temp = tempfile::tempdir().unwrap();
+    let _runtime = crate::cli::test_support::ScopedEnvVar::unset("GWT_SESSION_RUNTIME_PATH");
     let repo = temp.path().join("project");
     let gitdir = repo.join("project.git/worktrees/linked");
     let worktree = repo.join("work/linked");
@@ -1320,17 +1373,110 @@ fn hook_doctor_keeps_unmaterialized_worktree_inactive_with_shared_hooks() {
     .unwrap();
     assert!(repo.join(".codex/hooks.json").exists());
     assert!(!worktree.join(".codex").exists());
-    let mut env = TestEnv::new(worktree);
-    env.stdin = serde_json::json!({
+    let mut env = TestEnv::new(worktree.clone());
+    let doctor_request = serde_json::json!({
         "schema_version": 1, "operation": "hook.doctor", "params": {}
     })
     .to_string();
+    env.stdin = doctor_request.clone();
     assert_eq!(dispatch(&mut env, &["gwtd".to_string()]), 0);
     let envelope: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
     let doctor: serde_json::Value =
         serde_json::from_str(envelope["output"].as_str().unwrap()).unwrap();
     assert_eq!(doctor["health"]["status"].as_str(), Some("inactive"));
+    assert!(doctor["codex_hook_audit"].is_null());
+    assert_eq!(
+        doctor["repair_plan"],
+        serde_json::json!({
+            "automatic": ["materialize_managed_git_hooks"],
+            "user_actions": [],
+            "new_session_actions": []
+        })
+    );
     assert!(!codex_home.join("config.toml").exists());
+
+    // A materialized local surface must audit both discovery paths even when
+    // no runtime sidecar exists and the shared hooks file has disappeared.
+    gwt_skills::generate_codex_hooks_for_mode(
+        &worktree,
+        gwt_skills::CodexHookDiscoveryMode::WorktreeLocal,
+    )
+    .unwrap();
+    fs::remove_dir_all(repo.join(".codex")).unwrap();
+    let hooks_path = worktree.join(".codex/hooks.json");
+    let hooks_before = fs::read(&hooks_path).unwrap();
+    env.stdout.clear();
+    env.stdin = doctor_request.clone();
+    assert_eq!(dispatch(&mut env, &["gwtd".to_string()]), 0);
+    let envelope: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
+    let doctor: serde_json::Value =
+        serde_json::from_str(envelope["output"].as_str().unwrap()).unwrap();
+    let audit = &doctor["codex_hook_audit"];
+    assert_eq!(audit["discovery_mode"], "both");
+    assert_eq!(
+        audit["expected_hook_paths"],
+        serde_json::json!([
+            worktree.join(".codex/hooks.json"),
+            repo.join(".codex/hooks.json")
+        ])
+    );
+    assert_eq!(
+        audit["trust"]["missing_managed_events"]
+            .as_array()
+            .unwrap()
+            .len(),
+        5
+    );
+    assert!(audit["trust"]["missing_managed_events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|entry| entry
+            .as_str()
+            .unwrap()
+            .starts_with(repo.join(".codex/hooks.json").to_str().unwrap())));
+    assert_eq!(fs::read(hooks_path).unwrap(), hooks_before);
+    assert!(!codex_home.join("config.toml").exists());
+
+    gwt_skills::generate_codex_hooks_for_mode(&worktree, gwt_skills::CodexHookDiscoveryMode::Both)
+        .unwrap();
+    let config = codex_home.join("config.toml");
+    gwt_skills::register_codex_managed_hook_trust_for_mode(
+        &worktree,
+        &config,
+        gwt_skills::CodexHookDiscoveryMode::Both,
+    )
+    .unwrap();
+    let config_before = fs::read(&config).unwrap();
+    let hooks_path = worktree.join(".codex/hooks.json");
+    let mut hooks: serde_json::Value =
+        serde_json::from_slice(&fs::read(&hooks_path).unwrap()).unwrap();
+    hooks["hooks"].as_object_mut().unwrap().remove("PreToolUse");
+    hooks["hooks"]["Stop"].as_array_mut().unwrap().push(
+        serde_json::json!({"matcher":"*","hooks":[{"type":"command","command":"echo user hook"}]}),
+    );
+    fs::write(&hooks_path, serde_json::to_vec(&hooks).unwrap()).unwrap();
+    let hooks_before = fs::read(&hooks_path).unwrap();
+    env.stdout.clear();
+    env.stdin = doctor_request.clone();
+    assert_eq!(dispatch(&mut env, &["gwtd".to_string()]), 0);
+    let envelope: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
+    let doctor: serde_json::Value =
+        serde_json::from_str(envelope["output"].as_str().unwrap()).unwrap();
+    let trust = &doctor["codex_hook_audit"]["trust"];
+    assert_eq!(
+        trust["missing_managed_events"],
+        serde_json::json!([format!(
+            "{}:PreToolUse",
+            gwt_skills::codex_hook_trust_key_path(&hooks_path)
+                .unwrap()
+                .display()
+        )])
+    );
+    assert_eq!(trust["trusted_entries"].as_array().unwrap().len(), 9);
+    assert_eq!(trust["modified_gwt_hooks"], serde_json::json!([]));
+    assert_eq!(fs::read(hooks_path).unwrap(), hooks_before);
+    assert_eq!(fs::read(config).unwrap(), config_before);
 }
 
 #[test]
@@ -1376,6 +1522,14 @@ fn dispatch_json_envelope_hook_doctor_can_repair_missing_managed_configs() {
         serde_json::from_str(stdout["output"].as_str().expect("output string"))
             .expect("parse hook doctor output");
     assert_eq!(doctor["repair"]["repaired"].as_bool(), Some(true));
+    assert_eq!(
+        doctor["repair_plan"],
+        serde_json::json!({
+            "automatic": ["materialize_managed_git_hooks", "regenerate_managed_provider_configs"],
+            "user_actions": ["verify_codex_hook_trust"],
+            "new_session_actions": ["start_new_agent_session"]
+        })
+    );
     assert_eq!(
         doctor["repair_writer"]["pid"].as_u64(),
         Some(u64::from(std::process::id()))
@@ -1603,7 +1757,33 @@ fn dispatch_json_envelope_issue_create_uses_body_param() {
 
 #[test]
 fn dispatch_json_envelope_pr_create_uses_body_param() {
+    let _lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _session = crate::cli::test_support::ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
     let temp = tempfile::tempdir().expect("tempdir");
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "chore: fixture",
+        ],
+        vec!["update-ref", "refs/remotes/origin/develop", "HEAD"],
+    ] {
+        assert!(gwt_core::process::hidden_command("git")
+            .args(args)
+            .current_dir(temp.path())
+            .status()
+            .unwrap()
+            .success());
+    }
     let mut env = TestEnv::new(temp.path().to_path_buf());
     env.seed_created_pr(sample_pr_status());
     env.stdin = r#"{
@@ -1615,7 +1795,7 @@ fn dispatch_json_envelope_pr_create_uses_body_param() {
             "title": "Wire JSON envelope",
             "body": "PR body supplied directly through params.body",
             "labels": ["agent"],
-            "draft": true
+            "draft": false
         }
     }"#
     .to_string();
@@ -1635,7 +1815,7 @@ fn dispatch_json_envelope_pr_create_uses_body_param() {
     assert_eq!(call.title, "Wire JSON envelope");
     assert_eq!(call.body, "PR body supplied directly through params.body");
     assert_eq!(call.labels, vec!["agent"]);
-    assert!(call.draft);
+    assert!(!call.draft);
 }
 
 fn issue_3693_transport_env(repo_path: &Path) -> DefaultCliEnv {
@@ -1896,6 +2076,19 @@ fn default_cli_env_routes_gh_backed_methods_and_internal_dispatch() {
             failing_factory(Arc::new(AtomicUsize::new(0))),
         );
 
+        {
+            let log = repo_path.join("completion-pr-argv");
+            let _ambient = gwt_core::test_support::ScopedEnvVar::set("GH_REPO", "other/unrelated");
+            let _log = gwt_core::test_support::ScopedEnvVar::set("GWT_FAKE_GH_ARGV_FILE", &log);
+            let snapshot = env.fetch_completion_pr(12).expect("completion snapshot");
+            assert_eq!(snapshot.inventory.number, 12);
+            let argv = fs::read_to_string(log).unwrap();
+            assert!(
+                argv.contains("--repo\ngithub.com/akiojin/gwt"),
+                "completion evidence must use the mutation repository: {argv}"
+            );
+        }
+
         let linked = env.fetch_linked_prs(IssueNumber(42)).expect("linked prs");
         assert_eq!(linked.len(), 1);
         assert_eq!(linked[0].number, 12);
@@ -1949,7 +2142,7 @@ fn default_cli_env_routes_gh_backed_methods_and_internal_dispatch() {
         assert_eq!(threads[0].path, "src/lib.rs");
 
         assert_eq!(
-            env.reply_and_resolve_pr_review_threads(12, "done")
+            env.reply_and_resolve_pr_review_threads(12, "done", None)
                 .expect("reply and resolve"),
             1
         );

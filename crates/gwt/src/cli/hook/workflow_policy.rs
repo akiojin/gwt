@@ -19,6 +19,7 @@ use std::{io::Read, path::Path};
 
 use gwt_agent::session::{Session, GWT_SESSION_ID_ENV};
 use gwt_core::{paths::gwt_sessions_dir, workspace_projection::load_workspace_projection};
+use gwt_skills::coordination_guidance::PANE_NAME_FIRST_ACTION_OPERATION;
 
 use crate::discussion_resume::PendingDiscussionGoal;
 use crate::pm_registry::pm_identity_exempt_session_for_worktree;
@@ -610,11 +611,17 @@ fn is_identity_gate_exempt_event(event: &HookEvent) -> bool {
     if event.tool_name.as_deref() != Some("Bash") {
         return false;
     }
-    event
-        .command()
-        .and_then(json_envelope_operation)
+    let Some(command) = event.command() else {
+        return false;
+    };
+    json_envelope_operation(command)
         .as_deref()
-        .is_some_and(is_identity_gate_exempt_operation)
+        .is_some_and(|operation| {
+            is_identity_gate_exempt_operation(operation)
+                // Naming must not carry a file write past the identity gate.
+                && (operation != PANE_NAME_FIRST_ACTION_OPERATION
+                    || !has_file_output_redirection(command))
+        })
 }
 
 /// Issue #4533: the operations a session may run while the Agent Workspace
@@ -656,10 +663,15 @@ fn is_identity_gate_exempt_event(event: &HookEvent) -> bool {
 /// [`crate::cli::verification_record::work_event_settlement_blocker_description`]
 /// now spells out in the refusal itself (AC-1).
 pub(crate) fn is_identity_gate_exempt_operation(operation: &str) -> bool {
-    matches!(
-        operation,
-        "execution.adopt"
+    // Issue #5705: the canonical startup operation must run before identity.
+    operation == PANE_NAME_FIRST_ACTION_OPERATION
+        || matches!(
+            operation,
+            "execution.adopt"
             | "execution.repair"
+            // Repair proves an existing Work's immutable source history;
+            // a broken assignment must not prevent its own bounded recovery.
+            | "workspace.work_repair"
             | "execution.reopen"
             | "execution.release_prepared"
             | "execution.release-prepared"
@@ -676,8 +688,16 @@ pub(crate) fn is_identity_gate_exempt_operation(operation: &str) -> bool {
             | "execution.settle_delivered"
             | "pr.create_from_ci"
             | "execution.blocked"
+            // Issue #4363: waiting must remain reportable before identity
+            // recovery; the operation still checks for a live owner itself.
+            | "issue.monitor.wait"
             | "memory.add"
-    )
+            // Feedback retains its own source identity and native consent.
+            // A broken Work assignment must not prevent reporting that fault.
+            | "feedback.create"
+            | "feedback.process"
+            | "feedback.retry"
+        )
 }
 
 /// Issue #5078 (AC-3): the PM escalation path never waits for the identity.
@@ -845,6 +865,7 @@ pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
     matches!(
         operation,
         "workspace.candidates"
+            | "feedback.status"
             | "workspace.receipt"
             | "workspace.projection_list"
             | "workspace.projection-list"
@@ -883,12 +904,16 @@ pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
             | "execution.status"
             | "execution.continue"
             | "hook.health"
+            | "fleet.inventory"
+            | "fleet.orphans"
             | "pane.list"
+            | "pane.health"
             | "pane.read"
             | "perf.summary"
             | "perf.startup"
             | "perf.violations"
             | "pm.capabilities"
+            | "pm.plan.status"
             | "pm.status"
             | "pm.report.list"
             | "search"
@@ -1926,6 +1951,27 @@ mod tests {
     }
 
     #[test]
+    fn feedback_is_reportable_when_workspace_identity_is_unavailable() {
+        let repo = tempfile::tempdir().unwrap();
+        let context = WorkflowContext::unknown().with_title_summary_missing(true);
+        for operation in [
+            "feedback.create",
+            "feedback.process",
+            "feedback.retry",
+            "feedback.status",
+        ] {
+            let command = envelope_command(operation, "{}");
+            assert_eq!(
+                evaluate_with_context(&bash_event(&command), repo.path(), &context).unwrap(),
+                HookOutput::Silent,
+                "{operation}"
+            );
+        }
+        assert!(is_read_only_json_envelope_operation("feedback.status"));
+        assert!(!is_read_only_json_envelope_operation("feedback.create"));
+    }
+
+    #[test]
     fn issue_4188_queued_diagnostic_is_read_only_through_the_hook() {
         let repo = tempfile::tempdir().expect("repo");
         let context = WorkflowContext::unknown().with_title_summary_missing(true);
@@ -2099,6 +2145,23 @@ mod tests {
     }
 
     #[test]
+    fn title_summary_guard_rejects_work_attached_to_pane_name() {
+        let name = envelope_command("pane.name", "{}");
+        for command in [
+            format!("{name}\ncargo test -p gwt"),
+            name.replacen("gwtd", "gwtd > source.txt", 1),
+        ] {
+            assert!(
+                matches!(
+                    evaluate_title_summary_guard(&bash_event(&command), true).unwrap(),
+                    HookOutput::PreToolUsePermission { .. }
+                ),
+                "startup exemption must not admit work: {command}"
+            );
+        }
+    }
+
+    #[test]
     fn title_summary_guard_allows_execution_blocked_before_identity_is_set() {
         let command = envelope_command("execution.blocked", r#"{"reason":"identity unavailable"}"#);
         assert_eq!(
@@ -2250,6 +2313,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn pm_plan_operations_preserve_identity_and_mutation_boundaries() {
+        for (operation, admitted) in [("pm.plan.status", true), ("pm.plan.apply", false)] {
+            let event = HookEvent {
+                tool_name: Some("Bash".to_string()),
+                tool_input: Some(serde_json::json!({
+                    "command": envelope_command(operation, "{}")
+                })),
+                transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
+                cwd: None,
+            };
+            assert_eq!(is_read_only_json_envelope_operation(operation), admitted);
+            assert_eq!(identity_gate_admits_operation(operation), admitted);
+            assert_eq!(
+                evaluate_title_summary_guard(&event, true).expect("guard output")
+                    == HookOutput::Silent,
+                admitted,
+                "{operation}"
+            );
+        }
+    }
+
     /// Issue #4533 (AC-5/AC-6): the operations `execution.status` advertises in
     /// `available_recoveries` must survive the gate. Denying them closed the
     /// interlock the issue reports — the refusal text named the exit and the
@@ -2272,6 +2359,7 @@ mod tests {
                 "execution.release_prepared",
                 r#"{"reason":"stale fence","operation_id":"op-1"}"#,
             ),
+            envelope_command("workspace.work_repair", r#"{"work_id":"existing-work"}"#),
         ] {
             assert_eq!(
                 evaluate_title_summary_guard(&bash_event(&command), true).expect("guard output"),

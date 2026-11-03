@@ -1,56 +1,103 @@
 import { createUiStateStore } from './ui-state-store.js';
-import { markdownContent, renderUiContent } from './ui-content.js';
+import { renderUiContent } from './ui-content.js';
+
+function reportDetailsMarkdown(structured) {
+  return [structured.details, (structured.refs || []).map(ref => `- ${ref}`).join('\n')]
+    .filter(Boolean).join('\n\n');
+}
 
 // Explicit PM reports and raw terminal packets share one immutable window version.
 // The terminal runtime retains responsibility for buffering and snapshot ordering.
 export function createPmWindowModel() {
-  const model = createUiStateStore({ windows: {}, changedWindowId: null });
-  // chrono emits UTC timestamps with variable fractional precision. Keep the
-  // nanoseconds when comparing; JavaScript Date truncates them to milliseconds.
-  const snapshotTime = value => value.replace(/(?:\.(\d+))?Z$/, (_, digits = '') => `.${digits.padEnd(9, '0')}Z`);
-  const nativeCount = reports => reports.filter(report => !report.id.startsWith('pm-peer-')).length;
+  const model = createUiStateStore({ windows: {}, changedWindowId: null, resyncRequest: null });
+  let requestSequence = 0;
+  const requests = new Map();
+  const validVersion = version => version && typeof version.epoch === 'string' && version.epoch.length > 0
+    && Number.isSafeInteger(version.revision) && version.revision > 0;
+  function requestPmReports(windowId, resync = false) {
+    const state = model.read().windows[windowId];
+    if (!state?.sessionId) return null;
+    let request = requests.get(windowId);
+    if (!request) {
+      request = { applied: 0, issued: 0, force: null, needsSnapshot: true };
+      requests.set(windowId, request);
+    }
+    if (resync) { request.needsSnapshot = true; request.force = null; }
+    if (request.needsSnapshot && request.force !== null) {
+      return { kind: 'load_pm_reports', id: windowId, request_id: request.force, version: null };
+    }
+    const requestId = ++requestSequence;
+    request.issued = requestId;
+    if (request.needsSnapshot) request.force = requestId;
+    return { kind: 'load_pm_reports', id: windowId, request_id: requestId,
+      version: request.needsSnapshot ? null : state.reportsVersion };
+  }
   function emptyWindow(windowId, sessionId = null) {
     return { windowId, sessionId, revision: 0, terminal: null,
-      reports: [], current: null, error: null, loaded: false };
+      reportsVersion: null, reports: [], current: null, error: null, loaded: false };
   }
   function bindPmWindowState(windowId, sessionId) {
     model.update(state => {
       const previous = state.windows[windowId];
       if (previous && previous.sessionId === sessionId) return state;
+      requests.delete(windowId);
       const next = previous?.sessionId == null ? { ...emptyWindow(windowId, sessionId), terminal: previous?.terminal || null }
         : emptyWindow(windowId, sessionId);
-      return { windows: { ...state.windows, [windowId]: { ...next, revision: (previous?.revision || 0) + 1 } }, changedWindowId: windowId };
+      return { ...state, windows: { ...state.windows, [windowId]: { ...next, revision: (previous?.revision || 0) + 1 } }, changedWindowId: windowId };
     });
   }
   function applyPmWindowReceiveEvent(event) {
+    let needsResync = false;
     model.update(state => {
       const previous = state.windows[event.id];
       let next = previous || emptyWindow(event.id);
       if (event.kind === 'pm_reports') {
         if (!previous || event.session_id !== previous.sessionId) return state;
-        // Native history only appends. Optional peer projections may be absent
-        // during a peer-store failure without freezing native reports/current.
-        if (!event.error && nativeCount(event.reports || []) < nativeCount(previous.reports)) return state;
-        if (!event.error && event.current?.observed_at && previous.current?.observed_at
-          && snapshotTime(event.current.observed_at) < snapshotTime(previous.current.observed_at)) return state;
-        next = { ...next, error: event.error || null, loaded: true,
+        const request = requests.get(event.id);
+        if (!request || !Number.isSafeInteger(event.request_id) || event.request_id <= request.applied
+          || event.request_id > request.issued || !validVersion(event.version)) return state;
+        const version = previous.reportsVersion;
+        if (request.force !== null) {
+          if (event.request_id !== request.force || event.snapshot !== true) return state;
+          if (version?.epoch === event.version.epoch && event.version.revision < version.revision) return state;
+        } else {
+          if (event.snapshot !== false) return state;
+          if (version?.epoch === event.version.epoch && event.version.revision <= version.revision) return state;
+          if (!version || version.epoch !== event.version.epoch || event.version.revision !== version.revision + 1) {
+            request.needsSnapshot = true;
+            needsResync = true;
+            return { ...state, resyncRequest: { windowId: event.id,
+              expected: version, received: event.version } };
+          }
+        }
+        request.applied = event.request_id;
+        request.force = null;
+        request.needsSnapshot = false;
+        if (version?.epoch === event.version.epoch && version.revision === event.version.revision) return state;
+        next = { ...next, reportsVersion: event.version, error: event.error || null, loaded: true,
           current: event.error ? previous.current : (event.current || null),
-          reports: event.error ? previous.reports : (event.reports || []) };
+          reports: event.error ? previous.reports : (event.reports || []).map(report => ({ ...report,
+            content: report.structured ? { type: 'text', body: report.body || '' }
+              : { type: 'markdown', body: report.body || '', body_html: report.body_html || '' },
+            detailsContent: report.structured ? { type: 'markdown', body: reportDetailsMarkdown(report.structured),
+              body_html: report.details_html || '' } : null })) };
       } else if (event.kind === 'terminal_output' || event.kind === 'terminal_snapshot') {
         next = { ...next, terminal: { kind: event.kind, dataBase64: event.data_base64 } };
       } else return state;
-      return { windows: { ...state.windows, [event.id]: { ...next, revision: next.revision + 1 } }, changedWindowId: event.id };
+      return { ...state, windows: { ...state.windows, [event.id]: { ...next, revision: next.revision + 1 } }, changedWindowId: event.id };
     });
+    return needsResync;
   }
   function removePmWindowState(windowId) {
+    requests.delete(windowId);
     model.update(state => {
       const { [windowId]: removed, ...windows } = state.windows;
-      return removed ? { windows, changedWindowId: windowId } : state;
+      return removed ? { ...state, windows, changedWindowId: windowId } : state;
     });
   }
   function readPmWindowState() { return model.read(); }
   function subscribePmWindowState(select, render) { return model.subscribe(select, render); }
-  return { bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, readPmWindowState, subscribePmWindowState };
+  return { requestPmReports, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, readPmWindowState, subscribePmWindowState };
 }
 
 // Read-only report view. The caller owns polling and the unchanged terminal.
@@ -62,6 +109,9 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
   let digest = '';
   let currentDigest;
   let latestState;
+  let scrollTop = 0;
+  let followTail = true;
+  const expandedReports = new Set();
   const element = (tag, className, text) => {
     const node = document.createElement(tag);
     node.className = className;
@@ -105,13 +155,30 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
   body.append(currentCard, historyHeader, notice, transcript);
   root.append(toolbar, body);
 
+  function rememberScroll() {
+    // Hidden tabs/windows have no layout; their zero offsets are not user intent.
+    if (!body.clientHeight) return;
+    scrollTop = body.scrollTop;
+    followTail = body.scrollHeight - body.clientHeight - scrollTop <= 32;
+  }
+  function restoreScroll() {
+    if (disposed || !body.clientHeight) return;
+    body.scrollTop = followTail ? body.scrollHeight : scrollTop;
+  }
+  body.addEventListener('scroll', rememberScroll);
+  const resizeObserver = typeof document.defaultView.ResizeObserver === 'function'
+    ? new document.defaultView.ResizeObserver(restoreScroll) : null;
+  resizeObserver?.observe(body);
+
   function showLogs(value) {
+    if (value && !logs) rememberScroll();
     logs = value;
     body.hidden = logs;
     root.classList.toggle('pm-chat--logs', logs);
     reportsButton.setAttribute('aria-pressed', String(!logs));
     logButton.setAttribute('aria-pressed', String(logs));
     onLogVisibility(logs);
+    if (!logs) restoreScroll();
   }
   const showReports = () => showLogs(false);
   const showLog = () => showLogs(true);
@@ -196,15 +263,20 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
     setSession(state.sessionId);
     latestState = state;
     root.dataset.stateVersion = String(state.revision);
+    if (transcript.childElementCount) rememberScroll();
     renderCurrent(state.current);
     const reports = state.reports;
     const visibleReports = kindSelect.value === 'all' ? reports : reports.filter(report => report.kind === kindSelect.value);
     const nextDigest = JSON.stringify([kindSelect.value, visibleReports]);
     if (digest !== nextDigest) {
-      const atBottom = transcript.childElementCount > 0 && body.scrollHeight - body.clientHeight - body.scrollTop <= 32;
-      const previousScroll = body.scrollTop;
+      for (const row of transcript.children) {
+        const details = row.querySelector('details');
+        if (details?.hasAttribute('open')) expandedReports.add(row.dataset.reportId);
+        else expandedReports.delete(row.dataset.reportId);
+      }
       const nodes = visibleReports.map(report => {
         const row = element('article', 'pm-chat__message');
+        row.dataset.reportId = report.id;
         const qa = report.kind === 'qa';
         const header = element('div', 'pm-chat__author');
         const time = element('time', '', new Date(report.created_at).toLocaleString());
@@ -214,7 +286,8 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
         copy.setAttribute('aria-label', 'Copy report');
         copy.addEventListener('click', async () => {
           try {
-            await copyText(qa ? `Q: ${report.question || ''}\n\nA:\n${report.body}` : report.body);
+            await copyText(qa ? `Q: ${report.question || ''}\n\nA:\n${report.body}`
+              : [report.body, report.structured ? reportDetailsMarkdown(report.structured) : ''].filter(Boolean).join('\n\n'));
             if (!disposed) copy.textContent = 'Copied';
           } catch {
             if (!disposed) {
@@ -225,7 +298,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
         });
         header.append(element('span', '', qa ? 'Q&A' : report.kind), time, copy);
         row.append(header);
-        const content = renderUiContent(document, markdownContent(report), 'pm-chat__text');
+        const content = renderUiContent(document, report.content, 'pm-chat__text');
         if (qa) {
           const question = element('section', '');
           question.setAttribute('aria-label', 'Question');
@@ -234,29 +307,44 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
           answer.setAttribute('aria-label', 'Answer');
           answer.append(element('h2', 'pm-chat__section-label', 'A'), content);
           row.append(question, answer);
-        } else row.append(content);
+        } else {
+          row.append(content);
+          if (report.structured && (report.structured.details.trim() || report.structured.refs.length)) {
+            const details = element('details', '');
+            if (expandedReports.has(report.id)) details.setAttribute('open', '');
+            details.append(element('summary', '', 'Details'),
+              renderUiContent(document, report.detailsContent, 'pm-chat__text'));
+            row.append(details);
+          }
+        }
         return row;
       });
       transcript.replaceChildren(...nodes);
-      body.scrollTop = atBottom ? body.scrollHeight : previousScroll;
       digest = nextDigest;
     }
     notice.textContent = state.error || (!state.loaded ? 'Loading PM reports…'
       : !reports.length ? 'No PM reports yet. Use the execution log to interact with PM.'
         : visibleReports.length ? '' : `No ${kindLabels[kindSelect.value]} reports yet.`);
     notice.hidden = !notice.textContent;
+    restoreScroll();
   }
   function setSession(nextSession) {
     if (disposed || session === nextSession) return;
     session = nextSession;
+    expandedReports.clear();
     transcript.replaceChildren();
     body.scrollTop = 0;
+    scrollTop = 0;
+    followTail = true;
     digest = '';
     currentDigest = undefined;
     showLogs(false);
   }
   function dispose() {
     disposed = true;
+    expandedReports.clear();
+    body.removeEventListener('scroll', rememberScroll);
+    resizeObserver?.disconnect();
     reportsButton.removeEventListener('click', showReports);
     logButton.removeEventListener('click', showLog);
     kindSelect.removeEventListener('change', filterReports);

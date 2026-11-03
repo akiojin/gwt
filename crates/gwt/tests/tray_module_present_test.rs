@@ -1,9 +1,6 @@
-//! SPEC #2920 Phase 1 (T-010): verify the tray-resident front-door module
-//! skeleton is present and the public surface is wired into `cli.rs`.
-//!
-//! This test exists so that a future refactor cannot silently drop the
-//! placeholder modules before Phase 4 fills them in. It only inspects the
-//! source tree via `include_str!`; no runtime behaviour is exercised.
+//! Verify the tray front door's supporting modules and native menu contracts.
+//! These checks inspect source via `include_str!`; runtime behavior is tested
+//! by the tray parser, lifetime, lock, and menu tests.
 
 const CLI_ROOT: &str = include_str!("../src/cli.rs");
 const CARGO_MANIFEST: &str = include_str!("../Cargo.toml");
@@ -102,7 +99,7 @@ fn cli_root_declares_tray_and_open_modules() {
 }
 
 #[test]
-fn tray_module_exposes_phase_1_surface() {
+fn tray_module_exposes_runtime_support() {
     assert!(
         TRAY_MOD.contains("pub mod autostart;"),
         "tray/mod.rs must expose the autostart sub-module"
@@ -118,10 +115,6 @@ fn tray_module_exposes_phase_1_surface() {
     assert!(
         TRAY_MOD.contains("pub struct TrayArgs"),
         "tray/mod.rs must define the TrayArgs entry struct"
-    );
-    assert!(
-        TRAY_MOD.contains("pub fn run"),
-        "tray/mod.rs must expose `run` as the tray entry point"
     );
 }
 

@@ -165,10 +165,51 @@ pub(crate) fn classify_command(command: &str) -> CommandWeight {
 /// Issue #5086: the explicit short-gate allowlist also owns its execution bound.
 /// Arbitrary interpreters/wrappers and coverage producers remain Heavy.
 pub(crate) fn short_non_cargo_timeout(command: &str) -> Option<Duration> {
+    if is_short_non_cargo_slot_gate(command) {
+        // Fixture subprocesses exceed two minutes on a saturated Windows host.
+        // Keep one ordinary slot and a finite limit without shortening the suite.
+        return Some(Duration::from_secs(300));
+    }
     let (assignments, args) = crate::cli::verification_record::split_command_line(command)
         .and_then(crate::cli::verification_record::take_env_assignments)
         .ok()?;
     is_short_non_cargo_gate(&args, &assignments).then_some(Duration::from_secs(60))
+}
+
+/// Issue #5621: this fixture-backed Node test is bounded but still needs one
+/// ordinary host slot. Unknown files/options and preloads stay exclusive.
+pub(crate) fn is_short_non_cargo_slot_gate(command: &str) -> bool {
+    let Ok((assignments, args)) = crate::cli::verification_record::split_command_line(command)
+        .and_then(crate::cli::verification_record::take_env_assignments)
+    else {
+        return false;
+    };
+    let [program, flag, script] = args.as_slice() else {
+        return false;
+    };
+    let script = script.replace('\\', "/");
+    matches!(
+        Path::new(program)
+            .file_name()
+            .and_then(|name| name.to_str()),
+        Some("node" | "node.exe")
+    ) && flag == "--test"
+        && script.strip_prefix("./").unwrap_or(&script) == "scripts/coverage-summary.test.mjs"
+        && !has_node_options(&assignments)
+}
+
+fn has_node_options(assignments: &[(String, String)]) -> bool {
+    // The last explicit assignment overrides inherited Node preloads.
+    assignments
+        .iter()
+        .rev()
+        .find(|(key, _)| {
+            key == "NODE_OPTIONS" || (cfg!(windows) && key.eq_ignore_ascii_case("NODE_OPTIONS"))
+        })
+        .map_or_else(
+            || std::env::var_os("NODE_OPTIONS").is_some_and(|value| !value.is_empty()),
+            |(_, value)| !value.is_empty(),
+        )
 }
 
 fn is_short_non_cargo_gate(args: &[String], assignments: &[(String, String)]) -> bool {
@@ -191,6 +232,7 @@ fn is_short_non_cargo_gate(args: &[String], assignments: &[(String, String)]) ->
         has_check
     };
     match program {
+        Some("rustc") => subcommand == Some("--version") && args.len() == 2,
         // Custom actionlint checkers may be arbitrary executable wrappers.
         Some("actionlint") => !args.iter().skip(1).any(|arg| {
             arg.starts_with('-')
@@ -210,18 +252,7 @@ fn is_short_non_cargo_gate(args: &[String], assignments: &[(String, String)]) ->
         Some("node") => {
             // NODE_OPTIONS can preload arbitrary modules before the reader.
             // An explicit empty assignment disables inherited options.
-            let has_options = assignments
-                .iter()
-                .rev()
-                .find(|(key, _)| {
-                    key == "NODE_OPTIONS"
-                        || (cfg!(windows) && key.eq_ignore_ascii_case("NODE_OPTIONS"))
-                })
-                .map_or_else(
-                    || std::env::var_os("NODE_OPTIONS").is_some_and(|value| !value.is_empty()),
-                    |(_, value)| !value.is_empty(),
-                );
-            !has_options
+            !has_node_options(assignments)
                 && subcommand.is_some_and(|script| {
                     script.replace('\\', "/").trim_start_matches("./")
                         == "scripts/check-coverage-threshold.mjs"
@@ -445,6 +476,7 @@ pub(super) fn run<E: CliEnv>(
             let mut status = status()?;
             let worktree = resolve_current_worktree_root(env.repo_path());
             observe_holder_activity(&mut status, &worktree)?;
+            status.caller_target = Some(verification_key(env)?.file_stem());
             render(
                 out,
                 "held",
@@ -452,6 +484,16 @@ pub(super) fn run<E: CliEnv>(
                 &status,
                 project_scope_hash(&worktree).as_str(),
             );
+            // Placement can refuse before admission creates a holder. Report
+            // the current caller separately from the pool's holder (Issue #4473).
+            match crate::cli::daemon::verification_host::resolve(&worktree) {
+                Ok((host, _)) => {
+                    out.push_str(&format!("current_spawn_host: {}\n", host.label()));
+                }
+                Err(error) => out.push_str(&format!(
+                    "current_spawn_host: refused\ncurrent_spawn_error: {error}\n"
+                )),
+            }
             Ok(0)
         }
         VerificationLeaseCommand::Acquire { .. }
@@ -862,10 +904,118 @@ fn holder_project_relation(target: Option<&str>, current_project: &str) -> Holde
     }
 }
 
+/// Issue #4358: one identity reading for admission and every status slot.
+/// Self-hold is diagnostic evidence, never permission to end a live holder.
+struct HolderDiagnostics {
+    exe: Option<PathBuf>,
+    cwd: Option<PathBuf>,
+    has_live_children: Option<bool>,
+    self_hold: bool,
+}
+
+fn holder_is_self(
+    status: &HeavyLeaseStatus,
+    caller_target: Option<&str>,
+    caller_session: Option<&str>,
+) -> bool {
+    status.held
+        && !status.holder_stale
+        && status.holder_alive != Some(false)
+        && status.holder_kind == Some(HeavyHolderKind::Verification)
+        && (caller_target.is_some_and(|target| status.target.as_deref() == Some(target))
+            || caller_session
+                .filter(|session| !session.is_empty())
+                .is_some_and(|session| {
+                    status
+                        .holder_context
+                        .as_ref()
+                        .and_then(|context| context.session_id.as_deref())
+                        == Some(session)
+                }))
+}
+
+impl HolderDiagnostics {
+    fn read(status: &HeavyLeaseStatus, caller_target: Option<&str>) -> Self {
+        use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+        let Ok(mut system) = System::new() else {
+            return Self {
+                exe: None,
+                cwd: None,
+                has_live_children: None,
+                self_hold: holder_is_self(
+                    status,
+                    caller_target,
+                    std::env::var("GWT_SESSION_ID").ok().as_deref(),
+                ),
+            };
+        };
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+        let pid = status.owner.as_ref().map(|owner| Pid::from_u32(owner.pid));
+        if let Some(pid) = pid {
+            system.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&[pid]),
+                true,
+                ProcessRefreshKind::nothing()
+                    .with_exe(UpdateKind::Always)
+                    .with_cwd(UpdateKind::Always),
+            );
+        }
+        let process = pid.and_then(|pid| system.process(pid));
+        Self {
+            exe: process
+                .and_then(|process| process.exe())
+                .map(Path::to_path_buf),
+            cwd: process
+                .and_then(|process| process.cwd())
+                .map(Path::to_path_buf),
+            has_live_children: process.map(|_| {
+                system.processes().values().any(|child| {
+                    child.parent() == pid && child.status() != sysinfo::ProcessStatus::Zombie
+                })
+            }),
+            self_hold: process.is_some()
+                && holder_is_self(
+                    status,
+                    caller_target,
+                    std::env::var("GWT_SESSION_ID").ok().as_deref(),
+                ),
+        }
+    }
+
+    fn detail(&self, status: &HeavyLeaseStatus) -> String {
+        format!(
+            "holder_pid: {}, holder_exe: {}, acquired_at_ms: {}, holder_has_live_children: {}, self_hold: {}",
+            status.owner.as_ref().map_or_else(|| "unknown".into(), |owner| owner.pid.to_string()),
+            self.exe.as_ref().map_or_else(|| "unknown".into(), |exe| exe.display().to_string()),
+            status.acquired_at_ms.map_or_else(|| "unknown".into(), |at| at.to_string()),
+            self.has_live_children.map_or_else(|| "unknown".into(), |children| children.to_string()),
+            self.self_hold,
+        )
+    }
+
+    fn push_fields(&self, out: &mut String, prefix: &str) {
+        out.push_str(&format!(
+            "{prefix}holder_exe: {}\n{prefix}holder_has_live_children: {}\n{prefix}self_hold: {}\n",
+            self.exe
+                .as_ref()
+                .map_or_else(|| "unknown".into(), |exe| exe.display().to_string()),
+            self.has_live_children
+                .map_or_else(|| "unknown".into(), |children| children.to_string()),
+            self.self_hold,
+        ));
+    }
+}
+
 /// Status rendering and the pre-upgrade detached holder wire format.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct LeaseStatusSnapshot {
     held: bool,
+    #[serde(skip)]
+    caller_target: Option<String>,
     /// Pool diagnostics are additive output, not part of legacy control outcomes.
     #[serde(skip)]
     capacity: Option<usize>,
@@ -1094,17 +1244,21 @@ fn status_for_lease(lease_id: &str) -> Result<Option<LeaseStatusSnapshot>, SpecO
 pub(super) fn open_coordinator() -> Result<IndexCoordinator, SpecOpsError> {
     let settings = gwt_config::Settings::load()
         .map_err(|err| unexpected(format!("verification configuration invalid: {err}")))?;
-    let capacity = settings.verification.slots.map_or_else(
-        || {
-            let mut host = sysinfo::System::new();
+    let capacity = match settings.verification.slots {
+        None => {
+            let mut host = sysinfo::System::new().map_err(|error| {
+                unexpected(format!(
+                    "verification host observation unavailable: {error}"
+                ))
+            })?;
             host.refresh_memory();
             automatic_slot_capacity(
                 std::thread::available_parallelism().map_or(1, usize::from),
                 host.total_memory(),
             )
-        },
-        |slots| usize::from(slots.get()),
-    );
+        }
+        Some(slots) => usize::from(slots.get()),
+    };
     IndexCoordinator::open_verification(verification_coordinator_root(), capacity)
         .map_err(|err| unexpected(format!("verification lease coordinator unavailable: {err}")))
 }
@@ -1147,7 +1301,18 @@ pub(super) fn effective_cargo_target(
         crate::cli::verification_record::split_command_line(command)?,
     )?;
     if Path::new(&args[0]).file_stem().and_then(|s| s.to_str()) != Some("cargo") {
-        return Ok(None);
+        // Wrappers may build Cargo without invoking it directly. Only an inline
+        // declaration opts in: ambient variables do not establish a wrapper's
+        // artifact contract, and isolated baselines remove this assignment.
+        if isolated_baseline {
+            return Ok(None);
+        }
+        return Ok(assignments
+            .iter()
+            .rev()
+            .find(|(name, _)| name == "CARGO_TARGET_DIR")
+            .filter(|(_, value)| !value.is_empty())
+            .map(|(_, value)| worktree.join(value)));
     }
     let cargo_args: Vec<_> = args[1..]
         .iter()
@@ -1283,14 +1448,15 @@ pub(super) fn command_disk_budgets(
 fn command_disk_budgets_with_inventory(
     paths: &[PathBuf],
     settings: &gwt_config::Settings,
-    _disk_inventory: impl FnOnce() -> sysinfo::Disks,
+    _disk_inventory: impl FnOnce() -> Result<sysinfo::Disks, sysinfo::Error>,
 ) -> Result<Vec<gwt_core::index_coordinator::VerificationDiskBudget>, String> {
     let bytes = settings
         .verification
         .disk_budget_bytes
         .unwrap_or(DEFAULT_VERIFICATION_DISK_BUDGET_BYTES);
     #[cfg(not(unix))]
-    let disks = _disk_inventory();
+    let disks = _disk_inventory()
+        .map_err(|error| format!("verification disk observation unavailable: {error}"))?;
     let mut budgets: Vec<gwt_core::index_coordinator::VerificationDiskBudget> = Vec::new();
     for path in paths {
         let mut probe = path.clone();
@@ -1451,7 +1617,7 @@ pub(super) fn lock_build_artifacts(target: &Path) -> std::io::Result<BuildArtifa
     Ok(guard)
 }
 
-fn build_artifact_lock_path(target: &Path) -> std::io::Result<PathBuf> {
+pub(super) fn build_artifact_lock_path(target: &Path) -> std::io::Result<PathBuf> {
     use sha2::{Digest, Sha256};
     let mut existing = if target.is_absolute() {
         target.to_path_buf()
@@ -1557,7 +1723,23 @@ fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot, current_pr
             "capacity: {capacity}\nrunning: {}\navailable: {}\n",
             status.running, status.available
         ));
-        out.push_str("exclusive_commands: headed Playwright, coverage, and other commands without a resolved Cargo target; legacy root locks also exclude all slots\n");
+        out.push_str("exclusive_commands: commands without a resolved build directory (Cargo metadata or inline CARGO_TARGET_DIR); legacy root locks also exclude all slots\n");
+        let exclusive_held = status
+            .slots
+            .iter()
+            .any(|slot| slot.slot.is_none() && (slot.status.held || slot.status.holder_stale));
+        let (count, oldest, total) = status
+            .queue
+            .iter()
+            .filter(|entry| exclusive_held && entry.bypass_reason.is_none())
+            .fold((0usize, 0u64, 0u64), |(count, oldest, total), entry| {
+                (
+                    count + 1,
+                    oldest.max(entry.waiting_ms),
+                    total.saturating_add(entry.waiting_ms),
+                )
+            });
+        out.push_str(&format!("exclusive_blocked_count: {count}\nexclusive_blocked_oldest_wait_ms: {oldest}\nexclusive_blocked_total_wait_ms: {total}\n"));
         for slot in &status.slots {
             let label = slot
                 .slot
@@ -1576,28 +1758,18 @@ fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot, current_pr
                 holder_project_relation(holder.target.as_deref(), current_project).as_str(),
             ));
             if holder.held || holder.holder_stale {
-                use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
-                let mut system = System::new();
-                if let Some(owner) = &holder.owner {
-                    system.refresh_processes_specifics(
-                        ProcessesToUpdate::Some(&[Pid::from_u32(owner.pid)]),
-                        true,
-                        ProcessRefreshKind::nothing()
-                            .with_exe(UpdateKind::Always)
-                            .with_cwd(UpdateKind::Always),
-                    );
-                }
-                let process = holder
-                    .owner
-                    .as_ref()
-                    .and_then(|owner| system.process(Pid::from_u32(owner.pid)));
+                let identity = HolderDiagnostics::read(holder, status.caller_target.as_deref());
                 push_slot_admission_fields(
                     out,
                     &label,
                     holder,
-                    process.and_then(|process| process.exe()),
-                    process.and_then(|process| process.cwd()),
+                    identity.exe.as_deref(),
+                    identity.cwd.as_deref(),
                 );
+                identity.push_fields(out, &format!("slots[{label}]."));
+                if holder.lease_id == status.lease_id {
+                    identity.push_fields(out, "");
+                }
             }
         }
     }
@@ -1770,6 +1942,51 @@ fn unexpected(message: String) -> SpecOpsError {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn self_hold_matches_session_or_worktree_but_not_foreign_or_stale_holders() {
+        use gwt_core::index_coordinator::{HeavyHolderContext, HeavyHolderKind, HeavyLeaseStatus};
+        let mut holder = HeavyLeaseStatus {
+            held: true,
+            holder_alive: Some(true),
+            holder_kind: Some(HeavyHolderKind::Verification),
+            target: Some("repo--verification--first".into()),
+            holder_context: Some(
+                serde_json::from_value::<HeavyHolderContext>(serde_json::json!({
+                    "project_root": "/work/first", "action": "cargo build", "qos": "exclusive"
+                }))
+                .unwrap(),
+            ),
+            ..Default::default()
+        };
+        assert!(
+            holder.holder_context.as_ref().unwrap().session_id.is_none(),
+            "legacy context must remain readable"
+        );
+        assert!(super::holder_is_self(
+            &holder,
+            Some("repo--verification--first"),
+            None
+        ));
+        assert!(!super::holder_is_self(
+            &holder,
+            Some("repo--verification--second"),
+            Some("caller")
+        ));
+        holder.holder_context.as_mut().unwrap().session_id = Some("caller".into());
+        assert!(super::holder_is_self(
+            &holder,
+            Some("repo--verification--second"),
+            Some("caller")
+        ));
+        assert!(!super::holder_is_self(&holder, None, Some("other")));
+        holder.holder_stale = true;
+        assert!(!super::holder_is_self(
+            &holder,
+            Some("repo--verification--first"),
+            Some("caller")
+        ));
+    }
+
+    #[test]
     fn canonical_refusal_names_the_authorized_recovery_operations() {
         let error = super::canonical_refusal("held", None).to_string();
         for operation in ["verify.status", "verify.cancel", "verify.lease.release"] {
@@ -1864,6 +2081,14 @@ mod tests {
         );
         assert!(out.contains("slots[0]:"), "{out}");
         assert!(out.contains("slots[1]:"), "{out}");
+        for field in [
+            "holder_exe:",
+            "self_hold: false",
+            "slots[0].holder_exe:",
+            "slots[1].holder_exe:",
+        ] {
+            assert!(out.contains(field), "missing {field}: {out}");
+        }
         struct NoWork;
         impl super::OrphanReclaimer for NoWork {
             fn observe(
@@ -1950,6 +2175,38 @@ mod tests {
         assert!(error.contains("Cargo.toml"), "{error}");
     }
 
+    #[test]
+    fn wrappers_declare_build_directories_without_cargo_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        for command in [
+            "CARGO_TARGET_DIR=build make -j1 quality-checks",
+            "CARGO_TARGET_DIR=old CARGO_TARGET_DIR=build python quality.py",
+        ] {
+            assert_eq!(
+                super::effective_cargo_target(dir.path(), command, false).unwrap(),
+                Some(dir.path().join("build")),
+                "{command}"
+            );
+        }
+        for command in [
+            "make -j1 quality-checks",
+            "CARGO_TARGET_DIR= make quality-checks",
+            "CARGO_TARGET_DIR=build cargo llvm-cov",
+        ] {
+            assert_eq!(
+                super::effective_cargo_target(dir.path(), command, false).unwrap(),
+                None,
+                "{command}"
+            );
+        }
+        assert_eq!(
+            super::effective_cargo_target(dir.path(), "CARGO_TARGET_DIR=build make check", true)
+                .unwrap(),
+            None,
+            "isolated baselines remove the declared environment variable"
+        );
+    }
+
     fn command_strings(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|part| part.to_string()).collect()
     }
@@ -1961,6 +2218,7 @@ mod tests {
             .unwrap_or_else(|error| error.into_inner());
         let _node_options = gwt_core::test_support::ScopedEnvVar::unset("NODE_OPTIONS");
         for command in [
+            "rustc --version",
             "git diff --check",
             "git diff --check --cached",
             "git.exe diff --cached --check -- README.md",
@@ -1977,6 +2235,7 @@ mod tests {
             assert_eq!(short_non_cargo_timeout(command), Some(Duration::from_secs(60)), "{command}");
         }
         for command in [
+            "rustc --version input.rs",
             "git diff",
             "git status",
             "git diff --line-prefix --check --ext-diff -- README.md",
@@ -2006,6 +2265,33 @@ mod tests {
     }
 
     #[test]
+    fn known_node_test_is_slot_admitted_and_bounded() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _node_options = gwt_core::test_support::ScopedEnvVar::unset("NODE_OPTIONS");
+        for command in [
+            "node --test \"scripts/coverage-summary.test.mjs\"",
+            "node.exe --test ./scripts/coverage-summary.test.mjs",
+        ] {
+            assert_eq!(classify_command(command), CommandWeight::Heavy, "{command}");
+            assert_eq!(
+                short_non_cargo_timeout(command),
+                Some(Duration::from_secs(300)),
+                "{command}"
+            );
+        }
+        for command in [
+            "node --test arbitrary.test.mjs",
+            "node --test ../scripts/coverage-summary.test.mjs",
+            "node --test scripts/coverage-summary.test.mjs --import=./wrapper.mjs",
+        ] {
+            assert_eq!(classify_command(command), CommandWeight::Heavy, "{command}");
+            assert_eq!(short_non_cargo_timeout(command), None, "{command}");
+        }
+    }
+
+    #[test]
     fn node_reader_options_cannot_preload_arbitrary_workloads() {
         let _env_lock = crate::env_test_lock()
             .lock()
@@ -2014,6 +2300,7 @@ mod tests {
             gwt_core::test_support::ScopedEnvVar::set("NODE_OPTIONS", "--require=./wrapper.cjs");
         for command in [
             "node scripts/check-coverage-threshold.mjs summary.json 90",
+            "node --test scripts/coverage-summary.test.mjs",
             "NODE_OPTIONS= NODE_OPTIONS=--import=./wrapper.mjs node scripts/check-coverage-threshold.mjs summary.json 90",
         ] {
             assert_eq!(classify_command(command), CommandWeight::Heavy, "{command}");
@@ -2268,6 +2555,8 @@ mod tests {
                 project_root: PathBuf::from("/work/owner"),
                 action: "node scripts/coverage-summary.mjs".into(),
                 qos: "coverage requires exclusive host resources".into(),
+                session_id: None,
+                artifact_lock: None,
             }),
             ..HeavyLeaseStatus::default()
         };
@@ -2301,6 +2590,57 @@ mod tests {
         assert!(out.contains("executable: unknown"), "{out}");
         assert!(out.contains("worktree: unknown"), "{out}");
         assert!(out.contains("command: unknown"), "{out}");
+    }
+
+    #[test]
+    fn status_counts_waiters_blocked_by_an_exclusive_holder() {
+        let entries = [
+            (true, None, 90_000),
+            (false, None, 80_000),
+            (false, Some("reservation expired"), 120_000),
+        ]
+        .into_iter()
+        .map(|(resident, bypass_reason, waiting_ms)| {
+            serde_json::from_value(serde_json::json!({
+                "priority": "manual-rebuild", "queued_at_ms": 1,
+                "waiting_ms": waiting_ms, "resident": resident,
+                "bypass_reason": bypass_reason
+            }))
+            .unwrap()
+        })
+        .collect();
+        let mut status = LeaseStatusSnapshot {
+            capacity: Some(2),
+            slots: vec![HeavySlotStatus {
+                slot: None,
+                status: HeavyLeaseStatus {
+                    held: true,
+                    ..Default::default()
+                },
+            }],
+            queue: entries,
+            ..Default::default()
+        };
+        let mut out = String::new();
+        push_status_fields(&mut out, &status, "repo");
+        assert!(out.contains("exclusive_blocked_count: 2\n"), "{out}");
+        assert!(
+            out.contains("exclusive_blocked_oldest_wait_ms: 90000\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("exclusive_blocked_total_wait_ms: 170000\n"),
+            "{out}"
+        );
+        status.slots[0].status.held = false;
+        status.slots[0].status.holder_stale = true;
+        out.clear();
+        push_status_fields(&mut out, &status, "repo");
+        assert!(out.contains("exclusive_blocked_count: 2\n"), "{out}");
+        status.slots[0].slot = Some(0);
+        out.clear();
+        push_status_fields(&mut out, &status, "repo");
+        assert!(out.contains("exclusive_blocked_count: 0\n"), "{out}");
     }
 
     #[test]

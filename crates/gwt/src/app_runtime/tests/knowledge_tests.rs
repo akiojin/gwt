@@ -1,6 +1,87 @@
 use super::*;
 
 #[test]
+#[cfg(debug_assertions)]
+fn app_runtime_issue_cache_reply_precedes_related_work_decode() {
+    let _lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let _gate_env = ScopedEnvVar::set("GWT_PLAYWRIGHT_ACTIVE_WORK_RENDEZVOUS", "1");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo(&repo);
+    let cache = Cache::new(issue_cache_root(&repo));
+    cache
+        .write_snapshot(&sample_issue_snapshot(
+            42,
+            "Cached row",
+            &["bug"],
+            "body",
+            "2026-04-20T10:00:00Z",
+        ))
+        .unwrap();
+    let works = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo);
+    fs::create_dir_all(works.parent().unwrap()).unwrap();
+    fs::write(
+        &works,
+        r#"{"updated_at":"2026-04-20T10:00:00Z","work_items":[]}"#,
+    )
+    .unwrap();
+    let gate = temp.path().join(".gwt/issue-3777-active-work-rendezvous");
+    fs::create_dir_all(&gate).unwrap();
+    struct ReleaseGate(PathBuf);
+    impl Drop for ReleaseGate {
+        fn drop(&mut self) {
+            let _ = fs::write(self.0.join("release"), b"release");
+        }
+    }
+    let _release = ReleaseGate(gate.clone());
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "issue-1",
+        repo,
+        WindowPreset::Settings,
+        WindowProcessStatus::Ready,
+    );
+    let (runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    fs::write(
+        gate.join("work-items-path"),
+        works.to_string_lossy().as_bytes(),
+    )
+    .unwrap();
+    let id = combined_window_id("tab-1", "issue-1");
+    assert!(runtime
+        .load_knowledge_bridge_events(
+            "client-1",
+            KnowledgeLoadRequest {
+                id: &id,
+                kind: gwt::KnowledgeKind::Issue,
+                request_id: Some(5543),
+                selected_number: Some(42),
+                refresh: false,
+            }
+        )
+        .is_empty());
+    let first = wait_for_knowledge_view_dispatch(&events, &id);
+    assert!(
+        matches!(&first[0].event, BackendEvent::KnowledgeEntries { request_id: Some(5543), entries, .. } if entries.iter().any(|entry| entry.number == 42))
+    );
+    wait_for_recorded_event("held related Work decode", &events, |_| {
+        gate.join("started").exists()
+    });
+    assert!(
+        !gate.join("resumed").exists(),
+        "cached rows must arrive before the held historical Work decode resumes"
+    );
+    fs::write(gate.join("release"), b"release").unwrap();
+    wait_for_recorded_event("related enrichment after cached rows", &events, |events| {
+        events.iter().filter(|event| matches!(recorded_project_payload(event), UserEvent::Dispatch(dispatched) if dispatched.iter().any(|outbound| matches!(&outbound.event, BackendEvent::KnowledgeEntries { request_id: Some(5543), .. })))).count() >= 2
+    });
+}
+
+#[test]
 fn app_runtime_report_knowledge_error_journals_only_valid_issue_window_failures() {
     let _lock = env_test_lock()
         .lock()
@@ -253,8 +334,7 @@ fn select_knowledge_bridge_entry_is_cache_backed_detail_only() {
             pr_state: None,
         },
     );
-    gwt_core::workspace_projection::record_workspace_work_event(&repo, work_event)
-        .expect("record work event");
+    record_legacy_workspace_work_event_for_test(&repo, work_event).expect("record work event");
 
     // Initial load captures the latest related-work snapshot for issue 42.
     let immediate = runtime.load_knowledge_bridge_events(
@@ -311,7 +391,7 @@ fn select_knowledge_bridge_entry_is_cache_backed_detail_only() {
             pr_state: None,
         },
     );
-    gwt_core::workspace_projection::record_workspace_work_event(&repo, second_event)
+    record_legacy_workspace_work_event_for_test(&repo, second_event)
         .expect("record second work event");
     write_issue_link_store(
         &repo,
@@ -862,7 +942,7 @@ fn app_runtime_select_and_save_profile_broadcasts_snapshot_to_profile_windows() 
         title: "Repo".to_string(),
         project_root: repo,
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(persisted),
+        workspace: WindowRegistry::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -1096,6 +1176,123 @@ fn frontend_user_action_logs_issue_monitor_global_profile_configure() {
 }
 
 #[test]
+fn app_runtime_open_issue_monitor_audits_navigation_without_mutation() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let roots = [temp.path().join("first"), temp.path().join("other")];
+    for root in &roots {
+        fs::create_dir_all(root).expect("project root");
+    }
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&roots[0]);
+    let prefs = gwt::IssueMonitorPrefs {
+        priority_order: vec![3165, 3214],
+        ..Default::default()
+    };
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed stopped monitor");
+    let tabs = roots
+        .iter()
+        .zip(["first", "other"])
+        .map(|(root, id)| sample_project_tab(id, id, root.clone(), ProjectKind::NonRepo, &[]))
+        .collect();
+    let mut runtime = sample_runtime(temp.path(), tabs, Some("other"));
+    let context = runtime
+        .project_context("first")
+        .expect("authenticated project");
+    let state = runtime.project_state(&context).expect("project state");
+    *state.issue_monitor_status_cache.borrow_mut() = Some(
+        test_monitor_with_prefs(gwt::IssueMonitorConfig::default(), prefs.clone()).status_view(),
+    );
+    let before_status = serde_json::to_value(&*state.issue_monitor_status_cache.borrow()).unwrap();
+    let before_workspace =
+        serde_json::to_value(runtime.tab("first").unwrap().workspace.persisted()).unwrap();
+    let request: FrontendEvent = serde_json::from_str(r#"{"kind":"open_issue_monitor"}"#)
+        .expect("payload-free navigation audit request");
+    assert_eq!(
+        runtime.frontend_project_log_tab_id(Some(&context), &request),
+        Some("first"),
+        "the authenticated project owns the log even while another project is active"
+    );
+    let actions = capture_tracing_events(|| {
+        let replies = runtime.handle_frontend_event_in_scope(
+            "client-first".into(),
+            request,
+            &ClientScope::Project(context.project_key.clone()),
+        );
+        assert!(
+            replies.is_empty(),
+            "navigation audit has no backend response"
+        );
+    });
+    let actions: Vec<_> = actions
+        .iter()
+        .filter(|event| event.target == "gwt_ui_action")
+        .collect();
+    assert_eq!(actions.len(), 1, "one navigation produces one audit record");
+    let action = actions[0];
+    assert_eq!(action.level, Level::INFO);
+    assert_eq!(
+        action.fields.get("client_id").map(String::as_str),
+        Some("client-first")
+    );
+    assert_eq!(
+        action.fields.get("action").map(String::as_str),
+        Some("open_issue_monitor")
+    );
+    assert_eq!(
+        action.fields.get("surface").map(String::as_str),
+        Some("issue_monitor")
+    );
+    assert_eq!(action.fields.get("mode").map(String::as_str), Some(""));
+    assert_eq!(action.fields.get("ui_target").map(String::as_str), Some(""));
+    assert_eq!(gwt::load_issue_monitor_prefs(&prefs_path).unwrap(), prefs);
+    assert_eq!(
+        serde_json::to_value(runtime.tab("first").unwrap().workspace.persisted()).unwrap(),
+        before_workspace
+    );
+    assert_eq!(
+        serde_json::to_value(
+            &*runtime
+                .project_state(&context)
+                .unwrap()
+                .issue_monitor_status_cache
+                .borrow()
+        )
+        .unwrap(),
+        before_status
+    );
+    assert_eq!(runtime.active_tab_id.as_deref(), Some("other"));
+    assert!(runtime.window_details.is_empty());
+    assert!(runtime.issue_monitor_launch_queue.is_empty());
+    assert!(runtime.issue_monitor_launch_deliveries.is_empty());
+    assert!(runtime
+        .project_state(&context)
+        .unwrap()
+        .launch_wizard
+        .is_none());
+
+    let start = super::super::frontend_user_action_log(&FrontendEvent::SetIssueMonitorEnabled {
+        enabled: true,
+    })
+    .expect("existing Start audit");
+    let launch = super::super::frontend_user_action_log(&FrontendEvent::IssueMonitorLaunchNow {
+        issue_number: 3165,
+        linked_issue_kind: None,
+    })
+    .expect("existing Launch now audit");
+    assert_eq!(
+        (start.action, start.mode.as_str()),
+        ("set_issue_monitor_enabled", "on")
+    );
+    assert_eq!(
+        (launch.action, launch.ui_target.as_str()),
+        ("issue_monitor_launch_now", "3165")
+    );
+}
+
+#[test]
 fn app_runtime_load_logs_replies_with_current_log_snapshot() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
@@ -1183,7 +1380,6 @@ fn frontend_project_log_tab_id_routes_non_window_owners() {
         (
             FrontendEvent::LaunchWizardAction {
                 action: gwt::LaunchWizardAction::Cancel,
-                bounds: None,
             },
             Some("tab-a"),
         ),
@@ -1303,7 +1499,7 @@ fn app_runtime_routes_restored_opened_and_queued_logs_by_project_scope() {
     );
 
     let context_b = runtime.project_context(&tab_b_id).unwrap();
-    runtime.create_window_events(&context_b, WindowPreset::Logs, canvas_bounds(), None);
+    runtime.create_window_events(&context_b, WindowPreset::Logs, None);
     let logs_b_raw_id = runtime
         .tab(&tab_b_id)
         .expect("opened project tab")
@@ -1432,7 +1628,6 @@ fn app_runtime_routes_restored_opened_and_queued_logs_by_project_scope() {
                 Some(&context_a),
                 &FrontendEvent::FocusWindow {
                     id: logs_a_id.clone(),
-                    bounds: Some(canvas_bounds()),
                 }
             )
             .as_ref(),

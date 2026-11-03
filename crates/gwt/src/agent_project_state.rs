@@ -2483,6 +2483,7 @@ fn probe_authenticated_work_materialization_with_binding(
             "Work materialization probe Session claim does not match the authenticated launch",
         ));
     }
+    tracing::info!(target: "gwt.work_materialization_probe", stage = "execution_validation");
     let validated = validate_current_execution_binding_authority(
         authenticated_project_root,
         authenticated_session_id,
@@ -2495,6 +2496,7 @@ fn probe_authenticated_work_materialization_with_binding(
         ));
     }
 
+    tracing::info!(target: "gwt.work_materialization_probe", stage = "target_validation");
     let target = resolve_authenticated_session_work_mutation_target(
         authenticated_project_root,
         authenticated_session_id,
@@ -2511,6 +2513,7 @@ fn probe_authenticated_work_materialization_with_binding(
             error
         }
     })?;
+    tracing::info!(target: "gwt.work_materialization_probe", stage = "validated");
     Ok(AgentWorkMaterializationProbeReceipt {
         schema_version: AGENT_WORK_MATERIALIZATION_PROBE_SCHEMA_VERSION,
         owner_number: request.owner_number,
@@ -3086,6 +3089,14 @@ fn classify_workspace_transaction_error(error: &GwtError) -> AgentWorkspaceUpdat
         error = %error,
         "Host workspace transaction failed without committing"
     );
+    if matches!(error, GwtError::WorkspaceOperationInFlight { .. }) {
+        let mut refusal = AgentWorkspaceUpdateError::new(
+            AgentWorkspaceUpdateErrorCode::TransactionConflict,
+            "Another workspace operation is in flight; the update did not run; wait for its finalizer before retrying",
+        );
+        refusal.diagnostic_reason = Some("workspace_operation_in_flight".to_string());
+        return refusal;
+    }
     if error
         .to_string()
         .to_ascii_lowercase()
@@ -3257,6 +3268,117 @@ pub(crate) enum ValidatedWorkspaceEnsureSession {
 pub(crate) enum BoundTerminalCompatibilityDisposition {
     EmitIfNeeded,
     ConfirmOnly,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct BlockedDoneBuildAbortAuthority {
+    pub(crate) identity: gwt_agent::SessionExecutionIdentity,
+    pub(crate) target: gwt_core::workspace_projection::SessionBoundWorkspaceTerminalTarget,
+    pub(crate) work_id: String,
+}
+
+/// Read-only proof for ending build bookkeeping while retaining an exact Done
+/// Work. This grants no terminalization authority and never requests Discarded.
+pub(crate) fn snapshot_blocked_done_build_abort_authority(
+    invocation_cwd: &Path,
+    session_id: &str,
+    owner_number: u64,
+) -> Result<Option<BlockedDoneBuildAbortAuthority>> {
+    use crate::cli::execution_state::{self, ExecutionControlStatus};
+    let Some(record) = execution_state::load(invocation_cwd)? else {
+        return Ok(None);
+    };
+    if record.status != ExecutionControlStatus::Blocked {
+        return Ok(None);
+    }
+    if !execution_state::integrity_ok(&record)
+        || record.owner_number != owner_number
+        || record.primary_session_id != session_id
+    {
+        return Err(mutation_error(
+            "Blocked build cleanup requires the exact current execution owner and Session",
+        ));
+    }
+    let Some(ValidatedWorkspaceEnsureSession::Host(recovery)) =
+        validated_workspace_recovery_session_with_terminal_kind(
+            invocation_cwd,
+            session_id,
+            Some(AgentWorkTerminalKind::Discarded),
+        )?
+    else {
+        return Err(mutation_error(
+            "Blocked build cleanup requires an exact bound Host Session",
+        ));
+    };
+    if recovery.session.runtime_target != LaunchRuntimeTarget::Host
+        || recovery.session.docker_runtime_binding.is_some()
+    {
+        return Err(mutation_error(
+            "Blocked build cleanup has a foreign runtime binding",
+        ));
+    }
+    let identity = gwt_agent::SessionExecutionIdentity::from_session(&recovery.session)
+        .map_err(mutation_error)?
+        .ok_or_else(|| {
+            mutation_error("Blocked build cleanup requires a durable execution binding")
+        })?;
+    let owner = execution_owner_from_session_binding(&identity.execution_binding)
+        .map_err(mutation_error)?;
+    if owner.number != owner_number
+        || !execution_state::blocked_build_abort_execution_binding_matches(
+            &identity.worktree_path,
+            owner,
+            session_id,
+            &identity.execution_binding.identity,
+        )?
+    {
+        return Err(mutation_error(
+            "Blocked build cleanup requires the current generation and same active build",
+        ));
+    }
+    let (owner, agent_id) =
+        durable_session_work_authority(&recovery.session, recovery.branch_authority)?;
+    let work = resolve_unique_existing_work(
+        &recovery.project_state_root,
+        &recovery.work_event_root,
+        session_id,
+        &recovery.branch_identity,
+        &recovery.worktree_identity,
+        SessionWorkAuthorityExpectation {
+            owner: owner.as_deref(),
+            agent_id: &agent_id,
+            require_single_session_assignment: true,
+            allow_terminal: true,
+            require_exclusive_container: true,
+        },
+    )?;
+    if work.done && work.discarded {
+        return Err(mutation_error(
+            "canonical Work has ambiguous Done and Discarded terminal state",
+        ));
+    }
+    if !work.done {
+        return Ok(None);
+    }
+    let target = gwt_core::workspace_projection::SessionBoundWorkspaceTerminalTarget {
+        project_state_root: recovery.project_state_root,
+        work_event_root: recovery.work_event_root,
+        session_id: session_id.to_string(),
+        branch_identity: recovery.branch_identity,
+        worktree_identity: recovery.worktree_identity,
+        owner,
+        agent_id,
+    };
+    gwt_core::workspace_projection::with_exact_workspace_done_read_only(
+        &target,
+        &work.work_id,
+        || (),
+    )?;
+    Ok(Some(BlockedDoneBuildAbortAuthority {
+        identity,
+        target,
+        work_id: work.work_id,
+    }))
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -3783,7 +3905,6 @@ fn validated_workspace_recovery_session_with_terminal_kind(
     })? {
         return Ok(None);
     }
-    let recovery_context = resolve_execution_recovery_context(invocation_cwd, session_id)?;
     let session = load_session_for_mutation(session_id)?;
     if session.id != session_id {
         return Err(mutation_error(format!(
@@ -3807,7 +3928,33 @@ fn validated_workspace_recovery_session_with_terminal_kind(
             "durable Session {session_id} has no execution binding"
         ))
     })?;
-    let identity = validate_host_session_identity(recovery_context.worktree(), &session)?;
+    // Validate this Session's repository, branch and exact worktree once.
+    // Resolving a recovery context first repeats all those Git checks, which
+    // makes workspace.ensure scale with subprocess latency rather than Work data.
+    let identity = validate_host_session_identity(&session.worktree_path, &session)?;
+    let invocation = canonicalize_mutation_path(invocation_cwd, "recovery invocation scope")?;
+    if invocation != identity.project_state_root {
+        if !invocation.starts_with(&identity.worktree_identity) {
+            return Err(mutation_error(format!(
+                "Session cwd mismatch for Session {session_id}: recovery must run from Project State root {} or within exact worktree {}, got {}",
+                identity.project_state_root.display(),
+                identity.worktree_identity.display(),
+                invocation.display(),
+            )));
+        }
+        // The exact root was checked above. Nested directories still need Git
+        // discovery so a nested repository cannot inherit its parent's authority.
+        if invocation != identity.worktree_identity {
+            let invocation_git_root = git_toplevel(&invocation, "recovery invocation scope")?;
+            if invocation_git_root != identity.worktree_identity {
+                return Err(mutation_error(format!(
+                    "Session worktree mismatch for Session {session_id}: recovery invocation resolves to {}, expected {}",
+                    invocation_git_root.display(),
+                    identity.worktree_identity.display(),
+                )));
+            }
+        }
+    }
     let binding_validation = terminal_kind.map_or_else(
         || {
             validate_projection_execution_binding_authority(
@@ -4293,6 +4440,15 @@ fn mutation_error(message: impl Into<String>) -> GwtError {
     GwtError::Other(message.into())
 }
 
+pub(crate) fn missing_session_ledger_message(session_id: &str) -> String {
+    format!(
+        "Session ledger is missing for Session {session_id}; durable identity cannot be recovered in this Session, and changing agent input or order cannot restore it. \
+         PM: for a monitored Issue, read issue.monitor.status and run issue.monitor.stop with its number, reason, current launch identity, and remove_from_queue:false. \
+         Confirm generation_release succeeded, close the returned stopped_window_id with pane.close, then run issue.monitor.requeue with number and reason to request a fresh Session. \
+         For other work, arrange a fresh Session with Start Work / Launch."
+    )
+}
+
 fn load_session_for_mutation(session_id: &str) -> Result<Session> {
     let path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
     if !path.try_exists().map_err(|error| {
@@ -4302,7 +4458,8 @@ fn load_session_for_mutation(session_id: &str) -> Result<Session> {
         ))
     })? {
         return Err(mutation_error(format!(
-            "Session ledger is missing for Session {session_id} at {}",
+            "{} (ledger path: {})",
+            missing_session_ledger_message(session_id),
             path.display()
         )));
     }
@@ -4596,6 +4753,12 @@ fn resolve_unique_existing_work(
     worktree_identity: &Path,
     expected: SessionWorkAuthorityExpectation<'_>,
 ) -> Result<ResolvedExistingWorkAuthority> {
+    let probe_span = tracing::Span::current()
+        .metadata()
+        .is_some_and(|metadata| metadata.name() == "work_materialization_probe");
+    if probe_span {
+        tracing::info!(target: "gwt.work_materialization_probe", stage = "work_lookup");
+    }
     let current_path =
         gwt_core::paths::gwt_workspace_projection_path_for_repo_path(work_items_root);
     let projection = load_workspace_projection_from_path(&current_path)
@@ -4777,9 +4940,18 @@ fn resolve_unique_existing_work(
         ));
     }
     if matching_containers > 1 {
+        let repair = if item
+            .execution_containers
+            .iter()
+            .any(|container| container.worktree_path.as_deref() == Some(Path::new(".")))
+        {
+            format!("; inspect workspace.work_repair params.work_id=\"{work_id}\" (dry-run by default; params.dry_run=false applies accepted-source repair)")
+        } else {
+            String::new()
+        };
         return Err(workspace_ensure_error(
             session_id,
-            &format!("assigned Work {work_id} has ambiguous matching execution containers"),
+            &format!("assigned Work {work_id} has ambiguous matching execution containers{repair}"),
         ));
     }
     for other in work_items
@@ -4826,6 +4998,9 @@ fn resolve_unique_existing_work(
                 WORK_PRUNE_REMEDY,
             ));
         }
+    }
+    if probe_span {
+        tracing::info!(target: "gwt.work_materialization_probe", stage = "work_lookup_complete");
     }
     Ok(ResolvedExistingWorkAuthority {
         work_id,
@@ -5077,6 +5252,29 @@ fn fill_option_path(target: &mut Option<PathBuf>, source: Option<&Path>) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_in_flight_diagnostic_requires_a_precommit_typed_cause() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = GwtError::WorkspaceOperationInFlight {
+            operation_id: "private-launch".into(),
+        };
+        let refusal = classify_workspace_transaction_error(&source);
+        assert_eq!(
+            refusal.diagnostic_reason.as_deref(),
+            Some("workspace_operation_in_flight")
+        );
+        assert!(!refusal.message.contains("private-launch"));
+        let lookalike = classify_workspace_transaction_error(&GwtError::Other(source.to_string()));
+        assert_eq!(
+            lookalike.diagnostic_reason.as_deref(),
+            Some("workspace_transaction_failed")
+        );
+    }
 
     #[test]
     fn workspace_transaction_failure_persists_cause_without_a_subscriber() {
@@ -7233,6 +7431,99 @@ mod tests {
                 assert!(error.message.contains("execution.reopen"), "{error:?}");
             },
         );
+    }
+
+    /// Issue #4363 (AC-3): a trusted worktree keeps the identity gate even
+    /// when its Monitor launch row is missing and a PM marker was inherited.
+    #[test]
+    fn identity_gate_uses_trusted_worktree_binding_independent_of_monitor_launch_row() {
+        with_strict_target_fixture(|repo, session| {
+            use crate::cli::hook::{workflow_policy, HookEvent, HookOutput};
+            use gwt_core::test_support::ScopedEnvVar;
+
+            let (session, binding) = bind_session_to_current_execution(repo, session);
+            seed_work_mutation_surfaces(repo, repo);
+            seed_unique_mutation_target(repo, repo, &session, "work-monitor-independent-identity");
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, &session.id);
+            let _review_dispatch = ScopedEnvVar::unset("GWT_REVIEW_DISPATCH");
+            let _pm_marker = ScopedEnvVar::set(
+                crate::pm_registry::GWT_PM_SCRATCH_DIR_ENV,
+                repo.join("inherited-pm-scratch"),
+            );
+            assert!(crate::cli::trusted_store::under_trusted_management(repo));
+
+            let edit = HookEvent {
+                tool_name: Some("Edit".to_string()),
+                tool_input: Some(serde_json::json!({
+                    "file_path": repo.join("fixture.rs"),
+                    "old_string": "old",
+                    "new_string": "new",
+                })),
+                transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
+                cwd: None,
+            };
+            let blocked = HookEvent {
+                tool_name: Some("Bash".to_string()),
+                tool_input: Some(serde_json::json!({
+                    "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"execution.blocked\",\"params\":{\"reason\":\"identity recovery is unavailable\"}}\nJSON",
+                })),
+                ..edit.clone()
+            };
+            let wait = HookEvent {
+                tool_input: Some(serde_json::json!({
+                    "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"issue.monitor.wait\",\"params\":{\"number\":2359,\"reason\":\"recovery pending\",\"resume_condition\":\"binding recovered\"}}\nJSON",
+                })),
+                ..blocked.clone()
+            };
+            let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(repo);
+            let set_monitor_launch_row = |present| {
+                let mut prefs = crate::IssueMonitorPrefs::default();
+                if present {
+                    prefs
+                        .launched_issues
+                        .push(crate::IssueMonitorLaunchedIssue {
+                            issue_number: binding.owner_number,
+                            window_id: "tab-1::identity-gate".to_string(),
+                        });
+                }
+                crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("save Monitor rows");
+            };
+            for present in [false, true] {
+                set_monitor_launch_row(present);
+                assert!(
+                    matches!(
+                        workflow_policy::evaluate(&edit, repo).expect("evaluate identity gate"),
+                        HookOutput::PreToolUsePermission { .. }
+                    ),
+                    "trusted work without an identity stays gated: Monitor row={present}"
+                );
+                assert_eq!(
+                    workflow_policy::evaluate(&blocked, repo).expect("evaluate stop path"),
+                    HookOutput::Silent,
+                    "execution.blocked stays reachable: Monitor row={present}"
+                );
+                assert_eq!(
+                    workflow_policy::evaluate(&wait, repo).expect("evaluate wait path"),
+                    HookOutput::Silent,
+                    "wait reporting stays reachable: Monitor row={present}"
+                );
+            }
+
+            let mut request = bound_workspace_update_request(&session);
+            request.intent.title_summary = Some("Monitor-independent identity".to_string());
+            apply_bound_authenticated_workspace_update(repo, &session.id, &binding, request)
+                .expect("set purpose and current focus with the trusted binding");
+            for present in [false, true] {
+                set_monitor_launch_row(present);
+                assert_eq!(
+                    workflow_policy::evaluate(&edit, repo).expect("evaluate named Work"),
+                    HookOutput::Silent,
+                    "the configured Work identity lifts the gate: Monitor row={present}"
+                );
+            }
+        });
     }
 
     /// Issue #5078 (AC-4): restoring the window of a Completed execution
@@ -9466,6 +9757,152 @@ mod tests {
                     .is_err()
             );
             assert_eq!(WorkMutationSnapshot::capture(repo, repo), before);
+        });
+    }
+
+    #[test]
+    fn work_materialization_http_probe_correlates_stages_without_mutation() {
+        with_strict_target_fixture(|repo, session| {
+            let (session, binding) = bind_session_to_current_execution(repo, session);
+            seed_work_mutation_surfaces(repo, repo);
+            seed_unique_mutation_target(repo, repo, &session, "work-http-probe");
+            let request = bound_work_materialization_probe_request(&session);
+            let before = WorkMutationSnapshot::capture(repo, repo);
+            let registry = crate::agent_capability::AgentCapabilityRegistry::default();
+            let token = registry.issue_bound(repo, &session.id, binding).unwrap();
+            let log = tempfile::NamedTempFile::new().unwrap();
+            let subscriber = tracing_subscriber::fmt()
+                .json()
+                .with_env_filter("off,gwt.work_materialization_probe=info")
+                .with_writer(log.reopen().unwrap())
+                .finish();
+            let _subscriber = tracing::subscriber::set_default(subscriber);
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let state = crate::project_transport::TransportState::new(
+                    crate::project_transport::ClientHub::default(),
+                    registry.clone(),
+                    "probe-diagnostic-host".into(),
+                    std::sync::Arc::new(|_| {}),
+                );
+                let app = crate::project_transport::agent_router(
+                    state,
+                    crate::project_transport::AccessLogSink::default(),
+                );
+                let server = tokio::spawn(async move {
+                    axum::serve(
+                        listener,
+                        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                    )
+                    .await
+                    .unwrap();
+                });
+                let url = format!("http://{address}/internal/work-materialization-probe");
+                let client = reqwest::Client::new();
+                let response = client
+                    .post(&url)
+                    .bearer_auth(&token)
+                    .json(&request)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                let receipt: AgentWorkMaterializationProbeReceipt = response.json().await.unwrap();
+                assert_eq!(receipt.work_id, "work-http-probe");
+                let response = client
+                    .post(&url)
+                    .bearer_auth("private-invalid-token")
+                    .json(&request)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+                server.abort();
+                let _ = server.await;
+            });
+            assert_eq!(WorkMutationSnapshot::capture(repo, repo), before);
+            let text = std::fs::read_to_string(log.path()).unwrap();
+            let records = text
+                .lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                .collect::<Vec<_>>();
+            for private in [
+                token.as_str(),
+                "private-invalid-token",
+                request.observation.cwd.as_str(),
+            ] {
+                assert!(
+                    !records
+                        .iter()
+                        .any(|record| json_value_contains(record, private)),
+                    "probe diagnostics must not expose private request data"
+                );
+            }
+            let stages = records
+                .iter()
+                .filter(|record| {
+                    let span = &record["span"];
+                    span["name"] == "work_materialization_probe"
+                        && record["target"] == "gwt.work_materialization_probe"
+                })
+                .map(|record| {
+                    (
+                        record["span"]["request_id"].as_str().unwrap().to_string(),
+                        record["fields"]["stage"].as_str().unwrap().to_string(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let first_id = &stages
+                .first()
+                .expect("probe request must log its entry before processing")
+                .0;
+            let successful = stages
+                .iter()
+                .filter(|(id, _)| id == first_id)
+                .map(|(_, stage)| stage.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                successful,
+                [
+                    "request",
+                    "authentication",
+                    "authenticated",
+                    "dispatch",
+                    "worker",
+                    "execution_validation",
+                    "target_validation",
+                    "work_lookup",
+                    "work_lookup_complete",
+                    "validated",
+                    "worker_complete",
+                    "reply"
+                ]
+            );
+            let rejected = stages
+                .iter()
+                .filter(|(id, _)| id != first_id)
+                .map(|(_, stage)| stage.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(rejected, ["request", "authentication", "reply"]);
+            let replies = records
+                .iter()
+                .filter(|record| record["fields"]["stage"] == "reply")
+                .collect::<Vec<_>>();
+            assert_eq!(replies.len(), 2);
+            for reply in replies {
+                let expected = if reply["span"]["request_id"] == first_id.as_str() {
+                    200
+                } else {
+                    401
+                };
+                assert_eq!(reply["fields"]["status"].as_u64(), Some(expected));
+                assert!(reply["fields"]["elapsed_ms"].as_u64().is_some());
+            }
         });
     }
 

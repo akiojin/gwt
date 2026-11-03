@@ -41,17 +41,27 @@ test('compact PM Reports shares one scroll at 600, 1280 and 400 pixels', async (
     post('pm.status.set', { items: [{ kind: 'waiting', text: 'Waiting for required CI', started_at: new Date().toISOString() }],
       next_trigger: 'Required CI passes, then verify every deployment result. '.repeat(12), user_action: null });
     await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+    // The stopped PM registers after the initial workspace projection. Open
+    // its normal surface only after that registration has reached the page.
+    await expect.poll(async () => {
+      await sendLiveGwtEvent(page, { kind: 'frontend_ready' });
+      return page.locator('.workspace-window .pm-chat').count();
+    }, { timeout: 30_000 }).toBe(1);
+    await expect(page.locator('#op-pm-entry')).toHaveAttribute('data-pm-state', 'stopped');
+    await page.locator('#op-pm-entry').click();
     const pane = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
     const card = pane.getByRole('region', { name: 'PM status', exact: true });
     await expect(card).toBeVisible({ timeout: 30_000 });
-    const id = await pane.getAttribute('data-id');
     await expect(pane.locator('.pm-chat__message')).toHaveCount(6);
     const body = pane.locator('.pm-chat__body');
     const details = card.locator('details');
     await expect(details).not.toHaveAttribute('open');
     for (const width of [600, 1280, 400]) {
-      await sendLiveGwtEvent(page, { kind: 'update_window_geometry', id,
-        geometry: { x: 20, y: 20, width, height: 700 }, cols: 80, rows: 24 });
+      // Split panes fill their parent rather than applying floating-window
+      // geometry. Resize the real viewport, accounting for responsive chrome.
+      await page.setViewportSize({ width, height: 850 });
+      const chromeWidth = width - await pane.evaluate(node => Math.round(node.getBoundingClientRect().width));
+      await page.setViewportSize({ width: width + chromeWidth, height: 850 });
       await expect.poll(() => pane.evaluate(node => Math.round(node.getBoundingClientRect().width))).toBe(width);
       await body.evaluate(node => { node.scrollTop = 0; });
       await expect(card.locator('summary')).toContainText('0 working · 1 waiting');
@@ -78,7 +88,7 @@ test('compact PM Reports shares one scroll at 600, 1280 and 400 pixels', async (
     }
     await details.locator('summary').click();
     await expect(details).toHaveAttribute('open');
-    await sendLiveGwtEvent(page, { kind: 'load_pm_reports', id });
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
     await expect(details).toHaveAttribute('open');
     await pane.locator('.pm-chat__message').last().scrollIntoViewIfNeeded();
     expect(await body.evaluate(node => node.scrollTop)).toBeGreaterThan(0);

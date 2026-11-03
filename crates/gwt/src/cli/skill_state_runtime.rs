@@ -103,7 +103,7 @@ pub(super) fn run_with_start_evidence<E: CliEnv>(
                 }
             }
         }
-        SkillStateAction::Complete { spec } => {
+        SkillStateAction::Complete { spec, .. } => {
             finalize(&worktree, skill_name, skill_display, verb, spec, None, out)
         }
         SkillStateAction::Abort { spec, reason } => finalize(

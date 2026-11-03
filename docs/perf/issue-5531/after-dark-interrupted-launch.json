@@ -1,0 +1,28 @@
+{
+  "owned_pid": 32196,
+  "baseline_sha": "bc175f05a2b730775e1f5302b3af0d588ba4470a",
+  "head_sha": "a0465e2b919a928fc72f74e5c997efb92c258d1c",
+  "isolated_home": "E:\\gwt\\work\\issue-5531\\target\\issue-5531-home-25af6faa55bd434b8c0e4ab394d28ee6",
+  "acceptance_duration": true,
+  "checkout": "E:\\gwt\\work\\issue-5531",
+  "label": "after",
+  "source_sha256": {
+    "branches-cleanup-surface.js": "bde7167028994867cd651344e4578b4690ab45082f89439511ce9b5ea2839760",
+    "board-logs-surface.js": "85b9c423b99a84a44194b53e8650ded353a4494ba72f846b3e28b0f62441334e",
+    "project-index-search-surface.js": "d6e9a9d6170e40eb0d7a5497596e56d0e6c3e14a87bf54feb16678a1aa1ed78f",
+    "app.js": "4f31f07c0ee1f5779910503cfa69edace00f29d41c9e8bce77f677657a888d1c",
+    "settings-surface.js": "6f1cd242ff9278443e8c076dd92d530a43a72cecb727dfa91c4eea9663f19817",
+    "knowledge-kanban-surface.js": "4b6e08043e804efcadacd867697776296017c9a2cc04908956d5f080aeecf773",
+    "console-window.js": "19a5d4a3617385456bd792fe01ff4e1a595e76e78406dd00e17e2c61bbdc803e",
+    "socket-receive-dispatcher.js": "528b73593022850585acb0166e92978eb0d6cb231bc4086ac48e0090191ef88e",
+    "profile-window-surface.js": "68f2aac1a3324f779247a4099b163549e219c27f5196e2755500e9e93165b27a",
+    "file-tree-surface.js": "6fed771e5183327d33392f0cbe227d9a474fe01960e739b2c96ea7d99d79c596"
+  },
+  "native_visibility": "isolated runner: focus emulation disabled; browser background defaults restored",
+  "test_sha256": {
+    "crates/gwt/playwright/tests/socket-receive-backpressure-live.spec.ts": "a0ac6739abd78ddbd92d6be5132cbd486b09eb8cbb56f8ec301b2809adbe858c",
+    "scripts/diagnostics/issue-5531-browser-check.ps1": "fd6f77ce5f2076f6fd2bf0ca291863e565d947a7cd3aa09a481d2017eecbdebc"
+  },
+  "playwright_version": "1.49.1",
+  "background_milliseconds": 1800000
+}

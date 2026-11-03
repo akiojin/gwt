@@ -1,0 +1,32 @@
+{
+  "source": "errors.2026-10-15.jsonl",
+  "snapshot_through": "2026-10-15T22:20:13Z",
+  "counts": {
+    "total_hook_live_failures": 1222,
+    "legacy_failures": 643,
+    "detailed_failures": 579,
+    "attempted": 323,
+    "zero_attempts": 256
+  },
+  "examples": [
+    {
+      "line": 1034,
+      "recorded_at": "2026-10-15T12:31:15.941827700Z",
+      "message": "PostToolUse/runtime-state/live-forward (fail-open): hook live readiness delivery exhausted its bounded deadline after 0 attempts; attempts=0 elapsed_ms=0 attempt_budget_ms=100 overall_budget_ms=0"
+    },
+    {
+      "line": 1838,
+      "recorded_at": "2026-10-15T17:47:08.035024500Z",
+      "message": "PostToolUse/forward/live-forward (fail-open): hook live event transport timed out; attempts=1 elapsed_ms=476 attempt_budget_ms=100 overall_budget_ms=99"
+    }
+  ],
+  "limitation": "Successful HTTP 204 access records are suppressed; receiver stage latency cannot be inferred from this ledger.",
+  "attempted_failure_wall_ms": {
+    "min": 1,
+    "median": 104,
+    "p95": 266,
+    "max": 476
+  },
+  "attempts_with_remaining_budget_under_20ms": 41,
+  "interpretation": "Zero attempts proves pre-attempt budget consumption. Attempt elapsed is wall time, including scheduling; it is not a direct measurement of receiver ACK latency."
+}

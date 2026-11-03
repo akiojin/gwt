@@ -31,6 +31,8 @@ pub enum RunStatus {
 pub struct RunLifecycle {
     pub status: RunStatus,
     pub runner_pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_started_at: Option<u64>,
     /// The private pipe carries the token; only its digest reaches a record.
     /// A record ID from a diagnostic mirror does not authorize interruption.
     pub watchdog_token_hash: String,
@@ -49,11 +51,42 @@ impl RunLifecycle {
         Self {
             status: RunStatus::Running,
             runner_pid: std::process::id(),
+            runner_started_at: crate::process::host_process_start_time(std::process::id()),
             watchdog_token_hash: token_hash(token),
             current_command: None,
             reason: None,
             external_terminations: None,
         }
+    }
+}
+
+/// A reused PID is not the old runner. Unreadable process identity retains
+/// the runner; only definite absence or an observed mismatch permits recovery.
+pub(super) fn runner_is_alive(
+    pid: u32,
+    started_at: Option<u64>,
+    created_at: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    if !crate::process::is_host_process_alive(pid) {
+        return false;
+    }
+    if let Some(expected) = started_at {
+        return crate::process::host_process_start_time(pid)
+            .is_none_or(|actual| actual == expected);
+    }
+    // Legacy records have no opaque identity. A strictly later process start
+    // proves reuse on platforms with stable epoch timestamps. Linux/WSL boot
+    // time can move while a process lives, so never use its epoch for identity.
+    #[cfg(not(target_os = "linux"))]
+    {
+        crate::process::host_process_start_epoch_secs(pid)
+            .and_then(|start| chrono::DateTime::from_timestamp(i64::try_from(start).ok()?, 0))
+            .is_none_or(|start| start <= created_at)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = created_at;
+        true
     }
 }
 
@@ -84,7 +117,11 @@ pub(super) fn previous_external_terminations(
         .as_ref()
         .filter(|lifecycle| lifecycle.status == RunStatus::Running)
     {
-        if crate::process::is_host_process_alive(lifecycle.runner_pid) {
+        if runner_is_alive(
+            lifecycle.runner_pid,
+            lifecycle.runner_started_at,
+            record.created_at,
+        ) {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "the previous verification runner is unsettled; wait for its terminal result before retrying (its watchdog may still be recording an external termination)",
@@ -422,6 +459,38 @@ mod tests {
             msg.to_string().contains("replaced or interrupted"),
             "unexpected error: {msg}"
         );
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn legacy_reused_runner_pid_is_recovered_from_later_process_creation() {
+        let fixture = isolated_git_worktree();
+        let worktree = fixture.dir.path();
+        let mut record = super::super::tests::passing_record("predecessor", "unused");
+        record.lifecycle = Some(RunLifecycle::running("token"));
+        record.created_at = chrono::DateTime::from_timestamp(
+            crate::process::host_process_start_epoch_secs(std::process::id()).unwrap() as i64 - 1,
+            0,
+        )
+        .unwrap();
+        let mut document = serde_json::to_value(record).unwrap();
+        document["lifecycle"]
+            .as_object_mut()
+            .unwrap()
+            .remove("runner_started_at");
+        let record = serde_json::from_value(document).unwrap();
+        save(worktree, &record).unwrap();
+        let count = crate::cli::trusted_store::with_write_lease(worktree, || {
+            previous_external_terminations(worktree, None)
+        })
+        .unwrap();
+        assert_eq!(count, None);
+        let recovered = load(worktree).unwrap().unwrap();
+        assert_eq!(
+            recovered.lifecycle.as_ref().unwrap().status,
+            RunStatus::Interrupted
+        );
+        assert!(!recovered.all_passed);
     }
 
     #[test]

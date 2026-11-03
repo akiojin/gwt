@@ -1,0 +1,90 @@
+{
+  "timestamp": "2026-10-20T02:57:43.761114+00:00",
+  "pid": 13508,
+  "sampled_bytes": 805306368,
+  "marker_counts": {
+    ".jsonl": 314935,
+    ".gwt": 317975,
+    "worktree": 452108,
+    "work_id": 626,
+    "schema_version": 7426,
+    "terminal_output": 439,
+    "board_posted": 0,
+    "workspace_state": 1161,
+    "GWT_": 8910,
+    "Issue #": 212144,
+    "Codex": 266989,
+    "\"kind\"": 313592,
+    "fingerprint": 5172,
+    "source": 38402
+  },
+  "committed_by_type": {
+    "0x20000": 2176581632,
+    "0x40000": 29978624,
+    "0x1000000": 110542848
+  },
+  "private_allocations": 368,
+  "largest_private_allocations": [
+    {
+      "committed_bytes": 127803392
+    },
+    {
+      "committed_bytes": 84557824
+    },
+    {
+      "committed_bytes": 68161536
+    },
+    {
+      "committed_bytes": 42278912
+    },
+    {
+      "committed_bytes": 20639744
+    },
+    {
+      "committed_bytes": 16576512
+    },
+    {
+      "committed_bytes": 16576512
+    },
+    {
+      "committed_bytes": 16576512
+    },
+    {
+      "committed_bytes": 16576512
+    },
+    {
+      "committed_bytes": 16572416
+    },
+    {
+      "committed_bytes": 16502784
+    },
+    {
+      "committed_bytes": 16482304
+    },
+    {
+      "committed_bytes": 16449536
+    },
+    {
+      "committed_bytes": 16371712
+    },
+    {
+      "committed_bytes": 16338944
+    },
+    {
+      "committed_bytes": 16289792
+    },
+    {
+      "committed_bytes": 16175104
+    },
+    {
+      "committed_bytes": 16134144
+    },
+    {
+      "committed_bytes": 16121856
+    },
+    {
+      "committed_bytes": 16117760
+    }
+  ],
+  "limitations": "Read-only committed-page sample; freed heap pages can remain and markers do not prove live retention. No raw content emitted."
+}

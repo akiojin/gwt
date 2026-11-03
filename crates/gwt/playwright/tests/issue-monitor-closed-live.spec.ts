@@ -76,12 +76,12 @@ test.describe("Closed Issue retirement (live backend)", () => {
       await expect(page.locator("#close-project-button")).toBeVisible();
       await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? []).some((entry: any) =>
         entry.payload.kind === "workspace_state"));
-      const windows = page.locator('.workspace-window[data-preset="issue"]');
-      if (!await windows.count()) await sendLiveGwtEvent(page, { kind: "create_window", preset: "issue", bounds: { x: 50, y: 40, width: 1150, height: 850 } });
+      await page.locator(".op-rail").getByRole("button", { name: "Issues", exact: true }).click();
+      const windows = page.locator('.split-pane[data-active="true"][data-surface="issues"] .workspace-window[data-preset="issue"]');
       await expect(windows.first()).toBeVisible();
+      await expect(windows.first().locator(".issue-bridge-root")).toBeVisible();
       const windowId = await windows.first().getAttribute("data-id");
-      await sendLiveGwtEvent(page, { kind: "update_window_geometry", id: windowId,
-        geometry: { x: 50, y: 40, width: 1150, height: 850 }, cols: 100, rows: 28 });
+      await page.setViewportSize({ width: 1280, height: 1020 });
       await expect.poll(() => windows.first().evaluate(element => element.getBoundingClientRect().height)).toBeGreaterThan(800);
       const before = await cli("issue.monitor.status");
       expect(before.enabled).toBe(false);

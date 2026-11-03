@@ -15,12 +15,17 @@ bash scripts/run-node-tests-with-linkedom.sh "$@" \
   crates/gwt/web/__tests__/index-works-scope.test.mjs \
   crates/gwt/web/__tests__/launch-wizard-intake.test.mjs \
   crates/gwt/web/__tests__/launch-wizard-agent-setup.test.mjs \
+  crates/gwt/web/__tests__/launch-wizard-agent-settings-sets.test.mjs \
   crates/gwt/web/__tests__/operator-chrome-structure.test.mjs \
   crates/gwt/web/__tests__/operator-shell-runtime.test.mjs \
   crates/gwt/web/__tests__/provider-usage-surface.test.mjs \
+  crates/gwt/web/__tests__/dynamic-import-paths.test.mjs \
+  crates/gwt/web/__tests__/unused-code.test.mjs \
   crates/gwt/web/__tests__/operator-rail.test.mjs \
   crates/gwt/web/__tests__/surface-rail.test.mjs \
   crates/gwt/web/__tests__/split-surfaces.test.mjs \
+  crates/gwt/web/__tests__/surface-layout-only.test.mjs \
+  crates/gwt/web/__tests__/works-surface.test.mjs \
   crates/gwt/web/__tests__/agents-surface.test.mjs \
   crates/gwt/web/__tests__/terminal-text-preview.test.mjs \
   crates/gwt/web/__tests__/pm-launcher.test.mjs \
@@ -38,6 +43,7 @@ bash scripts/run-node-tests-with-linkedom.sh "$@" \
   crates/gwt/web/__tests__/knowledge-event-refresh.test.mjs \
   crates/gwt/web/__tests__/knowledge-issue-monitor.test.mjs \
   crates/gwt/web/__tests__/agent-kanban-surface.test.mjs \
+  crates/gwt/web/__tests__/agent-activity-model.test.mjs \
   crates/gwt/web/__tests__/issue-preview-placement.test.mjs \
   crates/gwt/web/__tests__/issue-preview-pane.test.mjs \
   crates/gwt/web/__tests__/issue-row-work-info.test.mjs \
@@ -52,18 +58,13 @@ bash scripts/run-node-tests-with-linkedom.sh "$@" \
   crates/gwt/web/__tests__/recovery-center-modal.test.mjs \
   crates/gwt/web/__tests__/connection-overlay.test.mjs \
   crates/gwt/web/__tests__/update-button.test.mjs \
-  crates/gwt/web/__tests__/window-docking.test.mjs \
   crates/gwt/web/__tests__/terminal-context-menu.test.mjs \
   crates/gwt/web/__tests__/terminal-copy-shortcut.test.mjs \
   crates/gwt/web/__tests__/terminal-wheel-scroll.test.mjs \
   crates/gwt/web/__tests__/terminal-output-buffer.test.mjs \
-  crates/gwt/web/__tests__/canvas-wheel-gesture.test.mjs \
   crates/gwt/web/__tests__/terminal-viewport-reflow.test.mjs \
   crates/gwt/web/__tests__/startup-metrics.test.mjs \
-  crates/gwt/web/__tests__/window-geometry-sync.test.mjs \
-  crates/gwt/web/__tests__/window-drag-geometry-wiring.test.mjs \
   crates/gwt/web/__tests__/window-worktree-form.test.mjs \
-  crates/gwt/web/__tests__/fleet-minimap.test.mjs \
   crates/gwt/web/__tests__/custom-agent-env-editor.test.mjs \
   crates/gwt/web/__tests__/settings-system-tab.test.mjs \
   crates/gwt/web/__tests__/settings-issues.test.mjs \
@@ -76,6 +77,7 @@ bash scripts/run-node-tests-with-linkedom.sh "$@" \
   crates/gwt/web/__tests__/socket-receive-dispatcher.test.mjs \
   crates/gwt/web/__tests__/ui-state-store.test.mjs \
   crates/gwt/web/__tests__/ui-content.test.mjs \
+  crates/gwt/web/__tests__/pull-render-structure.test.mjs \
   crates/gwt/web/__tests__/pull-render-contract.test.mjs \
   crates/gwt/web/__tests__/issue-render-sync.test.mjs \
   crates/gwt/web/__tests__/render-degradation-banner.test.mjs \
@@ -84,24 +86,18 @@ bash scripts/run-node-tests-with-linkedom.sh "$@" \
   crates/gwt/web/__tests__/ui-trace-wiring.test.mjs \
   crates/gwt/web/__tests__/interaction-guard.test.mjs \
   crates/gwt/web/__tests__/wizard-interaction-guard-wiring.test.mjs \
-  crates/gwt/web/__tests__/viewport-persist-throttle.test.mjs \
-  crates/gwt/web/__tests__/viewport-sync.test.mjs \
   crates/gwt/web/__tests__/agent-completion-notifications.test.mjs \
   crates/gwt/web/__tests__/project-page-metadata.test.mjs \
   crates/gwt/web/__tests__/toast-host.test.mjs \
   crates/gwt/web/__tests__/notification-center.test.mjs \
   crates/gwt/web/__tests__/notification-fanout.test.mjs \
   crates/gwt/web/__tests__/playwright-embedded-routes.test.mjs \
-  crates/gwt/web/__tests__/viewport-persist-wiring.test.mjs \
   crates/gwt/web/__tests__/system-settings-interaction-guard-wiring.test.mjs \
   crates/gwt/web/__tests__/clone-modal-focus-guard.test.mjs \
   crates/gwt/web/__tests__/clone-modal-focus-guard-wiring.test.mjs \
   crates/gwt/web/__tests__/recent-row-style.test.mjs \
   crates/gwt/web/__tests__/release-notes-window.test.mjs \
   crates/gwt/web/__tests__/surface-window-reopen.test.mjs \
-  crates/gwt/web/__tests__/preset-modal-surface-deck.test.mjs \
   crates/gwt/web/__tests__/logs-process-facet.test.mjs \
   crates/gwt/web/__tests__/logs-scope-facet.test.mjs \
-  crates/gwt/web/__tests__/window-runtime-state.test.mjs \
-  crates/gwt/web/__tests__/window-list-model.test.mjs \
-  crates/gwt/web/__tests__/window-close-confirm-modal.test.mjs
+  crates/gwt/web/__tests__/window-runtime-state.test.mjs

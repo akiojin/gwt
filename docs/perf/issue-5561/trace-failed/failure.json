@@ -1,0 +1,12 @@
+{
+  "source": "Playwright test.trace error entry from the failed dark observation",
+  "message": "Error: Timeout 30000ms exceeded while waiting on the predicate",
+  "function": "assertOutput",
+  "file": "crates/gwt/playwright/tests/runtime-memory-budget-live.spec.ts",
+  "line_at_run": 162,
+  "last_observed_rss_bytes": 535760896,
+  "maximum_observed_rss_bytes": 601468928,
+  "raw_trace_resource_count": 56287,
+  "raw_trace_resource_bytes": 7644015406,
+  "limitations": "The output predicate timed out. Trace size and slow reads are diagnostic observations, not proof of a product memory failure or of the timeout's sole cause. The runner was stopped after failure while the next theme was pending; wrapper cleanup completed. Post-failure process liveness and memory samples are excluded."
+}

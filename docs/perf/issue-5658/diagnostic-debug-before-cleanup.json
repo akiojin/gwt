@@ -1,0 +1,9 @@
+{
+  "gui_exited": true,
+  "cleaned_at": "2026-10-16T22:29:18.0299204Z",
+  "daemon_pid": 37424,
+  "gui_pid": 52700,
+  "daemon_exited": true,
+  "evidence_classification": "debug diagnostic; excluded from shipping-profile CPU acceptance",
+  "build_profile": "debug"
+}

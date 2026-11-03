@@ -5,6 +5,7 @@
 //! caller of this storage primitive must establish its own PM authority.
 
 use std::{
+    collections::BTreeMap,
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
@@ -119,6 +120,129 @@ pub struct Forecast {
     pub missing_inputs: Vec<String>,
 }
 
+/// A bounded planning-only upsert, never an execution or registration action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum PlanningAction {
+    Goal(Goal),
+    Milestone(Milestone),
+    Risk(Risk),
+    Decision(Decision),
+    Policy(PlanningPolicy),
+    Recurring(RecurringItem),
+    Link(RoadmapItem),
+}
+
+impl PlanningAction {
+    fn target(&self) -> (&'static str, &str) {
+        match self {
+            Self::Goal(value) => ("goal", &value.id),
+            Self::Milestone(value) => ("milestone", &value.id),
+            Self::Risk(value) => ("risk", &value.id),
+            Self::Decision(value) => ("decision", &value.id),
+            Self::Policy(value) => ("policy", &value.id),
+            Self::Recurring(value) => ("recurring", &value.id),
+            Self::Link(value) => ("link", &value.id),
+        }
+    }
+
+    fn upsert(&self, state: &mut PmPlanningState) {
+        fn upsert<T>(items: &mut Vec<T>, value: T, id: impl Fn(&T) -> &str) {
+            if let Some(item) = items.iter_mut().find(|item| id(item) == id(&value)) {
+                *item = value;
+            } else {
+                items.push(value);
+            }
+        }
+        match self {
+            Self::Goal(value) => upsert(&mut state.goals, value.clone(), |item| &item.id),
+            Self::Milestone(value) => upsert(&mut state.milestones, value.clone(), |item| &item.id),
+            Self::Risk(value) => upsert(&mut state.risks, value.clone(), |item| &item.id),
+            Self::Decision(value) => upsert(&mut state.decisions, value.clone(), |item| &item.id),
+            Self::Policy(value) => upsert(&mut state.policies, value.clone(), |item| &item.id),
+            Self::Recurring(value) => {
+                upsert(&mut state.recurring_items, value.clone(), |item| &item.id)
+            }
+            Self::Link(value) => upsert(&mut state.roadmap_items, value.clone(), |item| &item.id),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanningApplyRequest {
+    pub action: PlanningAction,
+    pub expected_revision: u64,
+    pub reason: String,
+    pub idempotency_key: String,
+}
+
+impl PlanningApplyRequest {
+    pub fn validate(&self) -> io::Result<()> {
+        if self.reason.trim().is_empty()
+            || self.idempotency_key.trim().is_empty()
+            || self.action.target().1.trim().is_empty()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "planning reason, idempotency_key and action value.id must be nonempty",
+            ));
+        }
+        let action = serde_json::to_string(&self.action).map_err(io::Error::other)?;
+        if gwt_core::error_ledger::redact_credentials(&action) != action {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "planning records must not contain credentials",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanningFieldChange {
+    pub before: serde_json::Value,
+    pub after: serde_json::Value,
+}
+
+/// Direct planning references only, not dependency propagation or delivery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanningChangeImpact {
+    pub record_created: bool,
+    pub changes: BTreeMap<String, PlanningFieldChange>,
+    pub directly_affected_issues: Vec<u64>,
+    pub missing_inputs: Vec<String>,
+}
+
+/// Receipts contain identity, request hashes and redacted changed fields,
+/// never the full action or raw idempotency key.
+/// Retention is intentionally append-only until the later audit-policy slice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanningReceipt {
+    pub actor: String,
+    pub requester: String,
+    pub action_kind: String,
+    pub target_id: String,
+    pub expected_revision: u64,
+    pub resulting_revision: u64,
+    pub reason: String,
+    pub policy_versions: BTreeMap<String, u64>,
+    pub risk_class: String,
+    pub outcome: String,
+    pub request_digest: String,
+    pub idempotency_key_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_impact: Option<PlanningChangeImpact>,
+}
+
 /// Typed decision data. Missing fields retain safe empty defaults; unknown
 /// fields are refused so an older writer cannot silently discard newer data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,6 +259,8 @@ pub struct PmPlanningState {
     pub policies: Vec<PlanningPolicy>,
     pub latest_forecasts: Vec<Forecast>,
     pub audit_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub audit_receipts: Vec<PlanningReceipt>,
 }
 
 impl Default for PmPlanningState {
@@ -151,6 +277,7 @@ impl Default for PmPlanningState {
             policies: Vec::new(),
             latest_forecasts: Vec::new(),
             audit_cursor: None,
+            audit_receipts: Vec::new(),
         }
     }
 }
@@ -274,9 +401,7 @@ pub fn mutate_planning_state<T>(
     expected_revision: u64,
     mutation: impl FnOnce(&mut PmPlanningState) -> io::Result<T>,
 ) -> io::Result<(PmPlanningState, T)> {
-    create_parent_durably(path)?;
-    let lock = NamedFileLock::acquire(&path.with_extension("lock"), "pm_planning")?;
-    let result = (|| {
+    with_planning_lock(path, || {
         let mut state = read_state(path, true)?;
         if state.revision != expected_revision {
             return Err(io::Error::new(
@@ -300,10 +425,92 @@ pub fn mutate_planning_state<T>(
         state.revision = next_revision;
         publish_state(path, &state)?;
         Ok((state, value))
-    })();
+    })
+}
+
+fn with_planning_lock<T>(path: &Path, action: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    create_parent_durably(path)?;
+    let lock = NamedFileLock::acquire(&path.with_extension("lock"), "pm_planning")?;
+    let result = action();
     let unlocked = lock.unlock();
     match (result, unlocked) {
         (Ok(value), Ok(())) => Ok(value),
         (Err(error), _) | (Ok(_), Err(error)) => Err(error),
     }
+}
+
+/// The caller must prove registered PM authority before invoking this store.
+/// Data and replay evidence are published together under the existing lock.
+pub fn apply_planning_action(
+    path: &Path,
+    actor: &str,
+    request: &PlanningApplyRequest,
+) -> io::Result<PlanningReceipt> {
+    request.validate()?;
+    if actor.trim().is_empty() || gwt_core::error_ledger::redact_credentials(actor) != actor {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid planning actor",
+        ));
+    }
+    let request_digest =
+        gwt_core::pm_authorization::digest(&serde_json::to_vec(request).map_err(io::Error::other)?);
+    let key_digest = gwt_core::pm_authorization::digest(request.idempotency_key.as_bytes());
+    with_planning_lock(path, || {
+        let mut state = read_state(path, true)?;
+        // Retry precedes CAS: later valid writes do not invalidate the receipt.
+        if let Some(receipt) = state
+            .audit_receipts
+            .iter()
+            .find(|receipt| receipt.idempotency_key_digest == key_digest)
+        {
+            if receipt.actor == actor && receipt.request_digest == request_digest {
+                return Ok(receipt.clone());
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "planning idempotency key already used by a different actor or request",
+            ));
+        }
+        if state.revision != request.expected_revision {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "stale PM planning revision: expected {}, current {}",
+                    request.expected_revision, state.revision
+                ),
+            ));
+        }
+        let next_revision = state.revision.checked_add(1).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "PM planning revision overflow")
+        })?;
+        let change_impact = crate::pm_policy::assess_planning_change(&state, &request.action)
+            .map_err(io::Error::other)?;
+        request.action.upsert(&mut state);
+        let (kind, id) = request.action.target();
+        let receipt = PlanningReceipt {
+            actor: actor.into(),
+            requester: actor.into(),
+            action_kind: kind.into(),
+            target_id: id.into(),
+            expected_revision: request.expected_revision,
+            resulting_revision: next_revision,
+            reason: gwt_core::error_ledger::redact_credentials(&request.reason),
+            policy_versions: state
+                .policies
+                .iter()
+                .map(|policy| (policy.id.clone(), policy.version))
+                .collect(),
+            risk_class: "planning_only".into(),
+            outcome: "applied".into(),
+            request_digest,
+            idempotency_key_digest: key_digest,
+            change_impact,
+        };
+        state.revision = next_revision;
+        state.audit_cursor = Some(format!("plan-{next_revision}"));
+        state.audit_receipts.push(receipt.clone());
+        publish_state(path, &state)?;
+        Ok(receipt)
+    })
 }

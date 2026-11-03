@@ -15,12 +15,12 @@
 //! - malformed lines are skipped leniently (warn, keep going);
 //! - terminal (Done / Discarded) items never apply events stamped at or
 //!   before their close time (no re-open, no `updated_at` rollback);
-//! - only works.json is written — sessions / current.json / journal.jsonl
+//! - only works.json and its close-projection proof are written — sessions / current.json / journal.jsonl
 //!   are untouched (SC-261).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{GwtError, Result, WorkspaceStateLoadError, WorkspaceStateLoadErrorKind};
 use crate::workspace_projection::{
     decode_workspace_work_event_line, load_workspace_work_items_from_path,
-    save_workspace_work_items_projection_to_path, workspace_execution_container_same,
+    resolve_workspace_work_event_container, workspace_execution_container_same,
     DecodedWorkspaceWorkEvent, DuplicateWorkEventProvenance, WorkEvent, WorkEventApplyOutcome,
     WorkEventKind, WorkItem, WorkItemsIntakeSnapshot, WorkItemsProjection,
     WorkspaceExecutionContainerRef,
@@ -51,20 +51,28 @@ impl WorkEventsIntakeReport {
     }
 }
 
-/// One shared `events.jsonl` source plus its reader context for diagnostics.
+/// One shared `events.jsonl` source plus its explicit worktree or ref context.
 /// Only explicit event containers establish Work refs; the reader's worktree
 /// or remote ref must never supply one. The raw content remains immutable and
 /// may be shared across several refs that point at the same Git blob.
 #[derive(Debug, Clone)]
 pub struct SharedWorkEventsSource {
     content: Arc<str>,
-    source_execution_container: Option<WorkspaceExecutionContainerRef>,
+    source_execution_container: Option<Arc<WorkspaceExecutionContainerRef>>,
 }
 
 impl SharedWorkEventsSource {
     pub fn new(
         content: impl Into<Arc<str>>,
         source_execution_container: Option<WorkspaceExecutionContainerRef>,
+    ) -> Self {
+        Self::with_shared_container(content, source_execution_container.map(Arc::new))
+    }
+
+    /// Keep one source context allocation for all sources in a group.
+    pub fn with_shared_container(
+        content: impl Into<Arc<str>>,
+        source_execution_container: Option<Arc<WorkspaceExecutionContainerRef>>,
     ) -> Self {
         Self {
             content: content.into(),
@@ -73,11 +81,304 @@ impl SharedWorkEventsSource {
     }
 }
 
-fn is_close_kind(kind: WorkEventKind) -> bool {
+/// Outcome of a projection-only repair of one Work's portable container aliases.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WorkEventContainersRepairReport {
+    pub work_id: String,
+    pub changed: bool,
+    pub repaired_aliases: usize,
+}
+
+/// Refold only a Work's already accepted history using durable source roots.
+/// No lifecycle event or source file is written. Missing or conflicting
+/// provenance is an error, including for terminal Work and dry runs.
+pub fn repair_work_event_containers(
+    works_path: &Path,
+    work_id: &str,
+    sources: Vec<SharedWorkEventsSource>,
+    close_path: Option<&Path>,
+    dry_run: bool,
+) -> Result<WorkEventContainersRepairReport> {
+    let snapshot = WorkItemsIntakeSnapshot::capture_for_container_repair(works_path, close_path)?;
+    publish_work_event_containers_repair(&snapshot, work_id, sources, dry_run)
+}
+
+fn publish_work_event_containers_repair(
+    snapshot: &WorkItemsIntakeSnapshot,
+    work_id: &str,
+    sources: Vec<SharedWorkEventsSource>,
+    dry_run: bool,
+) -> Result<WorkEventContainersRepairReport> {
+    let refuse = |reason: &str| {
+        GwtError::Other(format!("Work {work_id} container repair refused: {reason}"))
+    };
+    let mut previous = snapshot
+        .raw_projection()?
+        .ok_or_else(|| refuse("works projection is missing"))?;
+    let targets = previous
+        .work_items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| item.id == work_id)
+        .collect::<Vec<_>>();
+    let [(target_index, target)] = targets.as_slice() else {
+        return Err(refuse("exactly one existing target Work is required"));
+    };
+    let target_index = *target_index;
+    let target = (*target).clone();
+    if target.events.is_empty()
+        || target.legacy_metadata_authoritative
+        || target.legacy_metadata_snapshot.is_some()
+        || target.legacy_metadata_snapshot_at.is_some()
+    {
+        return Err(refuse(
+            "complete eventful, non-compacted history is required",
+        ));
+    }
+    if snapshot
+        .detachments()?
+        .get(work_id)
+        .is_some_and(|entries| !entries.is_empty())
+    {
+        return Err(refuse("target has explicit container detachments"));
+    }
+    let anchors = target
+        .execution_containers
+        .iter()
+        .filter(|container| {
+            container
+                .worktree_path
+                .as_deref()
+                .is_some_and(Path::is_absolute)
+        })
+        .collect::<Vec<_>>();
+    let [anchor] = anchors.as_slice() else {
+        return Err(refuse("ambiguous or missing absolute container anchor"));
+    };
+    if anchor.branch.as_deref().is_none_or(str::is_empty)
+        || target.execution_containers.iter().any(|container| {
+            container.branch != anchor.branch
+                || (container.worktree_path != anchor.worktree_path
+                    && container.worktree_path.as_deref() != Some(Path::new(".")))
+        })
+    {
+        return Err(refuse(
+            "container paths or branches do not share one absolute anchor",
+        ));
+    }
+    let repaired_aliases = target
+        .execution_containers
+        .iter()
+        .filter(|container| container.worktree_path.as_deref() == Some(Path::new(".")))
+        .count();
+    let mut retained = target.events.clone();
+    for entries in target.duplicate_event_containers.values() {
+        for provenance in entries {
+            let Some(event) = provenance.event() else {
+                return Err(refuse(
+                    "duplicate container lacks complete event provenance",
+                ));
+            };
+            retained.push(event.clone());
+        }
+    }
+    let event_ids = target
+        .events
+        .iter()
+        .map(|event| event.id.as_str())
+        .collect::<HashSet<_>>();
+    if event_ids.len() != target.events.len()
+        || retained
+            .iter()
+            .any(|event| event.work_item_id != work_id || !event_ids.contains(event.id.as_str()))
+        || previous.work_items.iter().any(|item| {
+            item.id != work_id
+                && item
+                    .events
+                    .iter()
+                    .any(|event| event_ids.contains(event.id.as_str()))
+        })
+    {
+        return Err(refuse(
+            "accepted event IDs have conflicting Work provenance",
+        ));
+    }
+    // A portable source must carry both parts of its owning context. Never
+    // let the reader's CWD or a branch-less source supply that evidence.
+    for source in &sources {
+        for line in source.content.lines() {
+            let Ok(DecodedWorkspaceWorkEvent::Known(event)) =
+                decode_workspace_work_event_line(line.as_bytes())
+            else {
+                continue;
+            };
+            if event_ids.contains(event.id.as_str())
+                && event.execution_container.as_ref().is_some_and(|container| {
+                    container.worktree_path.as_deref() == Some(Path::new("."))
+                })
+                && !source
+                    .source_execution_container
+                    .as_ref()
+                    .is_some_and(|context| {
+                        context
+                            .worktree_path
+                            .as_deref()
+                            .is_some_and(Path::is_absolute)
+                            && context
+                                .branch
+                                .as_deref()
+                                .is_some_and(|branch| !branch.is_empty())
+                    })
+            {
+                return Err(refuse(
+                    "portable event source is missing its absolute root or branch",
+                ));
+            }
+        }
+    }
+    let mut intake_report = WorkEventsIntakeReport::default();
+    let mut durable = collect_shared_work_event_sources(sources, &mut intake_report)?;
+    if let Some(content) = snapshot.local_content()? {
+        durable.extend(collect_machine_local_work_events(content)?);
+    }
+    durable.retain(|(event, _)| event_ids.contains(event.id.as_str()));
+    for (event, _) in &durable {
+        if !retained
+            .iter()
+            .any(|known| work_events_equal_except_path(known, event))
+        {
+            return Err(refuse(&format!(
+                "event {} has conflicting durable payload",
+                event.id
+            )));
+        }
+    }
+    let normalize = |event: &WorkEvent| -> Result<WorkEvent> {
+        let matching = durable
+            .iter()
+            .filter(|(candidate, _)| work_events_equal_except_path(event, candidate))
+            .map(|(candidate, _)| candidate)
+            .collect::<Vec<_>>();
+        if matching.is_empty() {
+            return Err(refuse(&format!(
+                "event {} is missing durable source evidence",
+                event.id
+            )));
+        }
+        let portable = event
+            .execution_container
+            .as_ref()
+            .is_some_and(|container| container.worktree_path.as_deref() == Some(Path::new(".")));
+        if !portable {
+            if matching.iter().any(|candidate| *candidate != event) {
+                return Err(refuse(&format!(
+                    "event {} has ambiguous source paths",
+                    event.id
+                )));
+            }
+            return Ok(event.clone());
+        }
+        let session = event.agent_session_id.as_deref().ok_or_else(|| {
+            refuse(&format!(
+                "portable event {} lacks Session provenance",
+                event.id
+            ))
+        })?;
+        if target
+            .agents
+            .iter()
+            .filter(|agent| agent.session_id == session)
+            .count()
+            != 1
+            || !retained.iter().any(|known| {
+                known.agent_session_id.as_deref() == Some(session)
+                    && known.execution_container.as_ref().is_some_and(|container| {
+                        container.worktree_path == anchor.worktree_path
+                            && container.branch == anchor.branch
+                    })
+            })
+            || matching.iter().any(|candidate| {
+                candidate
+                    .execution_container
+                    .as_ref()
+                    .is_none_or(|container| {
+                        container.worktree_path != anchor.worktree_path
+                            || container.branch != anchor.branch
+                    })
+            })
+        {
+            return Err(refuse(&format!(
+                "portable event {} has ambiguous root, branch, or Session provenance",
+                event.id
+            )));
+        }
+        Ok(matching[0].clone())
+    };
+    let normalized = retained.iter().map(normalize).collect::<Result<Vec<_>>>()?;
+    let mut replay = previous.clone();
+    replay.work_items.remove(target_index);
+    let incoming = normalized
+        .iter()
+        .map(|event| {
+            serde_json::to_string(event)
+                .map(|key| (event.clone(), key))
+                .map_err(|error| refuse(&format!("event stable key: {error}")))
+        })
+        .collect::<Result<_>>()?;
+    fold_work_events(&mut replay, &HashSet::new(), incoming, &mut intake_report);
+    let Some(rebuilt) = replay.work_items.iter().find(|item| item.id == work_id) else {
+        return Err(refuse("history replay rejected the target Work"));
+    };
+    let mut repaired = target.clone();
+    repaired.events = normalized[..target.events.len()].to_vec();
+    let mut duplicates = normalized[target.events.len()..].iter();
+    for entries in repaired.duplicate_event_containers.values_mut() {
+        for provenance in entries {
+            *provenance =
+                DuplicateWorkEventProvenance::Event(Box::new(duplicates.next().unwrap().clone()));
+        }
+    }
+    repaired.execution_containers = rebuilt.execution_containers.clone();
+    let mut replayed = rebuilt.clone();
+    replayed.duplicate_event_containers = repaired.duplicate_event_containers.clone();
+    if replayed != repaired {
+        return Err(refuse(
+            "history replay would change non-path metadata, accepted events, or lifecycle state",
+        ));
+    }
+    let changed = repaired != target;
+    if changed && repaired_aliases == 0 {
+        return Err(refuse(
+            "projection differs outside portable container aliases",
+        ));
+    }
+    let prepared = if changed && !dry_run {
+        previous.work_items[target_index] = repaired;
+        Some(snapshot.prepare_container_repair(previous)?)
+    } else {
+        None
+    };
+    snapshot.commit_container_repair(prepared.as_ref(), dry_run)?;
+    Ok(WorkEventContainersRepairReport {
+        work_id: work_id.to_string(),
+        changed,
+        repaired_aliases,
+    })
+}
+
+fn work_events_equal_except_path(left: &WorkEvent, right: &WorkEvent) -> bool {
+    let mut right = right.clone();
+    if let (Some(left), Some(right)) = (&left.execution_container, &mut right.execution_container) {
+        right.worktree_path = left.worktree_path.clone();
+    }
+    *left == right
+}
+
+fn is_close_kind(event: &WorkEvent) -> bool {
     matches!(
-        kind,
+        event.kind,
         WorkEventKind::Pause | WorkEventKind::Done | WorkEventKind::Discard
-    )
+    ) && !event.is_successor_supersession()
 }
 
 /// The first durable terminal close instant. Metadata and heartbeat events may
@@ -167,7 +468,7 @@ pub fn ingest_work_event_sources_with_local_path(
     let prepared = projection
         .map(|projection| snapshot.prepare(projection))
         .transpose()?;
-    snapshot.commit(prepared.as_deref())?;
+    snapshot.commit(prepared.as_ref())?;
     Ok((report, local_fingerprint))
 }
 
@@ -205,16 +506,34 @@ fn prepare_ingested_work_events(
         .iter()
         .filter_map(|item| {
             item.events_compacted_through()
-                .map(|through| (item.id.clone(), through))
+                .map(|through| (item.id.clone(), (through, item)))
         })
         .collect::<HashMap<_, _>>();
     if !compacted_through.is_empty() {
+        let detachments = snapshot.detachments()?;
         incoming.retain(|(event, _)| {
-            let already_folded = !is_close_kind(event.kind)
+            let already_folded = !is_close_kind(event)
                 && !seen_event_ids.contains(&event.id)
                 && compacted_through
                     .get(&event.work_item_id)
-                    .is_some_and(|through| event.updated_at <= *through);
+                    .is_some_and(|(through, item)| {
+                        // A compacted timestamp proves folded state, but cannot
+                        // prove a different host's audit was ever observed.
+                        // Admit missing host provenance once; represented or
+                        // explicitly detached containers still converge.
+                        let unseen_host = event.is_successor_supersession()
+                            && event.execution_container.as_ref().is_some_and(|container| {
+                                !item.execution_containers.iter().any(|known| {
+                                    known.worktree_path == container.worktree_path
+                                        && workspace_execution_container_same(known, container)
+                                }) && !detachments.get(&item.id).is_some_and(|removed| {
+                                    removed.iter().any(|known| {
+                                        workspace_execution_container_same(known, container)
+                                    })
+                                })
+                            });
+                        event.updated_at <= *through && !unseen_host
+                    });
             if already_folded {
                 report.skipped_duplicate += 1;
             }
@@ -240,7 +559,8 @@ fn prepare_ingested_work_events(
     let replayable = incoming
         .into_iter()
         .filter(|(event, _)| {
-            seen_event_ids.contains(&event.id)
+            event.is_successor_supersession()
+                || seen_event_ids.contains(&event.id)
                 || previous
                     .work_items
                     .iter()
@@ -493,7 +813,7 @@ fn publish_rebuilt_work_events(
         close_content,
         Vec::new(),
     )?;
-    let prepared = snapshot.prepare(projection)?;
+    let prepared = snapshot.prepare_rebuilt(projection)?;
     snapshot.commit(Some(&prepared))?;
     if let Some(error) = corrupt_state {
         tracing::warn!(%error, "work events rebuild: recovered corrupt projection from complete event history");
@@ -547,14 +867,12 @@ fn rebuild_work_event_sources_locked_with_legacy(
         work_items_path,
         &mut projection,
     )?;
+    crate::workspace_projection::save_workspace_work_items_projection_after_rebuild(
+        work_items_path,
+        &projection,
+    )?;
     if let Some(error) = corrupt_state {
-        crate::workspace_projection::save_workspace_work_items_projection_after_rebuild(
-            work_items_path,
-            &projection,
-        )?;
         tracing::warn!(%error, "work events rebuild: recovered corrupt projection from complete event history");
-    } else {
-        save_workspace_work_items_projection_to_path(work_items_path, &projection)?;
     }
     Ok(report)
 }
@@ -625,13 +943,6 @@ fn prepare_rebuilt_work_events(
     Ok((report, projection, corrupt_state))
 }
 
-#[derive(Debug, Clone)]
-enum CachedSharedWorkEventLine {
-    Known(Box<WorkEvent>),
-    Opaque,
-    Invalid(String),
-}
-
 fn collect_shared_work_event_sources(
     sources: impl IntoIterator<Item = SharedWorkEventsSource>,
     report: &mut WorkEventsIntakeReport,
@@ -651,76 +962,115 @@ fn collect_shared_work_event_sources_with_decoder<F>(
 where
     F: FnMut(&[u8]) -> Result<DecodedWorkspaceWorkEvent>,
 {
+    // A shard can be offered by hundreds of refs. Keep one raw source and
+    // its multiplicity instead of retaining every decoded event in a cache.
+    // Retaining the Arc also keeps its pointer identity valid while grouping.
+    let mut grouped = Vec::<(SharedWorkEventsSource, usize)>::new();
+    let mut group_by_identity = HashMap::<_, usize>::new();
+    for source in sources {
+        let context = source.source_execution_container.as_deref();
+        let root = context.and_then(|context| context.worktree_path.as_ref());
+        let branch = root.and_then(|_| context.and_then(|context| context.branch.clone()));
+        let identity = (
+            Arc::as_ptr(&source.content) as *const () as usize,
+            root.cloned(),
+            branch,
+        );
+        if let Some(&index) = group_by_identity.get(&identity) {
+            grouped[index].1 += 1;
+        } else {
+            group_by_identity.insert(identity, grouped.len());
+            grouped.push((source, 1));
+        }
+    }
+    drop(group_by_identity);
+
     let mut incoming = Vec::new();
-    let mut decoded_by_content_identity = HashMap::<usize, Vec<CachedSharedWorkEventLine>>::new();
     // Issue #4371: one shard is offered once per origin ref that holds it
     // (701 refs peaked the rebuild at 4.7 GB). The fold keeps the canonical
     // event, and the first identical duplicate records its provenance; any
     // further identical copy is a no-op it would only count as a duplicate.
     let mut copies_by_stable_key = HashMap::<String, u8>::new();
-    for source in sources {
-        let content_identity = Arc::as_ptr(&source.content) as *const () as usize;
-        let decoded = decoded_by_content_identity
-            .entry(content_identity)
-            .or_insert_with(|| {
-                source
-                    .content
-                    .lines()
-                    .filter_map(|line| {
-                        let line = line.trim();
-                        if line.is_empty() {
-                            return None;
-                        }
-                        Some(match decode(line.as_bytes()) {
-                            Ok(DecodedWorkspaceWorkEvent::Known(event)) => {
-                                if event.execution_container.is_none() && !is_close_kind(event.kind) {
-                                    tracing::warn!(
-                                        event_id = %event.id,
-                                        work_item_id = %event.work_item_id,
-                                        source = ?source.source_execution_container,
-                                        "work events intake: event has no explicit container; retaining history without a Work ref"
-                                    );
-                                }
-                                CachedSharedWorkEventLine::Known(event)
-                            }
-                            Ok(DecodedWorkspaceWorkEvent::Opaque) => {
-                                CachedSharedWorkEventLine::Opaque
-                            }
-                            Err(error) => CachedSharedWorkEventLine::Invalid(error.to_string()),
-                        })
-                    })
-                    .collect()
-            });
-        for cached in decoded.iter() {
-            let event = match cached {
-                CachedSharedWorkEventLine::Known(event) => event.as_ref().clone(),
-                CachedSharedWorkEventLine::Opaque => {
-                    report.skipped_opaque += 1;
+    for (source, multiplicity) in grouped {
+        for line in source
+            .content
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
+            let mut event = match decode(line.as_bytes()) {
+                Ok(DecodedWorkspaceWorkEvent::Known(event)) => *event,
+                Ok(DecodedWorkspaceWorkEvent::Opaque) => {
+                    report.skipped_opaque += multiplicity;
                     continue;
                 }
-                CachedSharedWorkEventLine::Invalid(error) => {
-                    report.skipped_invalid += 1;
-                    tracing::warn!(%error, "work events intake: skipping malformed line");
+                Err(error) => {
+                    report.skipped_invalid += multiplicity;
+                    tracing::warn!(%error, multiplicity, "work events intake: skipping malformed line");
                     continue;
                 }
             };
-            if is_close_kind(event.kind) {
-                report.skipped_close_kind += 1;
+            let context = source.source_execution_container.as_deref();
+            resolve_workspace_work_event_container(
+                &mut event,
+                context.and_then(|context| context.worktree_path.as_deref()),
+                context.and_then(|context| context.branch.as_deref()),
+            );
+            if is_close_kind(&event) {
+                report.skipped_close_kind += multiplicity;
                 continue;
+            }
+            if event.execution_container.is_none() {
+                warn_containerless_event_once(&event, source.source_execution_container.as_deref());
             }
             let stable_key = serde_json::to_string(&event).map_err(|error| {
                 GwtError::Other(format!("work events intake stable key: {error}"))
             })?;
-            let copies = copies_by_stable_key.entry(stable_key.clone()).or_default();
-            if *copies >= 2 {
-                report.skipped_duplicate += 1;
+            let copies = copies_by_stable_key.get(&stable_key).copied().unwrap_or(0);
+            let accepted = multiplicity.min(usize::from(2 - copies));
+            report.skipped_duplicate += multiplicity - accepted;
+            if accepted == 0 {
                 continue;
             }
-            *copies += 1;
+            copies_by_stable_key.insert(stable_key.clone(), copies + accepted as u8);
+            if accepted == 2 {
+                incoming.push((event.clone(), stable_key.clone()));
+            }
             incoming.push((event, stable_key));
         }
     }
     Ok(incoming)
+}
+
+/// Reader aliases, retries and rebuilds may decode the same historical event.
+/// Diagnose it once per process without changing the accepted history or cache.
+fn warn_containerless_event_once(
+    event: &WorkEvent,
+    source: Option<&WorkspaceExecutionContainerRef>,
+) {
+    if !tracing::enabled!(tracing::Level::WARN) {
+        return;
+    }
+    static REPORTED_EVENTS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let first = {
+        let mut reported = REPORTED_EVENTS
+            .get_or_init(|| Mutex::new(HashSet::new()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if reported.contains(&event.id) {
+            false
+        } else {
+            reported.insert(event.id.clone())
+        }
+    };
+    if first {
+        tracing::warn!(
+            event_id = %event.id,
+            work_item_id = %event.work_item_id,
+            source = ?source,
+            "work events intake: event has no explicit container; retaining history without a Work ref"
+        );
+    }
 }
 
 fn collect_machine_local_work_events(content: &str) -> Result<Vec<(WorkEvent, String)>> {
@@ -810,7 +1160,10 @@ fn fold_work_events(
             .find(|item| item.id == event.work_item_id)
             .and_then(terminal_close_time);
         if let Some(closed_at) = terminal_cutoff {
-            if event.updated_at <= closed_at {
+            // Structural lineage audits from another host may share a close
+            // instant or arrive later with an earlier timestamp. They cannot
+            // reopen Work and must retain both hosts' immutable provenance.
+            if event.updated_at <= closed_at && !event.is_successor_supersession() {
                 report.skipped_terminal += 1;
                 report.skipped_duplicate += duplicate_count;
                 continue;
@@ -1282,6 +1635,15 @@ impl WorkEventsIntakeStore {
         self.loaded.get(group).and_then(Option::as_ref)
     }
 
+    /// Release a successful read after comparison. Unsaved changes (including
+    /// legacy migration) and failed reads remain authoritative for this pass.
+    pub fn evict_clean_group_sources(&mut self, group: &str) -> bool {
+        if self.dirty_groups.contains(group) || !matches!(self.loaded.get(group), Some(Some(_))) {
+            return false;
+        }
+        self.loaded.remove(group).is_some()
+    }
+
     fn read_group(&self, group: &str) -> Option<BTreeMap<String, String>> {
         let body = std::fs::read(self.group_path(group)).ok()?;
         let file = serde_json::from_slice::<IntakeGroupFile>(&body).ok()?;
@@ -1458,9 +1820,84 @@ pub fn content_fingerprint(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace_projection::save_workspace_work_items_projection_to_path;
     use crate::workspace_projection::{WorkItemsProjection, WorkspaceStatusCategory};
     use chrono::TimeZone;
     use std::sync::Arc;
+
+    #[test]
+    fn late_cross_host_supersession_retains_both_audits_without_reopening() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("works.json");
+        let now = Utc.timestamp_opt(20_000, 0).unwrap();
+        let work_id = crate::workspace_projection::successor_work_id("cross-host-parent");
+        let make = |host: &str, at| {
+            let mut event = WorkEvent::new(WorkEventKind::Discard, &work_id, at);
+            event.id = format!("superseded-{work_id}");
+            event.related_work_item_id = Some("cross-host-parent".to_string());
+            event.execution_container = Some(WorkspaceExecutionContainerRef {
+                branch: Some("work/issue-5867".to_string()),
+                worktree_path: Some(PathBuf::from(host)),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            });
+            event.bind_successor_supersession_identity().unwrap();
+            event
+        };
+        let local = make(r"E:\gwt\work\issue-5867", now);
+        let incoming = make(
+            "/Users/example/gwt/work/issue-5867",
+            now - chrono::Duration::minutes(31),
+        );
+        ingest_work_events_content(&path, &serde_json::to_string(&local).unwrap()).unwrap();
+        let mut compacted = load_workspace_work_items_from_path(&path).unwrap().unwrap();
+        for index in 0..crate::workspace_projection::MAX_INLINE_WORK_EVENTS + 1 {
+            compacted.apply_event(WorkEvent::new(
+                WorkEventKind::Update,
+                &work_id,
+                now + chrono::Duration::seconds(index as i64 + 1),
+            ));
+        }
+        let latest = compacted.work_items[0].updated_at;
+        compacted.compact_inline_events();
+        save_workspace_work_items_projection_to_path(&path, &compacted).unwrap();
+        ingest_work_events_content(&path, &serde_json::to_string(&incoming).unwrap()).unwrap();
+        let projection = load_workspace_work_items_from_path(&path).unwrap().unwrap();
+        let item = &projection.work_items[0];
+        assert!(item
+            .execution_containers
+            .contains(local.execution_container.as_ref().unwrap()));
+        assert!(item
+            .execution_containers
+            .contains(incoming.execution_container.as_ref().unwrap()));
+        assert!(item.is_terminal());
+        assert_eq!(
+            item.updated_at, latest,
+            "late arrival must not roll the current state back"
+        );
+        let before = std::fs::read(&path).unwrap();
+        ingest_work_events_content(&path, &serde_json::to_string(&incoming).unwrap()).unwrap();
+        let after = std::fs::read(&path).unwrap();
+        assert!(
+            after == before,
+            "the newly imported host must not be reapplied after compaction"
+        );
+        let mut stale = WorkEvent::new(WorkEventKind::Update, &work_id, incoming.updated_at);
+        stale.status_category = Some(WorkspaceStatusCategory::Active);
+        let report =
+            ingest_work_events_content(&path, &serde_json::to_string(&stale).unwrap()).unwrap();
+        assert_eq!(
+            report.skipped_terminal + report.skipped_duplicate,
+            1,
+            "ordinary terminal cutoffs stay enforced"
+        );
+        assert!(load_workspace_work_items_from_path(&path)
+            .unwrap()
+            .unwrap()
+            .work_items[0]
+            .is_terminal());
+    }
 
     /// AC-3: benchmark an isolated copy, never resolve or mutate the live HOME.
     #[test]
@@ -1566,6 +2003,362 @@ mod tests {
         }
     }
 
+    fn poisoned_container_repair_fixture(
+        directory: &Path,
+    ) -> (
+        PathBuf,
+        PathBuf,
+        Vec<SharedWorkEventsSource>,
+        WorkItemsProjection,
+    ) {
+        let works = directory.join("works.json");
+        let close = directory.join("close.jsonl");
+        let mut anchor = source_container("work/issue-3590");
+        anchor.worktree_path = Some(directory.join("worktree"));
+        let at = Utc.timestamp_opt(20_000, 0).unwrap();
+        let mut start = WorkEvent::new(WorkEventKind::Start, "repair-target", at);
+        start.id = "repair-start".to_string();
+        start.owner = Some("Issue #3590".to_string());
+        start.agent_session_id = Some("repair-session".to_string());
+        start.execution_container = Some(anchor.clone());
+        let mut pr = WorkEvent::new(
+            WorkEventKind::Pr,
+            "repair-target",
+            at + chrono::Duration::seconds(1),
+        );
+        pr.id = "repair-pr".to_string();
+        pr.agent_session_id = start.agent_session_id.clone();
+        let mut portable = anchor.clone();
+        portable.worktree_path = Some(PathBuf::from("."));
+        portable.pr_number = Some(3591);
+        portable.pr_url = Some("https://example.test/pull/3591".to_string());
+        portable.pr_state = Some("MERGED".to_string());
+        pr.execution_container = Some(portable);
+        let mut done = WorkEvent::new(
+            WorkEventKind::Done,
+            "repair-target",
+            at + chrono::Duration::seconds(2),
+        );
+        done.id = "repair-done".to_string();
+        done.summary = Some("delivered".to_string());
+        done.execution_container = Some(anchor.clone());
+        let mut projection = WorkItemsProjection::empty(at);
+        for event in [&start, &pr, &done] {
+            projection.apply_event(event.clone());
+        }
+        projection.work_items[0].duplicate_event_containers.insert(
+            done.id.clone(),
+            vec![DuplicateWorkEventProvenance::Event(Box::new(done.clone()))],
+        );
+        let mut unrelated = WorkEvent::new(WorkEventKind::Start, "untouched-work", at);
+        unrelated.id = "untouched-event".to_string();
+        unrelated.title = Some("Workspace untouched".to_string());
+        projection.apply_event(unrelated);
+        std::fs::write(&works, serde_json::to_vec_pretty(&projection).unwrap()).unwrap();
+        std::fs::write(
+            &close,
+            format!("{}\n", serde_json::to_string(&done).unwrap()),
+        )
+        .unwrap();
+        let shared = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&start).unwrap(),
+            serde_json::to_string(&pr).unwrap()
+        );
+        std::fs::write(directory.join("events.jsonl"), &shared).unwrap();
+        let sources = vec![SharedWorkEventsSource::new(shared, Some(anchor))];
+        (works, close, sources, projection)
+    }
+
+    #[test]
+    fn container_repair_converges_poisoned_done_without_changing_other_work() {
+        let temp = tempfile::tempdir().unwrap();
+        let (works, close, sources, before) = poisoned_container_repair_fixture(temp.path());
+        let works_bytes = std::fs::read(&works).unwrap();
+        let close_bytes = std::fs::read(&close).unwrap();
+        let source_path = temp.path().join("events.jsonl");
+        let source_bytes = std::fs::read(&source_path).unwrap();
+        let dry_run = repair_work_event_containers(
+            &works,
+            "repair-target",
+            sources.clone(),
+            Some(&close),
+            true,
+        )
+        .unwrap();
+        assert!(dry_run.changed);
+        assert_eq!(dry_run.repaired_aliases, 1);
+        assert_eq!(std::fs::read(&works).unwrap(), works_bytes);
+        assert!(
+            !works.with_extension("lock").exists(),
+            "dry run must not write lock metadata"
+        );
+        let applied = repair_work_event_containers(
+            &works,
+            "repair-target",
+            sources.clone(),
+            Some(&close),
+            false,
+        )
+        .unwrap();
+        assert_eq!(applied, dry_run);
+        let repaired: WorkItemsProjection =
+            serde_json::from_slice(&std::fs::read(&works).unwrap()).unwrap();
+        let target = repaired
+            .work_items
+            .iter()
+            .find(|item| item.id == "repair-target")
+            .unwrap();
+        assert_eq!(
+            target.execution_containers.len(),
+            1,
+            "the existing portable alias must converge onto its absolute anchor"
+        );
+        assert_eq!(target.execution_containers[0].pr_number, Some(3591));
+        assert!(target.execution_containers[0]
+            .worktree_path
+            .as_deref()
+            .unwrap()
+            .is_absolute());
+        let original = before
+            .work_items
+            .iter()
+            .find(|item| item.id == "repair-target")
+            .unwrap();
+        let mut expected = original.clone();
+        expected.execution_containers = target.execution_containers.clone();
+        expected.events[1]
+            .execution_container
+            .as_mut()
+            .unwrap()
+            .worktree_path = target.execution_containers[0].worktree_path.clone();
+        assert_eq!(
+            *target, expected,
+            "only paths and folded container metadata may change"
+        );
+        assert_eq!(
+            repaired
+                .work_items
+                .iter()
+                .find(|item| item.id == "untouched-work"),
+            before
+                .work_items
+                .iter()
+                .find(|item| item.id == "untouched-work")
+        );
+        assert_eq!(repaired.updated_at, before.updated_at);
+        let applied_bytes = std::fs::read(&works).unwrap();
+        let repeated =
+            repair_work_event_containers(&works, "repair-target", sources, Some(&close), false)
+                .unwrap();
+        assert!(!repeated.changed);
+        assert_eq!(repeated.repaired_aliases, 0);
+        assert_eq!(std::fs::read(&works).unwrap(), applied_bytes);
+        assert_eq!(std::fs::read(close).unwrap(), close_bytes);
+        assert_eq!(std::fs::read(source_path).unwrap(), source_bytes);
+    }
+
+    #[test]
+    fn container_repair_refuses_missing_or_ambiguous_provenance_without_writes() {
+        let temp = tempfile::tempdir().unwrap();
+        let (works, close, sources, mut projection) =
+            poisoned_container_repair_fixture(temp.path());
+        let before = std::fs::read(&works).unwrap();
+        let missing =
+            repair_work_event_containers(&works, "repair-target", sources.clone(), None, false)
+                .unwrap_err();
+        assert!(missing
+            .to_string()
+            .contains("repair-done is missing durable source evidence"));
+        let mut ambiguous = sources.clone();
+        let mut foreign = source_container("work/issue-3590");
+        foreign.worktree_path = Some(temp.path().join("other-worktree"));
+        ambiguous.push(SharedWorkEventsSource::new(
+            Arc::clone(&sources[0].content),
+            Some(foreign),
+        ));
+        let error =
+            repair_work_event_containers(&works, "repair-target", ambiguous, Some(&close), false)
+                .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("ambiguous root, branch, or Session provenance"));
+        assert_eq!(std::fs::read(&works).unwrap(), before);
+        let target = projection
+            .work_items
+            .iter_mut()
+            .find(|item| item.id == "repair-target")
+            .unwrap();
+        target
+            .execution_containers
+            .push(target.execution_containers[0].clone());
+        std::fs::write(&works, serde_json::to_vec_pretty(&projection).unwrap()).unwrap();
+        let duplicated = std::fs::read(&works).unwrap();
+        let error =
+            repair_work_event_containers(&works, "repair-target", sources, Some(&close), false)
+                .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("ambiguous or missing absolute container anchor"));
+        assert_eq!(std::fs::read(works).unwrap(), duplicated);
+    }
+
+    #[test]
+    fn container_repair_cas_rejects_concurrent_terminal_writer() {
+        let temp = tempfile::tempdir().unwrap();
+        let (works, close, sources, _) = poisoned_container_repair_fixture(temp.path());
+        let before = std::fs::read(&works).unwrap();
+        let snapshot =
+            WorkItemsIntakeSnapshot::capture_for_container_repair(&works, Some(&close)).unwrap();
+        let mut close_bytes = std::fs::read(&close).unwrap();
+        close_bytes.push(b'\n');
+        std::fs::write(&close, &close_bytes).unwrap();
+        let error =
+            publish_work_event_containers_repair(&snapshot, "repair-target", sources, false)
+                .unwrap_err();
+        assert!(error.to_string().contains("snapshot changed"));
+        assert_eq!(std::fs::read(works).unwrap(), before);
+        assert_eq!(std::fs::read(close).unwrap(), close_bytes);
+    }
+
+    #[test]
+    fn container_repair_refuses_pending_transaction_without_recovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let (works, close, sources, _) = poisoned_container_repair_fixture(temp.path());
+        let before = std::fs::read(&works).unwrap();
+        let marker = temp.path().join("pending-state-transaction.json");
+        std::fs::write(&marker, b"interrupted transaction").unwrap();
+        for dry_run in [true, false] {
+            let error = repair_work_event_containers(
+                &works,
+                "repair-target",
+                sources.clone(),
+                Some(&close),
+                dry_run,
+            )
+            .unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("pending workspace state transaction"));
+            assert_eq!(std::fs::read(&marker).unwrap(), b"interrupted transaction");
+            assert_eq!(std::fs::read(&works).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn issue_5380_containerless_warning_is_once_per_event_across_sources_and_rebuilds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::ScopedGwtHome::set(tmp.path());
+        let works = tmp.path().join("works.json");
+        let log = tmp.path().join("trace.log");
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(std::fs::File::create(&log).unwrap()))
+            .finish();
+        let first = event_json(
+            "issue-5380-warning-first",
+            "issue-5380-warning-work",
+            "start",
+            "2026-10-20T00:00:00Z",
+            "",
+        );
+        let second = first.replace("warning-first", "warning-second");
+        tracing::subscriber::with_default(subscriber, || {
+            for _ in 0..2 {
+                // Separate allocations and reader contexts must still share one warning.
+                let sources = ["work/one", "work/two"].map(|branch| {
+                    SharedWorkEventsSource::new(first.as_str(), Some(source_container(branch)))
+                });
+                ingest_work_events_sources(&works, sources).unwrap();
+            }
+            rebuild_work_events_contents(&works, [first.as_str(), second.as_str()], None).unwrap();
+        });
+        let output = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(
+            output.matches("event has no explicit container").count(),
+            2,
+            "one warning for each event, regardless of sources or prior intake: {output}"
+        );
+        let projection = load_workspace_work_items_from_path(&works)
+            .unwrap()
+            .unwrap();
+        assert_eq!(projection.work_items.len(), 1);
+        assert_eq!(projection.work_items[0].events.len(), 2);
+        assert!(projection.work_items[0].execution_containers.is_empty());
+    }
+
+    /// AC-3: run this identical fixture on the control and treatment binaries.
+    #[test]
+    #[ignore = "paired intake timing and log-volume measurement for Issue #5380"]
+    fn issue_5380_measure_replayed_containerless_events() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::ScopedGwtHome::set(tmp.path());
+        let works = tmp.path().join("works.json");
+        let content = (0..74)
+            .map(|index| {
+                event_json(
+                    &format!("issue-5380-probe-{index:03}"),
+                    &format!("issue-5380-probe-work-{}", index % 2),
+                    "start",
+                    "2026-10-20T00:00:00Z",
+                    "",
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let log = tmp.path().join("trace.log");
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(std::fs::File::create(&log).unwrap()))
+            .finish();
+        let started = std::time::Instant::now();
+        tracing::subscriber::with_default(subscriber, || {
+            // One day-equivalent replay count from the Issue's reported warning rate.
+            for _ in 0..7_770 {
+                ingest_work_events_content(&works, &content).unwrap();
+            }
+        });
+        let elapsed = started.elapsed();
+        let output = std::fs::read_to_string(&log).unwrap();
+        let projection = load_workspace_work_items_from_path(&works)
+            .unwrap()
+            .unwrap();
+        assert_eq!(projection.work_items.len(), 2);
+        assert!(projection
+            .work_items
+            .iter()
+            .all(|item| item.events.len() == 37));
+        let history = serde_json::to_string(&projection.work_items).unwrap();
+        eprintln!(
+            "issue-5380 passes=7770 events=74 elapsed_ms={:.3} warnings={} log_bytes={} history_sha256={}",
+            elapsed.as_secs_f64() * 1000.0,
+            output.matches("event has no explicit container").count(),
+            output.len(),
+            content_fingerprint(&history)
+        );
+    }
+
+    #[test]
+    fn shared_source_keeps_group_container_allocation_and_owned_constructor_compatibility() {
+        let container = Arc::new(source_container("work/shared"));
+        let content: Arc<str> = Arc::from("shared content");
+        let shared = SharedWorkEventsSource::with_shared_container(
+            Arc::clone(&content),
+            Some(Arc::clone(&container)),
+        );
+        let owned = SharedWorkEventsSource::new(content, Some(container.as_ref().clone()));
+        assert!(Arc::ptr_eq(
+            shared.source_execution_container.as_ref().unwrap(),
+            &container
+        ));
+        assert_eq!(
+            shared.source_execution_container,
+            owned.source_execution_container
+        );
+    }
+
     #[test]
     fn contextual_shared_content_decodes_once_without_inventing_containers() {
         let content: Arc<str> = Arc::from(
@@ -1588,11 +2381,16 @@ mod tests {
         ];
         let mut report = WorkEventsIntakeReport::default();
         let mut decode_calls = 0;
+        let mut decoded_title = None;
 
         let incoming =
             collect_shared_work_event_sources_with_decoder(sources, &mut report, |line| {
                 decode_calls += 1;
-                decode_workspace_work_event_line(line)
+                let decoded = decode_workspace_work_event_line(line);
+                if let Ok(DecodedWorkspaceWorkEvent::Known(event)) = &decoded {
+                    decoded_title = event.title.as_ref().map(|title| title.as_ptr());
+                }
+                decoded
             })
             .expect("collect contextual sources");
 
@@ -1600,6 +2398,12 @@ mod tests {
         assert_eq!(report.skipped_opaque, 2, "accounting remains per source");
         assert_eq!(report.skipped_invalid, 2, "accounting remains per source");
         assert_eq!(incoming.len(), 2);
+        assert!(
+            incoming.iter().any(|(event, _)| {
+                event.title.as_ref().map(|title| title.as_ptr()) == decoded_title
+            }),
+            "the decoded event must move into the output instead of remaining in a cloned cache"
+        );
         assert!(incoming
             .iter()
             .all(|(event, _)| event.execution_container.is_none()));
@@ -2052,6 +2856,70 @@ mod tests {
     // SPEC-2359 T-820/T-821 (US-88 / FR-557): shared checkout logs use the
     // release-A compatible reader, while machine-local lifecycle state keeps
     // its strict fail-closed contract.
+    #[test]
+    fn shared_intake_resolves_portable_containers_only_against_each_source_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let first = tmp.path().join("first-worktree");
+        let second = tmp.path().join("second-worktree");
+        let foreign = tmp.path().join("foreign-clone");
+        let content: Arc<str> = [Path::new("."), foreign.as_path()]
+            .into_iter()
+            .enumerate()
+            .map(|(index, path)| {
+                serde_json::json!({
+                    "id": format!("event-portable-{index}"),
+                    "work_item_id": format!("work-portable-{index}"),
+                    "kind": "start",
+                    "execution_container": {"branch": "work/target", "worktree_path": path},
+                    "updated_at": "2026-10-22T00:00:00Z"
+                })
+                .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            .into();
+        let copied_to_develop = tmp.path().join("develop-worktree");
+        let sources = [
+            ("work/target", Some(first.clone())),
+            ("work/target", Some(second.clone())),
+            ("develop", Some(copied_to_develop)),
+            ("work/target", None),
+        ]
+        .map(|(branch, root)| {
+            let mut context = source_container(branch);
+            context.worktree_path = root;
+            SharedWorkEventsSource::new(Arc::clone(&content), Some(context))
+        });
+        let mut report = WorkEventsIntakeReport::default();
+        let events = collect_shared_work_event_sources(sources, &mut report).expect("collect");
+        let portable_paths = events
+            .iter()
+            .filter(|(event, _)| event.id == "event-portable-0")
+            .map(|(event, _)| {
+                event
+                    .execution_container
+                    .as_ref()
+                    .unwrap()
+                    .worktree_path
+                    .clone()
+            })
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            portable_paths,
+            HashSet::from([Some(first), Some(second), None])
+        );
+        assert!(events
+            .iter()
+            .filter(|(event, _)| event.id == "event-portable-1")
+            .all(|(event, _)| event
+                .execution_container
+                .as_ref()
+                .unwrap()
+                .worktree_path
+                .as_ref()
+                == Some(&foreign)));
+    }
+
     #[test]
     fn shared_intake_applies_known_event_with_additive_fields_without_rewriting_source() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -3100,6 +3968,38 @@ mod tests {
         state.record("source-list:v1", "fp-list");
         state.record_projection_version("v-test");
         state
+    }
+
+    #[test]
+    fn intake_store_evicts_only_clean_successful_groups() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("work-events-intake.json");
+        let expected = grouped_state();
+        std::fs::write(&path, serde_json::to_vec(&expected).unwrap()).unwrap();
+        let group = "ref:refs/remotes/origin/b0";
+        let mut store = WorkEventsIntakeStore::open(&path);
+        assert!(
+            !store.evict_clean_group_sources(group),
+            "migration is not saved yet"
+        );
+        assert!(store.loaded.contains_key(group));
+        store.save().unwrap();
+        assert!(store.evict_clean_group_sources(group));
+        assert!(!store.loaded.contains_key(group));
+        assert_eq!(store.group_sources(group).unwrap().len(), 4);
+        assert_eq!(store.to_state().unwrap(), expected);
+
+        assert!(store.evict_clean_group_sources(group));
+        let group_path = store.group_path(group);
+        let original = std::fs::read(&group_path).unwrap();
+        std::fs::write(&group_path, b"{ invalid").unwrap();
+        assert!(store.group_sources(group).is_none());
+        assert!(!store.evict_clean_group_sources(group));
+        std::fs::write(&group_path, original).unwrap();
+        assert!(
+            store.group_sources(group).is_none(),
+            "a failed read stays fail-closed for this pass"
+        );
     }
 
     /// Issue #4397 AC-1: a trigger that changed one group rewrites that group

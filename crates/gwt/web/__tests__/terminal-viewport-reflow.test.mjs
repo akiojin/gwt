@@ -43,6 +43,42 @@ const projectShellSurfaceSource = readFileSync(
 );
 const appCssSource = readFileSync(resolve(here, "../styles/app.css"), "utf8");
 
+test("initial fit runs once without frames and can be cancelled on runtime removal", (t) => {
+  const frames = new Map(), timers = new Map();
+  let nextId = 0, fits = 0;
+  for (const [key, value] of Object.entries({
+    requestAnimationFrame: callback => { frames.set(++nextId, callback); return nextId; },
+    cancelAnimationFrame: id => frames.delete(id),
+  })) {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, key);
+    Object.defineProperty(globalThis, key, { configurable: true, value });
+    t.after(() => {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else delete globalThis[key];
+    });
+  }
+  t.mock.method(globalThis, "setTimeout", (callback, delay) => {
+    assert.equal(delay, 100);
+    timers.set(++nextId, callback);
+    return nextId;
+  });
+  t.mock.method(globalThis, "clearTimeout", id => timers.delete(id));
+  for (const winner of ["timer", "frame", "cancel"]) {
+    const before = fits;
+    const cancel = terminalViewportReflow.scheduleTerminalInitialFit(() => { fits += 1; });
+    assert.equal(frames.size, 1);
+    assert.equal(timers.size, 1);
+    const frame = frames.values().next().value;
+    const timer = timers.values().next().value;
+    ({ timer, frame, cancel })[winner]();
+    assert.equal(frames.size, 0);
+    assert.equal(timers.size, 0);
+    frame();
+    timer();
+    assert.equal(fits - before, winner === "cancel" ? 0 : 1, "stale callbacks cannot fit a removed or already fitted runtime");
+  }
+});
+
 function fixtureWindow() {
   const { document } = parseHTML(`<!doctype html><body></body>`);
   return document.defaultView;
@@ -57,6 +93,9 @@ function asyncTerminalStub() {
   return {
     writes,
     resets,
+    buffer: { active: { viewportY: 0, baseY: 0 } },
+    scrollToBottom() { this.buffer.active.viewportY = this.buffer.active.baseY; },
+    scrollToLine(line) { this.buffer.active.viewportY = Math.min(line, this.buffer.active.baseY); },
     write(text, callback) {
       if (nextWriteFailure) {
         const { beforeThrow, error } = nextWriteFailure;
@@ -77,6 +116,7 @@ function asyncTerminalStub() {
         throw error;
       }
       resets.push(writes.length);
+      this.buffer.active = { viewportY: 0, baseY: 0 };
     },
     failNextReset(error, beforeThrow) {
       nextResetFailure = { beforeThrow, error };
@@ -238,6 +278,12 @@ test("decodeTerminalSnapshotBoundary isolates snapshot and subsequent live UTF-8
     "後続ライブ",
     "post-snapshot live output must decode through a fresh streaming decoder",
   );
+
+  const partial = decodeTerminalSnapshotBoundary(Uint8Array.of(
+    ...new TextEncoder().encode("snapshot: "), 0xf0, 0x9f, 0xa6,
+  ));
+  assert.equal(partial.snapshotText, "snapshot: ", "a snapshot must retain its own incomplete UTF-8 prefix");
+  assert.equal(partial.nextLiveDecoder.decode(Uint8Array.of(0x80), { stream: true }), "🦀");
 });
 
 test("clearTerminalOutputBeforeSnapshot drops only output before the latest snapshot boundary", () => {
@@ -331,6 +377,27 @@ test("snapshot coordinator serializes a newer snapshot and its live output after
   assert.deepEqual(harness.refreshes, ["refresh"]);
   assert.deepEqual(harness.runtime.deferredWrites, []);
   assert.deepEqual(harness.terminal.writes, ["", "decoded:A", "decoded:B", "live-after-B"]);
+});
+
+test("snapshot replacement follows the tail and preserves history through overlapping snapshots (Issue #6235)", () => {
+  const tail = snapshotWriteHarness();
+  tail.terminal.buffer.active = { viewportY: 100, baseY: 100 };
+  tail.receiveSnapshot("tail");
+  tail.terminal.completeNextWrite();
+  tail.terminal.buffer.active = { viewportY: 0, baseY: 150 };
+  tail.terminal.completeNextWrite();
+  assert.equal(tail.terminal.buffer.active.viewportY, 150, 'tail readers follow the replacement');
+
+  const history = snapshotWriteHarness();
+  history.terminal.buffer.active = { viewportY: 25, baseY: 100 };
+  history.receiveSnapshot("A");
+  history.terminal.completeNextWrite();
+  history.receiveSnapshot("B");
+  history.terminal.buffer.active = { viewportY: 0, baseY: 150 };
+  history.terminal.completeNextWrite();
+  history.terminal.buffer.active = { viewportY: 0, baseY: 200 };
+  history.terminal.completeNextWrite();
+  assert.equal(history.terminal.buffer.active.viewportY, 25, 'latest-wins snapshots retain the original reading position');
 });
 
 test("snapshot coordinator callbacks are no-ops after terminal runtime teardown", () => {
@@ -660,7 +727,7 @@ test("applyVisibilityTransition fires onReveal only on hidden -> visible with te
   assert.equal(becomingHidden.hidden, true);
 });
 
-test("viewportEligibleForRefresh skips display:none and minimised windows (T-186)", () => {
+test("viewportEligibleForRefresh follows DOM visibility and ignores saved minimization (Issue #4777 AC15)", () => {
   const { document } = parseHTML(`<!doctype html><body></body>`);
   const visibleEl = document.createElement("section");
   visibleEl.hidden = false;
@@ -676,11 +743,11 @@ test("viewportEligibleForRefresh skips display:none and minimised windows (T-186
     ".hidden element must skip refresh",
   );
 
-  // Visible + minimised: the existing minimised short-circuit still wins.
+  // Fixed rail layout ignores the retired saved canvas minimization state.
   assert.equal(
     viewportEligibleForRefresh({ element: visibleEl, workspaceWindow: { minimized: true } }),
-    false,
-    "minimised workspace state must skip refresh",
+    true,
+    "legacy minimization must not suppress a visible terminal refresh",
   );
 
   // Visible + not minimised: refresh allowed.
@@ -2333,8 +2400,8 @@ test("app.js wires the reflow controller for resize, transition, and predicate",
   );
   assert.match(
     appSource,
-    /scheduleTerminalFit\(windowData\.id,\s*shouldPersistTerminalGeometry\)/,
-    "workspace render geometry changes must route terminal fits through the shared scheduler",
+    /scheduleTerminalFit\(windowData\.id,\s*true\)/,
+    "surface render must route terminal fits through the shared scheduler",
   );
   assert.match(
     appSource,
@@ -2422,11 +2489,6 @@ test("app.js wires the reflow controller for resize, transition, and predicate",
     appSource,
     /runTerminalActivationSequence\(\{/,
     "scheduleTerminalFocusActivation must delegate to runTerminalActivationSequence",
-  );
-  assert.match(
-    appSource,
-    /scheduleTerminalFocusActivation\(topmostId,\s*\{[\s\S]*?shouldPersistGeometry:\s*false[\s\S]*?reason:\s*"topmost_focus"[\s\S]*?\}\)/,
-    "topmost focus activation must not persist geometry unconditionally on every workspace render",
   );
   assert.match(
     appSource,

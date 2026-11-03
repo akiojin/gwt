@@ -878,7 +878,7 @@ fn non_blocking_corrupt_spec_scope_fails_promptly_and_queues_coordinated_repair(
 
     wait_for_rebuild_invocations(
         &fixture.runner_log,
-        "--action index-specs",
+        "--action index-issues",
         1,
         Duration::from_secs(15),
     );

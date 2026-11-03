@@ -16,9 +16,64 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
+import { createUiStateStore } from "../ui-state-store.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const html = readFileSync(resolve(here, "../index.html"), "utf8");
+
+test("Monitor strip batches the latest status while model reads and other subscribers stay synchronous", async () => {
+  const { subscribeIssueMonitorStatus } = await importOperatorShell();
+  const fixture = await mountFixture();
+  const frames = new Set();
+  const model = createUiStateStore({ status: { enabled: false } }, {
+    scheduleFrame(callback) { frames.add(callback); return () => frames.delete(callback); },
+  });
+  let unsubscribe = () => {};
+  try {
+    unsubscribe = subscribeIssueMonitorStatus(fixture.document, model);
+    const cell = fixture.document.getElementById("op-strip-issue-monitor");
+    const value = fixture.document.getElementById("op-strip-issue-monitor-value");
+    assert.equal(value.textContent, "Off", "initial status renders immediately");
+    let synchronousStatus;
+    model.subscribe(state => state.status, status => { synchronousStatus = status; });
+    let renders = 0;
+    const setAttribute = cell.setAttribute.bind(cell);
+    cell.setAttribute = (...args) => { if (args[0] === "aria-label") renders++; return setAttribute(...args); };
+    const previous = model.read();
+    for (let index = 0; index < 50; index++) {
+      model.update(state => ({ ...state, status: { enabled: true, state: "active", queue_len: index, active_count: 1 } }));
+    }
+    assert.equal(model.read().status.queue_len, 49);
+    assert.equal(synchronousStatus.queue_len, 49);
+    assert.equal(previous.status.enabled, false);
+    assert.equal(value.textContent, "Off");
+    assert.equal(renders, 0);
+    assert.equal(frames.size, 1);
+    const flush = () => { const callbacks = [...frames]; frames.clear(); callbacks.forEach(callback => callback()); };
+    flush();
+    assert.equal(value.textContent, "Run Q49 A1/1");
+    assert.equal(renders, 1);
+    model.update(state => ({ ...state, unrelated: true }));
+    flush();
+    assert.equal(renders, 1);
+    model.update(state => ({ ...state, status: { enabled: true, state: "error", last_error: "scan failed" } }));
+    flush();
+    assert.equal(cell.classList.contains("op-status-strip__cell--alert"), true);
+    model.update(state => ({ ...state, status: { enabled: true, state: "idle" } }));
+    flush();
+    assert.equal(value.textContent, "Idle Q0 A0/1");
+    assert.equal(cell.classList.contains("op-status-strip__cell--alert"), false);
+    const commands = [];
+    fixture.document.addEventListener("op:command", event => commands.push(event.detail.id));
+    cell.dispatchEvent(new fixture.window.Event("click"));
+    assert.deepEqual(commands, ["open-issue-monitor"]);
+    model.update(state => ({ ...state, status: { enabled: false } }));
+    assert.equal(frames.size, 1);
+    unsubscribe();
+    assert.equal(frames.size, 0);
+    assert.equal(value.textContent, "Idle Q0 A0/1");
+  } finally { unsubscribe(); model.dispose(); fixture.dispose(); }
+});
 
 test("rail: 起動時に reveal 系 dataset 属性を一切設定しない", async () => {
   const fixture = await mountFixture();
@@ -58,28 +113,23 @@ test("rail commands: Intake is absent and an existing [data-cmd] item still disp
     const stopAll = fixture.document.querySelector(
       '.op-rail__item[data-cmd="stop-all-windows"]',
     );
-    assert.ok(stopAll, "expected Stop all agents rail item");
-    stopAll.dispatchEvent(new fixture.window.Event("click", { bubbles: true }));
-    assert.deepEqual(received, ["stop-all-windows"]);
+    assert.equal(Boolean(stopAll), false, "Stop all agents must be absent from the rail");
+    const logs = fixture.document.querySelector('.op-rail__item[data-cmd="open-logs"]');
+    assert.ok(logs, "Logs stays directly reachable from the rail");
+    logs.dispatchEvent(new fixture.window.Event("click", { bubbles: true }));
+    assert.deepEqual(received, ["open-logs"]);
   } finally {
     fixture.dispose();
   }
 });
 
-test("rail window badge: applyTelemetryCounts が windows 数を badge に反映する", async () => {
-  // SPEC-3038 AS-1.4: the Windows rail item carries an open-window count
-  // badge; zero windows hides the badge entirely.
+test("rail: retired window list and Add window controls are absent", async () => {
   const { applyTelemetryCounts } = await importOperatorShell();
   const { document } = parseHTML(html);
-  const badge = document.getElementById("op-rail-window-count");
-  assert.ok(badge, "expected #op-rail-window-count badge in the rail");
-
   applyTelemetryCounts(document, { windows: 3 });
-  assert.equal(badge.textContent, "3");
-  assert.equal(badge.hidden, false);
-
-  applyTelemetryCounts(document, { windows: 0 });
-  assert.equal(badge.hidden, true);
+  for (const id of ["window-list-button", "window-list-panel", "op-rail-window-count", "add-button", "preset-modal"]) {
+    assert.equal(Boolean(document.getElementById(id)), false, `${id} must be removed`);
+  }
 });
 
 test("FR-039 (安心): applyTelemetryCounts が waiting を WAITING cell に反映しアラート点滅する", async () => {
@@ -109,7 +159,7 @@ test("FR-039 (安心): applyTelemetryCounts が waiting を WAITING cell に反�
 });
 
 test("Issue Monitor status strip cell stays visible and requests the canonical Issue entry", async () => {
-  const { applyIssueMonitorStatus } = await importOperatorShell();
+  const { renderIssueMonitorStatus } = await importOperatorShell();
   const { document, window } = parseHTML(html);
   const originalCustomEvent = globalThis.CustomEvent;
   globalThis.CustomEvent = window.CustomEvent;
@@ -118,13 +168,15 @@ test("Issue Monitor status strip cell stays visible and requests the canonical I
     const value = document.getElementById("op-strip-issue-monitor-value");
     assert.ok(cell, "expected Issue Monitor status cell in the strip");
     assert.ok(value, "expected Issue Monitor status value in the strip");
+    assert.equal(cell.getAttribute("aria-label"), "Open Monitor: Off");
+    assert.match(cell.getAttribute("title"), /^Open Monitor.*Issue Monitor: Off/);
 
     const commands = [];
     document.addEventListener("op:command", (event) => {
       commands.push(event.detail?.id);
     });
 
-    applyIssueMonitorStatus(document, {
+    renderIssueMonitorStatus(document, {
       enabled: true,
       state: "launching",
       queue_len: 3,
@@ -134,10 +186,11 @@ test("Issue Monitor status strip cell stays visible and requests the canonical I
 
     assert.equal(value.textContent, "Run Q3 A1/2");
     assert.equal(cell.dataset.state, "launching");
-    assert.equal(cell.getAttribute("aria-label"), "Issue Monitor: Run Q3 A1/2");
+    assert.equal(cell.getAttribute("aria-label"), "Open Monitor: Run Q3 A1/2");
+    assert.match(cell.getAttribute("title"), /^Open Monitor.*Run Q3 A1\/2/);
     assert.equal(cell.classList.contains("op-status-strip__cell--alert"), false);
 
-    applyIssueMonitorStatus(document, {
+    renderIssueMonitorStatus(document, {
       enabled: true,
       state: "error",
       queue_len: 3,
@@ -159,12 +212,12 @@ test("Issue Monitor status strip cell stays visible and requests the canonical I
 });
 
 test("Issue Monitor status strip distinguishes and clears a quota hold", async () => {
-  const { applyIssueMonitorStatus } = await importOperatorShell();
+  const { renderIssueMonitorStatus } = await importOperatorShell();
   const { document } = parseHTML(html);
   const cell = document.getElementById("op-strip-issue-monitor");
   const value = document.getElementById("op-strip-issue-monitor-value");
 
-  applyIssueMonitorStatus(document, {
+  renderIssueMonitorStatus(document, {
     enabled: true,
     state: "idle",
     queue_len: 3,
@@ -180,7 +233,7 @@ test("Issue Monitor status strip distinguishes and clears a quota hold", async (
   const quotaHoldState = cell.dataset.state;
   const quotaHoldTitle = cell.getAttribute("title") ?? "";
 
-  applyIssueMonitorStatus(document, {
+  renderIssueMonitorStatus(document, {
     enabled: true,
     state: "idle",
     queue_len: 3,
@@ -199,7 +252,7 @@ test("Issue Monitor status strip distinguishes and clears a quota hold", async (
 });
 
 test("Issue Monitor status strip preserves higher-priority states around quota-hold metadata", async () => {
-  const { applyIssueMonitorStatus } = await importOperatorShell();
+  const { renderIssueMonitorStatus } = await importOperatorShell();
   const { document } = parseHTML(html);
   const cell = document.getElementById("op-strip-issue-monitor");
   const value = document.getElementById("op-strip-issue-monitor-value");
@@ -208,7 +261,7 @@ test("Issue Monitor status strip preserves higher-priority states around quota-h
     reset_at: "2026-09-04T09:30:00Z",
   };
 
-  applyIssueMonitorStatus(document, {
+  renderIssueMonitorStatus(document, {
     enabled: true,
     state: "error",
     queue_len: 3,
@@ -224,7 +277,7 @@ test("Issue Monitor status strip preserves higher-priority states around quota-h
   assert.match(cell.getAttribute("title") ?? "", /issue #3785: failed/);
   assert.doesNotMatch(cell.getAttribute("title") ?? "", /Provider|Reset/);
 
-  applyIssueMonitorStatus(document, {
+  renderIssueMonitorStatus(document, {
     enabled: false,
     state: "disabled",
     queue_len: 3,
@@ -239,7 +292,7 @@ test("Issue Monitor status strip preserves higher-priority states around quota-h
   assert.doesNotMatch(cell.getAttribute("title") ?? "", /Provider|Reset/);
 
   for (const state of ["active", "launching"]) {
-    applyIssueMonitorStatus(document, {
+    renderIssueMonitorStatus(document, {
       enabled: true,
       state,
       queue_len: 3,
@@ -254,7 +307,7 @@ test("Issue Monitor status strip preserves higher-priority states around quota-h
     assert.match(cell.getAttribute("title") ?? "", /Reset 2026-09-04T09:30:00Z/);
   }
 
-  applyIssueMonitorStatus(document, {
+  renderIssueMonitorStatus(document, {
     enabled: true,
     state: "active",
     queue_len: 3,

@@ -2,11 +2,17 @@ pub mod agent_backend_dispatch;
 pub mod agent_capability;
 pub mod agent_capacity;
 pub mod agent_maintenance;
+pub mod agent_names;
 pub(crate) mod agent_project_state;
+pub mod agent_registry_import;
 pub mod agent_resource_policy;
+pub mod docker_launch;
+pub mod launch_runtime;
 pub mod pane_runtime;
 pub mod session_finalizer;
 pub mod session_launch;
+#[cfg(windows)]
+pub(crate) mod verification_cap_relief;
 #[doc(hidden)]
 pub use agent_project_state::validated_project_state_root_for_session_recovery;
 pub mod autonomous_handoff;
@@ -38,28 +44,35 @@ pub mod index_worker;
 pub mod issue_cache;
 pub mod issue_monitor;
 pub mod issue_monitor_authz;
+pub mod issue_monitor_ci;
 pub mod issue_monitor_gate;
 pub mod issue_monitor_review;
 pub mod issue_monitor_settlement;
 pub mod issue_monitor_worker;
 pub mod knowledge_bridge;
 pub mod launch_wizard;
+pub mod machine_agent_admission;
+pub mod machine_agent_settings;
 pub mod managed_assets;
 pub mod memory_pressure;
 pub mod migration;
+pub mod mobile_connection;
 pub mod monitor_duplicate_runtime;
 pub mod native_app;
 pub mod native_notification_permission;
+pub mod native_notifications;
 #[doc(hidden)]
 pub mod perf;
 pub mod persistence;
 pub mod pm_conversation;
 pub mod pm_current;
 pub mod pm_planning;
+pub mod pm_policy;
 pub mod pm_registry;
 pub mod preset;
 pub mod process;
 pub mod profile_dispatch;
+pub mod project_notifications;
 pub mod project_open_control;
 pub mod project_runtime;
 pub mod project_transport;
@@ -78,7 +91,7 @@ pub mod update_control;
 pub mod update_drain;
 pub mod update_settings;
 pub mod web_protocol_enums;
-pub mod window_canvas;
+pub mod window_registry;
 pub mod window_state;
 pub mod work_notes;
 pub(crate) mod workspace_update_receipt;
@@ -251,9 +264,9 @@ pub use persistence::{
     load_session_state, load_workspace_state, migrate_legacy_workspace_state,
     pause_process_windows_for_restore, project_title_from_path, save_session_state,
     save_workspace_state, save_workspace_state_durable, workspace_state_path, AgentKanbanLane,
-    CanvasViewport, PersistedSessionState, PersistedSessionTabState, PersistedWindowCanvasState,
-    PersistedWindowState, ProjectKind, RecentProjectEntry, WindowGeometry, WindowPlacement,
-    WindowProcessStatus, WindowState, WindowSurfaceOwner, WindowWorktreeForm,
+    PersistedSessionState, PersistedSessionTabState, PersistedWindowRegistry, PersistedWindowState,
+    ProjectKind, RecentProjectEntry, WindowPlacement, WindowProcessStatus, WindowState,
+    WindowSurfaceOwner, WindowWorktreeForm,
 };
 pub use preset::{
     detect_shell_program, resolve_launch_spec, LaunchSpec, PresetResolveError, ShellProgram,
@@ -261,19 +274,20 @@ pub use preset::{
 };
 pub use protocol::{
     ActiveWorkAgentView, ActiveWorkCleanupCandidateView, ActiveWorkItemView,
-    ActiveWorkProjectionView, ActiveWorkspaceWorkView, AppStateView, ArrangeMode,
-    AttachmentProgressPhase, BackendEvent, BranchEntriesPhase, ContentLimits,
+    ActiveWorkProjectionView, ActiveWorkspaceWorkView, AgentAssignmentHistoryView,
+    AgentPastContributorView, AgentRosterMemberView, AgentRosterView, AgentWorkFactsView,
+    AppStateView, AttachmentProgressPhase, BackendEvent, BranchEntriesPhase, ContentLimits,
     ContinueWorkOutcomeKind, CustomAgentErrorCode, FileAttachment, FocusCycleDirection,
     FrontendEvent, GitHubRepositorySearchResultView, HubProjectView, HubStateView,
     IndexSearchMatchMode, IndexSearchResult, IndexSearchScope, IndexSearchTarget,
-    LogScopeSelection, ManagedHookHealthView, ManagedHookPendingDiscussionView,
-    ManagedHookPendingGoalView, ManagedHookSlowHandlerView, PmAgentOption, ProfileEntryView,
-    ProfileEnvEntryView, ProfileSnapshotView, ProjectTabView, RecentProjectView,
-    RecoveryCenterItemState, RecoveryCenterItemView, RecoveryCenterLoadStatus, RunningAgentSummary,
-    UiTraceEntry, UiTracePayload, WorkAgentView, WorkEventView, WorkItemView,
+    LocalAgentActivityAgentView, LocalAgentActivityView, LogScopeSelection, ManagedHookHealthView,
+    ManagedHookPendingDiscussionView, ManagedHookPendingGoalView, ManagedHookSlowHandlerView,
+    PmAgentOption, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView, ProjectTabView,
+    RecentProjectView, RecoveryCenterItemState, RecoveryCenterItemView, RecoveryCenterLoadStatus,
+    RunningAgentSummary, UiTraceEntry, UiTracePayload, WorkAgentView, WorkEventView, WorkItemView,
     WorkspaceExecutionContainerView, WorkspaceExecutionDiagnosisView, WorkspaceHistoryAgentView,
     WorkspaceHistoryEventView, WorkspaceHistorySessionView, WorkspaceHistoryView,
     WorkspaceJournalEntryView, WorkspaceResumeSource, WorkspaceStateNoticeKind,
     WorkspaceStateNoticeView, WorkspaceView,
 };
-pub use window_canvas::WindowCanvasState;
+pub use window_registry::WindowRegistry;

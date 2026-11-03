@@ -35,7 +35,7 @@ async function importSurfaceModule() {
     'from "data:text/javascript,export function createLaunchOperationId(){return%20%22resume-test%22}"',
   );
   return import(
-    `data:text/javascript;base64,${Buffer.from(source.replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`)).toString("base64")}`
+    `data:text/javascript;base64,${Buffer.from(source.replace('from "./agent-kanban-surface.js"', `from "${new URL("../agent-kanban-surface.js", import.meta.url).href}"`).replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`).replace('from "./ui-content.js"', `from "${new URL("../ui-content.js", import.meta.url).href}"`)).toString("base64")}`
   );
 }
 
@@ -47,6 +47,7 @@ function createSurface(mod, sent, preset = "issue", options = {}) {
       return true;
     });
   return mod.createKnowledgeKanbanSurface({
+    scheduleFrame: run => { run(); return () => {}; },
     send: options.send || ((message) => sent.push(message)),
     sendKnowledgeSemanticSearchNow: directSend,
     createNode: options.createNode || (() => ({ appendChild() {}, classList: { add() {} } })),
@@ -64,10 +65,43 @@ function createSurface(mod, sent, preset = "issue", options = {}) {
     sendWindowFocus() {},
     focusOrSpawnPreset() {},
     openIssueLaunchWizard() {},
-    visibleBounds: () => ({ x: 0, y: 0, width: 100, height: 100 }),
     launchPending: {},
   });
 }
+
+test("Issue #5531: resync replaces lost Knowledge owners and retains selection without retrying writes", async () => {
+  const mod = await importSurfaceModule();
+  withPatchedTimers(() => {
+    const sent = [];
+    const surface = createSurface(mod, sent);
+    const state = surface.ensureKnowledgeBridgeState("win-1", "issue");
+    state.selectedNumber = 42;
+    state.selectionGeneration = 3;
+    state.query = "retained query";
+    surface.requestKnowledgeBridge("win-1", "issue");
+    const oldRequestId = state.loadRequestId;
+    state.detailRequestId = 99;
+    state.searchInFlight = true;
+    state.inFlightSearchRequestId = 100;
+    state.revisionPending = true;
+    state.pendingPhaseUpdates.set(101, { issueNumber: 42 });
+
+    surface.resyncKnowledge(["win-1"]);
+
+    assert.equal(sent.length, 2, "resync must bypass the lost loading owner");
+    assert.equal(sent[1].kind, "load_knowledge_bridge");
+    assert.equal(sent[1].selected_number, 42);
+    assert.ok(sent[1].request_id > oldRequestId);
+    assert.equal(state.ownedLoadRequestIds.has(oldRequestId), false);
+    assert.equal(state.detailRequestId, 0);
+    assert.equal(state.searchInFlight, false);
+    assert.equal(state.revisionPending, false);
+    assert.equal(state.query, "retained query");
+    assert.equal(state.selectionGeneration, 3);
+    assert.equal(state.pendingPhaseUpdates.size, 0, "a lost phase reply cannot leave a permanent pending marker");
+    surface.clearKnowledgeBridgeState("win-1");
+  });
+});
 
 // SPEC #3170 T-948/T-949 shared fixtures: two cached rows plus an
 // authoritative detail for row A, driven through the public surface API
@@ -87,6 +121,42 @@ const ROW_B = {
   phase: "draft",
 };
 
+test("phase completion preserves synchronous acknowledgement and rollback state", async () => {
+  const surface = createSurface(await importSurfaceModule(), []);
+  const state = surface.ensureKnowledgeBridgeState("win-1", "issue");
+  state.entries = [ROW_B];
+  state.baseEntries = [ROW_B];
+  state.selectedNumber = ROW_B.number;
+  state.query = "Beta";
+  state.dndSnapshot = { issueNumber: ROW_B.number, entry: ROW_B };
+  state.pendingPhaseUpdates.set(ROW_B.number, {});
+  const fresh = { ...ROW_B, phase: "implementation" };
+  const reply = { kind: "knowledge_bridge_phase_updated", id: "win-1",
+    issue_number: ROW_B.number, result: { kind: "ok", fresh_entry: fresh } };
+  surface.applyKnowledgeReceiveEvent({ ...reply, id: "other-window" });
+  assert.equal(state.pendingPhaseUpdates.size, 1);
+  surface.applyKnowledgeReceiveEvent(reply);
+  assert.equal(state.pendingPhaseUpdates.size, 0);
+  assert.equal(state.entries[0], fresh);
+  assert.equal(state.baseEntries[0], fresh);
+  assert.equal(state.dndSnapshot, null);
+
+  state.entries[0] = { ...fresh, phase: "done" };
+  state.dndSnapshot = { issueNumber: ROW_B.number, entry: fresh };
+  state.pendingPhaseUpdates.set(ROW_B.number, {});
+  surface.applyKnowledgeReceiveEvent({ ...reply, result: { kind: "error", message: "Phase write failed" } });
+  assert.equal(state.pendingPhaseUpdates.size, 0);
+  assert.equal(state.entries[0], fresh);
+  assert.equal(state.baseEntries[0], fresh);
+  assert.equal(state.dndSnapshot, null);
+  assert.equal(state.error, "Phase write failed");
+  assert.equal(state.selectedNumber, ROW_B.number);
+  assert.equal(state.query, "Beta");
+  surface.clearKnowledgeBridgeState("win-1");
+  surface.applyKnowledgeReceiveEvent(reply);
+  assert.equal(surface.knowledgeBridgeStateMap.has("win-1"), false);
+});
+
 function detailFor(row, body) {
   return {
     number: row.number,
@@ -94,7 +164,7 @@ function detailFor(row, body) {
     subtitle: "",
     state: row.state,
     labels: row.labels,
-    sections: [{ title: "Description", body }],
+    sections: [{ title: "Description", body, content: { type: "markdown", body, body_html: "" } }],
     launch_issue_number: row.number,
     related_works: [],
   };
@@ -132,6 +202,52 @@ test("Issue #5396: semantic list completion does not request an implicit preview
     const before = sent.length;
     surface.applyKnowledgeReceiveEvent(searchResultsEvent(requestId));
     assert.equal(sent.slice(before).filter(message => message.kind === "select_knowledge_bridge_entry").length, 0);
+  });
+});
+
+test("Issue #5543: related-work enrichment refreshes only the explicitly selected detail", async () => {
+  const mod = await importSurfaceModule();
+  await withPatchedTimersAsync(async () => {
+    const sent = [];
+    const surface = createSurface(mod, sent);
+    surface.requestKnowledgeBridge("win-1", "issue", false);
+    const listEvent = {
+      kind: "knowledge_entries", id: "win-1", knowledge_kind: "issue",
+      request_id: sent.at(-1).request_id, entries: [ROW_A, ROW_B],
+      selected_number: null, refresh_enabled: true,
+    };
+    const detailRequests = () => sent.filter(message => message.kind === "select_knowledge_bridge_entry");
+    surface.applyKnowledgeReceiveEvent(listEvent);
+    assert.equal(detailRequests().length, 0, "initial rows must not open a detail");
+
+    surface.requestKnowledgeDetail("win-1", "issue", ROW_B.number);
+    surface.applyKnowledgeReceiveEvent({
+      kind: "knowledge_detail", id: "win-1", knowledge_kind: "issue",
+      request_id: detailRequests().at(-1).request_id,
+      detail: detailFor(ROW_B, "Beta body"),
+    });
+    const state = surface.knowledgeBridgeStateMap.get("win-1");
+    const selectionGeneration = state.selectionGeneration;
+    const enriched = {
+      ...listEvent,
+      entries: [ROW_A, { ...ROW_B, related_work_refs: [{ id: "work-beta" }],
+        related_work_count: 1, related_session_count: 1 }],
+    };
+    surface.applyKnowledgeReceiveEvent(enriched);
+    assert.equal(detailRequests().length, 2, "enrichment must requery the selected detail once");
+    assert.equal(detailRequests().at(-1).number, ROW_B.number);
+    assert.equal(state.selectedNumber, ROW_B.number);
+    assert.equal(state.selectionGeneration, selectionGeneration, "refresh is not an explicit selection");
+    surface.applyKnowledgeReceiveEvent(enriched);
+    assert.equal(detailRequests().length, 2, "the same related snapshot must not requery again");
+
+    const relatedWorks = [{ id: "work-beta", title: "Beta work" }];
+    surface.applyKnowledgeReceiveEvent({
+      kind: "knowledge_detail", id: "win-1", knowledge_kind: "issue",
+      request_id: detailRequests().at(-1).request_id,
+      detail: { ...detailFor(ROW_B, "Beta body"), related_works: relatedWorks },
+    });
+    assert.deepEqual(state.detail.related_works, relatedWorks);
   });
 });
 
@@ -207,16 +323,32 @@ test("a late initial load cannot move a newer explicit selection (AS-17.5)", asy
 
   // The initial load completes late, still claiming row A as selected and
   // no longer containing row B.
+  const entries = [{ ...ROW_A, labels: ["bug"] }];
   surface.applyKnowledgeReceiveEvent({
     kind: "knowledge_entries",
     id: "win-1",
     knowledge_kind: "issue",
     request_id: staleLoadRequestId,
-    entries: [ROW_A],
+    entries,
     selected_number: ROW_A.number,
     empty_message: "",
     refresh_enabled: true,
   });
+
+  entries[0].labels.push("caller");
+  entries.push(ROW_B);
+  assert.equal(state.baseEntries.length, 1, "the list receipt must own its outer array");
+  assert.deepEqual(state.baseEntries[0].labels, ["bug"], "nested caller mutation must be isolated");
+  assert.ok(Object.isFrozen(state.baseEntries[0].labels));
+  assert.equal(Object.isFrozen(state.baseEntries), false, "Phase ACKs replace local list slots");
+  assert.equal(Object.isFrozen(state.entries), false);
+  const fresh = { ...ROW_A, title: "Confirmed Alpha" };
+  surface.applyKnowledgeReceiveEvent({
+    kind: "knowledge_bridge_phase_updated", id: "win-1", issue_number: ROW_A.number,
+    result: { kind: "ok", fresh_entry: fresh },
+  });
+  assert.equal(state.baseEntries[0], fresh);
+  assert.equal(state.entries[0], fresh);
 
   assert.equal(
     state.selectedNumber,
@@ -246,24 +378,37 @@ test("a search completion cannot move a newer explicit selection (AS-17.5)", asy
     // The user explicitly selects B while the search is in flight.
     surface.requestKnowledgeDetail("win-1", "issue", ROW_B.number);
 
+    const entries = [{ ...ROW_A, labels: ["bug"] }, { ...ROW_B }];
     surface.applyKnowledgeReceiveEvent({
       kind: "knowledge_search_results",
       id: "win-1",
       knowledge_kind: "issue",
       query: "alpha",
       request_id: searchRequestId,
-      entries: [ROW_A, ROW_B],
+      entries,
       selected_number: ROW_A.number,
       empty_message: "",
       refresh_enabled: true,
     });
 
+    entries[0].title = "Caller mutation";
+    entries[0].labels.push("caller");
+    entries.pop();
+    assert.equal(state.entries.length, 2);
+    assert.equal(state.entries[0].title, ROW_A.title);
+    assert.deepEqual(state.entries[0].labels, ["bug"]);
+    assert.ok(Object.isFrozen(state.entries[0].labels));
     assert.equal(
       state.selectedNumber,
       ROW_B.number,
       "a search completion may refresh its rows but must not move the newer explicit selection (FR-101)",
     );
     assert.equal(state.detail?.number, ROW_B.number);
+    surface.applyKnowledgeReceiveEvent({
+      kind: "knowledge_bridge_phase_updated", id: "win-1", issue_number: ROW_A.number,
+      result: { kind: "ok", fresh_entry: { ...ROW_A, title: "Updated phase" } },
+    });
+    assert.equal(state.entries[0].title, "Updated phase");
   });
 });
 
@@ -279,12 +424,15 @@ test("A→B→A reverse-order detail completions leave the latest selection auth
   const requestForA = sent.at(-1).request_id;
 
   // Responses arrive in reverse order: A (latest) first, then stale B.
+  const detail = { ...detailFor(ROW_A, "Fresh alpha body"),
+    labels: ["bug"], related_works: [{ id: "work-alpha", title: "Original work",
+      agents: [{ session_id: "session-alpha", purpose: "Original purpose" }] }] };
   surface.applyKnowledgeReceiveEvent({
     kind: "knowledge_detail",
     id: "win-1",
     knowledge_kind: "issue",
     request_id: requestForA,
-    detail: detailFor(ROW_A, "Fresh alpha body"),
+    detail,
   });
   surface.applyKnowledgeReceiveEvent({
     kind: "knowledge_detail",
@@ -294,6 +442,12 @@ test("A→B→A reverse-order detail completions leave the latest selection auth
     detail: detailFor(ROW_B, "Stale beta body"),
   });
 
+  detail.labels.push("caller");
+  detail.related_works[0].agents[0].purpose = "Caller mutation";
+  detail.related_works.pop();
+  assert.deepEqual(state.detail.labels, ["bug"]);
+  assert.equal(state.detail.related_works[0].agents[0].purpose, "Original purpose");
+  assert.ok(Object.isFrozen(state.detail.related_works[0].agents));
   assert.equal(state.selectedNumber, ROW_A.number);
   assert.equal(
     state.detail?.number,
@@ -735,7 +889,13 @@ test("auto refresh gates revision checks on visibility and semantic owners (#539
       const body = domDocument.createElement("div");
       domDocument.body.appendChild(body);
       const windowMap = new Map([["win-1", body]]);
-      const windowData = { id: "win-1", preset: "issue" };
+      const windowData = { id: "win-1", preset: "issue", minimized: true,
+        tab_group_id: "legacy-group", tab_group_active: false };
+      const cache = domDocument.createElement("section");
+      cache.className = "surface-cache";
+      cache.hidden = true;
+      cache.setAttribute("inert", "");
+      domDocument.body.appendChild(cache);
       let activeTab = true;
       const createNode = (tag, className, textContent = "") => {
         const node = domDocument.createElement(tag);
@@ -791,7 +951,8 @@ test("auto refresh gates revision checks on visibility and semantic owners (#539
       }
 
       intervals[0].callback();
-      assert.equal(sent.filter(message => message.kind === "check_knowledge_revision").length, 1);
+      assert.equal(sent.filter(message => message.kind === "check_knowledge_revision").length, 1,
+        "visible legacy grouped windows refresh independently of saved canvas state");
       intervals[0].callback();
       intervals[0].callback();
       assert.equal(sent.filter(message => message.kind === "check_knowledge_revision").length, 1,
@@ -804,9 +965,7 @@ test("auto refresh gates revision checks on visibility and semantic owners (#539
       // Repeated hidden ticks coalesce to one revision check on activation.
       const hiddenCases = [
         [() => { body.hidden = true; }, () => { body.hidden = false; }],
-        [() => { windowData.minimized = true; }, () => { windowData.minimized = false; }],
-        [() => { windowData.tab_group_id = "group"; windowData.tab_group_active = false; },
-          () => { windowData.tab_group_active = true; }],
+        [() => { cache.appendChild(body); }, () => { domDocument.body.appendChild(body); }],
         [() => { activeTab = false; }, () => { activeTab = true; }],
         [() => { domDocument.hidden = true; }, () => { domDocument.hidden = false; }],
       ];
@@ -815,7 +974,7 @@ test("auto refresh gates revision checks on visibility and semantic owners (#539
         hide();
         intervals[0].callback();
         intervals[0].callback();
-        assert.equal(sent.length, before, "hidden/minimized/inactive surfaces do no reads");
+        assert.equal(sent.length, before, "hidden/cache/inactive-project surfaces do no reads");
         reveal();
         surface.refreshVisibleKnowledgeWindows();
         surface.refreshVisibleKnowledgeWindows();
@@ -1037,6 +1196,7 @@ test("offline retries never enter the generic pending queue; reconnect restarts 
     const online = { value: true };
     const windowData = { id: "win-1", preset: "issue" };
     const surface = mod.createKnowledgeKanbanSurface({
+      scheduleFrame: run => { run(); return () => {}; },
       send: (message) => sent.push(message),
       sendKnowledgeSemanticSearchNow: (message) => {
         if (!online.value) return false;
@@ -1054,7 +1214,6 @@ test("offline retries never enter the generic pending queue; reconnect restarts 
       sendWindowFocus() {},
       focusOrSpawnPreset() {},
       openIssueLaunchWizard() {},
-      visibleBounds: () => ({ x: 0, y: 0, width: 100, height: 100 }),
       launchPending: {},
     });
     const state = seedListAndAuthoritativeA(surface, "issue");
@@ -1245,6 +1404,9 @@ test("unchanged entry revisions retain rows while completing loads and preservin
       <div class="knowledge-status"></div><div class="knowledge-list"></div>
       <div class="knowledge-detail-pane"></div>
     </div></section>
+    <div id="kanban-drawer-backdrop"></div>
+    <aside id="kanban-drawer"><h2 id="kanban-drawer-title"></h2>
+      <div id="kanban-drawer-body"></div><div id="kanban-drawer-footer"></div></aside>
   `);
   const originalDocument = globalThis.document;
   globalThis.document = document;
@@ -1285,6 +1447,45 @@ test("unchanged entry revisions retain rows while completing loads and preservin
       assert.equal(state.selectedNumber, ROW_B.number);
       assert.equal(element.querySelector(".knowledge-detail-title").textContent, ROW_B.title);
       assert.equal(originalRow.classList.contains("selected"), true);
+
+      assert.ok(element.querySelector(".knowledge-detail-pane").textContent.includes("Loading detail"));
+      surface.applyKnowledgeReceiveEvent({
+        kind: "knowledge_error", id: "win-1", knowledge_kind: "issue",
+        request_id: state.detailRequestId, message: "Detail refresh failed",
+      });
+      assert.equal(state.detailLoading, false, "detail error settles synchronously");
+      assert.equal(state.error, "Detail refresh failed");
+      assert.equal(element.querySelector('[data-issue-number="2"]'), originalRow,
+        "detail error must not rebuild the list");
+      assert.equal(state.selectedNumber, ROW_B.number);
+      assert.ok(!element.querySelector(".knowledge-detail-pane").textContent.includes("Loading detail"));
+      assert.ok(element.querySelector(".knowledge-detail-pane .knowledge-notification-badge"));
+      state.error = "";
+
+      const drawer = document.getElementById("kanban-drawer");
+      drawer.focus = () => {};
+      surface.openKanbanDrawer({ windowId: "win-1", kind: "issue", number: ROW_B.number });
+      surface.applyKnowledgeReceiveEvent({
+        kind: "knowledge_detail", id: "win-1", knowledge_kind: "issue",
+        request_id: state.detailRequestId,
+        detail: { ...detailFor(ROW_B, "Completed drawer body"), title: "Completed beta" },
+      });
+      assert.equal(state.detailLoading, false, "detail completion is synchronous");
+      assert.equal(document.getElementById("kanban-drawer-title").textContent, "Completed beta");
+      assert.ok(document.getElementById("kanban-drawer-body").textContent.includes("Completed drawer body"));
+      assert.ok(element.querySelector('[data-issue-number="2"]') === originalRow,
+        "detail completion must preserve the list row");
+      const other = surface.ensureKnowledgeBridgeState("other-window", "issue");
+      other.selectedNumber = ROW_A.number;
+      surface.applyKnowledgeReceiveEvent({
+        kind: "knowledge_detail", id: "other-window", knowledge_kind: "issue",
+        detail: detailFor(ROW_A, "Other window body"),
+      });
+      assert.equal(other.detail.number, ROW_A.number);
+      assert.equal(document.getElementById("kanban-drawer-title").textContent, "Completed beta");
+      assert.ok(!document.getElementById("kanban-drawer-body").textContent.includes("Other window body"));
+      surface.closeKanbanDrawer();
+      surface.clearKnowledgeBridgeState("other-window");
 
       surface.applyKnowledgeReceiveEvent({
         kind: "knowledge_error", id: "win-1", knowledge_kind: "issue",
@@ -1342,6 +1543,22 @@ test("unchanged entry revisions retain rows while completing loads and preservin
       assert.ok(element.querySelector('[data-issue-number="2"]') === semanticRow,
         "an in-flight search must not redraw the list");
       assert.equal(state.queuedSearchIntent, null, "the in-flight search must not be duplicated");
+      const searchRequest = sent.at(-1);
+      const silentRow = element.querySelector('[data-issue-number="1"]');
+      assert.ok(silentRow);
+      const detailBeforeError = element.querySelector(".knowledge-detail-title");
+      surface.applyKnowledgeReceiveEvent({
+        kind: "knowledge_error", id: "win-1", knowledge_kind: "issue",
+        request_id: searchRequest.request_id, query: searchRequest.query, message: "Silent semantic failure",
+      });
+      assert.equal(state.searchInFlight, false);
+      assert.equal(state.searching, false);
+      assert.equal(state.error, "");
+      assert.equal(element.querySelector('[data-issue-number="1"]'), silentRow,
+        "silent errors must preserve list nodes");
+      assert.equal(element.querySelector(".knowledge-detail-title"), detailBeforeError,
+        "silent errors must preserve detail nodes");
+
       surface.clearKnowledgeBridgeState("win-1");
     });
   } finally {

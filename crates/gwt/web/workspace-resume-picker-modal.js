@@ -60,7 +60,7 @@ const focusTrapMap = new WeakMap();
  * of behavior callbacks. The function is a pure rendering primitive so
  * smoke tests can drive it without launching `app.js`.
  */
-export function renderWorkspaceResumePicker({
+function renderWorkspaceResumePicker({
   modalEl,
   dialogEl,
   state,
@@ -301,7 +301,6 @@ export function createWorkspaceResumePickerController({
   dialogEl,
   createNode,
   send,
-  getResumeBounds,
   launchPending,
   createOperationId = () => createLaunchOperationId("resume"),
 }) {
@@ -347,12 +346,6 @@ export function createWorkspaceResumePickerController({
     if (!agent || !agent.session_id) return;
     if (state.pendingSessionId) return;
     state.error = "";
-    const bounds = typeof getResumeBounds === "function" ? getResumeBounds() : null;
-    if (!bounds) {
-      state.error = "Cannot determine viewport bounds.";
-      render();
-      return;
-    }
     const operationId = String(createOperationId?.() || "").trim();
     if (!operationId) {
       state.error = "Cannot create a Resume request identifier.";
@@ -375,7 +368,6 @@ export function createWorkspaceResumePickerController({
         kind: "resume_workspace_agent",
         operation_id: operationId,
         session_id: agent.session_id,
-        bounds,
       });
     }
     state.pendingSessionId = agent.session_id;

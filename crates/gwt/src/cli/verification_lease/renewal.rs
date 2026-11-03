@@ -17,15 +17,29 @@ const RENEW_TTL: Duration = Duration::from_secs(super::DEFAULT_TTL_MINUTES * 60)
 const OBSERVE_EVERY: Duration = Duration::from_secs(30);
 const PENDING_THRESHOLD: usize = 3;
 const PRESSURE_AFTER: Duration = Duration::from_secs(5 * 60);
+const EXCLUSIVE_COMMAND_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
 /// The runner publishes its exact command root, including daemon-hosted
 /// commands. Other light verifications on that daemon cannot renew this run.
 #[derive(Default)]
 pub(crate) struct CommandProgress {
     pid: AtomicU32,
+    timeout: Option<Duration>,
 }
 
 impl CommandProgress {
+    /// Bound an unknown workload while it owns the host's exclusive lock.
+    pub(crate) fn with_exclusive_timeout() -> Self {
+        Self {
+            timeout: Some(EXCLUSIVE_COMMAND_TIMEOUT),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn timeout(&self) -> Option<Duration> {
+        self.timeout
+    }
+
     pub(crate) fn start(&self, pid: u32) -> RunningCommand<'_> {
         self.pid.store(pid, Ordering::Release);
         RunningCommand(self)

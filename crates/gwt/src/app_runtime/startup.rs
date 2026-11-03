@@ -4,10 +4,10 @@
 //! Owns:
 //! - [`AppRuntime::bootstrap`] (one-shot startup work: retroactive merge
 //!   migration, recovery-session restore queueing, ingest kicks)
-//! - The startup auto-resume queue and its geometry / freshness helpers
+//! - The startup auto-resume queue and its freshness helpers
 //!   ([`AppRuntime::queue_startup_auto_resume_sessions`],
 //!   [`AppRuntime::startup_auto_resume_ready_events`],
-//!   `startup_auto_resume_window_geometry`, `startup_auto_resume_is_fresh`,
+//!   `startup_auto_resume_is_fresh`,
 //!   `mark_auto_resume_source_completed`, ...)
 //! - Restoring open-project windows / paused placeholders
 //!   ([`AppRuntime::restore_open_project_windows`],
@@ -26,13 +26,15 @@ use std::{
 };
 
 use super::continuation::ActiveOwnerLiveness;
+#[cfg(test)]
+use super::launch_config_from_persisted_session;
 use super::terminal_convergence::{RestoreAdmission, TerminalCloseReason};
 use super::{
-    combined_window_id, execute_orphan_intake_worktree_prune, launch_config_from_persisted_session,
-    plan_orphan_intake_worktree_prune, plan_orphan_intake_worktree_prune_from_inventory,
-    same_worktree_path, should_auto_start_restored_window, workspace_resume_context_for_work_item,
+    combined_window_id, execute_orphan_intake_worktree_prune, plan_orphan_intake_worktree_prune,
+    plan_orphan_intake_worktree_prune_from_inventory, same_worktree_path,
+    should_auto_start_restored_window, workspace_resume_context_for_work_item,
     AgentCapabilityIssuer, AppRuntime, OrphanIntakePrunePlan, OutboundEvent,
-    PendingStartupAutoResumeSession, PreparedProjectWindowRestore, WindowGeometry, WindowPreset,
+    PendingStartupAutoResumeSession, PreparedProjectWindowRestore, WindowPreset,
     WindowProcessStatus, WorkspaceResumeContext,
 };
 
@@ -89,8 +91,6 @@ fn log_restore_drain_breakdown(resumed_sessions: usize, resume_ms: u64, pm_ensur
     }
 }
 const STARTUP_AUTO_RESUME_STALE_AFTER_SECS: i64 = 24 * 60 * 60;
-const STARTUP_AUTO_RESUME_STACK_OFFSET_X: f64 = 28.0;
-const STARTUP_AUTO_RESUME_STACK_OFFSET_Y: f64 = 24.0;
 
 /// Issue #4143 (AC-3): who asked for a restore.
 ///
@@ -179,11 +179,40 @@ impl RestoreRefusal {
         }
     }
 
-    fn removal_reason(self) -> Option<&'static str> {
-        match self {
-            Self::TerminalWork(reason) => Some(reason.as_str()),
-            Self::EmptyLandedWorktree => Some("empty_landed_worktree"),
-            _ => None,
+    pub(super) fn from_owner_code(code: &str) -> Self {
+        match code {
+            "settled_execution" => Self::TerminalWork(TerminalCloseReason::SettledExecution),
+            "closed_issue" => Self::TerminalWork(TerminalCloseReason::ClosedIssue),
+            "closed_issue_bookkeeping_warning" => {
+                Self::TerminalWork(TerminalCloseReason::ClosedIssueBookkeepingWarning)
+            }
+            "revoked_launch" => Self::TerminalWork(TerminalCloseReason::RevokedLaunch),
+            "lost_ownership" => Self::TerminalWork(TerminalCloseReason::LostOwnership),
+            "monitor_stopped" => Self::MonitorHold("monitor_stopped"),
+            "closed_work_diagnostic_retained" => Self::ClosedWorkDiagnostic,
+            "completed_work_retained" => Self::CompletedWork,
+            "fresh_session_required" => Self::FreshSessionRequired,
+            "no_resume_session" => Self::NoResumeSession,
+            "landed_worktree" => Self::LandedWorktree,
+            "empty_landed_worktree" => Self::EmptyLandedWorktree,
+            "worktree_already_restoring" => Self::WorktreeAlreadyRestoring,
+            "worktree_missing" => Self::WorktreeMissing,
+            "window_closed" => Self::WindowNotOpen,
+            "needs_human" => Self::MonitorHold("needs_human"),
+            "failure_hold" => Self::MonitorHold("failure_hold"),
+            "launch_revoked" => Self::MonitorHold("launch_revoked"),
+            "execution_blocked" => Self::MonitorHold("execution_blocked"),
+            "session_unreadable" => Self::TerminalFactsUnreadable("session_unreadable"),
+            "monitor_unreadable" => Self::TerminalFactsUnreadable("monitor_unreadable"),
+            "execution_unreadable" => Self::TerminalFactsUnreadable("execution_unreadable"),
+            "window_error" => Self::DiagnosticWindow,
+            "execution_session_mismatch" => {
+                Self::TerminalFactsUnreadable("execution_session_mismatch")
+            }
+            "work_authority_unreadable" => {
+                Self::TerminalFactsUnreadable("work_authority_unreadable")
+            }
+            _ => Self::LaunchNotStarted,
         }
     }
 
@@ -205,7 +234,7 @@ impl RestoreRefusal {
 }
 
 /// Issue #4143 (AC-2 / AC-4): per-target restore decisions plus the one-line
-/// startup summary that tells the operator why the canvas has fewer windows.
+/// startup summary that tells the operator why fewer windows were restored.
 ///
 /// The log times its own sweep: it is created when the sweep starts, and
 /// Issue #4305 (AC-5) defers the summary until the asynchronous spawns settle,
@@ -238,7 +267,7 @@ pub(crate) struct PendingRestoreSummary {
 }
 
 impl RestoreAdmissionLog {
-    fn refuse(&mut self, session_id: &str, refusal: RestoreRefusal) {
+    pub(super) fn refuse(&mut self, session_id: &str, refusal: RestoreRefusal) {
         let reason = refusal.label();
         if refusal.is_candidate_decision() {
             tracing::info!(
@@ -274,7 +303,7 @@ impl RestoreAdmissionLog {
     /// Issue #4441 (AC-5): the restored count and how long the sweep took, on
     /// the same line as the refusal breakdown, so "restore is what made startup
     /// slow" is a measurement next time rather than an inference.
-    fn emit_summary(&self, scope: &str, restored: usize) {
+    pub(super) fn emit_summary(&self, scope: &str, restored: usize) {
         tracing::info!(
             target: "gwt.restore.admission",
             scope,
@@ -299,7 +328,7 @@ pub(super) struct StartupGenerationReaperSummary {
 }
 
 pub(super) fn prepare_open_project_window_restores(
-    workspace: &gwt::PersistedWindowCanvasState,
+    workspace: &gwt::PersistedWindowRegistry,
     sessions_dir: &Path,
     project_kind: gwt::ProjectKind,
     migration_pending: bool,
@@ -318,7 +347,7 @@ pub(super) fn prepare_open_project_window_restores(
             if crate::runtime_support::window_is_agent_pane(window) {
                 let session_id = window.session_id.as_deref()?;
                 let path = sessions_dir.join(format!("{session_id}.toml"));
-                let session = gwt_agent::Session::load_and_migrate(&path).ok()?;
+                let session = gwt_agent::Session::load(&path).ok()?;
                 let project_state_root = session
                     .project_state_root
                     .as_deref()
@@ -336,13 +365,11 @@ pub(super) fn prepare_open_project_window_restores(
                     window_id: window.id.clone(),
                     session: Box::new(session),
                     workspace_resume_context,
-                    fallback_geometry: window.geometry.clone(),
                 })
             } else {
                 Some(PreparedProjectWindowRestore::Process {
                     window_id: window.id.clone(),
                     preset: window.preset,
-                    geometry: window.geometry.clone(),
                 })
             }
         })
@@ -461,26 +488,6 @@ pub(super) fn self_heal_managed_hooks_in_worktrees_with_expected<'a>(
     );
 }
 
-fn startup_auto_resume_window_geometry(
-    index: usize,
-    total: usize,
-    bounds: gwt::WindowGeometry,
-) -> gwt::WindowGeometry {
-    let (width, height) = WindowPreset::Agent.default_size();
-    let stack_steps = total.saturating_sub(1) as f64;
-    let index = index as f64;
-    gwt::WindowGeometry {
-        x: bounds.x + (bounds.width - width) / 2.0
-            - (stack_steps * STARTUP_AUTO_RESUME_STACK_OFFSET_X) / 2.0
-            + index * STARTUP_AUTO_RESUME_STACK_OFFSET_X,
-        y: bounds.y + (bounds.height - height) / 2.0
-            - (stack_steps * STARTUP_AUTO_RESUME_STACK_OFFSET_Y) / 2.0
-            + index * STARTUP_AUTO_RESUME_STACK_OFFSET_Y,
-        width,
-        height,
-    }
-}
-
 fn session_project_scope_hash(session: &gwt_agent::Session) -> Option<String> {
     session
         .repo_hash
@@ -516,7 +523,7 @@ pub(super) struct StartupRestoreFacts {
     pub intake_pruned: bool,
     pub worktree_exists: bool,
     /// A `Stopped` agent placeholder for this Session survives in a project
-    /// tab's canvas, i.e. nobody closed that window by hand (Issue #2942).
+    /// tab's saved window catalog, i.e. nobody explicitly closed that window (Issue #2942).
     pub has_placeholder: bool,
     /// [`startup_auto_resume_window_was_open`].
     pub window_was_open: bool,
@@ -738,18 +745,8 @@ pub(super) fn codex_home_for_startup(env_codex_home: Option<std::ffi::OsString>)
     }
 }
 
-pub(super) fn mark_auto_resume_source_completed(sessions_dir: &Path, session_id: &str) {
-    let _ = gwt_agent::update_session_with_wait(
-        sessions_dir,
-        session_id,
-        std::time::Duration::from_secs(2),
-        |session| {
-            session.update_status(gwt_agent::AgentStatus::Stopped);
-            session.restore_window_on_startup = false;
-            Ok(())
-        },
-    );
-}
+#[cfg(test)]
+pub(super) use gwt::project_runtime::installation::mark_auto_resume_source_completed;
 
 impl AppRuntime {
     pub(crate) fn bootstrap(&mut self) {
@@ -821,7 +818,6 @@ impl AppRuntime {
         // owner ledger, while readiness capabilities are intentionally
         // process-local. Reconcile that durable pair before startup migrations
         // or auto-resume can observe a partial Activated/Aborted transaction.
-        self.reconcile_durable_fresh_execution_launches();
 
         // SPEC-2359 US-37 / FR-119 / FR-123: One-shot retroactive migration to
         // mark historical merged `work/*` Start Work Workspaces as Done so the
@@ -942,11 +938,11 @@ impl AppRuntime {
                 continue;
             }
             gwt::perf::startup::track_terminal(&combined_window_id(&tab_id, &window.id));
-            let _ = self.start_window(&tab_id, &window.id, window.preset, window.geometry.clone());
+            let _ = self.start_window(&tab_id, &window.id, window.preset);
         }
         // SPEC-3431 FR-002: tabs already open at launch get their resident PM
-        // pane once the canvas reports bounds (same deferral rule as startup
-        // auto-resume — agent panes never spawn before the canvas is ready).
+        // pane once the frontend surfaces are ready (the same startup deferral
+        // rule that keeps Agent PTYs behind surface initialization).
         // Projects opened later get it from `open_project_path_events`.
         self.pending_startup_pm_tabs = self.tabs.iter().map(|tab| tab.id.clone()).collect();
         let _ = self.persist();
@@ -1026,8 +1022,10 @@ impl AppRuntime {
                 }
             }
             if let Err(refusal) = selection {
-                admission.refuse(&session.id, refusal);
-                continue;
+                if refusal != RestoreRefusal::NoResumeSession {
+                    admission.refuse(&session.id, refusal);
+                    continue;
+                }
             }
             let Some(tab_id) =
                 placeholder_tab.or_else(|| self.auto_resume_tab_id_for_session(&session))
@@ -1043,32 +1041,11 @@ impl AppRuntime {
                 admission.refuse(&session.id, RestoreRefusal::TabNotRestorable);
                 continue;
             }
-            // Issue #4143 (AC-2): the affirmative restore admission (Issue
-            // #3927 / FR-047 is its terminal half). A settled, closed, or
-            // revoked Issue-linked window is marked restore-disabled and its
-            // placeholder removed; a Session with no resumable conversation, or
-            // one whose Work facts cannot be read, keeps its placeholder but
-            // never spends a PTY on a launch that continues nothing.
-            let project_root = tab.project_root.clone();
-            let placeholder_window_id = tab
-                .workspace
-                .persisted()
-                .windows
-                .iter()
-                .find(|window| window.session_id.as_deref() == Some(session.id.as_str()))
-                .map(|window| combined_window_id(&tab_id, &window.id));
-            if let Err(refusal) =
-                self.restore_admission(&session, &project_root, placeholder_window_id.as_deref())
-            {
-                admission.refuse(&session.id, refusal);
-                if let Some(reason) = refusal.removal_reason() {
-                    self.remove_refused_session_restore(
-                        &tab_id,
-                        &session.id,
-                        placeholder_window_id.as_deref(),
-                        reason,
-                    );
-                }
+            // Canonical Work/native-conversation admission and source retirement
+            // run in RestoreSavedSession under the fixed project owner. This
+            // sweep only deduplicates immutable saved-source routing intents.
+            if self.restore_source_is_reserved(&session) {
+                admission.refuse(&session.id, RestoreRefusal::WorktreeAlreadyRestoring);
                 continue;
             }
             let project_state_root = session
@@ -1093,12 +1070,30 @@ impl AppRuntime {
                     workspace_resume_context,
                 });
         }
-        // Issue #4143 (AC-4) / Issue #4305 (AC-5): the canvas-ready drain owns
+        // Issue #4143 (AC-4) / Issue #4305 (AC-5): the surface-ready drain owns
         // the one summary line the operator reads. Queueing is not restoring —
         // a worktree may disappear after preparation, and the PTY spawn that
         // actually restores a window completes asynchronously — so the counts
         // are only final once every prepared window has settled.
         self.pending_startup_restore_log = Some(admission);
+    }
+
+    fn restore_source_is_reserved(&self, session: &gwt_agent::Session) -> bool {
+        // Deduplicate routing intents. The physical owner alone reserves a
+        // worktree after classifying requests that retire without a PTY.
+        self.active_agent_sessions
+            .values()
+            .any(|active| active.session_id == session.id)
+            || self
+                .pending_startup_auto_resume_sessions
+                .iter()
+                .any(|pending| pending.session.id == session.id)
+            || self
+                .pending_auto_resume_sources
+                .iter()
+                .any(|(window, source)| {
+                    self.window_lookup.contains_key(window) && source == &session.id
+                })
     }
 
     /// Issue #4143 (AC-2): decide whether automatic restore may spawn
@@ -1109,6 +1104,7 @@ impl AppRuntime {
     /// The terminal check runs first so a used-up window is still cleaned up
     /// (restore-disabled, placeholder removed) even when its conversation is
     /// also unresumable.
+    #[cfg(test)]
     pub(super) fn restore_admission(
         &self,
         session: &gwt_agent::Session,
@@ -1149,25 +1145,16 @@ impl AppRuntime {
         // Resolve only the local remote-tracking ref; startup never fetches.
         // The resident PM is a continuing conversation on a detached base,
         // not an Issue branch whose commits can mark its work as landed.
-        if !gwt::pm_registry::registered_pm_worktree_authority(
+        if let Some(reason) = gwt::project_runtime::installation::landed_restore_refusal(
+            session,
             project_root,
-            &session.id,
-            &session.worktree_path,
-        ) && gwt_core::process::run_git_logged(
-            &[
-                "merge-base",
-                "--is-ancestor",
-                "HEAD",
-                "refs/remotes/origin/develop",
-            ],
-            Some(&session.worktree_path),
-        )
-        .is_ok_and(|output| output.status.success())
-        {
-            if self.restore_placeholder_is_known_empty(session, window_id) {
-                return Err(RestoreRefusal::EmptyLandedWorktree);
-            }
-            return Err(RestoreRefusal::LandedWorktree);
+            self.restore_placeholder_is_known_empty(session, window_id),
+        ) {
+            return Err(if reason == "empty_landed_worktree" {
+                RestoreRefusal::EmptyLandedWorktree
+            } else {
+                RestoreRefusal::LandedWorktree
+            });
         }
         if completed_work {
             return Err(RestoreRefusal::CompletedWork);
@@ -1183,6 +1170,7 @@ impl AppRuntime {
     /// The Work-terminality half of [`Self::restore_admission`]. `Ok(true)`
     /// is the spawn-only `CompletedWork` refusal of Issue #4802 (AC-4), which
     /// the caller reports after the more specific worktree answers.
+    #[cfg(test)]
     fn work_terminality_refusal(
         &self,
         session: &gwt_agent::Session,
@@ -1202,43 +1190,9 @@ impl AppRuntime {
         }
     }
 
-    /// Issue #4783 AC-2: the admission decision, re-read at the spawn
-    /// boundary of an automatic restore.
-    ///
-    /// Admission runs once, at the startup sweep or the Open Project sweep;
-    /// the PTY spawn that restores the window happens later, after the canvas
-    /// round trip (and, for a PM worktree, an asynchronous preparation). The
-    /// spawn used to re-check only the cwd and the PM guards, so Work that
-    /// became terminal in between — or was admitted on facts a concurrent
-    /// Monitor scan has since settled — still came back as an agent. Reading
-    /// the same facts again immediately before the spawn is what keeps the
-    /// restore honest to the decision it was granted.
-    fn late_restore_refusal(
-        &self,
-        tab_id: &str,
-        session: &gwt_agent::Session,
-    ) -> Option<RestoreRefusal> {
-        let tab = self.tab(tab_id)?;
-        let placeholder_window_id = tab
-            .workspace
-            .persisted()
-            .windows
-            .iter()
-            .find(|window| window.session_id.as_deref() == Some(session.id.as_str()))
-            .map(|window| combined_window_id(tab_id, &window.id));
-        match self.work_terminality_refusal(
-            session,
-            &tab.project_root,
-            placeholder_window_id.as_deref(),
-        ) {
-            Err(refusal) => Some(refusal),
-            Ok(true) => Some(RestoreRefusal::CompletedWork),
-            Ok(false) => None,
-        }
-    }
-
     /// Only discard a provably empty placeholder. An unknown execution,
     /// prior failure, or any text/runtime belongs to the operator to inspect.
+    #[cfg(test)]
     fn restore_placeholder_is_known_empty(
         &self,
         session: &gwt_agent::Session,
@@ -1307,7 +1261,7 @@ impl AppRuntime {
     /// Issue #4378 AC-2: run the startup reaper on the blocking worker. The
     /// restore protection set is snapshotted here, so the worker judges exactly
     /// the sessions this startup is about to restore. Issue Monitor launch
-    /// deliveries are held until the worker reports back.
+    /// deliveries wait for both its result and surface-ready restore registration.
     pub(super) fn spawn_startup_generation_reaper(&mut self, startup_worktrees: &[PathBuf]) {
         let (protected_exact_sessions, protected_unknown_session_ids) =
             self.startup_reaper_protection();
@@ -1315,6 +1269,7 @@ impl AppRuntime {
         let worktrees = startup_worktrees.to_vec();
         let proxy = self.proxy.clone();
         self.deferred_issue_monitor_launches = Some(Vec::new());
+        self.startup_generation_reaper_pending = true;
         if let Err(error) = self.blocking_tasks.try_spawn(move || {
             reap_defunct_active_generations(
                 &sessions_dir,
@@ -1329,9 +1284,20 @@ impl AppRuntime {
                 %error,
                 "startup generation reaper could not be scheduled; running it inline"
             );
-            self.deferred_issue_monitor_launches = None;
             self.reap_startup_defunct_active_generations(startup_worktrees);
+            self.startup_generation_reaper_pending = false;
         }
+    }
+
+    /// Keep the source protected through queue drain and asynchronous launch
+    /// preparation. Its binding can be refreshed before the launch handshake,
+    /// so protection follows the admitted Session id, not a stale binding.
+    pub(super) fn restoring_session_ids(&self) -> HashSet<String> {
+        self.pending_startup_auto_resume_sessions
+            .iter()
+            .map(|pending| pending.session.id.clone())
+            .chain(self.restore_launch_windows.values().flatten().cloned())
+            .collect()
     }
 
     fn startup_reaper_protection(
@@ -1461,11 +1427,46 @@ pub(super) fn reap_defunct_active_generations(
                 continue;
             }
         };
+        // A queued routing draft cannot protect a Work that the owner must
+        // restore in a fresh Session. Unknown sources retain their protection.
+        let terminal_restore = protected_exact_sessions.contains(&exact_holder)
+            && match gwt_agent::inspect_session_path(
+                &sessions_dir.join(format!("{}.toml", candidate.session_id)),
+            ) {
+                gwt_agent::SessionPathState::Present(session)
+                    if session.id == candidate.session_id
+                        && same_worktree_path(&session.worktree_path, &candidate.worktree)
+                        && gwt_agent::SessionExecutionIdentity::from_session(&session)
+                            .ok()
+                            .flatten()
+                            .as_ref()
+                            == Some(&exact_holder) =>
+                {
+                    gwt::project_runtime::installation::restore_saved_session_work_terminality(
+                        &session,
+                        session
+                            .project_state_root
+                            .as_deref()
+                            .unwrap_or(&candidate.worktree),
+                        None,
+                    ) == RestoreAdmission::RefuseFreshSession
+                }
+                _ => false,
+            };
+        let eligible_protection = terminal_restore.then(|| {
+            protected_exact_sessions
+                .iter()
+                .filter(|holder| *holder != &exact_holder)
+                .cloned()
+                .collect::<Vec<_>>()
+        });
         match gwt::cli::execution_state::reap_startup_defunct_active_generation(
             &candidate,
             sessions_dir,
             &exact_holder,
-            protected_exact_sessions,
+            eligible_protection
+                .as_deref()
+                .unwrap_or(protected_exact_sessions),
         ) {
             Ok(gwt::cli::execution_state::StartupActiveGenerationReapOutcome::Reaped) => {
                 summary.reaped += 1;
@@ -1565,16 +1566,13 @@ impl AppRuntime {
         }
     }
 
-    pub(super) fn startup_auto_resume_ready_events(
-        &mut self,
-        bounds: WindowGeometry,
-    ) -> Vec<OutboundEvent> {
-        gwt::perf::startup::mark(gwt::perf::startup::StartupPhase::CanvasReady);
+    pub(super) fn startup_auto_resume_ready_events(&mut self) -> Vec<OutboundEvent> {
+        gwt::perf::startup::mark(gwt::perf::startup::StartupPhase::SurfaceReady);
         let _phase =
             gwt::perf::startup::PhaseTimer::start(gwt::perf::startup::StartupPhase::RestoreDrain);
         // Issue #4038 (AC-4 / AC-5): the notification center is a frontend
         // sink, so the bootstrap-time settle is recorded here, on the first
-        // canvas-ready round trip, where a client is guaranteed to listen.
+        // surface-ready round trip, where a client is guaranteed to listen.
         let mut events = self.update_resume_notice_events();
 
         let resume_started = Instant::now();
@@ -1582,28 +1580,25 @@ impl AppRuntime {
             gwt::perf::startup::StartupPhase::RestoreDrainResume,
         );
         let pending = std::mem::take(&mut self.pending_startup_auto_resume_sessions);
+        let total = pending.len();
         // Issue #4143 (AC-4): exactly one summary line per startup. Only the
         // drain that follows a queued sweep has something to report; a later
-        // canvas-ready round trip must stay silent instead of emitting an
+        // surface-ready round trip must stay silent instead of emitting an
         // empty second line.
         let queued_sweep = self.pending_startup_restore_log.is_some();
         let mut admission = self.pending_startup_restore_log.take().unwrap_or_default();
         let previous_windows = self.restore_launch_windows.keys().cloned().collect();
-        let total = pending.len();
-        for (index, pending_session) in pending.into_iter().enumerate() {
+        for pending_session in pending {
             if !pending_session.session.worktree_path.is_dir() {
                 admission.refuse(&pending_session.session.id, RestoreRefusal::WorktreeMissing);
                 continue;
             }
             let session_id = pending_session.session.id.clone();
             let pending_before = self.pending_auto_resume_sources.len();
-            let fallback_geometry =
-                startup_auto_resume_window_geometry(index, total, bounds.clone());
             let mut spawned = self.spawn_restored_agent_session(
                 &pending_session.tab_id,
                 pending_session.session,
                 pending_session.workspace_resume_context,
-                fallback_geometry,
                 RestoreOrigin::Automatic,
             );
             if self.pending_auto_resume_sources.len() == pending_before {
@@ -1627,10 +1622,11 @@ impl AppRuntime {
 
         // Issue #4375 AC-4: the drain's internals, not just its total.
         log_restore_drain_breakdown(total, resume_ms, pm_ensure_ms);
+        events.extend(self.drain_startup_issue_monitor_launches());
         events
     }
 
-    /// SPEC-3431 FR-002: drain the bootstrap-queued PM ensure once the canvas
+    /// SPEC-3431 FR-002: drain the bootstrap-queued PM ensure once the surfaces
     /// is ready. Runs after the auto-resume drain so a resumable PM session
     /// (which the resume queue may already have restarted) is seen as live by
     /// the singleton gate instead of being spawned twice.
@@ -1639,7 +1635,10 @@ impl AppRuntime {
             return Vec::new();
         }
         let tabs = std::mem::take(&mut self.pending_startup_pm_tabs);
-        tracing::info!(tabs = tabs.len(), "PM ensure: canvas ready, draining queue");
+        tracing::info!(
+            tabs = tabs.len(),
+            "PM ensure: surfaces ready, draining queue"
+        );
         let mut events = Vec::new();
         for tab_id in tabs {
             events.extend(self.ensure_pm_agent_for_tab(
@@ -1655,8 +1654,7 @@ impl AppRuntime {
         events
     }
 
-    /// Spawn a single restored agent window from a persisted session, reusing
-    /// the paused placeholder's geometry when present (Issue #2942). Shared by
+    /// Spawn a single restored agent window from a persisted session. Shared by
     /// startup auto-resume and the Open Project restore path so both honor the
     /// "restore everything the user did not explicitly close" rule. Records the
     /// source session in `pending_auto_resume_sources` so the lifecycle handler
@@ -1666,241 +1664,191 @@ impl AppRuntime {
         tab_id: &str,
         session: gwt_agent::Session,
         workspace_resume_context: Option<WorkspaceResumeContext>,
-        fallback_geometry: WindowGeometry,
         origin: RestoreOrigin,
     ) -> Vec<OutboundEvent> {
-        // Preparation and canvas readiness are asynchronous. Recheck the cwd
+        // Preparation and surface readiness are asynchronous. Recheck the cwd
         // at the shared spawn boundary, including an explicit user restart.
         if !session.worktree_path.is_dir() {
             RestoreAdmissionLog::default().refuse(&session.id, RestoreRefusal::WorktreeMissing);
             return Vec::new();
         }
-        if self.restore_would_resurrect_a_foreign_pm(tab_id, &session) {
-            return Vec::new();
-        }
-        if self.restore_would_resurrect_an_unregistered_pm(tab_id, &session) {
-            self.refuse_unregistered_pm_restore(tab_id, &session.id);
-            return Vec::new();
-        }
-        // Issue #4375: refreshing the resident PM's worktree is Git work whose
-        // cost scales with the repository, and this path runs inside the
-        // canvas-ready restore drain. Prepare it off the event loop and resume
-        // the spawn from the completion event.
-        if gwt::pm_registry::is_pm_worktree(&session.worktree_path) {
-            let Some(project_root) = self.tab(tab_id).map(|tab| tab.project_root.clone()) else {
-                return Vec::new();
-            };
-            return self.spawn_pm_worktree_preparation(
-                super::pm::PmWorktreeContinuation::ResumeSession {
-                    tab_id: tab_id.to_string(),
-                    project_root,
-                    session: Box::new(session),
-                    workspace_resume_context,
-                    fallback_geometry,
-                    origin,
-                    register_pm_launch: false,
-                },
-            );
-        }
         self.spawn_prepared_restored_agent_session(
             tab_id,
             session,
             workspace_resume_context,
-            fallback_geometry,
             origin,
         )
     }
 
-    /// The part of [`Self::spawn_restored_agent_session`] that runs once the PM
-    /// worktree — when the Session lives in one — has been prepared off the
-    /// GUI event loop.
     pub(super) fn spawn_prepared_restored_agent_session(
         &mut self,
         tab_id: &str,
         session: gwt_agent::Session,
         workspace_resume_context: Option<WorkspaceResumeContext>,
-        fallback_geometry: WindowGeometry,
         origin: RestoreOrigin,
     ) -> Vec<OutboundEvent> {
-        // Issue #4783 AC-2: re-evaluate the admission immediately before the
-        // spawn. A refusal here is logged like the sweep's, and a terminal
-        // one removes its placeholder the same way; the caller then counts
-        // the missing spawn as `launch_not_started`.
-        if origin == RestoreOrigin::Automatic {
-            if let Some(refusal) = self.late_restore_refusal(tab_id, &session) {
-                RestoreAdmissionLog::default().refuse(&session.id, refusal);
-                if let Some(reason) = refusal.removal_reason() {
-                    self.remove_refused_session_restore(tab_id, &session.id, None, reason);
-                }
-                return Vec::new();
+        if self.restore_source_is_reserved(&session) {
+            return Vec::new();
+        }
+        let Some(context) = self.project_context(tab_id) else {
+            return Vec::new();
+        };
+        let Some(tab) = self.tab_mut(tab_id) else {
+            return Vec::new();
+        };
+        // Reuse the saved layout alias. The owner alone decides source admission,
+        // member/name migration, native conversation reuse, and retirement.
+        let placeholder_existed = tab.workspace.persisted().windows.iter().any(|window| {
+            crate::runtime_support::window_is_agent_pane(window)
+                && window.session_id.as_deref() == Some(session.id.as_str())
+        });
+        let raw_id = tab
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .find(|window| {
+                crate::runtime_support::window_is_agent_pane(window)
+                    && window.session_id.as_deref() == Some(session.id.as_str())
+            })
+            .map(|window| window.id.clone())
+            .unwrap_or_else(|| {
+                tab.workspace
+                    .add_window_with_title(WindowPreset::Agent, session.display_name.clone(), true)
+                    .id
+            });
+        if !placeholder_existed {
+            tab.workspace
+                .set_session_id(&raw_id, Some(session.id.clone()));
+            tab.workspace
+                .set_agent_name(&raw_id, session.agent_name.clone());
+            tab.workspace
+                .set_agent_id(&raw_id, session.agent_id.command().to_string());
+            if let Some(purpose) = workspace_resume_context
+                .as_ref()
+                .and_then(WorkspaceResumeContext::purpose_title)
+            {
+                let _ = tab.workspace.set_purpose_title(&raw_id, Some(purpose));
             }
         }
-        let mut config = launch_config_from_persisted_session(&session);
-        if origin == RestoreOrigin::UserRequested {
-            config.launch_route = gwt_agent::LaunchRoute::Manual;
+        self.register_window(tab_id, &raw_id);
+        let window_id = combined_window_id(tab_id, &raw_id);
+        let generation = self
+            .window_lifecycle_generations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&window_id)
+            .copied();
+        if origin == RestoreOrigin::Automatic {
+            gwt::perf::startup::track_terminal(&window_id);
+            self.restore_launch_windows
+                .insert(window_id.clone(), Some(session.id.clone()));
         }
-        // Issue #4783 AC-2: tell the launch worker this Resume is a restore
-        // nobody asked for, so a terminal predecessor generation is left
-        // alone instead of being continued into a new Active generation.
-        config.automatic_restore = origin == RestoreOrigin::Automatic;
-        let agent_name = self.tab(tab_id).and_then(|tab| {
+        self.pending_auto_resume_sources
+            .insert(window_id.clone(), session.id.clone());
+        let queued = if origin == RestoreOrigin::Automatic {
+            self.queue_project_owner_cold_restore(
+                &context,
+                window_id.clone(),
+                generation,
+                session.id.clone(),
+                placeholder_existed,
+            )
+        } else {
+            self.queue_project_owner_restore(
+                &context,
+                window_id.clone(),
+                generation,
+                Box::new(session.clone()),
+                gwt_agent::SessionLaunchOrigin::UserRestart,
+                placeholder_existed,
+            )
+        };
+        match queued {
+            Ok(events) => events,
+            Err(error) => {
+                self.pending_auto_resume_sources.remove(&window_id);
+                self.restore_launch_error_events(tab_id, &session, origin, error)
+            }
+        }
+    }
+
+    fn restore_launch_error_events(
+        &mut self,
+        tab_id: &str,
+        session: &gwt_agent::Session,
+        origin: RestoreOrigin,
+        error: String,
+    ) -> Vec<OutboundEvent> {
+        tracing::warn!(session_id = %session.id, %error, "failed to spawn restored agent window");
+        let placeholder = self.tab(tab_id).and_then(|tab| {
             tab.workspace
                 .persisted()
                 .windows
                 .iter()
                 .find(|window| {
-                    crate::runtime_support::window_is_agent_pane(window)
+                    window.session_id.as_deref() == Some(session.id.as_str())
                         && matches!(
                             window.status,
                             WindowProcessStatus::Stopped | WindowProcessStatus::Error
                         )
-                        && window.session_id.as_deref() == Some(session.id.as_str())
                 })
-                .and_then(|window| window.agent_name.clone())
+                .map(|window| window.id.clone())
         });
-        let geometry = self
-            .remove_stale_paused_agent_window(tab_id, &session.id, None)
-            .unwrap_or(fallback_geometry);
-        // Snapshot the window registry *after* the paused placeholder is
-        // removed: the freshly spawned window may reuse the placeholder's id
-        // (ids are assigned lowest-free), so a pre-removal snapshot would fail
-        // to detect it and the source session would never be retired.
-        let existing_windows = self
-            .window_lookup
-            .keys()
-            .cloned()
-            .collect::<std::collections::HashSet<_>>();
-        match self.spawn_agent_window_at_geometry(
+        let mut events = Vec::new();
+        if let Some(raw_id) = &placeholder {
+            let window_id = combined_window_id(tab_id, raw_id);
+            self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
+            self.window_details.insert(window_id.clone(), error.clone());
+            let _ = self.persist();
+            events.extend(self.status_events(
+                window_id,
+                WindowProcessStatus::Error,
+                Some(error.clone()),
+            ));
+        }
+        events.extend(self.restore_launch_failure_notification_events(
             tab_id,
-            config,
-            geometry,
-            workspace_resume_context,
-        ) {
-            Ok(mut events) => {
-                if let Some(window_id) = self
-                    .window_lookup
-                    .keys()
-                    .find(|window_id| !existing_windows.contains(*window_id))
-                    .cloned()
-                {
-                    if let Some(name) = agent_name {
-                        if let Some(address) = self.window_lookup.get(&window_id).cloned() {
-                            if let Some(tab) = self.tab_mut(&address.tab_id) {
-                                tab.workspace.set_agent_name(&address.raw_id, Some(name));
-                            }
-                            if let Some(context) = self.project_context(&address.tab_id) {
-                                let named_state = self.workspace_state_broadcast(&context);
-                                for event in &mut events {
-                                    if matches!(
-                                        event.event,
-                                        gwt::BackendEvent::WindowCanvasState { .. }
-                                    ) {
-                                        *event = named_state.clone();
-                                    }
-                                }
-                            }
-                            let _ = self.persist();
-                        }
-                    }
-                    // Issue #4143 (AC-3): mark the in-flight automatic restore
-                    // so a failure before PTY start closes the empty pane
-                    // instead of persisting it into the next generation. A
-                    // restart the operator asked for is deliberately unmarked:
-                    // that pane is the diagnostic they are waiting for.
-                    if origin == RestoreOrigin::Automatic {
-                        gwt::perf::startup::track_terminal(&window_id);
-                        self.restore_launch_windows
-                            .insert(window_id.clone(), Some(session.id.clone()));
-                    }
-                    self.pending_auto_resume_sources
-                        .insert(window_id, session.id);
+            session,
+            origin,
+            placeholder.is_some(),
+            error,
+        ));
+        events
+    }
+
+    pub(super) fn restore_launch_failure_notification_events(
+        &self,
+        tab_id: &str,
+        session: &gwt_agent::Session,
+        origin: RestoreOrigin,
+        placeholder_existed: bool,
+        error: String,
+    ) -> Vec<OutboundEvent> {
+        let mut events = Vec::new();
+        if let Some(context) = self.project_context(tab_id) {
+            let event = if origin == RestoreOrigin::Automatic {
+                gwt::BackendEvent::IssueMonitorToast {
+                    notification_transition: None,
+                    notification_transition_id: None,
+                    level: "error".into(),
+                    message: format!("Agent restore failed: {error}"),
+                    issue_number: session.linked_issue_number,
                 }
-                events
-            }
-            Err(error) => {
-                tracing::warn!(
-                    session_id = %session.id,
-                    error = %error,
-                    "failed to spawn restored agent window"
-                );
-                Vec::new()
-            }
+            } else if !placeholder_existed {
+                gwt::BackendEvent::LaunchWizardOpenError {
+                    title: "Agent restore".into(),
+                    message: error,
+                }
+            } else {
+                return events;
+            };
+            events.push(
+                OutboundEvent::project(context.project_key, event)
+                    .with_error_project_root(&context.project_root),
+            );
         }
-    }
-
-    /// Issue #3607 AC-3: refuse to restore a Session rooted in *another*
-    /// project store's `pm/worktree`.
-    ///
-    /// The stopped store in the incident was not open in the app at all, yet
-    /// its PM came back: the current store's `workspace.json` still held a
-    /// window whose Session pointed at that store's PM worktree, and restore
-    /// resolves a window purely by its recorded session id. Nothing on the path
-    /// compared the two stores, and `auto_start` cannot close it because
-    /// restore never consults a registration.
-    ///
-    /// Guarding the shared spawn primitive covers every restore entry point at
-    /// once (startup auto-resume, Open Project restore, in-place restart) while
-    /// leaving a store's own PM resume — which goes through the same primitive
-    /// — untouched.
-    fn restore_would_resurrect_a_foreign_pm(
-        &self,
-        tab_id: &str,
-        session: &gwt_agent::Session,
-    ) -> bool {
-        let Some(tab) = self.tab(tab_id) else {
-            return false;
-        };
-        let own_project_dir = gwt_core::paths::gwt_project_dir_for_repo_path(&tab.project_root);
-        if !gwt::pm_registry::is_foreign_pm_worktree(&session.worktree_path, &own_project_dir) {
-            return false;
-        }
-        tracing::warn!(
-            tab_id,
-            session_id = %session.id,
-            worktree_path = %session.worktree_path.display(),
-            own_project_dir = %own_project_dir.display(),
-            "restore refused: the session belongs to another project store's PM worktree"
-        );
-        true
-    }
-
-    /// Issue #4394 AC-1: refuse to restore a Session in this store's own
-    /// `pm/worktree` that `pm.json` does not name.
-    ///
-    /// The foreign-store gate above compares stores only, so every PM Session
-    /// ever left restorable here came back on GUI restart — three PM windows,
-    /// one registration. The registered PM's own resume still passes, and its
-    /// successor is re-registered at launch completion.
-    fn restore_would_resurrect_an_unregistered_pm(
-        &self,
-        tab_id: &str,
-        session: &gwt_agent::Session,
-    ) -> bool {
-        let Some(tab) = self.tab(tab_id) else {
-            return false;
-        };
-        if !gwt::pm_registry::is_pm_worktree(&session.worktree_path) {
-            return false;
-        }
-        let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&tab.project_root);
-        if gwt::pm_registry::session_is_registered_pm(&prefs_path, &session.id) {
-            return false;
-        }
-        tracing::warn!(
-            tab_id,
-            session_id = %session.id,
-            worktree_path = %session.worktree_path.display(),
-            "restore refused: the PM worktree session is not the registered PM"
-        );
-        true
-    }
-
-    /// Retire an unregistered PM Session for good: never restorable again and
-    /// no placeholder left on the canvas, so the next startup sees one PM.
-    fn refuse_unregistered_pm_restore(&mut self, tab_id: &str, session_id: &str) {
-        mark_auto_resume_source_completed(&self.sessions_dir, session_id);
-        self.remove_stale_paused_agent_window(tab_id, session_id, None);
-        let _ = self.persist();
+        events
     }
 
     /// SPEC-2356 安心 Addendum (FR-044): relaunch a stopped/errored `Agent`
@@ -1915,7 +1863,6 @@ impl AppRuntime {
         &mut self,
         tab_id: &str,
         raw_id: &str,
-        fallback_geometry: WindowGeometry,
     ) -> Vec<OutboundEvent> {
         let Some(session_id) = self
             .tab(tab_id)
@@ -1924,8 +1871,9 @@ impl AppRuntime {
         else {
             return Vec::new();
         };
-        let path = self.sessions_dir.join(format!("{session_id}.toml"));
-        let Ok(session) = gwt_agent::Session::load_and_migrate(&path) else {
+        let Some(session) =
+            gwt_agent::session_ledger::load_session_candidate(&self.sessions_dir, &session_id)
+        else {
             return Vec::new();
         };
         let project_state_root = session
@@ -1946,7 +1894,6 @@ impl AppRuntime {
             tab_id,
             session,
             workspace_resume_context,
-            fallback_geometry,
             RestoreOrigin::UserRequested,
         ));
         events
@@ -1958,7 +1905,7 @@ impl AppRuntime {
     /// windows are exactly the set to restart: agents resume via their native
     /// session id (or launch fresh when none exists), and non-agent process
     /// windows (e.g. Shell) launch fresh. Runs synchronously because each
-    /// placeholder already carries its geometry, so no frontend canvas bounds
+    /// placeholder already carries its Session identity, so no frontend layout
     /// round-trip is required. The startup `bootstrap` queue only covers tabs
     /// open at launch, so projects opened via Open Project / Reopen Recent were
     /// never restored before this path existed.
@@ -2003,7 +1950,6 @@ impl AppRuntime {
                 PreparedProjectWindowRestore::Agent {
                     session,
                     workspace_resume_context,
-                    fallback_geometry,
                     ..
                 } => {
                     if !session.worktree_path.is_dir() {
@@ -2017,28 +1963,8 @@ impl AppRuntime {
                     {
                         continue;
                     }
-                    // Issue #4143 (AC-2): same affirmative admission as startup
-                    // auto-resume, which the Open Project path never applied —
-                    // an unresumable Session was silently relaunched fresh here.
-                    let project_root = self
-                        .tab(tab_id)
-                        .map(|tab| tab.project_root.clone())
-                        .unwrap_or_default();
-                    if let Err(refusal) =
-                        self.restore_admission(&session, &project_root, Some(&combined))
-                    {
-                        admission.refuse(&session.id, refusal);
-                        if let Some(reason) = refusal.removal_reason() {
-                            self.remove_refused_session_restore(
-                                tab_id,
-                                &session.id,
-                                Some(&combined),
-                                reason,
-                            );
-                            if let Some(context) = self.project_context(tab_id) {
-                                events.push(self.workspace_state_broadcast(&context));
-                            }
-                        }
+                    if self.restore_source_is_reserved(&session) {
+                        admission.refuse(&session.id, RestoreRefusal::WorktreeAlreadyRestoring);
                         continue;
                     }
                     let session_id = session.id.clone();
@@ -2047,7 +1973,6 @@ impl AppRuntime {
                         tab_id,
                         *session,
                         workspace_resume_context,
-                        fallback_geometry,
                         RestoreOrigin::Automatic,
                     );
                     if self.pending_auto_resume_sources.len() == pending_before {
@@ -2055,15 +1980,11 @@ impl AppRuntime {
                     }
                     events.append(&mut spawned);
                 }
-                PreparedProjectWindowRestore::Process {
-                    window_id,
-                    preset,
-                    geometry,
-                } => {
+                PreparedProjectWindowRestore::Process { window_id, preset } => {
                     // Issue #4143 (AC-3): a restored process window spends a PTY
                     // too, so its pre-PTY failure must not persist either.
                     self.restore_launch_windows.insert(combined.clone(), None);
-                    events.extend(self.start_window(tab_id, &window_id, preset, geometry));
+                    events.extend(self.start_window(tab_id, &window_id, preset));
                     if self.runtimes.contains_key(&combined) {
                         restored += 1;
                     } else {
@@ -2100,41 +2021,6 @@ impl AppRuntime {
                 })
             })
             .map(|tab| tab.id.clone())
-    }
-
-    pub(super) fn remove_stale_paused_agent_window(
-        &mut self,
-        tab_id: &str,
-        session_id: &str,
-        window_id: Option<&str>,
-    ) -> Option<WindowGeometry> {
-        let tab = self.tab_mut(tab_id)?;
-        // SPEC-1921 Phase 65 (T337): stale placeholder removal must cover the
-        // full Agent-family preset set (`Agent`, `Claude`, `Codex`), not just
-        // the legacy `Agent` preset — otherwise a resumed Claude/Codex window
-        // spawns next to its surviving placeholder and loses the restored
-        // geometry.
-        let stale = tab
-            .workspace
-            .persisted()
-            .windows
-            .iter()
-            .find(|w| {
-                crate::runtime_support::window_is_agent_pane(w)
-                    && matches!(
-                        w.status,
-                        WindowProcessStatus::Stopped | WindowProcessStatus::Error
-                    )
-                    && w.session_id.as_deref() == Some(session_id)
-                    && window_id.is_none_or(|id| combined_window_id(tab_id, &w.id) == id)
-            })
-            .map(|w| (w.id.clone(), w.geometry.clone()));
-        let (raw_id, geometry) = stale?;
-        tab.workspace.close_window(&raw_id);
-        let combined = combined_window_id(tab_id, &raw_id);
-        self.window_lookup.remove(&combined);
-        self.window_details.remove(&combined);
-        Some(geometry)
     }
 
     fn auto_resume_tab_id_for_session(&self, session: &gwt_agent::Session) -> Option<String> {
@@ -2382,27 +2268,10 @@ impl AppRuntime {
     }
 
     fn load_recovery_session(sessions_dir: &Path, session_id: &str) -> Option<gwt_agent::Session> {
-        let session = gwt_agent::session_ledger::load_session_candidate(sessions_dir, session_id)?;
-        // Historical stopped Sessions need no writer lease or serialization.
-        // A real mutation still re-reads and checks lifecycle under the lock below.
-        let needs_interruption = session.status != gwt_agent::AgentStatus::Interrupted
-            && session.should_mark_interrupted_from_lifecycle()
-            && session.worktree_path.exists();
-        if session.schema_version >= gwt_agent::Session::CURRENT_SCHEMA_VERSION
-            && !needs_interruption
-        {
-            return Some(session);
+        if gwt::session_launch::durable_launch_recovery_exists(sessions_dir, session_id) {
+            return None;
         }
-        gwt_agent::update_session_if_changed(sessions_dir, session_id, |session| {
-            if session.status != gwt_agent::AgentStatus::Interrupted
-                && session.worktree_path.exists()
-                && session.should_mark_interrupted_from_lifecycle()
-            {
-                session.update_status(gwt_agent::AgentStatus::Interrupted);
-            }
-            Ok(())
-        })
-        .ok()
+        gwt_agent::session_ledger::load_session_candidate(sessions_dir, session_id)
     }
 
     pub(crate) fn set_agent_capability_issuer(&mut self, issuer: AgentCapabilityIssuer) {

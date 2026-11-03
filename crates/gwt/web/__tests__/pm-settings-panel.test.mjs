@@ -70,8 +70,15 @@ function fixture({ confirmAnswer = true, mounts = 1 } = {}) {
   document.getElementById("pm-settings-panel")?.remove();
   const sent = [];
   const confirmed = [];
+  const frames = new Set();
+  const flush = () => {
+    const callbacks = [...frames];
+    frames.clear();
+    callbacks.forEach(callback => callback());
+  };
   const panel = createPmSettingsPanel({
     document,
+    scheduleFrame(callback) { frames.add(callback); return () => frames.delete(callback); },
     send: (event) => sent.push(event),
     confirm: (message) => {
       confirmed.push(message);
@@ -87,7 +94,10 @@ function fixture({ confirmAnswer = true, mounts = 1 } = {}) {
     panel.mount(view);
     views.push(view);
   }
-  return { document, sent, confirmed, panel, views };
+  const applyStatus = panel.applyStatus.bind(panel);
+  // Existing interaction assertions observe a completed display frame.
+  panel.applyStatus = status => { applyStatus(status); flush(); };
+  return { document, sent, confirmed, panel, views, applyStatus, frames, flush };
 }
 
 function changeEvent(document) {
@@ -199,6 +209,13 @@ test("AC-6: PM Settings explains existing controls on focus and hover without ac
   views[0].remove();
   assert.equal(document.getElementById(firstPopupId), null, "unmount disposes immediately without another status");
   assert.ok(document.getElementById(second.getAttribute("aria-describedby")), "other Settings mounts remain live");
+  panel.applyStatus({ ...RUNNING_STATUS, loop_interval_secs: 84 });
+  assert.equal(interval.value, "60", "unmounted controls no longer receive snapshots");
+  assert.equal(required(views[1], '[data-role="pm-loop-interval"]').value, "84");
+  document.body.appendChild(view);
+  panel.mount(view);
+  assert.equal(required(view, '[data-role="pm-loop-interval"]').value, "84",
+    "remount pulls the latest committed snapshot");
   assert.match(appJs, /pmSettingsPanel\.unmount\(element\.querySelector\('\[data-settings-panel="project-manager"\]'\)\)/);
   assert.deepEqual(sent, []);
   assert.deepEqual(confirmed, []);
@@ -225,7 +242,7 @@ test("FR-132: rail gear remains separate from the PM launcher without a standalo
 
   assert.match(
     appJs,
-    /for \(const id of \["op-pm-entry", "canvas-pm-launcher"\]\)/,
+    /document\.getElementById\("op-pm-entry"\)/,
     "PM ランチャーの click 配線は維持する",
   );
   assert.match(appJs, /send\(\{\s*kind:\s*"open_pm_agent"\s*\}\)/);
@@ -263,15 +280,19 @@ test("FR-132: shared controller routes gear and pm-settings command to Settings"
   assert.deepEqual(sent, [], "the PM settings command must not mutate the PM");
 });
 
-test("FR-132: late and existing mounts share the controller's current snapshot", () => {
-  const { document, panel, views } = fixture();
-  panel.applyStatus({
+test("FR-132: late and existing mounts share the latest frame snapshot while actions read synchronously", () => {
+  const { document, sent, panel, views, applyStatus, frames, flush } = fixture();
+  applyStatus({ ...RUNNING_STATUS, loop_interval_secs: 70 });
+  applyStatus({
     ...RUNNING_STATUS,
     auto_start: false,
     configured_agent_id: "codex",
     configured_model: "gpt-5.1-codex-max",
     loop_interval_secs: 42,
   });
+  assert.equal(required(views[0], '[data-role="pm-loop-interval"]').value, "60",
+    "received updates must wait for the display frame");
+  assert.equal(frames.size, 1, "a burst reserves one frame for every mount");
 
   const lateView = document.createElement("section");
   lateView.className = "settings-panel";
@@ -279,6 +300,9 @@ test("FR-132: late and existing mounts share the controller's current snapshot",
   document.body.appendChild(lateView);
   panel.mount(lateView);
   views.push(lateView);
+  assert.equal(required(lateView, '[data-role="pm-loop-interval"]').value, "42",
+    "a late mount immediately reads the latest model");
+  flush();
 
   for (const view of views) {
     assert.equal(required(view, '[data-role="pm-auto-start"]').checked, false);
@@ -294,6 +318,31 @@ test("FR-132: late and existing mounts share the controller's current snapshot",
   for (const view of views) {
     assert.equal(required(view, '[data-role="pm-loop-interval"]').value, "84");
   }
+
+  applyStatus({ available: false });
+  required(views[0], '[data-role="pm-pause-toggle"]').click();
+  assert.deepEqual(sent, [], "an action rejects unavailable state before its frame renders");
+  panel.unmount(views[0]);
+  lateView.remove();
+  applyStatus(RUNNING_STATUS); // Synchronous pruning releases the detached view.
+  assert.equal(frames.size, 0, "unmount/prune cancels the last pending display frame");
+  flush();
+  assert.equal(required(views[0], '[data-role="pm-loop-interval"]').value, "84");
+});
+
+test("a failing PM settings mount does not leave another mount on the old snapshot", () => {
+  const { panel, views } = fixture({ mounts: 2 });
+  const runningLine = required(views[0], '[data-role="pm-running-as"]');
+  Object.defineProperty(runningLine, "textContent", {
+    configurable: true,
+    set() { throw new Error("failed settings renderer"); },
+  });
+
+  assert.throws(
+    () => panel.applyStatus({ ...RUNNING_STATUS, loop_interval_secs: 84 }),
+    /failed settings renderer/,
+  );
+  assert.equal(required(views[1], '[data-role="pm-loop-interval"]').value, "84");
 });
 
 test("FR-132: active-project status replacement updates every mount without leaking the prior project", () => {
@@ -817,7 +866,7 @@ test("FR-132: app owns one controller and applies pm_status to it", () => {
   assert.match(appJs, /pmSettingsPanel\.bindEntryPoints\(\{\s*document\s*\}\)/);
   assert.match(
     appJs,
-    /case "pm_status":[\s\S]{0,200}pmSettingsPanel\.applyStatus\(/,
+    /case "pm_status":[\s\S]{0,200}applyPmSettingsReceiveEvent\(/,
     "pm_status が受信ディスパッチに繋がっていること",
   );
   assert.match(

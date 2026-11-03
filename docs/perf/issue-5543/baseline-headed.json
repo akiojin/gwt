@@ -1,0 +1,34 @@
+{
+  "issue": 5543,
+  "classification": "baseline RED",
+  "raw_evidence": "E:\\gwt\\work\\issue-5543\\crates\\gwt\\playwright\\test-results\\issue-5543-after-a19f89bff2ca49cab76a2bdead09c827\\knowledge-load-live-Issue--5c6a2-oads-preserve-GUI-responses-chromium-dark\\knowledge-load-after-dark.json",
+  "binary_sha256": "19DF1E84BC89A8C59DEA307760CDDA5766919ECEFE9EFF218A5596F356EE4FDB",
+  "owned_pid": 47836,
+  "owned_pid_running": false,
+  "project": "E:\\gwt",
+  "workspace_ready_ms": 93898.7671,
+  "all_load_samples": [
+    {
+      "id": "issue-load-5543::settings-1",
+      "request_id": 1,
+      "phase": "first",
+      "sent_at_ms": 93981.6124,
+      "status": "timeout",
+      "wall_ms": 60009.961800000005
+    }
+  ],
+  "work_decode_gate": {
+    "started_at_ms": 147194.9344,
+    "first_response_before_release": false,
+    "rows_visible_before_release": false,
+    "independence_pass": false,
+    "released_at_ms": 167407.1141
+  },
+  "window_presets": [
+    "settings"
+  ],
+  "suppressed_startup_restores": 1,
+  "console_and_page_error_count": 0,
+  "issue_window_timeout_ledger_count": 1,
+  "phase": "first"
+}

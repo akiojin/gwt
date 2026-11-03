@@ -1372,7 +1372,7 @@ fn classify_search_payload(payload: Value) -> Result<Value, IndexSearchAttemptEr
 /// Keep the existing model worker; avoid launching a Python transport process
 /// for every warm query. The home-specific paths also isolate browser checks
 /// whose runtime directory is a junction to the installed assets.
-fn search_worker_dir() -> PathBuf {
+pub(crate) fn search_worker_dir() -> PathBuf {
     use sha2::{Digest, Sha256};
     let identity = serde_json::json!([
         gwt_core::runtime::project_index_runner_path(),
@@ -3522,6 +3522,10 @@ mod tests {
             return;
         }
         let temp = tempfile::tempdir().expect("tempdir");
+        // Reject the missing root before Git probes: this fixture covers the
+        // worker's failure log, even when a real context probe would be slow.
+        let project_root = temp.path().join("missing-project");
+        let _git_hang = gwt_core::test_support::ScopedEnvVar::set("GWT_INDEX_TEST_GIT_HANG", "1");
         let output = tempfile::NamedTempFile::new().expect("repair log");
         // Repairs run on another thread, so a thread-local subscriber cannot
         // observe this event. Other log-capture tests use scoped subscribers.
@@ -3533,7 +3537,7 @@ mod tests {
         tracing::subscriber::set_global_default(subscriber).expect("repair log subscriber");
 
         queue_scope_rebuilds(
-            temp.path(),
+            &project_root,
             &[("specs".to_string(), "missing".to_string())],
             None,
         );
@@ -3857,12 +3861,16 @@ mod tests {
             let rebuild_scope = rebuild_scope_for_name(name)
                 .unwrap_or_else(|| panic!("scope {name} has no search-queued rebuild target"));
             assert_eq!(rebuild_scope.label(), name);
+            let writer_label = match scope {
+                IndexSearchScope::Specs => "issues",
+                _ => name,
+            };
             assert!(
-                crate::index_worker::rebuild_action_for_scope(rebuild_scope).label == name,
+                crate::index_worker::rebuild_action_for_scope(rebuild_scope).label == writer_label,
                 "scope {name} has no production rebuild action"
             );
             assert!(
-                manual_labels.contains(&name),
+                manual_labels.contains(&writer_label),
                 "scope {name} is missing from the manual `index.rebuild` path"
             );
         }

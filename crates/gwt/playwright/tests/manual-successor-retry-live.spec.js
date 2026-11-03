@@ -7,7 +7,7 @@ const { createWriteStream, realpathSync } = require('node:fs');
 const { homedir, tmpdir } = require('node:os');
 const { delimiter, join, resolve } = require('node:path');
 const { setTimeout: delay } = require('node:timers/promises');
-const { gotoLiveGwt, openLiveLaunchWizardForBranch, sendLiveGwtEvent } = require('./_helpers/live-gwt.ts');
+const { gotoLiveGwt, sendLiveGwtEvent } = require('./_helpers/live-gwt.ts');
 
 const ROOT = resolve(process.env.GWT_PLAYWRIGHT_CHECKOUT_ROOT ?? process.cwd());
 const OWNER = 4964;
@@ -230,7 +230,7 @@ async function action(page, action) {
 }
 async function launch(page) {
   const after = await cursor(page);
-  await openLiveLaunchWizardForBranch(page, BRANCH);
+  await sendLiveGwtEvent(page, { kind: 'open_active_work_launch_wizard', branch_name: BRANCH, linked_issue_number: OWNER });
   await wizardState(page, after);
   await action(page, { kind: 'set_launch_path', path: 'manual_setup' });
   await action(page, { kind: 'set_agent', agent_id: 'codex' });
@@ -261,7 +261,7 @@ test.describe('Manual successor retry (isolated checkout)', () => {
   test.setTimeout(240000);
   test.beforeAll(async () => { fixtureBinaries = await compileFixtures(); });
 
-  test('close Prepared candidate and launch a new same-owner successor through Ready', async ({ page }, info) => {
+  test('close Prepared candidate and supersede invalid occupancy through Ready', async ({ page }, info) => {
     const fixture = await startFixture(info);
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
@@ -272,7 +272,13 @@ test.describe('Manual successor retry (isolated checkout)', () => {
       await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
       const predecessor = fixture.inspect();
       const oldWork = predecessor.works.work_items.find(work => work.id === predecessor.workspace.id);
-      expect(oldWork.owner).toBeNull();
+      const invalidWork = predecessor.works.work_items.find(work => work.status_category === 'active');
+      const terminalHistory = predecessor.works.work_items.filter(work => work.status_category === 'done');
+      expect(terminalHistory).toHaveLength(4);
+      expect(terminalHistory.filter(work => work.owner === `Issue #${OWNER}`)).toHaveLength(3);
+      expect(invalidWork.status_category).toBe('active');
+      expect(invalidWork.related_work_item_ids).toEqual([]);
+      expect(oldWork.owner).toBe(`Issue #${OWNER}`);
       expect(oldWork.status_category).toBe('done');
       expect(oldWork.execution_containers).toHaveLength(1);
       expect(oldWork.execution_containers[0].worktree_path).toBe(`E:\\gwt\\work\\issue-${OWNER}`);
@@ -334,8 +340,15 @@ test.describe('Manual successor retry (isolated checkout)', () => {
       expect(successor.id).not.toBe(oldWork.id);
       expect(successor.status_category).not.toBe('done');
       expect(successor.discarded).toBe(false);
-      expect(successor.related_work_item_ids).toContain(oldWork.id);
-      expect(successor.events.some(event => event.kind === 'start' && event.related_work_item_id === oldWork.id)).toBe(true);
+      expect(successor.related_work_item_ids).toContain(invalidWork.id);
+      expect(successor.events.some(event => event.kind === 'start' && event.related_work_item_id === invalidWork.id)).toBe(true);
+      const retired = activated.works.work_items.find(work => work.id === invalidWork.id);
+      expect(retired.discarded).toBe(true);
+      expect(retired.execution_containers).toEqual([]);
+      expect(retired.events).toEqual(expect.arrayContaining(invalidWork.events));
+      expect(retired.events.filter(event => event.id === `superseded-${invalidWork.id}`
+        && event.kind === 'discard' && event.related_work_item_id === oldWork.id
+        && event.agent_session_id === null)).toHaveLength(1);
       expect(activated.works.work_items.find(work => work.id === oldWork.id)).toEqual(oldWork);
       await expect.poll(async () => {
         try {
@@ -349,6 +362,7 @@ test.describe('Manual successor retry (isolated checkout)', () => {
         purpose: 'Manual successor retry fixture', issue: OWNER, current_focus: 'Successor Work verification',
       });
       await fixture.sessionRpc(second.session_id, 'workspace.update', { current_focus: 'Validating successor execution authority' });
+      await fixture.sessionRpc(second.session_id, 'build.start', { spec: OWNER });
       // Probe verify authority without requesting a nested Heavy host slot.
       const commands = ['git diff --check'];
       await fixture.sessionRpc(second.session_id, 'verify.plan', { commands });
@@ -360,6 +374,9 @@ test.describe('Manual successor retry (isolated checkout)', () => {
       expect(verified.verification_run.execution_binding).toEqual(verified.binding);
       expect(verified.verification_run.all_passed).toBe(true);
       expect(verified.works.work_items.find(work => work.id === oldWork.id)).toEqual(oldWork);
+      for (const historical of terminalHistory) {
+        expect(verified.works.work_items.find(work => work.id === historical.id)).toEqual(historical);
+      }
       await info.attach(`active-${theme}`, { body: await page.screenshot(), contentType: 'image/png' });
       await info.attach('final-ledger', { body: JSON.stringify(verified), contentType: 'application/json' });
       expect(errors, 'real backend console/page errors').toEqual([]);

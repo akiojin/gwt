@@ -253,8 +253,22 @@ pub fn run_git_logged_with_stdin(
         .stderr(std::process::Stdio::piped());
     let result = (|| {
         let mut child = command.spawn()?;
-        if let Some(mut pipe) = child.stdin.take() {
-            pipe.write_all(stdin)?;
+        let written = match child.stdin.take() {
+            Some(mut pipe) => pipe.write_all(stdin),
+            None => Ok(()),
+        };
+        if let Err(error) = written {
+            if error.kind() != std::io::ErrorKind::BrokenPipe {
+                return Err(error);
+            }
+            // An early argument rejection can close stdin before our write.
+            // Keep its exit status/stderr so callers can handle that refusal.
+            let output = child.wait_with_output()?;
+            return if output.status.success() {
+                Err(error)
+            } else {
+                Ok(output)
+            };
         }
         child.wait_with_output()
     })();
@@ -409,7 +423,29 @@ pub fn hidden_command<S: AsRef<OsStr>>(program: S) -> Command {
     let mut command = Command::new(program);
     configure_hidden_command(&mut command);
     scrub_git_env(&mut command);
+    // Test subprocesses can fetch through production code as well as through
+    // fixture helpers. Set their defaults at the common boundary (Issue #4426).
+    #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
+    command.envs(noninteractive_git_environment());
     command
+}
+
+/// Authentication must fail instead of opening a terminal or credential GUI.
+/// Keep inherited settings and append an empty helper to the highest-priority
+/// inherited configuration, including Git -c settings propagated into hooks.
+pub fn noninteractive_git_environment() -> [(String, String); 4] {
+    let mut parameters = std::env::var("GIT_CONFIG_PARAMETERS").unwrap_or_default();
+    if !parameters.is_empty() {
+        parameters.push(' ');
+    }
+    parameters.push_str("'credential.helper='");
+    [
+        ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+        // Empty also blocks fallback to core.askpass and SSH_ASKPASS.
+        ("GIT_ASKPASS".into(), String::new()),
+        ("GCM_INTERACTIVE".into(), "never".into()),
+        ("GIT_CONFIG_PARAMETERS".into(), parameters),
+    ]
 }
 
 /// Resolve a process request with the current platform rules and build a
@@ -436,6 +472,8 @@ pub fn resolved_tokio_command(
     for key in GIT_ENV_SCRUB_KEYS {
         command.env_remove(key);
     }
+    #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
+    command.envs(noninteractive_git_environment());
     apply_resolved_tokio_plan(&mut command, &plan);
     Ok(command)
 }
@@ -595,6 +633,86 @@ pub fn get_command_version(cmd: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_stdin_keeps_failed_child_diagnostics_after_broken_pipe() {
+        let _lock = crate::test_support::env_lock().lock().unwrap();
+        // Both commands exit without consuming stdin. Exceed pipe capacity so
+        // the write fails regardless of which process the scheduler runs first.
+        let input = vec![b'x'; 8 * 1024 * 1024];
+        let output = run_git_logged_with_stdin(&["--gwt-pr-list-unsupported-option"], None, &input)
+            .expect("retain the failed child's diagnostic after its stdin closes");
+        assert_eq!(output.status.code(), Some(129));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("gwt-pr-list-unsupported-option"));
+
+        // A successful early exit cannot excuse failing to deliver its input.
+        let error = run_git_logged_with_stdin(&["--version"], None, &input).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+    }
+
+    #[test]
+    fn test_commands_disable_git_credentials_and_preserve_inherited_config() {
+        let _lock = crate::test_support::env_lock().lock().unwrap();
+        let _key = crate::test_support::ScopedEnvVar::set("GIT_CONFIG_KEY_0", "test.retained");
+        let _value = crate::test_support::ScopedEnvVar::set("GIT_CONFIG_VALUE_0", "yes");
+        // Publish the count after its entries; drop it before those entries.
+        let _count = crate::test_support::ScopedEnvVar::set("GIT_CONFIG_COUNT", "1");
+        let _parameters = crate::test_support::ScopedEnvVar::set(
+            "GIT_CONFIG_PARAMETERS",
+            "'test.alsoRetained=kept'",
+        );
+        let _askpass =
+            crate::test_support::ScopedEnvVar::set("GIT_ASKPASS", "inherited-askpass-must-not-run");
+        let mut command = hidden_command("git");
+        let environment: std::collections::HashMap<_, _> = command.get_envs().collect();
+        assert_eq!(
+            environment.get(OsStr::new("GIT_TERMINAL_PROMPT")),
+            Some(&Some(OsStr::new("0")))
+        );
+        assert_eq!(
+            environment.get(OsStr::new("GCM_INTERACTIVE")),
+            Some(&Some(OsStr::new("never")))
+        );
+        assert_eq!(
+            environment.get(OsStr::new("GIT_ASKPASS")),
+            Some(&Some(OsStr::new("")))
+        );
+        assert_eq!(
+            environment.get(OsStr::new("GIT_CONFIG_COUNT")),
+            None,
+            "the inherited config count must remain untouched"
+        );
+        assert_eq!(
+            environment.get(OsStr::new("GIT_CONFIG_PARAMETERS")),
+            Some(&Some(OsStr::new(
+                "'test.alsoRetained=kept' 'credential.helper='"
+            )))
+        );
+        let output = command
+            .args(["config", "--get", "test.retained"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "yes");
+
+        let output = hidden_command("git")
+            .args(["config", "--get", "test.alsoRetained"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "kept");
+
+        let asynchronous = resolved_tokio_command(ProcessPlanRequest::new("git")).unwrap();
+        let async_environment: std::collections::HashMap<_, _> =
+            asynchronous.as_std().get_envs().collect();
+        for (key, value) in noninteractive_git_environment() {
+            assert_eq!(
+                async_environment.get(OsStr::new(&key)),
+                Some(&Some(OsStr::new(&value))),
+                "async test subprocess default: {key}"
+            );
+        }
+    }
 
     #[test]
     fn fixture_git_init_cannot_reinitialize_an_inherited_bare_repository() {

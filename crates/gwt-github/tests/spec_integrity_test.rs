@@ -164,6 +164,7 @@ fn fixture(interference: Interference, check_lock: bool) -> (TempDir, SpecOps<In
     let temp = TempDir::new().unwrap();
     let inner = FakeIssueClient::new();
     inner.seed(IssueSnapshot {
+        author_login: None,
         number: NUMBER,
         title: "SPEC".into(),
         body: ORIGINAL.into(),

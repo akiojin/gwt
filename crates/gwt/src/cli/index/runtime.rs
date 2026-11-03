@@ -94,12 +94,6 @@ pub(crate) fn rebuild_actions(scope: IndexScope) -> Vec<RebuildAction> {
             needs_worktree_hash: false,
         },
         RebuildAction {
-            label: "specs",
-            action: "index-specs",
-            scope: None,
-            needs_worktree_hash: false,
-        },
-        RebuildAction {
             label: "memory",
             action: "index-memory",
             scope: None,
@@ -145,7 +139,7 @@ pub(crate) fn rebuild_actions(scope: IndexScope) -> Vec<RebuildAction> {
     match scope {
         IndexScope::All => all,
         IndexScope::Issues => all.into_iter().filter(|a| a.label == "issues").collect(),
-        IndexScope::Specs => all.into_iter().filter(|a| a.label == "specs").collect(),
+        IndexScope::Specs => all.into_iter().filter(|a| a.label == "issues").collect(),
         IndexScope::Memory => all.into_iter().filter(|a| a.label == "memory").collect(),
         IndexScope::Discussions => all
             .into_iter()
@@ -434,6 +428,17 @@ mod tests {
 
     #[test]
     fn issues_rebuild_selects_incremental_only_with_a_healthy_manifest() {
+        assert_eq!(rebuild_actions(IndexScope::Specs)[0].action, "index-issues");
+        assert_eq!(
+            crate::index_worker::rebuild_action_for_scope(
+                crate::index_worker::IndexRebuildScope::Specs
+            )
+            .label,
+            "issues"
+        );
+        assert!(!rebuild_actions(IndexScope::All)
+            .iter()
+            .any(|action| action.label == "specs"));
         use gwt_core::test_support::ScopedEnvVar;
         let _lock = crate::env_test_lock()
             .lock()

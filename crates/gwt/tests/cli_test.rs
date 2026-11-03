@@ -454,7 +454,6 @@ fn red_104a_parse_pr_create() {
         s("/tmp/pr-body.md"),
         s("--label"),
         s("release"),
-        s("--draft"),
     ])
     .unwrap();
     assert_eq!(
@@ -465,8 +464,32 @@ fn red_104a_parse_pr_create() {
             title: "feat(hooks): canonical pr.create operation".into(),
             file: "/tmp/pr-body.md".into(),
             labels: vec!["release".into()],
-            draft: true,
+            draft: false,
         })
+    );
+}
+
+#[test]
+fn pr_create_rejects_draft_and_draft_transition_is_removed() {
+    let refused = parse_pr_args(&[
+        s("create"),
+        s("--base"),
+        s("develop"),
+        s("--title"),
+        s("t"),
+        s("-f"),
+        s("/tmp/pr-body.md"),
+        s("--draft"),
+    ])
+    .expect_err("Draft creation must be refused");
+    assert!(
+        refused.to_string().contains("Draft PRs are prohibited"),
+        "{refused}"
+    );
+    assert!(parse_pr_args(&[s("draft"), s("42")]).is_err());
+    assert_eq!(
+        parse_pr_args(&[s("ready"), s("42")]).unwrap(),
+        CliCommand::Pr(PrCommand::Ready { number: 42 })
     );
 }
 
@@ -733,6 +756,7 @@ tasks=body\n\
 
 fn seed(env: &TestEnv, number: u64, spec: &str, tasks: &str) {
     let snapshot = IssueSnapshot {
+        author_login: None,
         number: IssueNumber(number),
         title: format!("Spec {number}"),
         body: mk_body_spec_and_tasks_in_body(spec, tasks),
@@ -813,6 +837,7 @@ fn red_83_dispatch_spec_list_filters_phase() {
     let mut env = TestEnv::new(tmp.path().to_path_buf());
     // Seed three SPECs in different phases.
     env.client.seed(IssueSnapshot {
+        author_login: None,
         number: IssueNumber(1),
         title: "draft one".to_string(),
         body: String::new(),
@@ -822,6 +847,7 @@ fn red_83_dispatch_spec_list_filters_phase() {
         comments: Vec::new(),
     });
     env.client.seed(IssueSnapshot {
+        author_login: None,
         number: IssueNumber(2),
         title: "impl two".to_string(),
         body: String::new(),
@@ -831,6 +857,7 @@ fn red_83_dispatch_spec_list_filters_phase() {
         comments: Vec::new(),
     });
     env.client.seed(IssueSnapshot {
+        author_login: None,
         number: IssueNumber(3),
         title: "done three".to_string(),
         body: String::new(),
@@ -945,6 +972,7 @@ fn red_87_dispatch_spec_rename_updates_issue_title_and_cache() {
     let tmp = TempDir::new().unwrap();
     let mut env = TestEnv::new(tmp.path().to_path_buf());
     let snapshot = IssueSnapshot {
+        author_login: None,
         number: IssueNumber(42),
         title: "SPEC-42: Old title".to_string(),
         body: mk_body_spec_and_tasks_in_body("# Old title", "- [ ] T-001"),
@@ -1146,6 +1174,7 @@ fn red_97_dispatch_issue_view_prefers_warm_cache() {
     let tmp = TempDir::new().unwrap();
     let mut env = TestEnv::new(tmp.path().to_path_buf());
     let snapshot = IssueSnapshot {
+        author_login: None,
         number: IssueNumber(42),
         title: "Cached title".to_string(),
         body: "Cached body".to_string(),
@@ -1184,6 +1213,7 @@ fn red_98_dispatch_issue_view_refresh_fetches_and_rewrites_cache() {
     let tmp = TempDir::new().unwrap();
     let mut env = TestEnv::new(tmp.path().to_path_buf());
     let old_snapshot = IssueSnapshot {
+        author_login: None,
         number: IssueNumber(42),
         title: "Old title".to_string(),
         body: "Old body".to_string(),
@@ -1228,6 +1258,7 @@ fn red_99_dispatch_issue_comments_prefers_cache() {
     let tmp = TempDir::new().unwrap();
     let mut env = TestEnv::new(tmp.path().to_path_buf());
     let snapshot = IssueSnapshot {
+        author_login: None,
         number: IssueNumber(42),
         title: "Issue".to_string(),
         body: "Body".to_string(),
@@ -1303,6 +1334,7 @@ fn red_101_dispatch_issue_comment_refreshes_cache_after_write() {
         "New comment body".to_string(),
     );
     env.client.seed(IssueSnapshot {
+        author_login: None,
         number: IssueNumber(42),
         title: "Issue".to_string(),
         body: "Body".to_string(),
@@ -1412,6 +1444,29 @@ fn red_108_dispatch_pr_current_is_live_first() {
 #[test]
 fn red_108a_dispatch_pr_create_uses_live_transport() {
     let tmp = TempDir::new().unwrap();
+    // Ready creation classifies the actual diff; use an empty, known baseline.
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "chore: fixture",
+        ],
+        vec!["update-ref", "refs/remotes/origin/develop", "HEAD"],
+    ] {
+        assert!(gwt_core::process::hidden_command("git")
+            .args(args)
+            .current_dir(tmp.path())
+            .status()
+            .unwrap()
+            .success());
+    }
     let mut env = TestEnv::new(tmp.path().to_path_buf());
     env.files.insert(
         "/virtual/pr-body.md".to_string(),
@@ -1447,10 +1502,9 @@ fn red_108a_dispatch_pr_create_uses_live_transport() {
             "/virtual/pr-body.md",
             "--label",
             "release",
-            "--draft",
         ]),
     );
-    assert_eq!(code, 0);
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&env.stdout));
     assert_eq!(
         env.pr_create_call_log,
         vec![PrCreateCall {
@@ -1459,7 +1513,7 @@ fn red_108a_dispatch_pr_create_uses_live_transport() {
             title: "Created PR".to_string(),
             body: "## Summary\n\nBody".to_string(),
             labels: vec!["release".to_string()],
-            draft: true,
+            draft: false,
         }]
     );
 
@@ -1491,6 +1545,15 @@ fn red_108b_dispatch_pr_edit_uses_live_transport() {
             merge_state_status: "CLEAN".to_string(),
             review_status: "APPROVED".to_string(),
         },
+    );
+    env.pr_quarantine_contexts.insert(
+        42,
+        serde_json::from_value(serde_json::json!({
+            "number": 42,
+            "body": "Original PR description",
+            "comments": []
+        }))
+        .unwrap(),
     );
 
     let code = dispatch(
@@ -1710,7 +1773,7 @@ fn red_109d_dispatch_pr_reply_and_resolve_targets_unresolved_threads() {
     assert_eq!(code, 0);
     assert_eq!(
         env.pr_reply_and_resolve_call_log,
-        vec![(42, "Fixed in latest commit.".to_string())]
+        vec![(42, "Fixed in latest commit.".to_string(), None)]
     );
 
     let out = String::from_utf8(env.stdout.clone()).unwrap();

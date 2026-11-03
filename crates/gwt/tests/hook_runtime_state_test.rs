@@ -72,14 +72,21 @@ fn repeated_writes_overwrite_and_leave_no_tmp_residue() {
     runtime_state::write_for_event(&path, "Stop").unwrap();
     runtime_state::write_for_event(&path, "PreToolUse").unwrap();
 
-    // Only the canonical file should exist — no `.tmp-*` siblings.
+    // Only the canonical state and its persistent writer lock should exist;
+    // atomic publication must leave no `.tmp-*` siblings.
     let mut entries: Vec<String> = fs::read_dir(dir.path())
         .unwrap()
         .filter_map(std::result::Result::ok)
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
     entries.sort();
-    assert_eq!(entries, vec!["runtime-state.json".to_string()]);
+    assert_eq!(
+        entries,
+        vec![
+            ".runtime-writer-runtime-state.json.lock".to_string(),
+            "runtime-state.json".to_string()
+        ]
+    );
 
     // And the *latest* write wins.
     let raw = fs::read_to_string(&path).unwrap();

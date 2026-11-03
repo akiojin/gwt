@@ -1,0 +1,32 @@
+{
+  "baseline-paired": {
+    "raw_sha256": "80eb4718c5997b9d50ab00e2e3ce6b92c4c967ba7271c6c8eadcc0681a0dd69b",
+    "raw_bytes": 2350291,
+    "gzip_bytes": 314700
+  },
+  "pilot-backlog5": {
+    "raw_sha256": "b0091957f36a58202b0b3bbfcdf8da05b9678dfa89273123241202db9779e2ff",
+    "raw_bytes": 55458,
+    "gzip_bytes": 7973
+  },
+  "pilot-backlog128": {
+    "raw_sha256": "b68ff5a4684ce98d2226308dcae774257686f152dcba0b327f3424cf8cf8544e",
+    "raw_bytes": 56993,
+    "gzip_bytes": 8238
+  },
+  "pilot-native": {
+    "raw_sha256": "3f0bba33b8b62352c6a7d347baf152d892c23060cf24f49ae9fa38958f334217",
+    "raw_bytes": 58173,
+    "gzip_bytes": 8238
+  },
+  "pilot-budget500": {
+    "raw_sha256": "9345a494820742a21af1503ad47c98515be45dce0103fe03d344b17eef83ebe4",
+    "raw_bytes": 56812,
+    "gzip_bytes": 8081
+  },
+  "after-paired": {
+    "raw_sha256": "04253b8958e54e8ac5b1a659ac7118d48db04ae0ceeb9fdd20459c23635b7d75",
+    "raw_bytes": 2285529,
+    "gzip_bytes": 301599
+  }
+}

@@ -71,3 +71,16 @@ test('disconnect releases an unanswered preview and discards old modal authority
   controller.request(token.project_key);
   assert.deepEqual(sent.at(-1), { kind: 'preview_close_project', project_key: token.project_key });
 });
+
+// The confirmation must keep the runtime-issued authority captured at receive.
+test('running preview owns its immutable token independently of the caller payload', () => {
+  const { controller, document, sent } = fixture();
+  const payload = { kind: 'close_project_preview', token: { ...token }, title: 'Alpha',
+    running_agents: [{ display_name: 'Codex', branch: 'work/alpha' }] };
+  controller.receive(payload);
+  payload.token.nonce = 'mutated';
+  payload.running_agents[0].display_name = 'mutated';
+  assert.match(controller.modal.textContent, /Codex \(work\/alpha\)/);
+  document.querySelector('[data-role="close-project-confirm"]').click();
+  assert.deepEqual(sent, [{ kind: 'confirm_close_project', token }]);
+});

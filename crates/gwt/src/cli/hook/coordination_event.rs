@@ -92,8 +92,53 @@ fn sync_coordination_for_session_with_paths(
         return Ok(());
     }
 
+    if suppress_ready_for_saved_switch(session, &entry) {
+        // ACK already saved a Paused Work and pushed its event shards. The
+        // native Idle observation is still emitted; this source is waiting
+        // for the Host, not asking a human for another task.
+        return Ok(());
+    }
+
     post_entry(&session.worktree_path, entry).map_err(coordination_as_hook_error)?;
     Ok(())
+}
+
+fn suppress_ready_for_saved_switch(session: &Session, entry: &BoardEntry) -> bool {
+    use crate::issue_monitor::AgentSwitchStage;
+    if entry.kind != BoardEntryKind::Status || entry.state.as_deref() != Some("ready") {
+        return false;
+    }
+    let Ok(Some(identity)) = gwt_agent::SessionExecutionIdentity::from_session(session) else {
+        return false;
+    };
+    let root = session
+        .project_state_root
+        .as_deref()
+        .unwrap_or(&session.worktree_path);
+    let prefs = match crate::load_issue_monitor_prefs(
+        &crate::issue_monitor_prefs_path_for_repo_path(root),
+    ) {
+        Ok(prefs) => prefs,
+        Err(error) => {
+            tracing::warn!(%error, "saved switch observation unavailable; retaining normal Stop notice");
+            return false;
+        }
+    };
+    prefs.agent_switch_intents.values().any(|intent| {
+        intent.checkpoint.is_some()
+            && matches!(
+                intent.stage,
+                AgentSwitchStage::CheckpointVerified
+                    | AgentSwitchStage::StoppingCurrent
+                    | AgentSwitchStage::LaunchingNext
+                    | AgentSwitchStage::Unknown
+            )
+            && intent.source.assignment.session_id.as_deref() == Some(session.id.as_str())
+            && intent
+                .runtime_stop
+                .as_ref()
+                .is_some_and(|proof| proof.execution_identity == identity)
+    })
 }
 
 fn suppress_lifecycle_summary_for_open_escalation(session: &Session, entry: &BoardEntry) -> bool {
@@ -188,6 +233,9 @@ fn board_entry_for_event_with_paths(
     }
     if !session.display_name.trim().is_empty() {
         entry = entry.with_origin_agent_id(session.display_name.clone());
+    }
+    if let Some(name) = session.agent_name.as_ref() {
+        entry = entry.with_origin_agent_name(name.clone());
     }
     Ok(Some(entry))
 }
@@ -291,6 +339,7 @@ mod tests {
 
     fn sample_issue_snapshot(number: u64, title: &str, labels: Vec<&str>) -> IssueSnapshot {
         IssueSnapshot {
+            author_login: None,
             number: IssueNumber(number),
             title: title.to_string(),
             body: String::new(),
@@ -316,6 +365,7 @@ mod tests {
 
         let mut session = Session::new(dir.path(), "feature/spec-1974", AgentId::Codex);
         session.linked_issue_number = Some(1974);
+        session.agent_name = Some("ミオ".into());
 
         sync_coordination_for_session_with_paths(&session, "SessionStart", &cache_root, None)
             .unwrap();
@@ -332,6 +382,7 @@ mod tests {
         assert_eq!(entry.related_owners, vec!["1974".to_string()]);
         assert_eq!(entry.origin_branch.as_deref(), Some("feature/spec-1974"));
         assert_eq!(entry.origin_agent_id.as_deref(), Some("Codex"));
+        assert_eq!(entry.origin_agent_name.as_deref(), Some("ミオ"));
         assert!(entry.origin_session_id.is_some());
     }
 
@@ -416,6 +467,71 @@ mod tests {
         let entry = &snapshot.board.entries[0];
         assert!(entry.body.contains("Issue #2042"));
         assert!(!entry.body.contains("Issue #2042 Issue #2042"));
+    }
+
+    #[test]
+    fn saved_switch_stop_preserves_pause_and_foreign_or_cancelled_sessions_still_report() {
+        use crate::issue_monitor::AgentSwitchStage;
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(dir.path().join("home"));
+        let cache_root = dir.path().join("issue-cache");
+        let mut session = Session::new(dir.path(), "work/issue-43", AgentId::Codex);
+        session.linked_issue_number = Some(43);
+        session.repo_hash = Some("repository".into());
+        session.execution_binding = Some(gwt_agent::SessionExecutionBinding {
+            schema_version: 1,
+            session_id: session.id.clone(),
+            repo_hash: "repository".into(),
+            owner_kind: "issue".into(),
+            owner_number: 43,
+            capability_generation: 1,
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation".into(),
+                binding_id: "binding".into(),
+                ledger_head_hash: "head".into(),
+            },
+        });
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .unwrap()
+            .unwrap();
+        let operation = "95a88b8f-c437-493b-b59c-894d7469876c";
+        let intent = serde_json::from_value(serde_json::json!({
+            "request":{"operation_id":operation,"member_id":"member","expected_roster_revision":1,"target_issue_number":44},
+            "source":{"assignment":{"reservation_id":"reservation","session_id":session.id,"issue_number":43,"host_id":"host","host_pid":1,"host_started_at":2},
+                "window_id":"window","claim_id":"claim","confirmation":{"window_id":"window","claim_id":"claim","confirmed_at":"2026-10-26T00:00:00Z"}},
+            "stage":"checkpoint_verified",
+            "checkpoint":{"verified_head":"1111111111111111111111111111111111111111","work_id":"work","board_entry_id":"handoff"},
+            "runtime_stop":{"issue_number":43,"window_id":"window","session_id":session.id,"execution_identity":identity,
+                "host_pid":1,"host_started_at":2,"runtime_incarnation":3,"child_pid":4,"child_started_at":5,"requested_at":"2026-10-26T00:00:00Z"}
+        })).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(dir.path());
+        let mut prefs = crate::IssueMonitorPrefs::default();
+        prefs.agent_switch_intents.insert(operation.into(), intent);
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+
+        sync_coordination_for_session_with_paths(&session, "Stop", &cache_root, None).unwrap();
+        assert!(
+            load_snapshot(dir.path()).unwrap().board.entries.is_empty(),
+            "saved source waits for Host without a new Active Work event"
+        );
+        sync_coordination_for_session_with_paths(&session, "SessionStart", &cache_root, None)
+            .unwrap();
+        assert_eq!(load_snapshot(dir.path()).unwrap().board.entries.len(), 1);
+        let mut foreign = session.clone();
+        foreign
+            .execution_binding
+            .as_mut()
+            .unwrap()
+            .capability_generation += 1;
+        sync_coordination_for_session_with_paths(&foreign, "Stop", &cache_root, None).unwrap();
+        assert_eq!(load_snapshot(dir.path()).unwrap().board.entries.len(), 2);
+        prefs.agent_switch_intents.get_mut(operation).unwrap().stage = AgentSwitchStage::Cancelled;
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        sync_coordination_for_session_with_paths(&session, "Stop", &cache_root, None).unwrap();
+        assert_eq!(load_snapshot(dir.path()).unwrap().board.entries.len(), 3);
     }
 
     /// Issue #3655 AC-3: the Stop-gate summary must not overwrite or bury a

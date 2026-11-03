@@ -41,6 +41,8 @@ pub struct TestEnv {
     pub stderr: Vec<u8>,
     pub files: HashMap<String, String>,
     pub target_issue_create_call_log: Vec<TargetIssueCreateCall>,
+    pub feedback_worker_ids: Vec<String>,
+    pub feedback_worker_error: Option<String>,
     pub linked_prs: HashMap<u64, Vec<LinkedPrSummary>>,
     pub linked_pr_errors: HashMap<u64, String>,
     pub linked_pr_call_log: Vec<u64>,
@@ -48,6 +50,9 @@ pub struct TestEnv {
     pub completion_prs: HashMap<u64, gwt_git::pr_status::PrCompletionSnapshot>,
     pub completion_prs_after_ready: HashMap<u64, gwt_git::pr_status::PrCompletionSnapshot>,
     pub completion_pr_call_log: Vec<u64>,
+    pub completion_pr_read_hook: Option<Box<dyn FnMut(usize) + Send>>,
+    pub completion_pr_candidates_call_count: usize,
+    pub pr_auto_merge_call_log: Vec<(u64, String)>,
     pub prs: HashMap<u64, PrStatus>,
     pub pr_quarantine_contexts: HashMap<u64, crate::cli::pr::PrQuarantineContext>,
     pub created_pr: Option<PrStatus>,
@@ -75,7 +80,7 @@ pub struct TestEnv {
     pub pr_update_branch_outcomes: HashMap<u64, crate::cli::PrUpdateBranchResult>,
     pub pr_reviews_call_log: Vec<u64>,
     pub pr_review_threads_call_log: Vec<u64>,
-    pub pr_reply_and_resolve_call_log: Vec<(u64, String)>,
+    pub pr_reply_and_resolve_call_log: Vec<(u64, String, Option<String>)>,
     pub pr_checks_call_log: Vec<u64>,
     pub run_logs: HashMap<u64, String>,
     pub run_log_call_log: Vec<u64>,
@@ -108,6 +113,8 @@ impl TestEnv {
             stderr: Vec::new(),
             files: HashMap::new(),
             target_issue_create_call_log: Vec::new(),
+            feedback_worker_ids: Vec::new(),
+            feedback_worker_error: None,
             linked_prs: HashMap::new(),
             linked_pr_errors: HashMap::new(),
             linked_pr_call_log: Vec::new(),
@@ -115,6 +122,9 @@ impl TestEnv {
             completion_prs: HashMap::new(),
             completion_prs_after_ready: HashMap::new(),
             completion_pr_call_log: Vec::new(),
+            completion_pr_read_hook: None,
+            completion_pr_candidates_call_count: 0,
+            pr_auto_merge_call_log: Vec::new(),
             prs: HashMap::new(),
             pr_quarantine_contexts: HashMap::new(),
             created_pr: None,
@@ -236,6 +246,33 @@ impl CliEnv for TestEnv {
     fn repo_path(&self) -> &std::path::Path {
         &self.repo_path
     }
+    fn deliver_feedback(
+        &mut self,
+        record: &gwt_core::feedback::PublicFeedback,
+    ) -> Result<u64, gwt_github::client::OwnerMutationError> {
+        super::super::feedback::send_to_upstream(&self.client, record)
+    }
+    fn spawn_feedback_worker(&mut self, id: &str) -> io::Result<()> {
+        self.feedback_worker_ids.push(id.to_string());
+        if let Some(error) = &self.feedback_worker_error {
+            return Err(io::Error::other(error.clone()));
+        }
+        Ok(())
+    }
+    fn deliver_auto_feedback(
+        &mut self,
+        snapshot: &gwt_core::feedback::auto_report::SafeAutoSnapshot,
+    ) -> Result<u64, gwt_core::feedback::auto_report::AutoReason> {
+        super::super::feedback::send_auto_to_upstream_with_deadline(
+            &self.client,
+            snapshot,
+            &self.repo_path,
+            &gwt_github::client::ResolutionDeadline::new(
+                std::time::Duration::from_secs(5),
+                std::time::Duration::from_secs(120),
+            ),
+        )
+    }
     fn stdout(&mut self) -> &mut dyn io::Write {
         &mut self.stdout
     }
@@ -281,6 +318,23 @@ impl CliEnv for TestEnv {
     fn fetch_current_pr(&mut self) -> io::Result<Option<PrStatus>> {
         self.pr_current_call_count += 1;
         Ok(self.current_pr.clone())
+    }
+    fn fetch_completion_pr_candidates(
+        &mut self,
+        number: Option<u64>,
+    ) -> io::Result<Vec<crate::cli::CompletionPrCandidate>> {
+        self.completion_pr_candidates_call_count += 1;
+        Ok(self
+            .completion_prs
+            .values()
+            .filter(|snapshot| number.is_none_or(|number| snapshot.inventory.number == number))
+            .map(|snapshot| crate::cli::CompletionPrCandidate {
+                number: snapshot.inventory.number,
+                url: snapshot.inventory.url.clone(),
+                head_ref_name: snapshot.inventory.head_ref_name.clone(),
+                head_sha: snapshot.head_sha.clone(),
+            })
+            .collect())
     }
     fn create_pr(
         &mut self,
@@ -380,10 +434,38 @@ impl CliEnv for TestEnv {
         number: u64,
     ) -> io::Result<gwt_git::pr_status::PrCompletionSnapshot> {
         self.completion_pr_call_log.push(number);
+        if let Some(hook) = self.completion_pr_read_hook.as_mut() {
+            hook(self.completion_pr_call_log.len());
+        }
         self.completion_prs
             .get(&number)
             .cloned()
             .ok_or_else(|| io::Error::other(format!("no completion PR snapshot: {number}")))
+    }
+    fn enable_pr_auto_merge(
+        &mut self,
+        number: u64,
+        reviewed_head_sha: &str,
+    ) -> io::Result<serde_json::Value> {
+        self.pr_auto_merge_call_log
+            .push((number, reviewed_head_sha.to_string()));
+        let snapshot = self
+            .completion_prs
+            .get_mut(&number)
+            .ok_or_else(|| io::Error::other("no auto-merge PR"))?;
+        if snapshot.head_sha != reviewed_head_sha {
+            return Err(io::Error::other("PR head changed"));
+        }
+        snapshot.inventory.auto_merge_enabled = true;
+        Ok(
+            serde_json::json!({"number":number,"reviewed_head_sha":reviewed_head_sha,"auto_merge_enabled":true,"state":"OPEN"}),
+        )
+    }
+    fn fetch_auto_merge_pr(
+        &mut self,
+        number: u64,
+    ) -> io::Result<gwt_git::pr_status::PrCompletionSnapshot> {
+        self.fetch_completion_pr(number)
     }
     fn edit_pr(
         &mut self,
@@ -505,15 +587,30 @@ impl CliEnv for TestEnv {
         &mut self,
         number: u64,
         body: &str,
+        thread_id: Option<&str>,
     ) -> io::Result<usize> {
-        self.pr_reply_and_resolve_call_log
-            .push((number, body.to_string()));
-        let count = self
+        self.pr_reply_and_resolve_call_log.push((
+            number,
+            body.to_string(),
+            thread_id.map(str::to_owned),
+        ));
+        let threads = self
             .pr_review_threads
             .get(&number)
-            .map(|threads| threads.iter().filter(|thread| !thread.is_resolved).count())
-            .unwrap_or(0);
-        Ok(count)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if let Some(id) = thread_id {
+            if !threads.iter().any(|thread| thread.id == id) {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("review thread {id} not found on PR #{number}"),
+                ));
+            }
+        }
+        Ok(threads
+            .iter()
+            .filter(|thread| !thread.is_resolved && thread_id.is_none_or(|id| thread.id == id))
+            .count())
     }
     fn fetch_pr_checks(&mut self, number: u64) -> io::Result<PrChecksSummary> {
         self.pr_checks_call_log.push(number);

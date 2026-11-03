@@ -28,420 +28,112 @@ test.describe("Agent title role and worktree badges", () => {
     expect(errors.get(page), "zero console/page errors").toEqual([]);
   });
 
-  test("fallback runtime title still displays the Agent runtime badge", async ({
-    page,
-  }, testInfo) => {
-    if (!liveBase) await installEmbeddedRoutes(page);
-    await installAgentTitleBadgeBackend(page, {
-      agentId: "grok",
-      color: "gray",
-      title: "Grok Build",
-    });
-
-    await page.goto(appUrl);
-
-    const agentWindow = page.locator(".workspace-window[data-id='agent-1']");
-    await expect(agentWindow).toBeVisible({ timeout: 10_000 });
-    await expect(agentWindow.locator(".title-text")).toHaveText("Naming…");
-
-    const badge = agentWindow.locator(".window-role-badge").first();
-    await expect(badge).toBeVisible();
-    await expect(badge).toHaveText("Grok Build");
-
-    await agentWindow.screenshot({
-      path:
-        process.env.GWT_AGENT_BADGE_SCREENSHOT_PATH ||
-        testInfo.outputPath("agent-title-badge.png"),
-    });
-  });
-
   test("Issue #5478 review title stays distinct from its waiting owner", async ({ page }, info) => {
     if (!liveBase) await installEmbeddedRoutes(page);
     await installAgentTitleBadgeBackend(page, undefined, false, true);
     await page.goto(appUrl);
-    const owner = page.locator(".workspace-window[data-id='agent-1']");
-    const review = page.locator(".workspace-window[data-id='agent-2']");
-    await expect(owner.locator(".title-text")).toHaveText("Naming… — Deliver Issue #42");
-    await expect(review.locator(".title-text")).toHaveText("Naming… — Review · Issue #42");
-    await expect(review.locator(".window-worktree-badge")).toHaveAttribute("data-worktree-form", "ephemeral");
+    await page.locator('.op-rail__surface[data-surface="works"]').click();
+    const owner = page.locator('.work-row[data-window-id="agent-1"]');
+    const review = page.locator('.work-row[data-window-id="agent-2"]');
+    await expect(owner.locator(".work-purpose")).toHaveText("Deliver Issue #42");
+    await expect(review.locator(".work-purpose")).toHaveText("Review · Issue #42");
+    await review.locator(".work-open").click();
+    await expect(page.locator(".works-full-meta")).toContainText("Review · Issue #42");
+    // The legacy titlebar retains the shared semantic adapter while Works owns navigation.
+    await expect(page.locator('.workspace-window[data-id="agent-2"] .window-worktree-badge'))
+      .toHaveAttribute("data-worktree-form", "ephemeral");
     await page.screenshot({ path: info.outputPath("independent-review.png") });
   });
 
-  test("late names reach badge, title, Fleet and Kanban in both themes", async ({ page }, info) => {
+  test("Board authors and replies retain assigned names in both themes", async ({ page }, info) => {
     if (!liveBase) await installEmbeddedRoutes(page);
     await installAgentTitleBadgeBackend(page, undefined, true);
     await page.goto(appUrl);
-    const agent = page.locator(".workspace-window[data-id='agent-1']");
-    await expect(agent.locator(".window-worktree-badge")).toHaveText("Naming…");
-    await page.evaluate(() => (window as any).__assignAgentName("Lumen"));
-    await expect(agent.locator(".window-worktree-badge")).toHaveText("Lumen");
-    await expect(agent.locator(".window-worktree-badge")).toHaveAccessibleName("Lumen — Branch-backed worktree");
-    await expect(agent.locator(".title-text")).toHaveText("Lumen — Fix cache");
-    await expect(agent.locator(".window-role-badge")).toHaveText("Codex");
-    await expect(page.locator(".fleet-minimap__cell[data-window-id='agent-1']"))
-      .toHaveAttribute("aria-label", /Lumen — Fix cache/);
-    await expect(page.locator(".agent-kanban-card[data-window-id='agent-3'] .agent-kanban-card-title"))
+    await page.locator('.op-rail__surface[data-surface="board"]').click();
+    const board = page.locator(".workspace-window[data-id='board-1']");
+    await expect(board).toBeVisible();
+    const authored = board.locator("[data-board-entry-id='named-post']");
+    await expect(authored.locator(".board-message-meta")).toContainText("ミオ (Codex)");
+    await expect(board.locator(".board-reply-quote")).toContainText("Reply to ミオ (Codex)");
+    await authored.locator(".board-reply-button").click();
+    await expect(board.locator(".board-reply-banner-text")).toContainText("Replying to ミオ (Codex)");
+    await authored.locator(".board-message-meta").scrollIntoViewIfNeeded();
+    const screenshot = info.outputPath("board-agent-names.png");
+    await board.screenshot({ path: screenshot });
+    await info.attach("Board agent names", { path: screenshot, contentType: "image/png" });
+  });
+
+  test("late names reach Kanban and live purpose updates reach Works in both themes", async ({ page }, info) => {
+    if (!liveBase) await installEmbeddedRoutes(page);
+    await installAgentTitleBadgeBackend(page, undefined, true);
+    await page.goto(appUrl);
+    const assignedName = info.project.name.includes("light") ? "Maya Clark" : "ミオ・アサノ";
+    await page.evaluate(name => (window as any).__assignAgentName(name), assignedName);
+    // The persisted inline placement restores its owning Agent Kanban through
+    // the normal workspace catalog route; its renderer survives the retired list.
+    await expect(page.locator("#fleet-minimap")).toHaveCount(0);
+    const kanban = page.locator(".workspace-window[data-id='kanban-1']");
+    await expect(kanban).toBeVisible();
+    await expect(kanban.locator(".agent-kanban-card[data-window-id='agent-3'] .agent-kanban-card-title"))
       .toHaveText("Lyra");
-    await expect(page.locator(".agent-kanban-card[data-window-id='agent-3'] .agent-kanban-card-meta"))
+    await expect(kanban.locator(".agent-kanban-card[data-window-id='agent-3'] .agent-kanban-card-meta"))
       .toContainText("Review cache");
-    await page.locator("#window-list-button").click();
-    await expect(page.locator(".window-list-title", { hasText: "Lumen — Fix cache" })).toBeVisible();
-    await page.locator("#window-list-button").click();
-    await page.locator('.op-rail__surface[data-surface="agents"]').click();
-    await expect(page.locator(".agent-tile[data-agent-id='agent-1'] h3")).toHaveText("Lumen — Fix cache");
-    await expect(page.locator(".agent-tile[data-agent-id='agent-2'] h3")).toHaveText("Naming…");
+    const screenshot = info.outputPath("kanban-agent-names.png");
+    await kanban.screenshot({ path: screenshot });
+    await info.attach("Kanban agent names", { path: screenshot, contentType: "image/png" });
+    await page.locator('.op-rail__surface[data-surface="works"]').click();
+    await expect(page.locator(".work-row[data-window-id='agent-1'] .work-name")).toHaveText(assignedName);
+    await expect(page.locator(".work-row[data-window-id='agent-1'] .work-purpose")).toHaveText("Fix cache");
+    await expect(page.locator(".work-row[data-window-id='agent-2'] .work-purpose")).toHaveText("Intake Agent");
+    const frameResults = [];
+    for (const suspended of [false, true]) {
+      const result = await page.evaluate(async ({ suspended, assignedName }) => {
+        const title = document.querySelector<HTMLElement>(".works-surface:not(.works-surface--preview) .work-row[data-window-id='agent-1'] .work-purpose")!;
+        const before = title.textContent;
+        const label = suspended ? "Fallback" : "Frame";
+        const expected = `${label} 49`;
+        const originalFrame = window.requestAnimationFrame;
+        let renders = 0;
+        let completed: () => void;
+        const changed = new Promise<void>(resolve => { completed = resolve; });
+        const observer = new MutationObserver(records => {
+          renders += records.length;
+          if (title.textContent === expected) completed();
+        });
+        observer.observe(title, { childList: true });
+        if (suspended) window.requestAnimationFrame = () => 0;
+        const started = performance.now();
+        let deadline: ReturnType<typeof setTimeout> | undefined;
+        try {
+          for (let index = 0; index < 50; index++) (window as any).__injectAgentTitle(`${label} ${index}`);
+          const beforeFlush = title.textContent;
+          await Promise.race([changed, new Promise<never>((_, reject) => {
+            deadline = setTimeout(() => reject(new Error("Works frame did not render within one second")), 1000);
+          })]);
+          return { before, beforeFlush, renders, elapsed: performance.now() - started,
+            title: `${title.closest(".work-row")!.querySelector(".work-name")!.textContent} — ${title.textContent}`, expected: `${assignedName} — ${expected}` };
+        } finally {
+          clearTimeout(deadline);
+          observer.disconnect();
+          window.requestAnimationFrame = originalFrame;
+        }
+      }, { suspended, assignedName });
+      expect(result.beforeFlush, "receipts leave the displayed title intact until the frame").toBe(result.before);
+      expect(result.renders, "the burst renders the latest title once").toBe(1);
+      expect(result.title).toBe(result.expected);
+      expect(result.elapsed).toBeLessThan(1000);
+      frameResults.push({ suspended, ...result });
+    }
+    await info.attach("Works frame results", { body: JSON.stringify(frameResults, null, 2), contentType: "application/json" });
+    const agentTitle = page.locator('.work-row[data-window-id="agent-1"]');
+    await agentTitle.focus();
+    await agentTitle.hover();
+    await expect(agentTitle).toBeFocused();
+    await expect(agentTitle).toHaveAttribute("aria-label", new RegExp(`${assignedName}.*Fallback 49.*Open terminal`));
     await page.screenshot({ path: info.outputPath("agent-names.png") });
   });
 
-  test("legacy wire forms render semantic badges across agent chrome", async ({
-    page,
-  }) => {
-    if (!liveBase) await installEmbeddedRoutes(page);
-    await installAgentTitleBadgeBackend(page);
-
-    await page.goto(appUrl);
-
-    const branchBackedWindow = page.locator(
-      ".workspace-window[data-id='agent-1']",
-    );
-    const ephemeralWindow = page.locator(".workspace-window[data-id='agent-2']");
-    const unknownWindow = page.locator(".workspace-window[data-id='agent-3']");
-    await expect(branchBackedWindow).toBeVisible({ timeout: 10_000 });
-    await expect(ephemeralWindow).toBeVisible();
-    await expect(unknownWindow).toBeVisible();
-
-    const branchBackedBadge = branchBackedWindow.locator(
-      ".window-worktree-badge",
-    );
-    await expect(branchBackedBadge).toBeVisible();
-    await expect(branchBackedBadge).toHaveText("Naming…");
-    await expect(branchBackedBadge).toHaveAttribute(
-      "data-worktree-form",
-      "branch-backed",
-    );
-    await expect(branchBackedBadge).toHaveAttribute(
-      "data-worktree-label",
-      "Branch-backed",
-    );
-    await expect(branchBackedBadge).toHaveAttribute("data-worktree-symbol", "B");
-    await expect(branchBackedBadge).toHaveAttribute(
-      "aria-label",
-      "Naming… — Branch-backed worktree",
-    );
-    await expect(branchBackedBadge).toHaveAttribute("role", "img");
-    await expect(branchBackedBadge).toHaveAccessibleName(
-      "Naming… — Branch-backed worktree",
-    );
-    await expect(branchBackedBadge).toHaveAttribute(
-      "title",
-      "Naming… — Branch-backed worktree",
-    );
-
-    const ephemeralBadge = ephemeralWindow.locator(".window-worktree-badge");
-    await expect(ephemeralBadge).toBeVisible();
-    await expect(ephemeralBadge).toHaveText("Naming…");
-    await expect(ephemeralBadge).toHaveAttribute(
-      "data-worktree-form",
-      "ephemeral",
-    );
-    await expect(ephemeralBadge).toHaveAttribute(
-      "data-worktree-label",
-      "Ephemeral",
-    );
-    await expect(ephemeralBadge).toHaveAttribute("data-worktree-symbol", "Ø");
-    await expect(ephemeralBadge).toHaveAttribute(
-      "aria-label",
-      "Naming… — Ephemeral branchless worktree",
-    );
-    await expect(ephemeralBadge).toHaveAttribute("role", "img");
-    await expect(ephemeralBadge).toHaveAccessibleName(
-      "Naming… — Ephemeral branchless worktree",
-    );
-
-    const unknownBadge = unknownWindow.locator(".window-worktree-badge");
-    await expect(unknownBadge).toBeVisible();
-    await expect(unknownBadge).toHaveText("Naming…");
-    await expect(unknownBadge).toHaveAttribute("data-worktree-form", "unknown");
-    await expect(unknownBadge).toHaveAttribute(
-      "data-worktree-label",
-      "Unknown worktree form",
-    );
-    await expect(unknownBadge).toHaveAttribute("data-worktree-symbol", "?");
-    await expect(unknownBadge).toHaveAttribute(
-      "aria-label",
-      "Naming… — Unknown worktree form",
-    );
-    await expect(unknownBadge).toHaveAttribute("role", "img");
-    await expect(unknownBadge).toHaveAccessibleName("Naming… — Unknown worktree form");
-
-    const minimap = page.locator("#fleet-minimap");
-    await expect(minimap).toBeVisible();
-    const minimapBranchBacked = minimap.locator(
-      '.fleet-minimap__cell[data-window-id="agent-1"]',
-    );
-    const minimapEphemeral = minimap.locator(
-      '.fleet-minimap__cell[data-window-id="agent-2"]',
-    );
-    const minimapUnknown = minimap.locator(
-      '.fleet-minimap__cell[data-window-id="agent-3"]',
-    );
-    await expect(minimapBranchBacked).toHaveAttribute(
-      "data-worktree-form",
-      "branch-backed",
-    );
-    await expect(minimapBranchBacked).toHaveAttribute(
-      "data-worktree-label",
-      "Branch-backed",
-    );
-    await expect(minimapEphemeral).toHaveAttribute(
-      "data-worktree-form",
-      "ephemeral",
-    );
-    await expect(minimapEphemeral).toHaveAttribute(
-      "data-worktree-label",
-      "Ephemeral",
-    );
-    await expect(minimapUnknown).toHaveAttribute("data-worktree-form", "unknown");
-    await expect(minimapUnknown).toHaveAttribute(
-      "data-worktree-label",
-      "Unknown worktree form",
-    );
-    for (const minimapCell of [
-      minimapBranchBacked,
-      minimapEphemeral,
-      minimapUnknown,
-    ]) {
-      const cellBox = await requiredBoundingBox(
-        minimapCell,
-        "compact minimap worktree cell",
-      );
-      expect(Math.min(cellBox.width, cellBox.height)).toBeLessThan(16);
-      await expect(minimapCell).not.toHaveAttribute(
-        "data-worktree-symbol",
-        /.+/,
-      );
-    }
-
-    await page.locator("#window-list-button").click();
-    const panel = page.locator("#window-list-panel");
-    await expect(panel).toBeVisible();
-    const branchBackedListBadge = panel
-      .locator(".window-list-row", { hasText: "Codex" })
-      .first()
-      .locator(".window-list-worktree");
-    const ephemeralListBadge = panel
-      .locator(".window-list-row").nth(1)
-      .first()
-      .locator(".window-list-worktree");
-    const unknownListBadge = panel
-      .locator(".window-list-row").nth(2)
-      .first()
-      .locator(".window-list-worktree");
-    await expect(branchBackedListBadge).toHaveText("Naming…");
-    await expect(branchBackedListBadge).toHaveAttribute(
-      "data-worktree-form",
-      "branch-backed",
-    );
-    await expect(branchBackedListBadge).toHaveAttribute("role", "img");
-    await expect(branchBackedListBadge).toHaveAccessibleName(
-      "Naming… — Branch-backed worktree",
-    );
-    await expect(ephemeralListBadge).toHaveText("Naming…");
-    await expect(ephemeralListBadge).toHaveAttribute(
-      "data-worktree-form",
-      "ephemeral",
-    );
-    await expect(ephemeralListBadge).toHaveAttribute("role", "img");
-    await expect(ephemeralListBadge).toHaveAccessibleName(
-      "Naming… — Ephemeral branchless worktree",
-    );
-    await expect(unknownListBadge).toHaveText("Naming…");
-    await expect(unknownListBadge).toHaveAttribute(
-      "data-worktree-label",
-      "Unknown worktree form",
-    );
-    await expect(unknownListBadge).toHaveAttribute("role", "img");
-    await expect(unknownListBadge).toHaveAccessibleName(
-      "Naming… — Unknown worktree form",
-    );
-
-    await expectWorktreeChromeNotToOverflow(page, false);
-    await page.setViewportSize({ width: 640, height: 720 });
-    // Resize reframes the focused window on the next animation frame.
-    await expect(async () => {
-      await expectWorktreeChromeNotToOverflow(page, true);
-    }).toPass();
-  });
 });
-
-async function expectWorktreeChromeNotToOverflow(page, expectMinimapMarkers) {
-  const viewport = page.viewportSize();
-  expect(viewport).not.toBeNull();
-  if (!viewport) {
-    throw new Error("page viewport is unavailable");
-  }
-  const viewportBox = {
-    x: 0,
-    y: 0,
-    width: viewport.width,
-    height: viewport.height,
-  };
-
-  const titlebars = page.locator(".workspace-window .titlebar");
-  await expect(titlebars).toHaveCount(3);
-  for (let index = 0; index < 3; index += 1) {
-    const titlebar = titlebars.nth(index);
-    const container = titlebar.locator("xpath=..");
-    const badge = titlebar.locator(".window-worktree-badge");
-    const actions = titlebar.locator(".window-actions");
-    await expect(titlebar).toBeVisible();
-    await expect(badge).toHaveCount(1);
-    await expect(badge).toBeVisible();
-    await expect(actions).toHaveCount(1);
-    await expect(actions).toBeVisible();
-    expect(await actions.locator("button:not([hidden])").count()).toBeGreaterThan(0);
-
-    const titlebarBox = await requiredBoundingBox(titlebar, `titlebar ${index}`);
-    const containerBox = await requiredBoundingBox(container, `window ${index}`);
-    const badgeBox = await requiredBoundingBox(badge, `worktree badge ${index}`);
-    const actionsBox = await requiredBoundingBox(actions, `window actions ${index}`);
-    expectBoxInside(titlebarBox, containerBox, `titlebar ${index} in window`);
-    expectBoxInside(titlebarBox, viewportBox, `titlebar ${index} in viewport`);
-    expectBoxInside(badgeBox, titlebarBox, `worktree badge ${index} in titlebar`);
-    expectBoxInside(actionsBox, titlebarBox, `window actions ${index} in titlebar`);
-    expect(
-      badgeBox.x + badgeBox.width,
-      `worktree badge ${index} must not overlap window actions`,
-    ).toBeLessThanOrEqual(actionsBox.x + 1);
-    const titlebarWidths = await titlebar.evaluate((element) => ({
-      clientWidth: element.clientWidth,
-      scrollWidth: element.scrollWidth,
-    }));
-    expect(titlebarWidths.clientWidth).toBeGreaterThan(0);
-    expect(
-      titlebarWidths.scrollWidth,
-      `titlebar ${index} must not overflow horizontally`,
-    ).toBeLessThanOrEqual(titlebarWidths.clientWidth + 1);
-  }
-
-  const rows = page.locator("#window-list-panel .window-list-row");
-  await expect(rows).toHaveCount(3);
-  for (let index = 0; index < 3; index += 1) {
-    const rowWidths = await rows.nth(index).evaluate((element) => ({
-      clientWidth: element.clientWidth,
-      scrollWidth: element.scrollWidth,
-    }));
-    expect(rowWidths.clientWidth).toBeGreaterThan(0);
-    expect(
-      rowWidths.scrollWidth,
-      `window list row ${index} must not overflow horizontally`,
-    ).toBeLessThanOrEqual(rowWidths.clientWidth + 1);
-  }
-  const panelBox = await requiredBoundingBox(
-    page.locator("#window-list-panel"),
-    "window list panel",
-  );
-  expectBoxInside(panelBox, viewportBox, "window list panel in viewport");
-
-  if (!expectMinimapMarkers) {
-    return;
-  }
-  const minimap = page.locator("#fleet-minimap");
-  await expect(minimap).toBeVisible();
-  const minimapBox = await requiredBoundingBox(minimap, "fleet minimap");
-  expectBoxInside(minimapBox, viewportBox, "fleet minimap in viewport");
-  const expectedMarkers = [
-    { form: "ephemeral", label: "Ephemeral", symbol: "Ø" },
-    { form: "branch-backed", label: "Branch-backed", symbol: "B" },
-    { form: "unknown", label: "Unknown worktree form", symbol: "?" },
-  ];
-  for (const expectedMarker of expectedMarkers) {
-    const marker = minimap.locator(
-      `.fleet-minimap__cell[data-worktree-form="${expectedMarker.form}"][data-worktree-symbol="${expectedMarker.symbol}"]`,
-    );
-    await expect(marker).toHaveCount(1);
-    await expect(marker).toBeVisible();
-    await expect(marker).toHaveAttribute(
-      "data-worktree-label",
-      expectedMarker.label,
-    );
-    const markerBox = await requiredBoundingBox(
-      marker,
-      `${expectedMarker.form} minimap marker`,
-    );
-    expectBoxInside(
-      markerBox,
-      minimapBox,
-      `${expectedMarker.form} minimap marker in minimap`,
-    );
-    expectBoxInside(
-      markerBox,
-      viewportBox,
-      `${expectedMarker.form} minimap marker in viewport`,
-    );
-    const pseudo = await marker.evaluate((element) => {
-      const cellStyle = getComputedStyle(element);
-      const style = getComputedStyle(element, "::before");
-      const pixels = (value) => Number.parseFloat(value) || 0;
-      const contentWidth = Math.max(pixels(style.width), pixels(style.minWidth));
-      const contentHeight = Math.max(pixels(style.height), pixels(style.minHeight));
-      return {
-        cellBorderBottom: pixels(cellStyle.borderBottomWidth),
-        cellBorderLeft: pixels(cellStyle.borderLeftWidth),
-        content: style.content,
-        bottom: pixels(style.bottom),
-        left: pixels(style.left),
-        outerHeight:
-          contentHeight +
-          pixels(style.paddingTop) +
-          pixels(style.paddingBottom) +
-          pixels(style.borderTopWidth) +
-          pixels(style.borderBottomWidth),
-        outerWidth:
-          contentWidth +
-          pixels(style.paddingLeft) +
-          pixels(style.paddingRight) +
-          pixels(style.borderLeftWidth) +
-          pixels(style.borderRightWidth),
-      };
-    });
-    expect(pseudo.content).toContain(expectedMarker.symbol);
-    expect(pseudo.outerWidth).toBeGreaterThan(0);
-    expect(pseudo.outerHeight).toBeGreaterThan(0);
-    const roundingTolerance = 0.01;
-    expect(
-      pseudo.cellBorderLeft + pseudo.left + pseudo.outerWidth,
-      `${expectedMarker.form} marker must fit its minimap cell horizontally`,
-    ).toBeLessThanOrEqual(markerBox.width + roundingTolerance);
-    expect(
-      pseudo.cellBorderBottom + pseudo.bottom + pseudo.outerHeight,
-      `${expectedMarker.form} marker must fit its minimap cell vertically`,
-    ).toBeLessThanOrEqual(markerBox.height + roundingTolerance);
-  }
-}
-
-async function requiredBoundingBox(locator, label) {
-  const box = await locator.boundingBox();
-  expect(box, `${label} must have a bounding box`).not.toBeNull();
-  if (!box) {
-    throw new Error(`${label} has no bounding box`);
-  }
-  expect(box.width, `${label} width`).toBeGreaterThan(0);
-  expect(box.height, `${label} height`).toBeGreaterThan(0);
-  return box;
-}
-
-function expectBoxInside(inner, outer, label) {
-  const tolerance = 1;
-  expect(inner.x, `${label} left`).toBeGreaterThanOrEqual(outer.x - tolerance);
-  expect(inner.y, `${label} top`).toBeGreaterThanOrEqual(outer.y - tolerance);
-  expect(inner.x + inner.width, `${label} right`).toBeLessThanOrEqual(
-    outer.x + outer.width + tolerance,
-  );
-  expect(inner.y + inner.height, `${label} bottom`).toBeLessThanOrEqual(
-    outer.y + outer.height + tolerance,
-  );
-}
 
 async function installAgentTitleBadgeBackend(
   page,
@@ -450,9 +142,11 @@ async function installAgentTitleBadgeBackend(
   reviewScenario = false,
 ) {
   await page.addInitScript(({ primaryAgentFixture, identityScenario, reviewScenario }) => {
+    (window as any).__gwtPlaywrightTestBridge = true;
     const windows = [
       {
         id: "agent-1",
+        session_id: "agent-1-session",
         title: primaryAgentFixture.title,
         preset: "agent",
         geometry: { x: 20, y: 640, width: 520, height: 280 },
@@ -474,6 +168,7 @@ async function installAgentTitleBadgeBackend(
       },
       {
         id: "agent-2",
+        session_id: "agent-2-session",
         title: "Intake Agent",
         preset: "agent",
         geometry: { x: 30, y: 680, width: 500, height: 280 },
@@ -495,6 +190,7 @@ async function installAgentTitleBadgeBackend(
       },
       {
         id: "agent-3",
+        session_id: "agent-3-session",
         title: "Restored Agent",
         preset: "agent",
         geometry: { x: 40, y: 720, width: 480, height: 280 },
@@ -526,6 +222,9 @@ async function installAgentTitleBadgeBackend(
         placement: { kind: "agent_kanban", board_id: "kanban-1", lane_id: "active", order: 0, collapsed: true } });
       windows.push({ ...windows[0], id: "kanban-1", preset: "agent_kanban", title: "Agent Kanban",
         agent_id: null, dynamic_title: null, geometry: { x: 600, y: 640, width: 720, height: 420 } });
+      windows.push({ ...windows[0], id: "board-1", preset: "board", title: "Board",
+        agent_id: null, agent_name: null, dynamic_title: null,
+        geometry: { x: 780, y: 20, width: 620, height: 540 } });
     }
     const workspaceState = {
       kind: "workspace_state",
@@ -535,6 +234,7 @@ async function installAgentTitleBadgeBackend(
           {
             id: "tab-1",
             title: "Agent Badge Fixture",
+            project_key: location.pathname.split("/").filter(Boolean).at(-1),
             project_root: "/fixture",
             kind: "git",
             workspace: {
@@ -568,6 +268,11 @@ async function installAgentTitleBadgeBackend(
           this.readyState = FixtureWebSocket.OPEN;
           this.dispatchEvent(new Event("open"));
           this.emit(workspaceState);
+          this.emit({ kind: "active_work_projection", projection: { id: "fixture-local-live", active_works: [], local_agent_activity: { project_key: location.pathname.split("/").filter(Boolean).at(-1), host_id: "title-badge-fixture", observed_at: new Date().toISOString(), agents: [
+          { window_id: 'agent-1', session_id: 'agent-1-session', runtime_incarnation: 1, is_pm: false, issue_number: null },
+          { window_id: 'agent-2', session_id: 'agent-2-session', runtime_incarnation: 1, is_pm: false, issue_number: null },
+          { window_id: 'agent-3', session_id: 'agent-3-session', runtime_incarnation: 1, is_pm: false, issue_number: null }
+        ] } } });
         }, 0);
       }
 
@@ -580,6 +285,17 @@ async function installAgentTitleBadgeBackend(
         }
         if (msg.kind === "list_windows") {
           this.emit(windowListState);
+        }
+        if (msg.kind === "load_board") {
+          const post = { id: "named-post", author_kind: "agent", author: "Codex",
+            origin_agent_name: "ミオ", origin_agent_id: "codex", origin_session_id: "closed-session",
+            origin_branch: "work/issue-3824", kind: "status", body: "対応中です。",
+            created_at: "2026-10-15T00:00:00Z", updated_at: "2026-10-15T00:00:00Z",
+            mentions: [], audience: [] };
+          this.emit({ kind: "board_entries", id: msg.id, has_more_before: false,
+            entries: [post, { ...post, id: "reply-post", author_kind: "user", author: "You",
+              origin_agent_name: null, origin_session_id: null, parent_id: post.id,
+              body: "了解です。", created_at: "2026-10-15T00:01:00Z", updated_at: "2026-10-15T00:01:00Z" }] });
         }
       }
 
@@ -601,6 +317,12 @@ async function installAgentTitleBadgeBackend(
       workspaceState.workspace.tabs[0].workspace.windows[0].agent_name = name;
       windowListState.windows[0].agent_name = name;
       for (const socket of FixtureWebSocket.instances) socket.emit(workspaceState);
+    };
+    // Use the existing synchronous receive bridge to separate receipt from its
+    // presentation frame; websocket event batching is tested independently.
+    (window as any).__injectAgentTitle = (title: string) => {
+      workspaceState.workspace.tabs[0].workspace.windows[0].dynamic_title = title;
+      window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: workspaceState }));
     };
     Object.defineProperty(window, "WebSocket", {
       configurable: true,

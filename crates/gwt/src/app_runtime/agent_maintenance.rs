@@ -20,7 +20,7 @@ pub(crate) struct AgentMaintenanceState {
     pub(crate) app_update_committing: bool,
     pub(super) catalog_generation: u64,
     saved_auto_update: Option<bool>,
-    pub(super) deferred_startup_bounds: Option<gwt::WindowGeometry>,
+    pub(super) deferred_startup_ready: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -144,6 +144,7 @@ impl AppRuntime {
         let pending_launch = !self.inflight_launches.is_empty()
             || !self.pending_launch_completions.is_empty()
             || !self.issue_monitor_launch_preparations.is_empty()
+            || !self.issue_monitor_launch_queue.is_empty()
             || !self.pending_continue_work.is_empty()
             || !self.pending_fresh_execution_launches.is_empty()
             || !self.pending_startup_auto_resume_sessions.is_empty()
@@ -358,8 +359,8 @@ impl AppRuntime {
             }
             events.push(OutboundEvent::broadcast(catalog));
         }
-        if let Some(bounds) = self.agent_maintenance.deferred_startup_bounds.take() {
-            events.extend(self.startup_auto_resume_ready_events(bounds));
+        if std::mem::take(&mut self.agent_maintenance.deferred_startup_ready) {
+            events.extend(self.startup_auto_resume_ready_events());
         }
         events
     }

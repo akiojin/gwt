@@ -214,6 +214,38 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "feedback.create",
+        aliases: &[],
+    },
+    Operation {
+        name: "feedback.process",
+        aliases: &[],
+    },
+    Operation {
+        name: "feedback.retry",
+        aliases: &[],
+    },
+    Operation {
+        name: "feedback.status",
+        aliases: &[],
+    },
+    Operation {
+        name: "fleet.disposition",
+        aliases: &[],
+    },
+    Operation {
+        name: "fleet.inventory",
+        aliases: &[],
+    },
+    Operation {
+        name: "fleet.orphan.terminate",
+        aliases: &[],
+    },
+    Operation {
+        name: "fleet.orphans",
+        aliases: &[],
+    },
+    Operation {
         name: "github.budget",
         aliases: &[],
     },
@@ -384,8 +416,39 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "issue.monitor.recovery.record",
+        aliases: &[],
+    },
+    Operation {
         name: "issue.monitor.review_verdict",
         aliases: &["issue.monitor.review-verdict"],
+    },
+    Operation {
+        name: "issue.monitor.schedule.read",
+        aliases: &[],
+    },
+    Operation {
+        name: "issue.monitor.schedule.reassign",
+        aliases: &[],
+    },
+    // The source Session acknowledges its own verified saved checkpoint.
+    Operation {
+        name: "issue.monitor.switch.ack",
+        aliases: &[],
+    },
+    // The registered PM may cancel before the captured runtime is stopped.
+    Operation {
+        name: "issue.monitor.switch.cancel",
+        aliases: &[],
+    },
+    Operation {
+        name: "issue.monitor.switch.read",
+        aliases: &[],
+    },
+    // The registered PM requests a checkpointed switch to the next planned Issue.
+    Operation {
+        name: "issue.monitor.switch.request",
+        aliases: &[],
     },
     Operation {
         name: "issue.monitor.status",
@@ -464,6 +527,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &["pane.stop"],
     },
     Operation {
+        name: "pane.health",
+        aliases: &[],
+    },
+    Operation {
         name: "pane.list",
         aliases: &[],
     },
@@ -536,6 +603,14 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "pm.plan.apply",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.plan.status",
+        aliases: &[],
+    },
+    Operation {
         name: "pm.message.send",
         aliases: &["pm.pane.send"],
     },
@@ -576,6 +651,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "pr.auto_merge.enable",
+        aliases: &[],
+    },
+    Operation {
         name: "pr.reopen",
         aliases: &[],
     },
@@ -597,10 +676,6 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "pr.current",
-        aliases: &[],
-    },
-    Operation {
-        name: "pr.draft",
         aliases: &[],
     },
     Operation {
@@ -752,6 +827,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "workspace.events_reconcile",
+        aliases: &[],
+    },
+    Operation {
         name: "workspace.join",
         aliases: &[],
     },
@@ -782,6 +861,10 @@ pub const OPERATIONS: &[Operation] = &[
     Operation {
         name: "workspace.work_prune",
         aliases: &["workspace.work-prune"],
+    },
+    Operation {
+        name: "workspace.work_repair",
+        aliases: &[],
     },
     Operation {
         name: "worktree.gc_build_artifacts",
@@ -868,12 +951,11 @@ pub fn suggestions(unknown: &str) -> Vec<&'static str> {
 /// The existing wording opens the message unchanged so log greps still match;
 /// the candidates follow it. When nothing is close, the namespace's actual
 /// operations are listed rather than nothing — an invented name like
-/// `pr.merge` was never a typo of anything, and the caller still has to learn
+/// `pr.nonexistent_operation` is no typo, and the caller still has to learn
 /// what `pr.` does have.
 ///
 /// Also reached by the argv parser, whose unknown values are flags and
-/// subcommand words rather than operations — `--draft` would otherwise collect
-/// `pr.draft` as a candidate and send the caller to the wrong surface. Only a
+/// subcommand words rather than operations. Only a
 /// dotted name is treated as an attempted operation.
 pub fn unknown_subcommand_message(unknown: &str) -> String {
     let mut message = format!("unknown subcommand: {unknown}");

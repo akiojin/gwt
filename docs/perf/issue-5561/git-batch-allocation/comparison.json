@@ -1,0 +1,202 @@
+{
+  "scope": "actual Git batch implementation; identical frozen origin refs and select-all callback; no worktree scan, caller fingerprint maps, projection fold or persistence",
+  "input_sha256": "d1684293bacbfbf1930737802644fad998cb2f6a1379dd5a393a06727daad3b8",
+  "refs": 749,
+  "unique_commits": 589,
+  "matrix_descriptors": 873959,
+  "unique_oids": 8514,
+  "old_peak_live_bytes": 594029390,
+  "new_peak_live_bytes": 290731928,
+  "peak_reduction_bytes": 303297462,
+  "peak_reduction_percent": 51.05765255150085,
+  "old_returned_live_bytes": 242069839,
+  "new_returned_live_bytes": 242063239,
+  "old_wall_ms": 10018.3707,
+  "new_wall_ms": 9571.3556,
+  "stages": {
+    "input": {
+      "old": {
+        "stage": "input",
+        "refs": 749,
+        "unique_commits": 589
+      },
+      "new": {
+        "stage": "input",
+        "refs": 749,
+        "unique_commits": 589
+      }
+    },
+    "api_begin": {
+      "old": {
+        "stage": "api_begin",
+        "live_bytes": 156063,
+        "peak_bytes": 182972,
+        "cumulative_allocated_bytes": 291878,
+        "descriptors": 0,
+        "unique_oids": 0
+      },
+      "new": {
+        "stage": "api_begin",
+        "live_bytes": 156063,
+        "peak_bytes": 182972,
+        "cumulative_allocated_bytes": 291878,
+        "descriptors": 0,
+        "unique_oids": 0
+      }
+    },
+    "descriptors_done": {
+      "old": {
+        "stage": "descriptors_done",
+        "live_bytes": 194807198,
+        "peak_bytes": 195197326,
+        "cumulative_allocated_bytes": 435525002,
+        "descriptors": 765426,
+        "unique_oids": 0
+      },
+      "new": {
+        "stage": "descriptors_done",
+        "live_bytes": 194832814,
+        "peak_bytes": 195197326,
+        "cumulative_allocated_bytes": 435550618,
+        "descriptors": 765426,
+        "unique_oids": 0
+      }
+    },
+    "matrix_done": {
+      "old": {
+        "stage": "matrix_done",
+        "live_bytes": 350365406,
+        "peak_bytes": 350365406,
+        "cumulative_allocated_bytes": 591083210,
+        "descriptors": 873959,
+        "unique_oids": 0
+      },
+      "new": {
+        "stage": "matrix_done",
+        "live_bytes": 214140176,
+        "peak_bytes": 214140376,
+        "cumulative_allocated_bytes": 454881540,
+        "descriptors": 873959,
+        "unique_oids": 0
+      }
+    },
+    "selector_begin": {
+      "old": {
+        "stage": "selector_begin",
+        "live_bytes": 351115582,
+        "peak_bytes": 351266598,
+        "cumulative_allocated_bytes": 626860878,
+        "descriptors": 873959,
+        "unique_oids": 0
+      },
+      "new": {
+        "stage": "selector_begin",
+        "live_bytes": 214890352,
+        "peak_bytes": 215041368,
+        "cumulative_allocated_bytes": 490659208,
+        "descriptors": 873959,
+        "unique_oids": 0
+      }
+    },
+    "selector_end": {
+      "old": {
+        "stage": "selector_end",
+        "live_bytes": 351865758,
+        "peak_bytes": 352016774,
+        "cumulative_allocated_bytes": 662638546,
+        "descriptors": 873959,
+        "unique_oids": 8514
+      },
+      "new": {
+        "stage": "selector_end",
+        "live_bytes": 215640528,
+        "peak_bytes": 215791544,
+        "cumulative_allocated_bytes": 526436876,
+        "descriptors": 873959,
+        "unique_oids": 8514
+      }
+    },
+    "payloads_done": {
+      "old": {
+        "stage": "payloads_done",
+        "live_bytes": 407823510,
+        "peak_bytes": 410644876,
+        "cumulative_allocated_bytes": 778053751,
+        "descriptors": 873959,
+        "unique_oids": 8514
+      },
+      "new": {
+        "stage": "payloads_done",
+        "live_bytes": 271598280,
+        "peak_bytes": 274419646,
+        "cumulative_allocated_bytes": 641852081,
+        "descriptors": 873959,
+        "unique_oids": 8514
+      }
+    },
+    "output_done": {
+      "old": {
+        "stage": "output_done",
+        "live_bytes": 594029390,
+        "peak_bytes": 594029390,
+        "cumulative_allocated_bytes": 1036785871,
+        "descriptors": 873959,
+        "unique_oids": 8514
+      },
+      "new": {
+        "stage": "output_done",
+        "live_bytes": 290338712,
+        "peak_bytes": 290731928,
+        "cumulative_allocated_bytes": 786944945,
+        "descriptors": 873959,
+        "unique_oids": 8514
+      }
+    },
+    "api_return": {
+      "old": {
+        "stage": "api_return",
+        "live_bytes": 242069839,
+        "peak_bytes": 594029390,
+        "cumulative_allocated_bytes": 1036785871,
+        "descriptors": 873959,
+        "unique_oids": 0
+      },
+      "new": {
+        "stage": "api_return",
+        "live_bytes": 242063239,
+        "peak_bytes": 290731928,
+        "cumulative_allocated_bytes": 786944945,
+        "descriptors": 873959,
+        "unique_oids": 0
+      }
+    },
+    "duration": {
+      "old": {
+        "stage": "duration",
+        "wall_ms": 10018.3707
+      },
+      "new": {
+        "stage": "duration",
+        "wall_ms": 9571.3556
+      }
+    },
+    "output_dropped": {
+      "old": {
+        "stage": "output_dropped",
+        "live_bytes": 168351,
+        "peak_bytes": 594029390,
+        "cumulative_allocated_bytes": 1036785871,
+        "descriptors": 0,
+        "unique_oids": 0
+      },
+      "new": {
+        "stage": "output_dropped",
+        "live_bytes": 168351,
+        "peak_bytes": 290731928,
+        "cumulative_allocated_bytes": 786944945,
+        "descriptors": 0,
+        "unique_oids": 0
+      }
+    }
+  }
+}

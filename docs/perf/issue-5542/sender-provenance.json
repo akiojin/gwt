@@ -1,0 +1,22 @@
+{
+  "baseline": {
+    "production_source_commit": "490a2b310ca3e4440144faa2bc59b58a60af3ab2",
+    "binary_sha256": "2c132912f359ae9029f91109124bbb0bd5c10ebc49c6d36e40989f6cda450670",
+    "compiler": "rustc 1.95.0 (59807616e 2026-04-14)",
+    "source_blobs": {
+      "crates/gwt/src/daemon_runtime.rs": "52ba0214df292412348f5da4730ac12e18fb9991",
+      "crates/gwt/src/cli/hook/diagnostics.rs": "50e190decf4d99a1435d6a19ed96b06cdd43903e"
+    },
+    "note": "Production functions match base; the ignored measurement child was an uncommitted test-only addition."
+  },
+  "after": {
+    "production_source_commit": "2c6571534ec2ecd1c91a8fcf5ad09f72b79b6f0d",
+    "binary_sha256": "1d44e05ccc856597fd517013e2453052a28a53b9a133ef121ba12e0c144ac93e",
+    "compiler": "rustc 1.95.0 (59807616e 2026-04-14)",
+    "source_blobs": {
+      "crates/gwt/src/daemon_runtime.rs": "da52fb43a7ae1e8df038ea243227240c73ee7b54",
+      "crates/gwt/src/cli/hook/diagnostics.rs": "95b68db0aea5057b1ce3e1050a0e144a60268bc4"
+    }
+  },
+  "summary_source_sha_semantics": "Legacy summaries capture HEAD at measurement end, not binary build provenance. Use production_source_commit and binary_sha256 above."
+}

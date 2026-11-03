@@ -1,5 +1,269 @@
 use super::*;
 
+/// Read the same immutable source metadata and canonical restore predicates as
+/// the owner. These history/refusal cases do not claim that a PTY was started;
+/// the small owner restore cases below verify physical publication and removal.
+struct RestoreFixtureAdmission {
+    admitted: Vec<String>,
+    terminal: HashSet<String>,
+    log: super::super::startup::RestoreAdmissionLog,
+}
+
+fn assess_restore_fixture(runtime: &AppRuntime, tab_id: &str) -> RestoreFixtureAdmission {
+    use super::super::startup::{RestoreAdmissionLog, RestoreRefusal};
+    let tab = runtime.tab(tab_id).expect("restore fixture tab");
+    let mut result = RestoreFixtureAdmission {
+        admitted: Vec::new(),
+        terminal: HashSet::new(),
+        log: RestoreAdmissionLog::default(),
+    };
+    for window in &tab.workspace.persisted().windows {
+        let Some(id) = window.session_id.as_ref() else {
+            continue;
+        };
+        let source = gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{id}.toml")))
+            .expect("saved restore admission source");
+        match runtime.restore_admission(
+            &source,
+            &tab.project_root,
+            Some(&combined_window_id(tab_id, &window.id)),
+        ) {
+            Ok(()) => result.admitted.push(source.id),
+            Err(refusal) => {
+                if matches!(refusal, RestoreRefusal::TerminalWork(_)) {
+                    result.terminal.insert(source.id.clone());
+                }
+                result.log.refuse(&source.id, refusal);
+            }
+        }
+    }
+    result.log.emit_summary("domain_admission", 0);
+    result
+}
+
+#[test]
+fn issue_restart_preserves_its_member_when_every_initial_is_reserved() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let mut settings = Settings::default();
+    settings.ai.language = Some("en".into());
+    settings
+        .save(&Settings::global_config_path().unwrap())
+        .unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let placeholders: Vec<_> = ('A'..='Z')
+        .map(|initial| (format!("agent-{initial}"), format!("session-{initial}")))
+        .collect();
+    let mut tab = restore_fixture_tab("tab-1", &repo, &placeholders);
+    for initial in 'A'..='Z' {
+        tab.workspace.set_agent_name(
+            &format!("agent-{initial}"),
+            Some(format!("{initial}Legacy")),
+        );
+    }
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut session = gwt_agent::Session::new(&repo, "work/restart", gwt_agent::AgentId::Codex);
+    session.id = "session-F".into();
+    session.agent_session_id = Some("native-restart".into());
+    session.agent_name = Some("FLegacy".into());
+    session.linked_issue_number = Some(3824);
+    session.update_status(gwt_agent::AgentStatus::Stopped);
+    session.save(&runtime.sessions_dir).unwrap();
+
+    runtime.spawn_restored_agent_session(
+        "tab-1",
+        session,
+        None,
+        super::super::startup::RestoreOrigin::UserRequested,
+    );
+
+    assert_eq!(
+        runtime.pending_auto_resume_sources.len(),
+        1,
+        "restart admitted"
+    );
+    let windows = &runtime.tabs[0].workspace.persisted().windows;
+    assert_eq!(windows.len(), 26);
+    let replacement = windows
+        .iter()
+        .filter_map(|window| window.agent_name.as_deref())
+        .find(|name| name.starts_with('F'))
+        .expect("the same member keeps its saved name");
+    assert_eq!(replacement, "FLegacy");
+    assert!(!replacement.chars().any(|ch| ch.is_ascii_digit()));
+}
+
+#[test]
+fn automatic_restore_preserves_names_even_when_saved_initials_collide() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let mut tab = restore_fixture_tab(
+        "tab-1",
+        &repo,
+        &[
+            ("agent-1".into(), "session-1".into()),
+            ("agent-2".into(), "session-2".into()),
+        ],
+    );
+    for (id, name) in [("agent-1", "モナ"), ("agent-2", "モミジ")] {
+        tab.workspace.set_agent_name(id, Some(name.into()));
+    }
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    let (command, args) = long_running_test_command();
+    persist_owner_fixture_agent(command, args);
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let _owner = project_owner_fixture(&mut runtime, "tab-1::agent-1");
+    for (id, name) in [("session-1", "モナ"), ("session-2", "モミジ")] {
+        let worktree = temp.path().join(id);
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                &format!("work/{id}"),
+                worktree.to_str().unwrap(),
+            ],
+        );
+        save_restore_fixture_session(
+            &runtime.sessions_dir,
+            id,
+            &temp.path().join(id),
+            Some(id),
+            None,
+        );
+        let path = runtime.sessions_dir.join(format!("{id}.toml"));
+        let mut session = gwt_agent::Session::load(&path).unwrap();
+        session.agent_name = Some(name.into());
+        session.agent_id = gwt_agent::AgentId::Custom("fixture".into());
+        session.branch = format!("work/{id}");
+        session.project_state_root = Some(repo.clone());
+        session.save(&runtime.sessions_dir).unwrap();
+    }
+
+    runtime.queue_startup_auto_resume_sessions(&HashSet::new());
+    let events = runtime.startup_auto_resume_ready_events();
+
+    assert_eq!(runtime.pending_auto_resume_sources.len(), 2, "{events:?}");
+    assert_eq!(runtime.restore_launch_windows.len(), 2);
+    let windows = &runtime.tabs[0].workspace.persisted().windows;
+    assert_eq!(windows.len(), 2);
+    let names: Vec<_> = windows
+        .iter()
+        .map(|window| window.agent_name.as_deref().expect("restored name"))
+        .collect();
+    assert_ne!(names[0], names[1]);
+    assert!(names.contains(&"モナ") && names.contains(&"モミジ"));
+    assert!(events
+        .iter()
+        .all(|event| !matches!(event.event, BackendEvent::LaunchWizardOpenError { .. })));
+    let actual_events = drain_owner_launch_fixtures(&mut runtime, &tasks);
+    assert_eq!(
+        runtime.runtimes.len(),
+        2,
+        "actual restore receipts: {actual_events:?}"
+    );
+    assert!(runtime.restore_launch_windows.is_empty());
+    let roster = gwt::agent_names::read_project_roster(&repo, &runtime.sessions_dir).unwrap();
+    assert_eq!(
+        roster.enabled_count(),
+        1,
+        "restore does not enlarge the configured capacity"
+    );
+    assert_eq!(
+        roster.members.len(),
+        2,
+        "the excess restored member is retained"
+    );
+    for window_id in runtime.runtimes.keys().cloned().collect::<Vec<_>>() {
+        close_test_owner_runtime(&mut runtime, &window_id);
+    }
+}
+
+#[test]
+fn restore_name_allocation_failure_notifies_automatically_and_keeps_manual_errors() {
+    use super::super::startup::RestoreOrigin;
+
+    for origin in [RestoreOrigin::Automatic, RestoreOrigin::UserRequested] {
+        for placeholder in [false, true] {
+            let temp = tempdir().expect("tempdir");
+            let _gwt_home = ScopedGwtHome::set(temp.path());
+            let repo = temp.path().join("repo");
+            fs::create_dir_all(&repo).unwrap();
+            init_repo_with_initial_commit(&repo);
+            let mut placeholders = vec![("occupied".into(), "other-session".into())];
+            if placeholder {
+                placeholders.push(("restoring".into(), "restore-session".into()));
+            }
+            let mut tab = restore_fixture_tab("tab-1", &repo, &placeholders);
+            tab.workspace
+                .set_agent_name("occupied", Some("モミジ".into()));
+            if placeholder {
+                tab.workspace
+                    .set_agent_name("restoring", Some("モナ".into()));
+            }
+            let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+            runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
+            let (spawner, tasks) = BlockingTaskSpawner::queued();
+            runtime.blocking_tasks = spawner;
+            let executor = tokio::runtime::Runtime::new().unwrap();
+            let owner = executor.block_on(production_owner_fixture(&repo));
+            let worktree = temp.path().join("restoring-worktree");
+            fs::create_dir_all(&worktree).unwrap();
+            let mut session = gwt_agent::Session::new(
+                &worktree,
+                "work/restore-fixture",
+                gwt_agent::AgentId::Codex,
+            );
+            session.id = "restore-session".into();
+            session.agent_session_id = Some("native-restore".into());
+            session.agent_name = Some("モナ".into());
+            session.linked_issue_number = Some(3824);
+            session.project_state_root = Some(repo.clone());
+            session.record_hook_event("Stop");
+            session.record_completed_stop();
+            session.save(&runtime.sessions_dir).unwrap();
+            // Make the existing allocator fail after detecting the collision.
+            fs::create_dir_all(
+                gwt_core::paths::gwt_project_dir_for_repo_path(&repo).join("agent-names.jsonl"),
+            )
+            .unwrap();
+
+            let mut events = runtime.spawn_restored_agent_session("tab-1", session, None, origin);
+            events.extend(drain_owner_launch_fixtures(&mut runtime, &tasks));
+            executor.block_on(owner.shutdown());
+            assert!(runtime.pending_auto_resume_sources.is_empty());
+            assert_eq!(
+                events.iter().any(|event| matches!(event.event,
+                    BackendEvent::IssueMonitorToast { ref level, .. } if level == "error")),
+                origin == RestoreOrigin::Automatic,
+                "automatic failures need a notification even when a placeholder exists"
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .any(|event| matches!(event.event, BackendEvent::LaunchWizardOpenError { .. })),
+                origin == RestoreOrigin::UserRequested && !placeholder
+            );
+            if placeholder {
+                assert_eq!(
+                    runtime.window_status(&combined_window_id("tab-1", "restoring")),
+                    Some(WindowProcessStatus::Error)
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn restore_admits_worktree_with_unlanded_commits() {
     let temp = tempdir().expect("tempdir");
@@ -33,7 +297,7 @@ fn restore_closed_diagnostic_keeps_placeholder_without_spawning() {
         &repo,
         &[("agent-closed".into(), "session-closed".into())],
     );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-closed"));
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-closed"));
     save_restore_fixture_session(
         &runtime.sessions_dir,
         "session-closed",
@@ -57,8 +321,9 @@ fn restore_closed_diagnostic_keeps_placeholder_without_spawning() {
         runtime.restore_admission(&session, &repo, Some("tab-closed::agent-closed")),
         Err(super::super::startup::RestoreRefusal::ClosedWorkDiagnostic)
     );
-    runtime.restore_open_project_windows("tab-closed");
-    assert!(runtime.pending_auto_resume_sources.is_empty());
+    let admission = assess_restore_fixture(&runtime, "tab-closed");
+    assert!(admission.admitted.is_empty());
+    assert!(admission.terminal.is_empty());
     assert_eq!(runtime.tabs[0].workspace.persisted().windows.len(), 1);
 }
 
@@ -96,6 +361,9 @@ fn restore_pending_worktree_reservation_ends_when_window_closes() {
 
 #[test]
 fn restore_summary_waits_for_async_preparation_failure_in_each_restore_route() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     for startup in [true, false] {
@@ -107,6 +375,10 @@ fn restore_summary_waits_for_async_preparation_failure_in_each_restore_route() {
         let placeholders = vec![("agent-restore".to_string(), "session-restore".to_string())];
         let tab = restore_fixture_tab("tab-1", &repo, &placeholders);
         let mut runtime = sample_runtime(&root, vec![tab], Some("tab-1"));
+        runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let (spawner, tasks) = BlockingTaskSpawner::queued();
+        runtime.blocking_tasks = spawner;
+        let _owner = project_owner_fixture(&mut runtime, "tab-1::agent-restore");
         save_restore_fixture_session(
             &runtime.sessions_dir,
             "session-restore",
@@ -114,10 +386,17 @@ fn restore_summary_waits_for_async_preparation_failure_in_each_restore_route() {
             Some("native"),
             None,
         );
+        let path = runtime.sessions_dir.join("session-restore.toml");
+        let mut source = gwt_agent::Session::load(&path).expect("source Session");
+        source.agent_id = gwt_agent::AgentId::Custom("missing-restore-provider".into());
+        source.project_state_root = Some(repo.clone());
+        source
+            .save(&runtime.sessions_dir)
+            .expect("actual preflight failure source");
         let prepared = capture_tracing_events(|| {
             if startup {
                 runtime.queue_startup_auto_resume_sessions(&HashSet::new());
-                runtime.startup_auto_resume_ready_events(canvas_bounds());
+                runtime.startup_auto_resume_ready_events();
             } else {
                 runtime.restore_open_project_windows("tab-1");
             }
@@ -136,10 +415,7 @@ fn restore_summary_waits_for_async_preparation_failure_in_each_restore_route() {
             .expect("pending restore")
             .clone();
         let completed = capture_tracing_events(|| {
-            runtime.handle_launch_complete_and_drain(
-                window_id.clone(),
-                Err("restore preparation failed".into()),
-            );
+            drain_owner_launch_fixtures(&mut runtime, &tasks);
         });
         let summary = restore_admission_summary(&completed);
         assert_eq!(
@@ -181,8 +457,8 @@ fn startup_restore_summary_includes_missing_worktrees_before_queue_and_before_sp
         runtime.queue_startup_auto_resume_sessions(&HashSet::new());
         assert_eq!(runtime.pending_startup_auto_resume_sessions.len(), 1);
         fs::remove_dir(temp.path().join("session-removed")).expect("remove queued worktree");
-        runtime.startup_auto_resume_ready_events(canvas_bounds());
-        runtime.startup_auto_resume_ready_events(canvas_bounds());
+        runtime.startup_auto_resume_ready_events();
+        runtime.startup_auto_resume_ready_events();
     });
     assert!(runtime.pending_auto_resume_sources.is_empty());
     let summary = restore_admission_summary(&logs);
@@ -249,7 +525,6 @@ fn restored_session_rechecks_that_its_worktree_is_a_directory_before_spawning() 
         "tab-1",
         source,
         None,
-        canvas_bounds(),
         super::super::startup::RestoreOrigin::Automatic,
     );
     assert!(events.is_empty());
@@ -262,10 +537,14 @@ fn restored_session_rechecks_that_its_worktree_is_a_directory_before_spawning() 
 /// for every refusal, and summarises the sweep in one line.
 #[test]
 fn startup_restore_admits_only_resumable_sessions_with_live_work() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
     let placeholders = vec![
         ("agent-live".to_string(), "session-live".to_string()),
         (
@@ -276,6 +555,29 @@ fn startup_restore_admits_only_resumable_sessions_with_live_work() {
     ];
     let tab = restore_fixture_tab("tab-1", &repo, &placeholders);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    let (command, args) = long_running_test_command();
+    persist_owner_fixture_agent(command, args);
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    for (session_id, suffix) in [
+        ("session-live", "live"),
+        ("session-no-resume", "no-resume"),
+        ("session-closed", "closed"),
+    ] {
+        let worktree = temp.path().join(format!("wt-{suffix}"));
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                &format!("work/{session_id}"),
+                worktree.to_str().unwrap(),
+            ],
+        );
+    }
+    let _owner = project_owner_fixture(&mut runtime, "tab-1::agent-live");
     save_restore_fixture_session(
         &runtime.sessions_dir,
         "session-live",
@@ -300,6 +602,16 @@ fn startup_restore_admits_only_resumable_sessions_with_live_work() {
         Some("native-closed"),
         Some(4003),
     );
+    for session_id in ["session-live", "session-no-resume", "session-closed"] {
+        let path = runtime.sessions_dir.join(format!("{session_id}.toml"));
+        let mut session = gwt_agent::Session::load(&path).expect("source Session");
+        session.agent_id = gwt_agent::AgentId::Custom("fixture".into());
+        session.branch = format!("work/{session_id}");
+        session.project_state_root = Some(repo.clone());
+        session
+            .save(&runtime.sessions_dir)
+            .expect("fixed project source");
+    }
     let prefs = gwt::IssueMonitorPrefs {
         merged_issues: vec![4003],
         ..gwt::IssueMonitorPrefs::default()
@@ -309,40 +621,13 @@ fn startup_restore_admits_only_resumable_sessions_with_live_work() {
 
     let logs = capture_tracing_events(|| {
         runtime.queue_startup_auto_resume_sessions(&HashSet::new());
-        let queued = runtime
-            .pending_startup_auto_resume_sessions
-            .iter()
-            .map(|pending| pending.session.id.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(queued, vec!["session-live"]);
-        runtime.startup_auto_resume_ready_events(canvas_bounds());
-        let window_id = runtime
-            .restore_launch_windows
-            .keys()
-            .next()
-            .expect("pending restore")
-            .clone();
-        let (command, args) = if cfg!(windows) {
-            ("cmd", vec!["/d", "/c", "exit /b 0"])
-        } else {
-            ("/bin/sh", vec!["-c", "exit 0"])
-        };
-        runtime
-            .spawn_process_window_with_console_kind(
-                &window_id,
-                canvas_bounds(),
-                ProcessLaunch {
-                    initial_prompt_file: None,
-                    command: command.to_string(),
-                    args: args.into_iter().map(str::to_string).collect(),
-                    env: HashMap::new(),
-                    remove_env: Vec::new(),
-                    cwd: Some(repo.clone()),
-                    resource_policy: None,
-                },
-                None,
-            )
-            .expect("install restored test PTY");
+        assert_eq!(
+            runtime.pending_startup_auto_resume_sessions.len(),
+            3,
+            "canonical Work/native admission is deferred to the actual owner"
+        );
+        runtime.startup_auto_resume_ready_events();
+        drain_owner_launch_fixtures(&mut runtime, &tasks);
     });
 
     let refusals = restore_admission_refusals(&logs);
@@ -385,6 +670,14 @@ fn startup_restore_admits_only_resumable_sessions_with_live_work() {
         .windows
         .iter()
         .all(|window| window.session_id.as_deref() != Some("session-closed")));
+    assert_eq!(
+        runtime.runtimes.len(),
+        1,
+        "only the actually admitted live Work has a PTY"
+    );
+    for window_id in runtime.runtimes.keys().cloned().collect::<Vec<_>>() {
+        close_test_owner_runtime(&mut runtime, &window_id);
+    }
 }
 
 /// Issue #4143 AC-2: an unreadable Work fact is not evidence that the window is
@@ -399,7 +692,7 @@ fn startup_restore_refuses_and_keeps_the_placeholder_when_work_facts_are_unreada
     fs::create_dir_all(&repo).expect("create repo");
     let placeholders = vec![("agent-1".to_string(), "session-unreadable".to_string())];
     let tab = restore_fixture_tab("tab-1", &repo, &placeholders);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     save_restore_fixture_session(
         &runtime.sessions_dir,
         "session-unreadable",
@@ -411,12 +704,14 @@ fn startup_restore_refuses_and_keeps_the_placeholder_when_work_facts_are_unreada
     fs::create_dir_all(prefs_path.parent().expect("prefs parent")).expect("create prefs dir");
     fs::write(&prefs_path, b"{ this is not monitor prefs").expect("write unreadable prefs");
 
+    let mut admission = None;
     let logs = capture_tracing_events(|| {
-        runtime.queue_startup_auto_resume_sessions(&HashSet::new());
+        admission = Some(assess_restore_fixture(&runtime, "tab-1"));
     });
+    let admission = admission.unwrap();
 
     assert!(
-        runtime.pending_startup_auto_resume_sessions.is_empty(),
+        admission.admitted.is_empty(),
         "an unprovable Work must not respawn"
     );
     let refusals = restore_admission_refusals(&logs);
@@ -471,7 +766,7 @@ fn startup_restore_limits_a_large_history_to_unterminated_windows() {
     }
     assert!(placeholders.len() >= 200);
     let tab = restore_fixture_tab("tab-1", &repo, &placeholders);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     for index in 0..TERMINAL {
         save_restore_fixture_session(
             &runtime.sessions_dir,
@@ -497,34 +792,23 @@ fn startup_restore_limits_a_large_history_to_unterminated_windows() {
     gwt::save_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo), &prefs)
         .expect("seed monitor prefs");
 
-    runtime.queue_startup_auto_resume_sessions(&HashSet::new());
+    let admission = assess_restore_fixture(&runtime, "tab-1");
     assert_eq!(
-        runtime.pending_startup_auto_resume_sessions.len(),
+        admission.admitted.len(),
         LIVE,
         "only the windows whose Work is still live may restore"
     );
-    assert!(runtime
-        .pending_startup_auto_resume_sessions
+    assert!(admission
+        .admitted
         .iter()
-        .all(|pending| pending.session.id.starts_with("session-live-")));
+        .all(|id| id.starts_with("session-live-")));
     assert_eq!(
-        runtime
-            .pending_startup_restore_log
-            .as_ref()
-            .expect("pending summary")
-            .reasons(),
+        admission.log.reasons(),
         format!("terminal_work:closed_issue={TERMINAL}")
     );
+    assert_eq!(admission.terminal.len(), TERMINAL);
 }
 
-/// Issue #4441 AC-1 / AC-5 / AC-6: the canvas comes back with the windows that
-/// were open at the last exit, not with one window per relaunch this machine
-/// ever performed.
-///
-/// A `Stopped` agent placeholder used to be unconditional permission to restore
-/// (Issue #2942), and agent panes never close themselves, so every launch that
-/// ever opened a window left one behind forever — 55 of them on the fleet that
-/// reported this.
 #[test]
 fn startup_restore_limits_windows_to_the_last_open_set() {
     let temp = tempdir().expect("tempdir");
@@ -584,7 +868,7 @@ fn startup_restore_limits_windows_to_the_last_open_set() {
         // Issue #4305 (AC-5): the summary counts restores that actually
         // reached a PTY, so it is emitted from the canvas-ready drain once
         // every prepared window has settled — not from the selection pass.
-        runtime.startup_auto_resume_ready_events(canvas_bounds());
+        runtime.startup_auto_resume_ready_events();
         let prepared = runtime
             .restore_launch_windows
             .keys()
@@ -720,7 +1004,7 @@ fn startup_restore_does_not_resurrect_a_row_stopped_through_the_monitor() {
         ("agent-live".to_string(), "session-live".to_string()),
     ];
     let tab = restore_fixture_tab("tab-1", &repo, &placeholders);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     for (session_id, worktree, issue) in [
         ("session-stopped", "wt-stopped", 4286u64),
         ("session-live", "wt-live", 4288),
@@ -734,7 +1018,7 @@ fn startup_restore_does_not_resurrect_a_row_stopped_through_the_monitor() {
         );
     }
 
-    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
+    let mut monitor = test_monitor(gwt::IssueMonitorConfig::default());
     // The exact park `IssueMonitorState::stop_only` performs: it is what turns
     // an operator stop into a durable `failed_issues` entry.
     monitor.escalate_to_needs_human(
@@ -753,14 +1037,16 @@ fn startup_restore_does_not_resurrect_a_row_stopped_through_the_monitor() {
     gwt::save_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo), &prefs)
         .expect("seed monitor prefs");
 
+    let mut admission = None;
     let logs = capture_tracing_events(|| {
-        runtime.queue_startup_auto_resume_sessions(&HashSet::new());
+        admission = Some(assess_restore_fixture(&runtime, "tab-1"));
     });
+    let admission = admission.unwrap();
 
-    let restored = runtime
-        .pending_startup_auto_resume_sessions
+    let restored = admission
+        .admitted
         .iter()
-        .map(|pending| pending.session.id.as_str())
+        .map(String::as_str)
         .collect::<Vec<_>>();
     assert_eq!(
         restored,
@@ -810,7 +1096,7 @@ fn startup_restore_refuses_a_monitor_held_row_and_keeps_the_placeholder() {
         ("agent-live".to_string(), "session-live".to_string()),
     ];
     let tab = restore_fixture_tab("tab-1", &repo, &placeholders);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     for (session_id, worktree, issue) in [
         ("session-held", "wt-held", 4286u64),
         ("session-parked", "wt-parked", 4287),
@@ -839,14 +1125,16 @@ fn startup_restore_refuses_a_monitor_held_row_and_keeps_the_placeholder() {
     gwt::save_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo), &prefs)
         .expect("seed monitor prefs");
 
+    let mut admission = None;
     let logs = capture_tracing_events(|| {
-        runtime.queue_startup_auto_resume_sessions(&HashSet::new());
+        admission = Some(assess_restore_fixture(&runtime, "tab-1"));
     });
+    let admission = admission.unwrap();
 
-    let restored = runtime
-        .pending_startup_auto_resume_sessions
+    let restored = admission
+        .admitted
         .iter()
-        .map(|pending| pending.session.id.as_str())
+        .map(String::as_str)
         .collect::<Vec<_>>();
     assert_eq!(restored, vec!["session-live"]);
     let refusals = restore_admission_refusals(&logs);
@@ -884,7 +1172,7 @@ fn startup_restore_refuses_a_monitor_held_row_and_keeps_the_placeholder() {
 
 /// Issue #4783 AC-1 / AC-3: a gwt restart over three Issue worktrees whose
 /// execution ledgers read Completed, Blocked-by-`issue.monitor.stop`, and
-/// ordinary recoverable Blocked restores only the last — with no Monitor
+/// ordinary Blocked, and Active restores only the last — with no Monitor
 /// hold left in the prefs to lean on. The admitted restore is then re-judged
 /// at the spawn boundary (AC-2): a hold that lands between the sweep and the
 /// drain stops the spawn.
@@ -904,9 +1192,10 @@ fn startup_restore_refuses_completed_and_monitor_revoked_generations() {
         ),
         ("agent-revoked".to_string(), "session-revoked".to_string()),
         ("agent-blocked".to_string(), "session-blocked".to_string()),
+        ("agent-active".to_string(), "session-active".to_string()),
     ];
     let tab = restore_fixture_tab("tab-1", &repo, &placeholders);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let owner_of = |number: u64| gwt::cli::execution_state::ExecutionOwnerKey {
         kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
         number,
@@ -916,6 +1205,7 @@ fn startup_restore_refuses_completed_and_monitor_revoked_generations() {
         ("session-completed", "wt-completed", 4291u64),
         ("session-revoked", "wt-revoked", 4294),
         ("session-blocked", "wt-blocked", 4275),
+        ("session-active", "wt-active", 4276),
     ] {
         let worktree = temp.path().join(worktree);
         fs::create_dir_all(&worktree).expect("create worktree");
@@ -983,18 +1273,20 @@ fn startup_restore_refuses_completed_and_monitor_revoked_generations() {
         gwt::cli::execution_state::SettleResult::Settled(_)
     ));
 
+    let mut admission = None;
     let logs = capture_tracing_events(|| {
-        runtime.queue_startup_auto_resume_sessions(&HashSet::new());
+        admission = Some(assess_restore_fixture(&runtime, "tab-1"));
     });
-    let queued = runtime
-        .pending_startup_auto_resume_sessions
+    let admission = admission.unwrap();
+    let queued = admission
+        .admitted
         .iter()
-        .map(|pending| pending.session.id.as_str())
+        .map(String::as_str)
         .collect::<Vec<_>>();
     assert_eq!(
         queued,
-        vec!["session-blocked"],
-        "only the recoverable Blocked generation restores"
+        vec!["session-active"],
+        "terminal generations must not restore automatically"
     );
     let refusals = restore_admission_refusals(&logs);
     let completed = refusals
@@ -1009,6 +1301,11 @@ fn startup_restore_refuses_completed_and_monitor_revoked_generations() {
         refusals.get("session-revoked").map(String::as_str),
         Some("monitor_hold:launch_revoked"),
         "{refusals:?}"
+    );
+    assert_eq!(
+        refusals.get("session-blocked").map(String::as_str),
+        Some("monitor_hold:execution_blocked"),
+        "a terminal Blocked generation retains diagnostics without spawning"
     );
     // The Monitor-revoked generation is a hold, not a terminal: the
     // placeholder and the restore flag stay for `execution.reopen`.
@@ -1026,12 +1323,12 @@ fn startup_restore_refuses_completed_and_monitor_revoked_generations() {
             .restore_window_on_startup
     );
 
-    // AC-2: between the sweep and the drain the PM stops #4275 through the
+    // AC-2: between the sweep and the drain the PM stops #4276 through the
     // Monitor. The queued restore is re-judged at the spawn boundary and
     // nothing spawns.
-    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
+    let mut monitor = test_monitor(gwt::IssueMonitorConfig::default());
     monitor.escalate_to_needs_human(
-        4275,
+        4276,
         gwt::NeedsHumanKind::UserChoiceRequired,
         "stopped: PM held this row after the sweep",
     );
@@ -1040,12 +1337,13 @@ fn startup_restore_refuses_completed_and_monitor_revoked_generations() {
         &monitor.prefs(),
     )
     .expect("seed monitor prefs");
+    let mut late_admission = None;
     let drain_logs = capture_tracing_events(|| {
-        runtime.startup_auto_resume_ready_events(canvas_bounds());
+        late_admission = Some(assess_restore_fixture(&runtime, "tab-1"));
     });
     assert!(
-        runtime.restore_launch_windows.is_empty() && runtime.pending_auto_resume_sources.is_empty(),
-        "a restore refused at the spawn boundary spawns nothing"
+        late_admission.unwrap().admitted.is_empty(),
+        "the canonical admission predicate must recheck a hold added after selection"
     );
     // The spawn boundary logs the hold; the drain then counts the missing
     // spawn as `launch_not_started`, so both reasons name this Session.
@@ -1053,7 +1351,7 @@ fn startup_restore_refuses_completed_and_monitor_revoked_generations() {
         .iter()
         .filter(|event| {
             event.fields.get("message").map(String::as_str) == Some("session restore refused")
-                && event.fields.get("session_id").map(String::as_str) == Some("session-blocked")
+                && event.fields.get("session_id").map(String::as_str) == Some("session-active")
         })
         .filter_map(|event| event.fields.get("reason").cloned())
         .collect::<Vec<_>>();
@@ -1070,7 +1368,7 @@ fn startup_restore_refuses_completed_and_monitor_revoked_generations() {
             .persisted()
             .windows
             .iter()
-            .any(|window| window.session_id.as_deref() == Some("session-blocked")),
+            .any(|window| window.session_id.as_deref() == Some("session-active")),
         "a held row keeps its placeholder"
     );
 }
@@ -1121,32 +1419,55 @@ fn startup_restore_honors_a_cleared_restore_flag_on_a_surviving_placeholder() {
 /// Issue #4383 AC-5: the ledger retains its linked Issue after the pane closes.
 #[test]
 fn automatic_restore_launch_failure_before_pty_closes_the_window_and_records_the_reason() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let tab = sample_project_tab_with_window(
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("fixture project");
+    init_repo_with_initial_commit(&repo);
+    let tab = sample_project_tab_with_window_at(
         "tab-1",
         "agent-1",
+        repo.clone(),
         WindowPreset::Agent,
         WindowProcessStatus::Stopped,
     );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut runtime = sample_runtime(&temp.path().join(".gwt"), vec![tab], Some("tab-1"));
     let window_id = combined_window_id("tab-1", "agent-1");
-    runtime
-        .tab_mut("tab-1")
-        .expect("tab")
+    runtime.tabs[0]
         .workspace
         .set_linked_issue_number("agent-1", Some(4383));
+    let mut source = gwt_agent::Session::new(
+        &repo,
+        "main",
+        gwt_agent::AgentId::Custom("missing-restore-fixture".into()),
+    );
+    source.id = "session-restore".into();
+    source.project_state_root = Some(repo.clone());
+    source.agent_session_id = Some("fixture-native-conversation".into());
+    source.linked_issue_number = Some(4383);
+    source.launch_command = repo.join("missing-restore-program").display().to_string();
+    source.restore_window_on_startup = true;
+    source.record_hook_event("Stop");
+    source.record_completed_stop();
+    source
+        .save(&runtime.sessions_dir)
+        .expect("saved restore source");
+    runtime.tabs[0]
+        .workspace
+        .set_session_id("agent-1", Some(source.id.clone()));
     runtime
         .restore_launch_windows
-        .insert(window_id.clone(), Some("session-restore".to_string()));
-
-    let detail = "Rebound continuation lost the exact Active launch handshake race";
-    let _ = runtime.handle_launch_complete_and_drain(
-        window_id.clone(),
-        Err(super::super::launch::AgentLaunchError::active_conflict(
-            detail,
-        )),
+        .insert(window_id.clone(), Some(source.id.clone()));
+    let (executor, owner, _, detail, owner_pane_id) = drive_owner_restore_fixture(
+        &mut runtime,
+        &window_id,
+        source,
+        gwt_agent::SessionLaunchOrigin::AutomaticRestore,
     );
+    let detail = detail.expect("actual owner pre-PTY failure");
 
     assert!(
         runtime
@@ -1168,49 +1489,55 @@ fn automatic_restore_launch_failure_before_pty_closes_the_window_and_records_the
         gwt_core::error_ledger::ErrorKind::LaunchFailure
     );
     assert!(
-        rows[0].message.contains(detail),
+        rows[0].message.contains(&detail),
         "the ledger row must keep the cause after the pane is gone: {}",
         rows[0].message
     );
     assert_eq!(
         rows[0].target.window_id.as_deref(),
-        Some(window_id.as_str())
+        Some(owner_pane_id.as_str())
     );
     assert_eq!(rows[0].target.issue, Some(4383));
+    executor.block_on(owner.shutdown());
 }
 
 /// Issue #4143 AC-3: the operator's own launch keeps its error pane — that
 /// diagnostic is the whole reason they are looking at the window.
 #[test]
 fn user_started_launch_failure_before_pty_keeps_the_error_window() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
-    let tab = sample_project_tab_with_window(
-        "tab-1",
-        "agent-1",
-        WindowPreset::Agent,
-        WindowProcessStatus::Stopped,
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "agent-1");
-
-    let _ = runtime.handle_launch_complete_and_drain(
-        window_id.clone(),
-        Err("PTY creation failed: too many open files".into()),
-    );
-
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (owner, caller, failure) =
+        super::execution_genesis_tests::genesis_pre_pty_failure_fixture(temp.path());
+    let rows = owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes),
+    )
+    .unwrap();
+    let diagnostic = rows["canonical_rows"]["windows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["id"] == "failed")
+        .collect::<Vec<_>>();
     assert_eq!(
-        runtime
-            .tab("tab-1")
-            .expect("tab")
-            .workspace
-            .persisted()
-            .windows
-            .len(),
+        diagnostic.len(),
         1,
-        "a launch the operator started must keep its diagnostic pane"
+        "a launch the operator started keeps one diagnostic pane"
     );
-    assert!(runtime.window_lookup.contains_key(&window_id));
+    assert_eq!(diagnostic[0]["session_id"], failure.session_id);
+    assert_eq!(diagnostic[0]["status"], "error");
+    assert!(
+        rows["panes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|pane| pane["id"] != failure.id),
+        "keeping an error canvas must not manufacture a PTY"
+    );
+    pane_control_tests::control_close(&owner, &caller);
 }
 
 /// Issue #4143 AC-6: failed restores do not breed. Two consecutive generations
@@ -1218,42 +1545,57 @@ fn user_started_launch_failure_before_pty_keeps_the_error_window() {
 /// extra to restore.
 #[test]
 fn restore_launch_failures_do_not_accumulate_error_windows_across_generations() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let tab = sample_project_tab(
-        "tab-1",
-        "Repo",
-        temp.path().join("repo"),
-        ProjectKind::Git,
-        &[],
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("fixture project");
+    init_repo_with_initial_commit(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(&temp.path().join(".gwt"), vec![tab], Some("tab-1"));
 
     let mut persisted_after_each_generation = Vec::new();
     for generation in 0..2 {
         let raw_id = {
             let tab = runtime.tab_mut("tab-1").expect("tab");
-            tab.workspace
-                .add_window(WindowPreset::Agent, canvas_bounds())
-                .id
-                .clone()
+            tab.workspace.add_window(WindowPreset::Agent).id.clone()
         };
         let window_id = combined_window_id("tab-1", &raw_id);
-        runtime.window_lookup.insert(
-            window_id.clone(),
-            WindowAddress {
-                tab_id: "tab-1".to_string(),
-                raw_id: raw_id.clone(),
-            },
+        runtime.register_window("tab-1", &raw_id);
+        let mut source = gwt_agent::Session::new(
+            &repo,
+            "main",
+            gwt_agent::AgentId::Custom("missing-restore-fixture".into()),
         );
+        source.id = format!("failed-restore-generation-{generation}");
+        source.project_state_root = Some(repo.clone());
+        source.agent_session_id = Some(format!("native-failed-generation-{generation}"));
+        source.launch_command = repo.join("missing-restore-program").display().to_string();
+        source.restore_window_on_startup = true;
+        source.record_hook_event("Stop");
+        source.record_completed_stop();
+        source
+            .save(&runtime.sessions_dir)
+            .expect("saved restore source");
+        runtime.tabs[0]
+            .workspace
+            .set_session_id(&raw_id, Some(source.id.clone()));
         runtime
             .restore_launch_windows
-            .insert(window_id.clone(), None);
-
-        let _ = runtime.handle_launch_complete_and_drain(
-            window_id,
-            Err(format!("PTY creation failed in generation {generation}").into()),
+            .insert(window_id.clone(), Some(source.id.clone()));
+        let (executor, owner, _, error, _) = drive_owner_restore_fixture(
+            &mut runtime,
+            &window_id,
+            source,
+            gwt_agent::SessionLaunchOrigin::AutomaticRestore,
         );
+        assert!(
+            error.is_some(),
+            "owner must observe the actual pre-PTY failure"
+        );
+        executor.block_on(owner.shutdown());
 
         persisted_after_each_generation.push(
             runtime
@@ -1343,6 +1685,10 @@ fn restore_admits_only_resumable_open_work_windows_at_history_scale() {
         );
         window.agent_id = Some("codex".to_string());
         window.session_id = Some(session_id.clone());
+        // Preassigned persisted identities keep Work admission independent of
+        // the capacity and language of a fresh-name catalog.
+        let initial = char::from_u32(0x4e00 + index as u32).expect("fixture initial");
+        window.agent_name = Some(format!("{initial}Agent"));
         persisted.windows.push(window);
     }
     persisted.next_z_index = fixtures.len() as u32 + 1;
@@ -1351,11 +1697,11 @@ fn restore_admits_only_resumable_open_work_windows_at_history_scale() {
         title: "Restore Scale".to_string(),
         project_root: worktree.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(persisted),
+        workspace: WindowRegistry::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-scale"));
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-scale"));
     for (session_id, native_id, linked_issue) in &fixtures {
         // Each live Work owns its own worktree. Reopened AC-6 intentionally
         // refuses multiple conversations that target the same worktree.
@@ -1375,51 +1721,56 @@ fn restore_admits_only_resumable_open_work_windows_at_history_scale() {
         session.save(&runtime.sessions_dir).expect("save session");
     }
 
+    let mut admission = None;
     let logs = capture_tracing_events(|| {
-        let _ = runtime.restore_open_project_windows("tab-scale");
-        // This fixture checks admission at history scale. Complete the
-        // simulated launches without spending fifty real PTYs; the small
-        // startup fixture above exercises the real PTY success callback.
-        for window_id in runtime
-            .restore_launch_windows
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>()
-        {
-            runtime.record_restore_window_outcome(&window_id, Ok(()));
-        }
+        admission = Some(assess_restore_fixture(&runtime, "tab-scale"));
     });
-
+    let admission = admission.unwrap();
     assert_eq!(
-        runtime.pending_auto_resume_sources.len(),
+        admission.admitted.len(),
         OPEN,
-        "only windows whose Work is still open and whose Session can resume may spawn"
+        "only readable open Work with a resumable Session is eligible at history scale"
     );
-    assert!(
-        runtime
-            .pending_auto_resume_sources
-            .values()
-            .all(|source| source.starts_with("session-open-")),
-        "no settled or unresumable Session was queued: {:?}",
-        runtime.pending_auto_resume_sources
-    );
-    let windows = runtime.tabs[0].workspace.persisted().windows.clone();
+    assert!(admission
+        .admitted
+        .iter()
+        .all(|id| id.starts_with("session-open-")));
+    let windows: Vec<_> = runtime.tabs[0]
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .filter(|window| {
+            !window
+                .session_id
+                .as_ref()
+                .is_some_and(|id| admission.terminal.contains(id))
+        })
+        .collect();
+    let initials: HashSet<_> = windows
+        .iter()
+        .filter(|window| {
+            window
+                .session_id
+                .as_ref()
+                .is_some_and(|id| admission.admitted.contains(id))
+        })
+        .map(|window| window.agent_name.as_ref().unwrap().chars().next().unwrap())
+        .collect();
+    assert_eq!(initials.len(), OPEN);
     assert_eq!(
         windows
             .iter()
             .filter(|window| crate::runtime_support::window_is_agent_pane(window))
             .count(),
         OPEN + UNRESUMABLE,
-        "the settled placeholders are removed, leaving only the non-terminal windows"
+        "canonical terminal admission selects only settled placeholders for removal"
     );
-    assert!(
-        !windows.iter().any(|window| window
-            .session_id
-            .as_deref()
-            .is_some_and(|id| id.starts_with("session-closed-"))),
-        "no settled placeholder survives the restore pass"
-    );
-
+    assert!(!windows.iter().any(|window| window
+        .session_id
+        .as_ref()
+        .is_some_and(|id| id.starts_with("session-closed-"))));
+    assert_eq!(admission.terminal.len(), SETTLED);
     // AC-4: one line that explains why the canvas shrank.
     let summary = restore_admission_summary(&logs);
     assert_eq!(
@@ -1444,6 +1795,7 @@ fn restore_launch_failure_before_pty_leaves_no_error_window_across_generations()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
     init_git_clone_with_origin(&repo);
@@ -1482,11 +1834,15 @@ fn restore_launch_failure_before_pty_leaves_no_error_window_across_generations()
         title: "Restore Failure".to_string(),
         project_root: worktree.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(persisted),
+        workspace: WindowRegistry::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-failure"));
+    runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let _owner = project_owner_fixture(&mut runtime, "tab-failure::codex-0");
     for session_id in session_ids {
         let worktree = temp.path().join("worktrees").join(session_id);
         let branch = format!("work/{session_id}");
@@ -1494,7 +1850,11 @@ fn restore_launch_failure_before_pty_leaves_no_error_window_across_generations()
             &repo,
             &["worktree", "add", "-b", &branch, worktree.to_str().unwrap()],
         );
-        let mut session = gwt_agent::Session::new(&worktree, &branch, gwt_agent::AgentId::Codex);
+        let mut session = gwt_agent::Session::new(
+            &worktree,
+            &branch,
+            gwt_agent::AgentId::Custom("missing-restore-provider".into()),
+        );
         session.id = session_id.to_string();
         session.agent_session_id = Some(format!("native-{session_id}"));
         session.restore_window_on_startup = true;
@@ -1516,12 +1876,7 @@ fn restore_launch_failure_before_pty_leaves_no_error_window_across_generations()
         runtime.pending_auto_resume_sources
     );
 
-    for window_id in &restored {
-        let _ = runtime.handle_launch_complete_and_drain(
-            window_id.clone(),
-            Err("PTY creation failed: Too many open files (os error 24)".into()),
-        );
-    }
+    drain_owner_launch_fixtures(&mut runtime, &tasks);
 
     let after_first = runtime.tabs[0].workspace.persisted().windows.clone();
     assert!(

@@ -15,20 +15,19 @@
 //
 // deps:
 // - send(message): forward a frontend event over the WebSocket bridge.
-// - createNode / createKnowledgeMarkdownBody: shared DOM helpers owned by
-//   app.js (the markdown body renderer is shared with the knowledge
-//   surface).
+// - createNode: shared DOM helper owned by app.js.
 // - windowMap: workspace window element map owned by app.js.
 // - focusWindowLocally(windowId) / sendWindowFocus(windowId): focus paths.
 // - focusOrSpawnPreset(preset): focus-or-spawn for Board origin jumps.
 // - activeWorkspace() / activeProjectTab(): workspace accessors.
 // - projectWindowContextById(windowId): owning project for per-window Logs.
-// - visibleBounds(): canvas bounds payload helper.
+
 // - getActiveWorkProjection(): read accessor for the active Work
 //   projection (app.js owns the let).
 import {
   applyBoardMentionNotificationFocus,
   boardEntryAudienceLabels,
+  boardEntryAuthorLabel,
   boardEntryMentionsSelf,
   boardEntryOriginActionLabel,
   boardEntryOriginLabel,
@@ -41,31 +40,64 @@ import {
   visibleBoardEntries,
 } from "/board-surface.js";
 import { createUiStateStore } from "/ui-state-store.js";
+import { renderUiContent } from "/ui-content.js";
 
 export function createBoardLogsSurface({
   send,
   createNode,
-  createKnowledgeMarkdownBody,
   windowMap,
   focusWindowLocally,
   pushAlertToast,
   sendWindowFocus,
   focusOrSpawnPreset,
+  onOpenOriginAgent,
   activeWorkspace,
   activeProjectTab,
   projectWindowContextById,
-  visibleBounds,
   getActiveWorkProjection,
 }) {
       const boardStateMap = new Map();
       const maxBoardEntries = 1000;
       const logStateMap = new Map();
+      const maxLogEntries = 1000;
+      // Retain only the latest plain-data receipt. Request settlement stays
+      // synchronous, including stale-scope reloads and equal-valued errors.
+      const logResponseModel = createUiStateStore(null);
+      logResponseModel.subscribe(response => response, response => {
+        if (!response) return;
+        if (response.kind === "log_entry_appended") {
+          appendLiveLogEntry(response.entry);
+          return;
+        }
+        if (!finishLogRequest(response.windowId)) return;
+        const state = ensureLogState(response.windowId);
+        state.loading = false;
+        if (response.kind === "log_error") {
+          state.error = response.message;
+        } else {
+          // Live appends still own a mutable local array; the receipt stays
+          // immutable and detached from the caller's nested entry data.
+          state.entries = [...response.entries];
+          state.error = "";
+          state.unreadAlerts = 0;
+          state.unreadEntryId = null;
+          if (!state.selectedEntryId || !state.entries.some((entry) => entry.id === state.selectedEntryId)) {
+            state.selectedEntryId =
+              state.entries.length > 0 ? state.entries[state.entries.length - 1].id : null;
+          }
+        }
+        renderLogs(response.windowId);
+      });
       let pendingBoardEntryFocusId = null;
       const boardModel = createUiStateStore(null);
       boardModel.subscribe((snapshot) => snapshot, (snapshot) => {
+        if (snapshot?.receipt) snapshot = applyBoardReceipt(snapshot.receipt);
         if (!snapshot) return;
         const state = ensureBoardState(snapshot.windowId);
         state.entries = snapshot.entries;
+        if (snapshot.mentionEntry) {
+          showBoardMentionNotification(snapshot.mentionEntry, snapshot.windowId);
+        }
         renderBoard(snapshot.windowId);
         if (state.error) return;
         if (state.pendingLatestReload) {
@@ -80,7 +112,7 @@ export function createBoardLogsSurface({
 
       function activeBoardWindowIds() {
         return (activeWorkspace().windows || [])
-          .filter((windowData) => windowData.preset === "board" && !windowData.minimized)
+          .filter((windowData) => windowData.preset === "board")
           .map((windowData) => windowData.id);
       }
 
@@ -171,7 +203,13 @@ export function createBoardLogsSurface({
       // resolved routing), keyed by project_root. Populated by the
       // `project_board_config` backend event; read by the Board window's
       // destination chip + config popover.
-      const boardConfigByProjectRoot = new Map();
+      const boardConfigModel = createUiStateStore({});
+      boardConfigModel.subscribeFrame(configs => configs, configs => {
+        if (Object.keys(configs).length === 0) return;
+        for (const windowId of activeBoardWindowIds()) {
+          boardModel.update(() => ({ windowId, entries: ensureBoardState(windowId).entries }));
+        }
+      });
       let activeDestinationPopover = null;
 
       function boardDestinationLabel(config) {
@@ -241,7 +279,7 @@ export function createBoardLogsSurface({
         closeBoardDestinationPopover();
         const projectRoot = activeProjectTab()?.project_root || "";
         if (!projectRoot) return;
-        const config = boardConfigByProjectRoot.get(projectRoot) || {};
+        const config = boardConfigModel.read()[projectRoot] || {};
 
         const pop = createNode("div", "board-destination-popover");
 
@@ -393,7 +431,7 @@ export function createBoardLogsSurface({
       // Board windows — refreshes the destination chip for the matching project.
       function applyProjectBoardConfigEventToBoard(event) {
         if (!event || !event.project_root) return;
-        boardConfigByProjectRoot.set(event.project_root, {
+        boardConfigModel.update(configs => ({ ...configs, [event.project_root]: {
           provider: event.provider || "",
           channel: event.channel || "",
           tenant: event.tenant || "",
@@ -402,10 +440,7 @@ export function createBoardLogsSurface({
           resolvedChannel: event.resolved_channel || "",
           signedIn: event.signed_in === true,
           message: event.message || "",
-        });
-        for (const windowId of activeBoardWindowIds()) {
-          boardModel.update(() => ({ windowId, entries: ensureBoardState(windowId).entries }));
-        }
+        } }));
       }
 
       // SPEC-2359 FR-098/101 + US-53: track every live assigned Work id for
@@ -512,6 +547,27 @@ export function createBoardLogsSurface({
         });
       }
 
+      function resyncBoardLogs(windowIds) {
+        for (const windowId of windowIds) {
+          const board = boardStateMap.get(windowId);
+          if (board) {
+            // A lost history reply cannot be merged safely with a later window.
+            // Keep the draft until the recovered snapshot confirms the post.
+            if (board.pendingSubmit) board.pendingSubmit.recovering = true;
+            board.loading = false;
+            board.loadingOlder = false;
+            board.pendingLatestReload = false;
+            requestBoard(windowId, true);
+          }
+          const logs = logStateMap.get(windowId);
+          if (logs) {
+            logs.loading = false;
+            logs.pendingScope = null;
+            requestLogs(windowId);
+          }
+        }
+      }
+
       function requestOlderBoardEntries(windowId) {
         const state = ensureBoardState(windowId);
         if (state.loading || state.loadingOlder || !state.hasMoreBefore) {
@@ -604,8 +660,8 @@ export function createBoardLogsSurface({
           kind: "open_board_origin_agent",
           id: windowId,
           origin_session_id: originSessionId,
-          bounds: visibleBounds(),
         });
+        onOpenOriginAgent?.(originSessionId);
       }
 
       function logMatchesQuery(entry, query) {
@@ -666,8 +722,8 @@ export function createBoardLogsSurface({
             continue;
           }
           state.entries.push(entry);
-          if (state.entries.length > 1000) {
-            state.entries = state.entries.slice(-1000);
+          if (state.entries.length > maxLogEntries) {
+            state.entries = state.entries.slice(-maxLogEntries);
           }
           if (logSeverityRank(entry.severity) >= logSeverityRank("warn")) {
             state.unreadAlerts += 1;
@@ -1038,9 +1094,7 @@ export function createBoardLogsSurface({
         // SPEC-2963 FR-030: reflect this project's resolved Board destination.
         const destinationChip = body.querySelector("[data-action='board-destination']");
         if (destinationChip) {
-          const config = boardConfigByProjectRoot.get(
-            activeProjectTab()?.project_root || "",
-          );
+          const config = boardConfigModel.read()[activeProjectTab()?.project_root || ""];
           destinationChip.replaceChildren(
             createNode("span", "board-destination-dot"),
             createNode(
@@ -1231,7 +1285,7 @@ export function createBoardLogsSurface({
           }
           meta.appendChild(
             document.createTextNode(
-              `${entry.author || "Unknown"} · ${boardTimestampLabel(
+              `${boardEntryAuthorLabel(entry)} · ${boardTimestampLabel(
                 entry.updated_at || entry.created_at,
               )}`,
             ),
@@ -1254,7 +1308,7 @@ export function createBoardLogsSurface({
               "button",
               "board-reply-quote",
               parent
-                ? `Reply to ${parent.author || "Unknown"}: ${boardEntryPreview(parent)}`
+                ? `Reply to ${boardEntryAuthorLabel(parent)}: ${boardEntryPreview(parent)}`
                 : "Reply to earlier Board entry",
             );
             quote.type = "button";
@@ -1266,8 +1320,8 @@ export function createBoardLogsSurface({
           }
           // SPEC-2963: the body is authored in Markdown; render the
           // server-sanitized `body_html` (falls back to plaintext when absent),
-          // reusing the Knowledge surface's markdown renderer.
-          card.appendChild(createKnowledgeMarkdownBody(entry, "board-message-body"));
+          // using the content type committed by the model.
+          card.appendChild(renderUiContent(document, entry.content, "board-message-body"));
           const messageActions = createNode("div", "board-message-actions");
           const replyButton = createNode("button", "board-reply-button", "Reply");
           replyButton.type = "button";
@@ -1450,7 +1504,7 @@ export function createBoardLogsSurface({
               "span",
               "board-reply-banner-text",
               parent
-                ? `Replying to ${parent.author || "Unknown"} - ${boardEntryPreview(parent)}`
+                ? `Replying to ${boardEntryAuthorLabel(parent)} - ${boardEntryPreview(parent)}`
                 : "Replying to earlier Board entry",
             ),
           );
@@ -1627,7 +1681,7 @@ export function createBoardLogsSurface({
               openBoardDestinationPopover(event.currentTarget);
             });
           const projectRoot = activeProjectTab()?.project_root || "";
-          if (projectRoot && !boardConfigByProjectRoot.has(projectRoot)) {
+          if (projectRoot && !Object.hasOwn(boardConfigModel.read(), projectRoot)) {
             send({ kind: "get_project_board_config", project_root: projectRoot });
           }
           const state = ensureBoardState(windowData.id);
@@ -1748,14 +1802,15 @@ export function createBoardLogsSurface({
           return;
       }
 
-      // SPEC-3064 Phase 3 (E6c): receive() bodies for board_* / log_*
-      // events moved verbatim from app.js; the case arms in app.js delegate
-      // here.
-      function applyBoardLogsReceiveEvent(event) {
+      // The shared model owns each response before request settlement, merging
+      // and rendering. Typed rows remain store-owned across settings updates;
+      // only the merged outer list needs freezing after derivation.
+      // Keep settlement synchronous with the receive FIFO.
+      function applyBoardReceipt(event) {
         switch (event.kind) {
           case "board_entries": {
             const state = ensureBoardState(event.id);
-            const incomingEntries = event.entries || [];
+            const incomingEntries = event.entries;
             const existingEntryIds = new Set(state.entries.map((entry) => entry.id));
             const incomingEntryIds = new Set(incomingEntries.map((entry) => entry.id));
             const retainedHistory = state.entries.some(
@@ -1780,6 +1835,7 @@ export function createBoardLogsSurface({
                   && String(entry.author_kind || "").toLowerCase() === "user"
                   && String(entry.body || "").trim() === pendingSubmit.body;
               });
+            const unconfirmedSubmit = pendingSubmit?.recovering && !completedSubmit;
             // Preserve the requested cursor until its page arrives. Evicting it
             // for a live push would leave a hole between history and this window.
             if (state.loadingOlder && addedEntry) state.hasNewerEntries = true;
@@ -1788,7 +1844,7 @@ export function createBoardLogsSurface({
               : incomingEntries;
             const merged = mergeBoardEntries(state.resetToLatest ? [] : state.entries, acceptedEntries);
             const evicted = merged.length > maxBoardEntries;
-            state.entries = merged.slice(-maxBoardEntries);
+            state.entries = Object.freeze(merged.slice(-maxBoardEntries));
             state.hasMoreBefore = evicted || (retainedHistory && !state.resetToLatest
               ? state.hasMoreBefore
               : Boolean(event.has_more_before));
@@ -1812,60 +1868,46 @@ export function createBoardLogsSurface({
               state.pendingSubmit = null;
               state.submitting = false;
               state.pendingSelfPostScroll = true;
+            } else if (unconfirmedSubmit) {
+              state.pendingSubmit = null;
+              state.submitting = false;
             } else if (addedEntry && !state.shouldFollowBoardBottom) {
               state.newEntriesAvailable = true;
             }
+            let mentionEntry = null;
             if (
               addressedEntry &&
               addressedEntry.id !== state.lastNotifiedMentionEntryId
             ) {
               state.forYouUnread += 1;
               state.lastNotifiedMentionEntryId = addressedEntry.id;
-              showBoardMentionNotification(addressedEntry, event.id);
+              mentionEntry = addressedEntry;
             }
             state.loading = false;
-            state.error = "";
+            state.error = unconfirmedSubmit
+              ? "Post result could not be confirmed. Check Board history before retrying; your draft is preserved."
+              : "";
             if (completedSubmit && state.hasNewerEntries) {
               state.pendingLatestReload = true;
             }
-            boardModel.update(() => ({ windowId: event.id, entries: state.entries }));
-            break;
+            return { windowId: event.id, entries: state.entries, mentionEntry };
           }
           case "board_history_page": {
             const state = ensureBoardState(event.id);
             const existingEntryIds = new Set(state.entries.map((entry) => entry.id));
-            const olderEntries = (event.entries || []).filter(
+            const olderEntries = event.entries.filter(
               (entry) => !entry.id || !existingEntryIds.has(entry.id),
             );
             const merged = mergeBoardEntries(state.entries, olderEntries);
             state.hasNewerEntries = state.hasNewerEntries || merged.length > maxBoardEntries;
-            state.entries = merged.slice(0, maxBoardEntries);
+            state.entries = Object.freeze(merged.slice(0, maxBoardEntries));
             state.hasMoreBefore = Boolean(event.has_more_before);
             state.oldestEntryId = state.entries[0]?.id || null;
             state.loadingOlder = false;
             state.preserveBoardScrollPosition = olderEntries.length > 0;
             state.error = "";
-            boardModel.update(() => ({ windowId: event.id, entries: state.entries }));
-            break;
+            return { windowId: event.id, entries: state.entries };
           }
-          case "log_entries": {
-            if (!finishLogRequest(event.id)) break;
-            const state = ensureLogState(event.id);
-            state.entries = event.entries || [];
-            state.loading = false;
-            state.error = "";
-            state.unreadAlerts = 0;
-            state.unreadEntryId = null;
-            if (!state.selectedEntryId || !state.entries.some((entry) => entry.id === state.selectedEntryId)) {
-              state.selectedEntryId =
-                state.entries.length > 0 ? state.entries[state.entries.length - 1].id : null;
-            }
-            renderLogs(event.id);
-            break;
-          }
-          case "log_entry_appended":
-            appendLiveLogEntry(event.entry);
-            break;
           case "board_error": {
             const state = ensureBoardState(event.id);
             state.loading = false;
@@ -1875,15 +1917,44 @@ export function createBoardLogsSurface({
             state.pendingLatestReload = false;
             state.pendingSubmit = null;
             state.error = event.message;
-            boardModel.update(() => ({ windowId: event.id, entries: state.entries }));
+            return { windowId: event.id, entries: Object.freeze(state.entries) };
+          }
+          default:
+            return null;
+        }
+      }
+
+      // SPEC-3064 Phase 3 (E6c): app.js delegates Board/Logs receipts here.
+      function applyBoardLogsReceiveEvent(event) {
+        switch (event.kind) {
+          case "board_entries": {
+            boardModel.update(() => ({ windowId: event.id, receipt: { ...event,
+              entries: (event.entries || []).map(entry => ({ ...entry,
+                content: { type: "markdown", body: entry.body || "", body_html: entry.body_html || "" } })),
+            } }));
+            break;
+          }
+          case "board_history_page": {
+            boardModel.update(() => ({ windowId: event.id, receipt: { ...event,
+              entries: (event.entries || []).map(entry => ({ ...entry,
+                content: { type: "markdown", body: entry.body || "", body_html: entry.body_html || "" } })),
+            } }));
+            break;
+          }
+          case "log_entries": {
+            logResponseModel.update(() => ({ kind: event.kind, windowId: event.id,
+              entries: (event.entries || []).slice(-maxLogEntries) }));
+            break;
+          }
+          case "log_entry_appended":
+            logResponseModel.update(() => ({ kind: event.kind, entry: event.entry }));
+            break;
+          case "board_error": {
+            boardModel.update(() => ({ windowId: event.id, receipt: event }));
             break;
           }
           case "log_error": {
-            if (!finishLogRequest(event.id)) break;
-            const state = ensureLogState(event.id);
-            state.loading = false;
-            state.error = event.message;
-            renderLogs(event.id);
+            logResponseModel.update(() => ({ kind: event.kind, windowId: event.id, message: event.message }));
             break;
           }
           default:
@@ -1897,6 +1968,7 @@ export function createBoardLogsSurface({
         ensureBoardState,
         ensureLogState,
         requestBoard,
+        resyncBoardLogs,
         requestOlderBoardEntries,
         requestLogs,
         renderBoard,

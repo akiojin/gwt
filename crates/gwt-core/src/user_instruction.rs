@@ -155,6 +155,8 @@ fn record_inner(
         }) {
             if previous.authority.as_ref() != Some(authority)
                 || previous.kind != input.kind
+                || previous.summary != redact(&input.summary)
+                || previous.answer != redact(&input.answer)
                 || previous.authorizations.len() != authorizations.len()
                 || !previous
                     .authorizations
@@ -419,6 +421,8 @@ mod tests {
         let repo = home.path().join("repo");
         let mut input = request("Enable automatic updates.");
         input.kind = UserInstructionKind::OneOff;
+        input.summary = "Enable automatic updates; token=summary-fixture".into();
+        input.answer = "I will enable updates; token=answer-fixture".into();
         input.authorizations = vec![crate::pm_authorization::OperationIntent {
             operation: "update.settings.set".into(),
             params: serde_json::json!({"auto_apply_updates":true}),
@@ -430,6 +434,20 @@ mod tests {
             "one human turn cannot mint another one-off instruction"
         );
         assert_eq!(load(&repo).unwrap().len(), 1);
+        let before = fs::read(instructions_path(&repo)).unwrap();
+
+        let mut changed = input.clone();
+        changed.summary = format!("Changed {}", changed.summary);
+        assert!(
+            record_from_prompt(&repo, changed, "pm-session", "human-turn").is_err(),
+            "a replay cannot silently replace the question summary"
+        );
+        let mut changed = input.clone();
+        changed.answer = format!("Changed {}", changed.answer);
+        assert!(
+            record_from_prompt(&repo, changed, "pm-session", "human-turn").is_err(),
+            "a replay cannot silently replace the answer"
+        );
 
         let mut changed = input.clone();
         changed.authorizations[0].params["auto_apply_updates"] = false.into();
@@ -440,6 +458,7 @@ mod tests {
         input.original = "A different human prompt".into();
         assert!(record_from_prompt(&repo, input, "pm-session", "human-turn").is_err());
         assert_eq!(load(&repo).unwrap().len(), 1);
+        assert_eq!(fs::read(instructions_path(&repo)).unwrap(), before);
     }
 
     #[test]

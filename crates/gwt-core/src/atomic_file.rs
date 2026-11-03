@@ -17,6 +17,41 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// Retry Windows access/sharing conflicts (os errors 5 and 32) with at most
+/// one second of backoff. Other errors and non-Windows operations return
+/// immediately; an exhausted retry retains the original native error.
+pub fn retry_on_sharing_violation<T>(
+    mut operation: impl FnMut() -> io::Result<T>,
+) -> io::Result<T> {
+    #[cfg(not(windows))]
+    {
+        operation()
+    }
+
+    #[cfg(windows)]
+    {
+        let original = match operation() {
+            Err(error) if matches!(error.raw_os_error(), Some(5 | 32)) => error,
+            result => return result,
+        };
+        // Replacement can temporarily reject a concurrent open even with delete
+        // sharing. Bound recovery rather than hiding permanent permission errors.
+        let mut remaining = std::time::Duration::from_secs(1);
+        let mut delay = std::time::Duration::from_millis(1);
+        while !remaining.is_zero() {
+            let wait = delay.min(remaining);
+            std::thread::sleep(wait);
+            remaining -= wait;
+            match operation() {
+                Err(error) if matches!(error.raw_os_error(), Some(5 | 32)) => {}
+                result => return result,
+            }
+            delay *= 2;
+        }
+        Err(original)
+    }
+}
+
 /// Writes `bytes` to `path` so that no reader ever observes the destination
 /// holding a partial payload.
 ///

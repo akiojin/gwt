@@ -19,6 +19,7 @@ pub mod refs;
 pub mod release_status;
 pub mod repository;
 pub mod worktree;
+mod worktree_inventory;
 
 pub use branch::{
     delete_local_branch, detect_cleanable_target, detect_cleanable_target_with_remote_names,

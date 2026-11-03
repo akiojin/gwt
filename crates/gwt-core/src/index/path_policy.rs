@@ -96,6 +96,25 @@ impl IndexPathPolicy {
 
     pub fn is_builtin_denied_path(&self, root: &Path, path: &Path) -> bool {
         let rel = relative_path(root, path);
+        self.is_builtin_denied_relative_path(&rel, path)
+    }
+
+    /// Filter one inventory without reopening its root for every candidate.
+    /// Resolve file targets afresh; no normalized paths survive this operation.
+    pub fn filter_builtin_denied_paths(
+        &self,
+        root: &Path,
+        mut paths: Vec<PathBuf>,
+    ) -> Vec<PathBuf> {
+        let canonical_root = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        paths.retain(|path| {
+            let rel = relative_path_with_canonical_root(root, &canonical_root, path);
+            !self.is_builtin_denied_relative_path(&rel, path)
+        });
+        paths
+    }
+
+    fn is_builtin_denied_relative_path(&self, rel: &Path, path: &Path) -> bool {
         let mut normal_components = rel.components().filter_map(|component| match component {
             Component::Normal(part) => part.to_str(),
             _ => None,
@@ -210,9 +229,13 @@ fn git_info_exclude_path(root: &Path) -> Option<PathBuf> {
 
 fn relative_path(root: &Path, path: &Path) -> PathBuf {
     let canonical_root = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    relative_path_with_canonical_root(root, &canonical_root, path)
+}
+
+fn relative_path_with_canonical_root(root: &Path, canonical_root: &Path, path: &Path) -> PathBuf {
     let canonical_path = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     canonical_path
-        .strip_prefix(&canonical_root)
+        .strip_prefix(canonical_root)
         .unwrap_or(path.strip_prefix(root).unwrap_or(path))
         .to_path_buf()
 }

@@ -19,6 +19,10 @@
 //! browsers were re-downloaded on every run, so an unrelated PR turned red and
 //! could only be recovered by re-running the job. These tests pin the
 //! properties that keep an install stall from looking like a test failure.
+//!
+//! Issue #6080 removes those runtime installs from the browser step:
+//! the official, version-matched Playwright image supplies browsers and system
+//! dependencies. Host regressions retain their existing Git/Rust toolchain.
 
 use std::fs;
 use std::path::PathBuf;
@@ -74,141 +78,81 @@ const VERSION_FILE: &str = "scripts/playwright-version.txt";
 // Workflow contracts
 // ---------------------------------------------------------------------------
 
-/// A bare `playwright install --with-deps` has no timeout of its own, so a
-/// stalled apt mirror can only be stopped by the step timeout — 10 minutes of
-/// silence that reads as "CI is broken" rather than "the install hung".
+/// The image contains the browser revision required by the pinned npm package.
+/// A different version makes Playwright search for absent browser executables.
 #[test]
-fn playwright_bootstrap_delegates_to_the_bounded_installer_script() {
+fn frontend_runs_only_browser_specs_in_the_pinned_official_image() {
     let job = frontend_job();
-    // Only executed commands matter here; the surrounding comments are allowed
-    // to name the command this replaced.
-    let commands: Vec<&str> = job
+    assert!(
+        !job.contains("\n    container:"),
+        "host regressions need the hosted runner's Git/Rust toolchain"
+    );
+    let browser = frontend_step("Run WebView E2E (embedded Playwright specs)");
+    assert!(browser.contains(VERSION_FILE));
+    assert!(browser.contains("docker run --rm"));
+    assert!(browser.contains("mcr.microsoft.com/playwright:v${version}-noble"));
+    assert!(browser.contains("target=/workspace"));
+}
+
+/// No apt transaction means runner feeds and background dpkg locks cannot
+/// prevent frontend tests from starting.
+#[test]
+fn frontend_does_not_install_system_dependencies() {
+    let job = frontend_job();
+    let mut commands = job
         .lines()
         .map(str::trim)
-        .filter(|line| !line.starts_with('#'))
-        .collect();
-
+        .filter(|line| !line.starts_with('#'));
     assert!(
-        !commands
-            .iter()
-            .any(|line| line.contains("install --with-deps")),
-        "the frontend job must not run a bare `playwright install --with-deps`; \
-         it merges the apt transaction and the browser download into one \
-         unbounded, unretried command:\n{job}"
-    );
-    assert!(
-        job.contains(INSTALLER),
-        "the frontend job must bootstrap browsers through {INSTALLER}, which \
-         bounds and retries each phase:\n{job}"
+        !commands.any(|line| [
+            "apt-get",
+            "ci-apt.sh",
+            "install-linux-deps.sh",
+            "install-playwright-browsers.sh system-deps",
+            "install-deps",
+            "--with-deps"
+        ]
+        .iter()
+        .any(|command| line.contains(command))),
+        "the frontend image already contains system dependencies; the job \
+         must not perform an apt transaction:\n{job}"
     );
 }
 
-/// The apt transaction and the browser download fail for unrelated reasons
-/// (mirror stall vs. CDN error). Keeping them in separate steps means the
-/// GitHub error line already names the phase that broke.
+/// Browser executables come from the image, so neither an installer nor a
+/// restored host browser cache may replace them.
 #[test]
-fn system_deps_and_browser_download_are_separate_steps() {
+fn frontend_uses_image_browsers_without_a_bootstrap_or_browser_cache() {
     let job = frontend_job();
-
-    let deps_step = frontend_step("Install Playwright system dependencies");
-    let browser_step = frontend_step("Install Playwright chromium browser");
-
+    let mut commands = job
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#'));
     assert!(
-        deps_step.contains("system-deps"),
-        "the system dependency step must run the installer's `system-deps` \
-         phase:\n{deps_step}"
-    );
-    assert!(
-        browser_step.contains("browsers"),
-        "the browser step must run the installer's `browsers` phase:\n{browser_step}"
-    );
-
-    let deps_at = job
-        .find("- name: Install Playwright system dependencies")
-        .expect("system dependency step must exist");
-    let browser_at = job
-        .find("- name: Install Playwright chromium browser")
-        .expect("browser step must exist");
-    assert!(
-        deps_at < browser_at,
-        "system dependencies must be installed before the browser download"
+        !commands.any(|line| line.contains(INSTALLER)
+            || line.contains("playwright install")
+            || line.contains("ms-playwright")),
+        "the frontend job must use the image's browsers without downloading \
+         or restoring a separate bundle:\n{job}"
     );
 }
 
-/// Both phases talk to the network. Without a per-step budget one stalled
-/// phase consumes the whole job's time before anything is reported.
+/// Replacing browser bootstrap must retain the embedded E2E suite itself.
 #[test]
-fn each_bootstrap_step_carries_its_own_timeout() {
-    for step in [
-        "Install Playwright system dependencies",
-        "Install Playwright chromium browser",
-    ] {
-        let body = frontend_step(step);
-        assert!(
-            body.contains("timeout-minutes:"),
-            "`{step}` must declare its own timeout-minutes so a stall is \
-             attributed to that phase:\n{body}"
-        );
-    }
-}
-
-/// Re-downloading chromium on every run makes every job depend on the
-/// Playwright CDN. A cache turns the common path into a no-op, so the
-/// download can only fail when the cache genuinely misses.
-#[test]
-fn playwright_browsers_are_cached_across_runs() {
-    let job = frontend_job();
-
-    assert!(
-        job.contains("actions/cache@"),
-        "the frontend job must cache the Playwright browser bundle:\n{job}"
-    );
-    assert!(
-        job.contains("~/.cache/ms-playwright"),
-        "the cache must cover ~/.cache/ms-playwright, where Playwright stores \
-         downloaded browsers on Linux:\n{job}"
-    );
-}
-
-/// A cache key built from a version literal that has drifted from the pinned
-/// version restores browsers the tests cannot use, and the download runs
-/// anyway — reintroducing the failure the cache was added to remove.
-#[test]
-fn the_workflow_does_not_duplicate_the_pinned_playwright_version() {
-    let workflow = test_workflow();
-
-    assert!(
-        !workflow.contains("playwright@1."),
-        "the workflow must not pin a Playwright version literal; the pinned \
-         version lives in {VERSION_FILE} so the cache key cannot drift away \
-         from what the tests actually run:\n{workflow}"
-    );
-    assert!(
-        workflow.contains(VERSION_FILE),
-        "the workflow must read the pinned version from {VERSION_FILE}:\n{workflow}"
-    );
-}
-
-/// AC-4: an install stall and a failing spec must never share a log region.
-#[test]
-fn the_e2e_run_stays_a_separate_step_from_the_bootstrap() {
-    let job = frontend_job();
-    let e2e_at = job
-        .find("- name: Run WebView E2E")
-        .expect("the WebView E2E step must exist");
-    let browser_at = job
-        .find("- name: Install Playwright chromium browser")
-        .expect("browser step must exist");
-
-    assert!(
-        browser_at < e2e_at,
-        "browsers must be installed in their own step before the E2E run, so \
-         a bootstrap failure never appears inside the test output"
-    );
+fn the_frontend_job_runs_the_embedded_e2e_suite() {
     assert!(
         frontend_step("Run WebView E2E (embedded Playwright specs)")
             .contains("run-visual-tests.sh"),
-        "the E2E step must only run the specs"
+        "the frontend job must retain the embedded Playwright specs"
+    );
+}
+
+/// Test execution keeps its own deadline after browser bootstrap is removed.
+#[test]
+fn the_embedded_e2e_step_is_time_bounded() {
+    assert!(
+        frontend_step("Run WebView E2E (embedded Playwright specs)").contains("timeout-minutes:"),
+        "the embedded Playwright step must declare its own timeout"
     );
 }
 

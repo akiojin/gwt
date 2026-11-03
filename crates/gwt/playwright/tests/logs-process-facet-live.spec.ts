@@ -30,7 +30,6 @@ test.describe.serial("Logs window Process facet (live backend)", () => {
   test.beforeEach(async ({ page }) => {
     await gotoLiveGwt(page, BASE, {
       enableTestBridge: true,
-      keepPresetModal: true,
     });
     await openLiveGwtProject(page);
     await clearLiveLaunchWizard(page);
@@ -72,18 +71,7 @@ test.describe.serial("Logs window Process facet (live backend)", () => {
 
   async function openLogsWindow(page) {
     const beforeIds = await logsWindowIds(page);
-    await page.evaluate(() => {
-      const modal = document.getElementById("preset-modal");
-      if (modal) {
-        modal.setAttribute("aria-hidden", "false");
-        modal.classList.add("open");
-      }
-    });
-    const presetModal = page.locator("#preset-modal");
-    await expect(presetModal).toBeVisible();
-    const logsButton = presetModal.locator("[data-preset='logs']");
-    await expect(logsButton).toBeVisible();
-    await logsButton.click();
+    await page.locator('.op-rail__item[data-cmd="open-logs"]').click();
     return await waitForNewLogsWindow(page, beforeIds);
   }
 

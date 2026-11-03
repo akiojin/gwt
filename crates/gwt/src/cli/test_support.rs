@@ -261,7 +261,7 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         [api, endpoint] if api == "api" && endpoint == "repos/akiojin/gwt/pulls/12" => {
-            // PR node id lookup for pr.ready / pr.draft (read:org-free REST GET).
+            // PR node id lookup for the Ready transition (read:org-free REST GET).
             println!("{{\"number\":12,\"node_id\":\"PR_node_12\",\"draft\":true}}");
             return ExitCode::SUCCESS;
         }
@@ -316,11 +316,23 @@ fn main() -> ExitCode {
                 && allow == "--allow-escape-sequences"
                 && endpoint == "/repos/akiojin/gwt/actions/jobs/91/logs" =>
         {
+            if mode == "job-log-unsupported-escape-flag" {
+                eprintln!("unknown flag: --allow-escape-sequences");
+                return ExitCode::FAILURE;
+            }
             if mode == "job-log-zip" {
                 print!("PKZIP");
             } else {
                 print!("job log 91");
             }
+            return ExitCode::SUCCESS;
+        }
+        [api, endpoint]
+            if mode == "job-log-unsupported-escape-flag"
+                && api == "api"
+                && endpoint == "/repos/akiojin/gwt/actions/jobs/91/logs" =>
+        {
+            print!("unrelated output\n\x1b[31mtest fails ... FAILED\x1b[0m\nthread 'fails' panicked at src/lib.rs:1:1\n");
             return ExitCode::SUCCESS;
         }
         [api, graphql, ..] if api == "api" && graphql == "graphql" => {
@@ -458,6 +470,17 @@ pub fn with_fake_gh<T>(mode: &str, test: impl FnOnce(&Path) -> T) -> T {
     }
 }
 
+/// Capture fake-gh calls without inheriting a managed Session. Both overrides
+/// stay inside `with_fake_gh`'s environment lock for the entire callback.
+pub fn with_fake_gh_capture<T>(mode: &str, test: impl FnOnce(&Path, &Path) -> T) -> T {
+    with_fake_gh(mode, |repo_path| {
+        let argv_file = repo_path.join("gh-argv");
+        let _session = ScopedEnvVar::unset("GWT_SESSION_ID");
+        let _argv = ScopedEnvVar::set("GWT_FAKE_GH_ARGV_FILE", &argv_file);
+        test(repo_path, &argv_file)
+    })
+}
+
 #[test]
 fn fake_gh_helper_restores_process_env_when_callback_panics() {
     let outcome = std::panic::catch_unwind(|| {
@@ -487,6 +510,7 @@ pub fn sample_thread() -> PrReviewThread {
 
 pub fn sample_issue_snapshot() -> IssueSnapshot {
     IssueSnapshot {
+        author_login: None,
         number: IssueNumber(42),
         title: "Coverage gate".to_string(),
         body: "Raise the project coverage gate.\n".to_string(),

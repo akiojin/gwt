@@ -36,7 +36,8 @@ fn issue_db_path_omits_worktree_hash() {
 fn specs_db_path_is_repo_scoped() {
     let repo = compute_repo_hash("https://github.com/akiojin/gwt.git");
     let path = gwt_index_db_path(&repo, None, Scope::Specs).unwrap();
-    assert_eq!(path.file_name().and_then(|s| s.to_str()), Some("specs"));
+    let issues = gwt_index_db_path(&repo, None, Scope::Issues).unwrap();
+    assert_eq!(path, issues);
     assert_eq!(
         path.parent()
             .and_then(|parent| parent.file_name())

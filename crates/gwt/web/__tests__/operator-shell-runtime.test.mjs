@@ -4,11 +4,63 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
+import { createUiStateStore } from "../ui-state-store.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const html = readFileSync(resolve(here, "../index.html"), "utf8");
 const runtimeCpuUnitsPattern =
   /aggregate CPU.*logical-core-normalized host share.*process rows.*1 core\s*=\s*100%/i;
+
+test("runtime health batches a frame into the same latest immutable cell and detail snapshot", async () => {
+  const { subscribeRuntimeHealth } = await importOperatorShell();
+  assert.equal(typeof subscribeRuntimeHealth, "function");
+  const { document, window } = parseHTML(html);
+  const frames = new Set();
+  const model = createUiStateStore(null, {
+    scheduleFrame(callback) { frames.add(callback); return () => frames.delete(callback); },
+  });
+  const unsubscribe = subscribeRuntimeHealth(document, model);
+  const cell = document.getElementById("op-strip-runtime-health-value");
+  const initial = cell.textContent;
+  model.update(() => ({ state: "warn", cpu_percent: 40, processes: [] }));
+  const payload = { state: "hot", cpu_percent: 80, memory_bytes: 1024 ** 3,
+    processes: [{ pid: 7, name: "original", cpu_percent: 80, memory_bytes: 1024 ** 3 }] };
+  model.update(() => payload);
+  const previous = model.read();
+  assert.equal(previous.cpu_percent, 80, "model reads stay synchronous");
+  assert.equal(cell.textContent, initial, "updates must wait for the display frame");
+  assert.equal(frames.size, 1, "a burst schedules only one display frame");
+  const flush = () => {
+    const callbacks = [...frames];
+    frames.clear();
+    callbacks.forEach(callback => callback());
+  };
+  payload.processes[0].name = "mutated";
+  payload.cpu_percent = 5;
+  flush();
+  const detail = document.getElementById("op-runtime-health-detail");
+  detail.querySelector('[data-sort="cpu"]')?.dispatchEvent(new window.Event("click"));
+  assert.equal(cell.textContent, "HOT 80% 1.0G");
+  assert.match(detail.textContent, /original/);
+  assert.doesNotMatch(detail.textContent, /mutated/);
+  assert.equal(previous.processes[0].name, "original");
+  model.update(() => ({ state: "ok", cpu_percent: 5, processes: [] }));
+  assert.equal(cell.textContent, "HOT 80% 1.0G");
+  flush();
+  assert.match(cell.textContent, /^OK 5%/);
+  assert.doesNotMatch(detail.textContent, /original/);
+  assert.equal(previous.cpu_percent, 80);
+  const last = cell.textContent;
+  model.update(() => ({ state: "warn", cpu_percent: 50 }));
+  assert.equal(frames.size, 1);
+  const cancelled = [...frames][0];
+  unsubscribe();
+  assert.equal(frames.size, 0, "unmount cancels the pending display frame");
+  cancelled();
+  model.update(() => ({ state: "hot", cpu_percent: 90 }));
+  assert.equal(cell.textContent, last);
+  assert.equal(frames.size, 0);
+});
 
 test("clock uses second boundaries and cancels all work while hidden", async () => {
   const { wireStatusStripClock } = await importOperatorShell();
@@ -833,4 +885,34 @@ test("Issue #3884 AC-3: RUNNING cell breaks out inline-terminal agents", async (
   // Counts that omit the breakdown (legacy callers) keep the slot hidden.
   applyTelemetryCounts(document, { running: 2 });
   assert.equal(inline()?.hidden, true);
+});
+
+// AC-5: the project owner lane is independent of the browser connection.
+test("project health renders its immutable latest frame without changing ONLINE", async () => {
+  const { subscribeProjectOwnerHealth } = await importOperatorShell();
+  const { document } = parseHTML(html);
+  const frames = new Set();
+  const model = createUiStateStore(null, {
+    scheduleFrame(callback) { frames.add(callback); return () => frames.delete(callback); },
+  });
+  const unsubscribe = subscribeProjectOwnerHealth(document, model);
+  const cell = document.querySelector("[data-project-owner-health]");
+  const initial = cell.dataset.state;
+  const health = { state: "degraded", detail: "Project connection lost" };
+  model.update(() => health);
+  health.state = "healthy";
+  assert.equal(cell.dataset.state, initial, "receive only commits immutable data until the display frame");
+  const flush = () => { const pending = [...frames]; frames.clear(); pending.forEach(callback => callback()); };
+  flush();
+  assert.equal(cell.dataset.state, "degraded");
+  assert.match(cell.textContent, /unavailable/i);
+  assert.equal(cell.title, "Project connection lost");
+  assert.equal(document.querySelector('[data-role="connection-label"]').textContent, "ONLINE");
+  model.update(() => ({ state: "healthy", detail: null }));
+  flush();
+  assert.equal(cell.dataset.state, "healthy");
+  assert.match(cell.textContent, /ready/i);
+  model.update(() => ({ state: "degraded" }));
+  unsubscribe();
+  assert.equal(frames.size, 0, "unmount cancels the pending frame");
 });

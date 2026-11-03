@@ -10,10 +10,9 @@ blocker resolution.
 
 gwtd has no merge operation. The merge itself is performed by the
 repository's merge automation (GitHub auto-merge, or a workflow that merges
-non-Draft PRs once checks pass) or by a human. Deliver has two levers: JSON
-operation `pr.ready` hands the PR to that automation, and JSON operation
-`pr.draft` can explicitly hold a merge when the owner requests it,
-because a Draft PR cannot be merged. It is not a prerequisite for routine pushes.
+non-Draft PRs once checks pass) or by a human. JSON
+operation `pr.ready` hands an inherited Draft PR to that automation.
+Draft PRs are prohibited; creation and demotion are unavailable.
 
 ### Entry: autonomous execution or explicit manual request
 
@@ -26,22 +25,21 @@ open PR exists, first use Create with the Ready PR Gate, then drive that PR.
 
 ### Hard PR Gate (mandatory before handing the PR to merge automation)
 
-Do **not** hand the PR to merge automation until the Ready PR Gate passes for
-the PR scope. Deliver applies a stricter gate than Create/Fix because merge
-automation removes the last human checkpoint:
+Do **not** hand the PR to merge automation until the Ready PR Gate passes:
 
-- `gwt-verify --mode pre-pr` returns `Overall: PASS`
-- `User Verification Result` is `confirmed`, `n/a`, or `n/a (autonomous)`.
-  Existing autonomous PRs may retain the legacy `deferred (autonomous execution)`
-  body value with fresh passing evidence. `pending`, `rejected(<reason>)`, and
-  `skipped(<reason>)` do not authorize delivery. Autonomous UI work requires
-  `Agent Visual Check: pass` plus the same record's measured passing headed
-  Chromium results for dark and light themes.
-- the PR is a releaseable slice with no known blockers
+- `gwt-verify --mode pre-pr` returns `Overall: PASS`.
+- User Verification Result is optional unless the owner explicitly requests
+  a human check. An absent, `pending`, or legacy deferred value alone does not
+  establish such a request. An actual `rejected(<reason>)` records a known
+  blocker that must be repaired. Keep autonomous `n/a (autonomous)` and legacy
+  `deferred (autonomous execution)` compatibility without rewriting the body.
+- UI work requires `Agent Visual Check: pass` plus the same fresh record's
+  measured passing headed Chromium results for dark and light themes.
+- The PR is a releaseable slice with no known blockers.
 
-If verification is `pending`, do **not** hand new work over through `pr.ready`.
-Route the failure for repair (back to the TDD loop, `gwt-verify`, or
-`gwt-discussion`). Never downgrade `pending` to `skipped` to pass the gate.
+If automated verification fails or an explicitly requested check is pending,
+repair the failure before handing new work over through `pr.ready`.
+Never turn an agent check into human `confirmed` or invent a skip result.
 
 ### Preserve the repository's delivery policy
 
@@ -51,8 +49,8 @@ operation `pr.update_branch` for a BEHIND PR; when the PM owns synchronization,
 hand it off on the Board instead of updating the branch concurrently.
 
 Do not require an unavailable merge operation or a Draft/Ready cycle for each
-push. An explicit owner-requested hold uses `pr.draft`; resume through
-`pr.ready` only after the Ready PR Gate passes again.
+push. Draft creation and demotion are unavailable; repair any failed gate
+before the next code-changing push.
 
 ### Drive-to-merge loop
 

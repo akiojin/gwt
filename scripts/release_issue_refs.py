@@ -17,6 +17,7 @@ import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
 from typing import Callable, Sequence
+from urllib.parse import quote, unquote, urlsplit
 
 CommandRunner = Callable[[Sequence[str]], str]
 
@@ -257,6 +258,216 @@ def collect_release_issue_refs(
     )
 
 
+
+FEEDBACK_REPO = "akiojin/gwt"
+FEEDBACK_AUTHORS = {"akiojin", "github-actions[bot]"}
+FEEDBACK_TAG_RE = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?")
+FEEDBACK_MARKER_RE = re.compile(
+    r"<!-- gwt-feedback:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12} -->", re.I
+)
+SOURCE_MARKER_RE = re.compile(r"^<!-- gwt-feedback-source:([1-9][0-9]*) -->$", re.M)
+OWNER_MARKER_RE = re.compile(r"^<!-- gwt-feedback-owner:([1-9][0-9]*):([1-9][0-9]*) -->(?:\r?\n|$)")
+
+
+def _feedback_api(path: str, runner: CommandRunner, body: str | None = None):
+    command = ["gh", "api", "--hostname", "github.com", "--method",
+               "GET" if body is None else "POST", f"repos/{FEEDBACK_REPO}/{path}"]
+    if body is not None:
+        command.extend(["-f", f"body={body}"])
+    return json.loads(runner(command))
+
+
+def _feedback_author(payload: dict) -> str:
+    author = (payload.get("user") or {}).get("login")
+    if not isinstance(author, str) or not author:
+        raise ValueError("feedback provenance has unknown author")
+    return author.lower()
+
+
+def _feedback_comments(number: int, runner: CommandRunner) -> list[dict]:
+    comments = []
+    seen = set()
+    page = 1
+    while True:
+        try:
+            batch = _feedback_api(f"issues/{number}/comments?per_page=100&page={page}", runner)
+        except (subprocess.CalledProcessError, ValueError) as error:
+            raise RuntimeError(f"notification pending: #{number} comments unverified (page {page})") from error
+        if not isinstance(batch, list) or len(batch) > 100:
+            raise ValueError(f"#{number} comment pagination is unverified")
+        for comment in batch:
+            if not isinstance(comment, dict):
+                raise ValueError(f"#{number} comment provenance is unverified")
+            _feedback_author(comment)
+            identity = comment.get("id")
+            if not isinstance(identity, int) or identity <= 0 or identity in seen:
+                raise ValueError(f"#{number} comment pagination is unverified")
+            seen.add(identity)
+        comments.extend(batch)
+        if len(batch) < 100:
+            return comments
+        page += 1
+
+
+def _raw_feedback(issue: dict) -> bool:
+    return "<!-- gwt-feedback:" in (issue.get("body") or "").lower() or any(
+        label.get("name", "").lower() == "gwt-feedback" for label in issue.get("labels", [])
+    )
+
+
+def _trusted_notice(comment: dict, marker: str) -> bool:
+    return (_feedback_author(comment) in FEEDBACK_AUTHORS
+            and (comment.get("body") or "").splitlines()[:1] == [marker])
+
+
+def feedback_release_range(tag: str, runner: CommandRunner = run_command) -> str:
+    """Use the nearest published ancestor; failed draft releases are not a boundary."""
+    if not FEEDBACK_TAG_RE.fullmatch(tag):
+        raise ValueError("invalid published release tag")
+    published = set()
+    seen = set()
+    page = 1
+    while True:
+        batch = _feedback_api(f"releases?per_page=100&page={page}", runner)
+        if not isinstance(batch, list) or len(batch) > 100:
+            raise ValueError("release pagination is unverified")
+        for release in batch:
+            identity = release.get("id")
+            if not isinstance(identity, int) or identity <= 0 or identity in seen:
+                raise ValueError("release pagination is unverified")
+            seen.add(identity)
+            name = release.get("tag_name") or ""
+            if (release.get("draft") is False and release.get("published_at")
+                    and name != tag and FEEDBACK_TAG_RE.fullmatch(name)):
+                published.add(name)
+        if len(batch) < 100:
+            break
+        page += 1
+    ancestors = set(runner(["git", "tag", "--merged", tag]).splitlines())
+    eligible = sorted(published & ancestors)
+    if not eligible:
+        return tag
+    command = ["git", "describe", "--tags", "--abbrev=0"]
+    for name in eligible:
+        command.extend(["--match", name])
+    previous = runner([*command, tag]).strip()
+    if previous not in eligible:
+        raise ValueError("previous published release is unverified")
+    return f"{previous}..{tag}"
+
+
+def notify_feedback_results(
+    report: ReleaseIssueRefs, tag: str, runner: CommandRunner = run_command,
+) -> list[str]:
+    """Notify through one trusted owner edge, after publication, without closing Issues.
+
+    All reads/writes use the fixed public repository. Reads must complete before
+    absence is trusted; a lost POST response is reconciled rather than retried.
+    Release workflow serialization supplies the single-writer boundary.
+    """
+    if report.repo != FEEDBACK_REPO:
+        raise ValueError("feedback notifications are restricted to akiojin/gwt")
+    if not FEEDBACK_TAG_RE.fullmatch(tag):
+        raise ValueError("invalid published release tag")
+    if report.range != tag and not report.range.endswith(f"..{tag}"):
+        raise ValueError("notification range must end at the published release tag")
+    release = _feedback_api(f"releases/tags/{quote(tag, safe='')}", runner)
+    url = urlsplit(release.get("html_url") or "")
+    if (release.get("draft") is not False or not release.get("published_at")
+            or release.get("tag_name") != tag or url.scheme != "https"
+            or url.netloc != "github.com" or url.query or url.fragment
+            or unquote(url.path) != f"/{FEEDBACK_REPO}/releases/tag/{tag}"):
+        raise ValueError("release must be published, non-draft, and in akiojin/gwt")
+
+    commits = set(runner(["git", "rev-list", "--end-of-options", report.range]).splitlines())
+    owner_prs: dict[int, list[tuple[int, str, bool]]] = {}
+    # Both per-PR lists nominate owners; Related-only refs require independent
+    # settlement proof and never inherit authority from the PR author alone.
+    for ref in report.refs:
+        candidates = unique_sorted([*ref.delivered_issues, *ref.reference_only_issues])
+        if ref.kind != "pr" or not candidates:
+            continue
+        pr = _feedback_api(f"pulls/{ref.number}", runner)
+        if not pr.get("merged_at") or pr.get("merge_commit_sha") not in commits:
+            raise ValueError(f"PR #{ref.number} is not merged in the published release range")
+        author = (pr.get("user") or {}).get("login")
+        trusted_author = isinstance(author, str) and author.lower() in FEEDBACK_AUTHORS
+        for owner in candidates:
+            owner_prs.setdefault(owner, []).append((
+                ref.number, pr["merge_commit_sha"], trusted_author and owner in ref.delivered_issues))
+
+    messages = []
+    for owner, deliveries in sorted(owner_prs.items()):
+        issue = _feedback_api(f"issues/{owner}", runner)
+        if issue.get("number") != owner:
+            raise ValueError(f"#{owner} owner identity is unverified")
+        if issue.get("pull_request"):
+            messages.append(f"Skipped #{owner}: pull request is not an Issue owner")
+            continue
+        if _feedback_author(issue) not in FEEDBACK_AUTHORS or _raw_feedback(issue):
+            messages.append(f"Skipped #{owner}: not a trusted curated owner")
+            continue
+        comments = _feedback_comments(owner, runner)
+        prs = []
+        for number, merge_sha, trusted_author in deliveries:
+            marker = f"<!-- gwt-merged-issue-settlement v1 pr={number} sha={merge_sha} -->"
+            if trusted_author or any(
+                _feedback_author(comment) in FEEDBACK_AUTHORS
+                and (comment.get("body") or "").splitlines()[:1] == [marker]
+                for comment in comments
+            ):
+                prs.append(number)
+        if not prs:
+            messages.append(f"Skipped #{owner}: PR delivery linkage is unverified")
+            continue
+        targets = {int(match.group(1)) for match in SOURCE_MARKER_RE.finditer(issue.get("body") or "")}
+        for comment in comments:
+            if _feedback_author(comment) in FEEDBACK_AUTHORS:
+                targets.update(int(match.group(1)) for match in OWNER_MARKER_RE.finditer(comment.get("body") or "")
+                               if int(match.group(2)) == owner)
+        targets.discard(owner)
+        # A report already aggregated on a trusted owner needs no reverse edge.
+        if any(FEEDBACK_MARKER_RE.match((comment.get("body") or "").lstrip()) for comment in comments):
+            targets.add(owner)
+        for target in sorted(targets):
+            target_comments = comments if target == owner else _feedback_comments(target, runner)
+            if target != owner:
+                source = _feedback_api(f"issues/{target}", runner)
+                if source.get("number") != target or source.get("pull_request") or not _raw_feedback(source):
+                    raise ValueError(f"#{target} source report identity is unverified")
+            marker = f"<!-- gwt-feedback-release:{target}:{owner}:{tag} -->"
+            if any(_trusted_notice(comment, marker) for comment in target_comments):
+                messages.append(f"Already recorded {tag} on #{target} for #{owner}")
+                continue
+            phase = any(label.get("name") == SPEC_LABEL for label in issue.get("labels", []))
+            scope = "SPEC phase" if phase else "curated change"
+            links = ", ".join(f"https://github.com/{FEEDBACK_REPO}/pull/{pr}" for pr in sorted(set(prs)))
+            body = (f"{marker}\nPublished {tag}: {release['html_url']}\n\n"
+                    f"The {scope} for https://github.com/{FEEDBACK_REPO}/issues/{owner} "
+                    f"is included through merged PR(s): {links}.\n"
+                    "This records the specified change; it does not mark the entire SPEC or report resolved.")
+            try:
+                posted = _feedback_api(f"issues/{target}/comments", runner, body)
+                if not isinstance(posted, dict) or not _trusted_notice(posted, marker):
+                    raise ValueError("notification POST result is unverified")
+            except (subprocess.CalledProcessError, ValueError) as error:
+                readback = _feedback_comments(target, runner)
+                if not any(_trusted_notice(comment, marker) for comment in readback):
+                    raise RuntimeError(f"published release {tag}; notification pending/unverified on #{target}") from error
+            messages.append(f"Recorded {tag} on #{target} for #{owner}")
+    return messages
+
+
+def _fixed_github_collection_command(args: Sequence[str]) -> str:
+    """Keep collector reads on the same host as notification writes."""
+    command = list(args)
+    if command[:2] == ["gh", "api"]:
+        command[2:2] = ["--hostname", "github.com"]
+    elif command[:3] == ["gh", "pr", "view"]:
+        command[command.index("--repo") + 1] = f"https://github.com/{FEEDBACK_REPO}"
+    return run_command(command)
+
+
 def neutralize_closing_keywords(text: str) -> str:
     """Break every `keyword #N` pair so GitHub cannot read it as a closing link.
 
@@ -418,6 +629,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional file with one `<sha> <subject>` breaking commit per line, listed under `## Breaking Changes`.",
     )
+    parser.add_argument("--notify-feedback", action="store_true",
+                        help="Record published release results on linked feedback (akiojin/gwt only); --range TAG selects the prior published release automatically.")
     return parser
 
 
@@ -426,6 +639,21 @@ def main() -> int:
     args = parser.parse_args()
     if args.format == "pr-body" and not args.version:
         parser.error("--format pr-body requires --version")
+
+    if args.notify_feedback:
+        if not args.version or args.repo_slug not in (None, FEEDBACK_REPO):
+            parser.error("--notify-feedback requires --version and fixed --repo akiojin/gwt")
+        try:
+            range_expr = (feedback_release_range(args.version)
+                          if args.range_expr == args.version else args.range_expr)
+            report = collect_release_issue_refs(range_expr, repo_slug=FEEDBACK_REPO,
+                                                runner=_fixed_github_collection_command)
+            for message in notify_feedback_results(report, args.version):
+                print(message)
+            return 0
+        except (subprocess.CalledProcessError, ValueError, RuntimeError) as error:
+            print(f"Release report notification pending/unverified: {error}", file=sys.stderr)
+            return 1
 
     try:
         report = collect_release_issue_refs(args.range_expr, repo_slug=args.repo_slug)

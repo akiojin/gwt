@@ -1,6 +1,6 @@
 //! Read-only process observations, separate from Issue Monitor admission.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
@@ -14,19 +14,55 @@ struct CachedRuntime {
     value: Result<Arc<SessionRuntimeState>, String>,
 }
 
-static RUNTIME_CACHE: OnceLock<Mutex<BTreeMap<PathBuf, CachedRuntime>>> = OnceLock::new();
+static RUNTIME_CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedRuntime>>> = OnceLock::new();
+
+#[cfg(test)]
+thread_local! {
+    static RUNTIME_PATH_STAMP_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn cached_runtime_entry(
+    entry: &std::fs::DirEntry,
+    path: &Path,
+) -> std::io::Result<Arc<SessionRuntimeState>> {
+    cached_runtime_with_stamp(path, || {
+        let metadata = entry.metadata()?;
+        let follow_target = metadata.file_type().is_symlink();
+        #[cfg(windows)]
+        let follow_target = {
+            use std::os::windows::fs::MetadataExt;
+            // FILE_ATTRIBUTE_REPARSE_POINT: preserve fs::metadata's target semantics.
+            follow_target || metadata.file_attributes() & 0x400 != 0
+        };
+        if follow_target {
+            return runtime_stamp(path);
+        }
+        // Windows directory enumeration already supplies this metadata.
+        Ok((metadata.modified()?, metadata.len()))
+    })
+}
+
+fn runtime_stamp(path: &Path) -> std::io::Result<(SystemTime, u64)> {
+    #[cfg(test)]
+    RUNTIME_PATH_STAMP_PROBES.with(|count| count.set(count.get().wrapping_add(1)));
+    let metadata = std::fs::metadata(path)?;
+    Ok((metadata.modified()?, metadata.len()))
+}
 
 /// Cache decoded sidecars only. Process identity/liveness is never cached.
 fn cached_runtime(path: &Path) -> std::io::Result<Arc<SessionRuntimeState>> {
+    cached_runtime_with_stamp(path, || runtime_stamp(path))
+}
+
+fn cached_runtime_with_stamp(
+    path: &Path,
+    stamp: impl FnOnce() -> std::io::Result<(SystemTime, u64)>,
+) -> std::io::Result<Arc<SessionRuntimeState>> {
     let mut cache = RUNTIME_CACHE
         .get_or_init(Mutex::default)
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let stamp = |path| {
-        let metadata = std::fs::metadata(path)?;
-        Ok::<_, std::io::Error>((metadata.modified()?, metadata.len()))
-    };
-    let (modified, size) = match stamp(path) {
+    let (modified, size) = match stamp() {
         Ok(stamp) => stamp,
         Err(error) => {
             cache.remove(path);
@@ -54,7 +90,7 @@ fn cached_runtime(path: &Path) -> std::io::Result<Arc<SessionRuntimeState>> {
     cache.remove(path);
     // A writer may atomically replace the sidecar during the read. Never memoize
     // that result against a stamp that no longer describes the file.
-    if stamp(path).is_ok_and(|after| after == (modified, size)) {
+    if runtime_stamp(path).is_ok_and(|after| after == (modified, size)) {
         cache.insert(
             path.to_path_buf(),
             CachedRuntime {
@@ -82,6 +118,9 @@ pub struct SessionObservation {
     pub child_started_at: u64,
     pub started_at: String,
     pub launch_origin: SessionLaunchOrigin,
+    /// Known skill token only; launch arguments and prompt bodies stay private.
+    #[serde(default)]
+    pub launch_entrypoint: Option<String>,
     pub restore_source_session_id: Option<String>,
 }
 
@@ -126,20 +165,19 @@ pub fn observe_machine_sessions(sessions_dir: &Path) -> MachineSessionInventory 
     finish_machine_inventory(inventory, attribution, &resources)
 }
 
-/// Share the capacity sampler's persistent CPU baseline and process census.
+/// Share the capacity sampler's process census. On Windows its caller scopes CPU refresh.
 pub(crate) fn observe_machine_sessions_with_system(
     sessions_dir: &Path,
     system: &mut sysinfo::System,
 ) -> MachineSessionInventory {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, UpdateKind};
     observe_machine_sessions_with_system_refresh(sessions_dir, system, |system| {
-        system.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::nothing()
-                .with_cpu()
-                .with_exe(UpdateKind::OnlyIfNotSet),
-        );
+        let refresh_kind = ProcessRefreshKind::nothing().with_exe(UpdateKind::OnlyIfNotSet);
+        // Linux advances process-time baselines even during metadata refresh;
+        // keep its existing single CPU pass instead of splitting the sample.
+        #[cfg(not(windows))]
+        let refresh_kind = refresh_kind.with_cpu();
+        system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind);
     })
 }
 
@@ -181,6 +219,9 @@ fn finish_machine_inventory(
     resources: &MachineProcessResources,
 ) -> MachineSessionInventory {
     inventory.uncertainties.retain(|uncertainty| {
+        if resources.observation_error.is_some() {
+            return true;
+        }
         if !uncertainty.reason.starts_with("session_unreadable:") {
             return true;
         }
@@ -218,6 +259,7 @@ fn finish_machine_inventory(
 
 #[derive(Default)]
 struct MachineProcessResources {
+    observation_error: Option<String>,
     memory: BTreeMap<u32, u64>,
     reviews: BTreeSet<u32>,
     scalar_identities: BTreeMap<u32, u64>,
@@ -345,6 +387,7 @@ impl ProjectSessionCensus {
             &mut snapshot,
         );
         let resources = capture_process_resources(&candidates, &inventory, false, snapshot);
+        inventory.check_deadline(&sessions_dir.join("runtime"));
         let uncertainties = inventory
             .uncertainties
             .into_iter()
@@ -401,7 +444,7 @@ impl ProjectSessionCensus {
 /// Observe one Session before cross-Session process deduplication. Recovery
 /// callers hold its Session lease and must also check every uncertainty.
 /// A live host without recorded identity remains uncertain for recovery.
-pub(crate) fn observe_session(session: &Session, sessions_dir: &Path) -> SessionInventory {
+pub fn observe_session(session: &Session, sessions_dir: &Path) -> SessionInventory {
     observe_sessions_filtered(
         session
             .project_state_root
@@ -429,8 +472,12 @@ fn observe_live_candidates(
     measure_resources: bool,
     require_host_absence: bool,
 ) -> MachineProcessResources {
+    if !inventory.check_deadline(Path::new("runtime")) {
+        return MachineProcessResources::default();
+    }
     let resources = capture_process_resources(&candidates, inventory, measure_resources, None);
     observe_candidate_resources(candidates, inventory, &resources, require_host_absence);
+    inventory.check_deadline(Path::new("runtime"));
     resources
 }
 
@@ -438,14 +485,22 @@ fn capture_process_resources(
     candidates: &[RuntimeCandidate],
     inventory: &SessionInventory,
     measure_resources: bool,
-    snapshot: Option<sysinfo::System>,
+    snapshot: Option<Result<sysinfo::System, sysinfo::Error>>,
 ) -> MachineProcessResources {
     if candidates.is_empty() && inventory.uncertainties.is_empty() {
         return MachineProcessResources::default();
     }
     // Read process state after the sidecars so a newly published child is not
     // compared with an OS snapshot taken before it was spawned.
-    let system = snapshot.unwrap_or_else(process_snapshot);
+    let system = match snapshot.unwrap_or_else(process_snapshot) {
+        Ok(system) => system,
+        Err(error) => {
+            return MachineProcessResources {
+                observation_error: Some(error.to_string()),
+                ..MachineProcessResources::default()
+            };
+        }
+    };
     capture_process_resources_with_system(candidates, inventory, measure_resources, &system)
 }
 
@@ -506,8 +561,11 @@ fn capture_process_resources_with_system(
         .collect::<BTreeMap<_, _>>();
     // Resource refreshes retain old values on access failure. Keep those probes
     // transient so an earlier positive RSS/environment never survives a tick.
-    let mut scalar_system = System::new();
-    if !legacy_children.is_empty() {
+    let mut scalar_system = System::new().ok();
+    if let Some(scalar_system) = scalar_system
+        .as_mut()
+        .filter(|_| !legacy_children.is_empty())
+    {
         scalar_system.refresh_processes_specifics(
             ProcessesToUpdate::Some(&legacy_children),
             true,
@@ -521,8 +579,12 @@ fn capture_process_resources_with_system(
         .iter()
         .map(|(pid, process)| (pid.as_u32(), process.start_time()))
         .collect::<BTreeMap<_, _>>();
-    let legacy_processes =
-        legacy_process_observations(system, &scalar_system, &legacy_hosts, &legacy_identities);
+    let legacy_processes = legacy_process_observations(
+        system,
+        scalar_system.as_ref(),
+        &legacy_hosts,
+        &legacy_identities,
+    );
     // Identity comes from the per-process start token, not the wall-clock
     // start time, which moves with the boot time on Linux (Issue #5089).
     // Only the PIDs a candidate can name are read.
@@ -553,7 +615,7 @@ fn capture_process_resources_with_system(
         })
         .collect::<BTreeMap<_, _>>();
     let mut resources = MachineProcessResources::default();
-    if measure_resources {
+    if let Some(scalar_system) = scalar_system.as_mut().filter(|_| measure_resources) {
         // Only named PTY identities are queried for resource/role scalars.
         let pids = named
             .iter()
@@ -586,7 +648,8 @@ fn capture_process_resources_with_system(
             }
         }
     }
-    let boot_epoch = System::boot_time();
+    // An unavailable boot epoch cannot prove that a runtime predates this boot.
+    let boot_epoch = System::boot_time().unwrap_or_default();
     let tokens_are_epoch = cfg!(not(target_os = "linux"));
     resources.processes = epochs.clone();
     resources.processes.extend(processes);
@@ -603,6 +666,14 @@ fn observe_candidate_resources(
     resources: &MachineProcessResources,
     require_host_absence: bool,
 ) {
+    if let Some(error) = &resources.observation_error {
+        inventory.uncertain(
+            Path::new("runtime"),
+            None,
+            format!("process_snapshot_unavailable: {error}"),
+        );
+        return;
+    }
     let candidates = candidates
         .into_iter()
         .filter(|candidate| {
@@ -647,16 +718,16 @@ fn observe_candidate_resources(
     );
 }
 
-fn process_snapshot() -> sysinfo::System {
+fn process_snapshot() -> Result<sysinfo::System, sysinfo::Error> {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
-    let mut system = System::new();
+    let mut system = System::new()?;
     system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
-    system
+    Ok(system)
 }
 
 fn legacy_process_observations(
     system: &sysinfo::System,
-    scalar_system: &sysinfo::System,
+    scalar_system: Option<&sysinfo::System>,
     legacy_hosts: &BTreeSet<u32>,
     legacy_identities: &BTreeMap<u32, u64>,
 ) -> Vec<LegacyProcessObservation> {
@@ -674,11 +745,13 @@ fn legacy_process_observations(
                 .get(&pid.as_u32())
                 .copied()
                 .unwrap_or_default();
-            let scalar = scalar_system.process(*pid).filter(|scalar| {
-                started_at > 0
-                    && crate::process::snapshot_process_start_identity(pid.as_u32(), scalar)
-                        == started_at
-            });
+            let scalar = scalar_system
+                .and_then(|system| system.process(*pid))
+                .filter(|scalar| {
+                    started_at > 0
+                        && crate::process::snapshot_process_start_identity(pid.as_u32(), scalar)
+                            == started_at
+                });
             let session_id = scalar
                 .and_then(|scalar| {
                     scalar
@@ -851,7 +924,7 @@ fn read_candidates_scope_with_snapshot(
     sessions_dir: &Path,
     session_id: Option<&str>,
     inventory: &mut SessionInventory,
-    snapshot: &mut Option<sysinfo::System>,
+    snapshot: &mut Option<Result<sysinfo::System, sysinfo::Error>>,
 ) -> Vec<RuntimeCandidate> {
     let mut process_evidence = None;
     read_candidates_with_liveness(
@@ -870,8 +943,10 @@ fn read_candidates_scope_with_snapshot(
             // PIDs too: a Host can spawn a child and exit after the snapshot
             // but before its direct probe. Never collect environments.
             let (observed, pids) = process_evidence.get_or_insert_with(|| {
-                let system = snapshot.get_or_insert_with(process_snapshot);
-                process_liveness_evidence(system)
+                match snapshot.get_or_insert_with(process_snapshot) {
+                    Ok(system) => process_liveness_evidence(system),
+                    Err(_) => (false, BTreeSet::new()),
+                }
             });
             !*observed || pids.contains(&host_pid)
         },
@@ -916,7 +991,12 @@ fn read_candidates_with_liveness(
         .and_then(gwt_core::repo_hash::detect_repo_identity)
         .map(|identity| identity.hash.as_str().to_string());
     let mut runtimes = Vec::new();
-    for namespace in read_paths(&sessions_dir.join("runtime"), inventory) {
+    let runtime_root = sessions_dir.join("runtime");
+    for entry in read_entries(&runtime_root, inventory) {
+        let namespace = entry.path();
+        if !inventory.check_deadline(&runtime_root) {
+            break;
+        }
         let Some(host_pid) = namespace
             .file_name()
             .and_then(|name| name.to_str())
@@ -925,7 +1005,11 @@ fn read_candidates_with_liveness(
         else {
             continue;
         };
-        for path in read_paths(&namespace, inventory) {
+        for entry in read_entries(&namespace, inventory) {
+            let path = entry.path();
+            if !inventory.check_deadline(&runtime_root) {
+                break;
+            }
             if path.extension().is_none_or(|extension| extension != "json") {
                 continue;
             }
@@ -947,18 +1031,20 @@ fn read_candidates_with_liveness(
             // Read every small sidecar before taking any process snapshot so
             // children published during the scan are not compared with an
             // older parent-PID inventory. No Session ledger is retained here.
-            let runtime = cached_runtime(&path);
+            let runtime = cached_runtime_entry(&entry, &path);
             runtimes.push((host_pid, path, runtime));
         }
     }
-    if session_id.is_none() {
+    if session_id.is_none()
+        && gwt_core::operation_deadline::ensure_remaining("session census").is_ok()
+    {
         // Full sweeps drop files that GC or a Host removed. A filtered recovery
         // observation must not evict other Sessions' entries.
         let root = sessions_dir.join("runtime");
         let seen = runtimes
             .iter()
             .map(|(_, path, _)| path.as_path())
-            .collect::<BTreeSet<_>>();
+            .collect::<HashSet<_>>();
         if let Some(cache) = RUNTIME_CACHE.get() {
             cache
                 .lock()
@@ -968,6 +1054,9 @@ fn read_candidates_with_liveness(
     }
     let mut candidates = Vec::new();
     for (host_pid, path, runtime) in runtimes {
+        if !inventory.check_deadline(&runtime_root) {
+            break;
+        }
         let Some(id) = path.file_stem().and_then(|name| name.to_str()) else {
             continue;
         };
@@ -1003,10 +1092,14 @@ fn read_candidates_with_liveness(
             }
         }
     }
+    inventory.check_deadline(&runtime_root);
     candidates
 }
 
-fn read_paths(directory: &Path, inventory: &mut SessionInventory) -> Vec<PathBuf> {
+fn read_entries(directory: &Path, inventory: &mut SessionInventory) -> Vec<std::fs::DirEntry> {
+    if !inventory.check_deadline(directory) {
+        return Vec::new();
+    }
     let entries = match std::fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
@@ -1019,10 +1112,13 @@ fn read_paths(directory: &Path, inventory: &mut SessionInventory) -> Vec<PathBuf
             return Vec::new();
         }
     };
-    let mut paths = Vec::new();
+    let mut captured = Vec::new();
     for entry in entries {
+        if !inventory.check_deadline(directory) {
+            break;
+        }
         match entry {
-            Ok(entry) => paths.push(entry.path()),
+            Ok(entry) => captured.push(entry),
             Err(error) => inventory.uncertain(
                 directory,
                 None,
@@ -1030,8 +1126,9 @@ fn read_paths(directory: &Path, inventory: &mut SessionInventory) -> Vec<PathBuf
             ),
         }
     }
-    paths.sort();
-    paths
+    // Every entry shares this parent; sorting file names preserves path order.
+    captured.sort_by_cached_key(std::fs::DirEntry::file_name);
+    captured
 }
 
 fn observe_candidates(
@@ -1147,6 +1244,10 @@ fn observe_candidates(
             if !seen.insert((child_pid, child_started_at)) {
                 continue;
             }
+            let entrypoint = gwt_agent::permission_mode::entrypoint_from_launch_args(
+                &session.launch_args,
+                false,
+            );
             inventory.sessions.push(SessionObservation {
                 session_id: session.id.clone(),
                 issue_number: session.linked_issue_number,
@@ -1160,6 +1261,13 @@ fn observe_candidates(
                 child_started_at,
                 started_at: started_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                 launch_origin: session.launch_origin,
+                launch_entrypoint: gwt_skills::assets::CLAUDE_SKILLS
+                    .dirs()
+                    .any(|skill| {
+                        skill.path().file_name().and_then(|name| name.to_str())
+                            == Some(entrypoint.as_str())
+                    })
+                    .then_some(entrypoint),
                 restore_source_session_id: session.restore_source_session_id.clone(),
             });
         }
@@ -1173,6 +1281,7 @@ fn observe_candidates(
             // The ledger describes only the latest use of a Session id; it
             // cannot attribute one origin to multiple distinct live PTYs.
             row.launch_origin = SessionLaunchOrigin::Unknown;
+            row.launch_entrypoint = None;
             row.restore_source_session_id = None;
         }
     }
@@ -1193,6 +1302,18 @@ fn observe_candidates(
 }
 
 impl SessionInventory {
+    fn check_deadline(&mut self, path: &Path) -> bool {
+        match gwt_core::operation_deadline::ensure_remaining("session census") {
+            Ok(_) => true,
+            Err(error) => {
+                // No Session attribution: missing rows in a partial census are
+                // uncertain for every owner, never proof of process absence.
+                self.uncertain(path, None, error.to_string());
+                false
+            }
+        }
+    }
+
     fn uncertain(&mut self, path: &Path, session_id: Option<&str>, reason: String) {
         self.uncertainties.push(SessionObservationUncertainty {
             runtime_path: path.to_path_buf(),
@@ -1223,6 +1344,54 @@ impl SessionInventory {
 mod tests {
     use super::*;
     use gwt_agent::{AgentId, AgentStatus};
+
+    #[test]
+    fn issue_5644_expired_inventory_is_uncertain_instead_of_empty() {
+        let temp = tempfile::tempdir().unwrap();
+        let deadline = std::time::Instant::now();
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(deadline);
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline);
+        let inventory = observe_sessions(temp.path(), &temp.path().join("sessions"));
+        assert!(inventory.sessions.is_empty());
+        assert!(
+            inventory
+                .uncertainties
+                .iter()
+                .any(|row| row.reason.contains("deadline expired")),
+            "a partial census must not authorize releasing a running owner"
+        );
+    }
+
+    #[test]
+    fn process_snapshot_creation_failure_is_uncertain_instead_of_absent() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        save_runtime(
+            &sessions,
+            temp.path(),
+            temp.path(),
+            "held",
+            Some((123, 456)),
+        );
+        let mut inventory = SessionInventory::default();
+        let candidates =
+            read_candidates_with_liveness(None, &sessions, None, &mut inventory, |_, _| true);
+        assert_eq!(candidates.len(), 1);
+        let resources = capture_process_resources(
+            &candidates,
+            &inventory,
+            false,
+            Some(Err(sysinfo::Error::Unsupported)),
+        );
+        observe_candidate_resources(candidates, &mut inventory, &resources, true);
+        assert!(inventory.sessions.is_empty());
+        assert!(
+            inventory.uncertainties.iter().any(|row| {
+                row.session_id.is_none() && row.reason.starts_with("process_snapshot_unavailable:")
+            }),
+            "a failed process census must not authorize absence-based recovery"
+        );
+    }
 
     #[test]
     fn project_census_keeps_scopes_and_uncertainties_without_rereading_the_tick() {
@@ -1269,6 +1438,64 @@ mod tests {
                 "scoped and unknown failures survive"
             );
         }
+    }
+
+    #[test]
+    fn warm_runtime_entry_reuses_directory_stamp_without_path_probe() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("runtime.json");
+        SessionRuntimeState::new(AgentStatus::Running)
+            .save(&path)
+            .unwrap();
+        let entry = std::fs::read_dir(temp.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        let before_cold = RUNTIME_PATH_STAMP_PROBES.with(std::cell::Cell::get);
+        let first = cached_runtime_entry(&entry, &path).unwrap();
+        assert_eq!(
+            RUNTIME_PATH_STAMP_PROBES.with(std::cell::Cell::get) - before_cold,
+            1,
+            "cold entry must validate the path stamp after reading"
+        );
+        let before = RUNTIME_PATH_STAMP_PROBES.with(std::cell::Cell::get);
+        let second = cached_runtime_entry(&entry, &path).unwrap();
+        let probes = RUNTIME_PATH_STAMP_PROBES.with(std::cell::Cell::get) - before;
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(
+            probes, 0,
+            "warm regular entry must reuse its directory stamp"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_entry_symlink_rechecks_the_target_stamp() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("target.json");
+        let link = temp.path().join("link.json");
+        let mut runtime = SessionRuntimeState::new(AgentStatus::Running);
+        runtime.save(&target).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let entry = std::fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .find(|entry| entry.path() == link)
+            .unwrap();
+        assert!(cached_runtime_entry(&entry, &link)
+            .unwrap()
+            .source_event
+            .is_none());
+        runtime.source_event = Some("changed target".to_string());
+        runtime.save(&target).unwrap();
+        assert_eq!(
+            cached_runtime_entry(&entry, &link)
+                .unwrap()
+                .source_event
+                .as_deref(),
+            Some("changed target")
+        );
     }
 
     #[test]
@@ -1380,7 +1607,7 @@ mod tests {
             std::fs::write(path, &json).unwrap();
         }
         let pid = sysinfo::Pid::from_u32(std::process::id());
-        let mut system = System::new();
+        let mut system = System::new().unwrap();
         let mut cpu_ms = || {
             system.refresh_processes_specifics(
                 ProcessesToUpdate::Some(&[pid]),
@@ -1466,7 +1693,7 @@ mod tests {
         for id in ["first", "later"] {
             save_runtime(&sessions, temp.path(), temp.path(), id, None);
         }
-        let mut system = sysinfo::System::new();
+        let mut system = sysinfo::System::new().unwrap();
         let mut refreshes = 0;
         let inventory =
             observe_machine_sessions_with_system_refresh(&sessions, &mut system, |_| {
@@ -1852,8 +2079,16 @@ mod tests {
         ] {
             save_runtime(&sessions, &project, worktree, id, Some(child));
         }
+        let mut launched = Session::load(&sessions.join("first.toml")).unwrap();
+        launched.launch_args =
+            vec!["$gwt-execute #4305\nPrivate launch instructions must not be exposed".to_string()];
+        launched.save(&sessions).unwrap();
         let mut unlinked = Session::load(&sessions.join("second.toml")).unwrap();
         unlinked.linked_issue_number = None;
+        unlinked.launch_args = vec![
+            "--model".to_string(),
+            "$gwt-private-token-do-not-publish".to_string(),
+        ];
         unlinked.save(&sessions).unwrap();
         let mut bound = Session::load(&sessions.join("missing.toml")).unwrap();
         bound.execution_binding = Some(gwt_agent::SessionExecutionBinding {
@@ -1907,7 +2142,19 @@ mod tests {
                 serde_json::json!(row["session_id"] == "first"),
                 "only the linked unbound Session lacks producing authority: {row}"
             );
+            assert_eq!(
+                row["launch_entrypoint"],
+                if row["session_id"] == "first" {
+                    serde_json::json!("gwt-execute")
+                } else {
+                    serde_json::Value::Null
+                },
+                "active_sessions exposes only the known launch entrypoint: {row}"
+            );
         }
+        assert!(!status_sessions
+            .to_string()
+            .contains("Private launch instructions"));
         let first = observed
             .sessions
             .iter()
@@ -2039,7 +2286,7 @@ mod tests {
     fn legacy_snapshot_presence_survives_unavailable_scalar_observation() {
         use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
         let pid = sysinfo::Pid::from_u32(std::process::id());
-        let mut system = System::new();
+        let mut system = System::new().unwrap();
         system.refresh_processes_specifics(
             ProcessesToUpdate::Some(&[pid]),
             true,
@@ -2049,12 +2296,8 @@ mod tests {
         let parent = process.parent().expect("current process parent").as_u32();
         let started_at = crate::process::snapshot_process_start_identity(pid.as_u32(), process);
         let identities = BTreeMap::from([(pid.as_u32(), started_at)]);
-        let rows = legacy_process_observations(
-            &system,
-            &System::new(),
-            &BTreeSet::from([parent]),
-            &identities,
-        );
+        let rows =
+            legacy_process_observations(&system, None, &BTreeSet::from([parent]), &identities);
         assert_eq!(
             rows.len(),
             1,
@@ -2200,6 +2443,9 @@ mod tests {
             "reused-session",
             Some((201, 20)),
         );
+        let mut session = Session::load(&sessions.join("reused-session.toml")).unwrap();
+        session.launch_args = vec!["$gwt-execute #4305".to_string()];
+        session.save(&sessions).unwrap();
         let mut successor = SessionRuntimeState::new(AgentStatus::Running);
         successor.child_pid = Some(202);
         successor.child_started_at = Some(21);
@@ -2224,5 +2470,11 @@ mod tests {
             .iter()
             .all(|row| row.launch_origin == SessionLaunchOrigin::Unknown
                 && row.restore_source_session_id.is_none()));
+        let rows = serde_json::to_value(&observed.sessions).unwrap();
+        assert!(rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["launch_entrypoint"].is_null()));
     }
 }

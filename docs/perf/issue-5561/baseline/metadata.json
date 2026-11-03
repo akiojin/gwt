@@ -1,0 +1,17 @@
+{
+  "budget_bytes": 1500000000,
+  "limitations": "Deterministic command Agent PTYs, not real model inference/hooks/builds.",
+  "pane_count": 12,
+  "started_at": "2026-10-15T22:00:26.9661808Z",
+  "requested_seconds": 60,
+  "checkout": "E:\\gwt\\work\\issue-5561",
+  "source_sha256": {
+    "crates/gwt/src/work_events_ingest.rs": "a65fb68870b80e2313f9b564d060b43f1ed3329c918ec34b5226cccaadc0f91f",
+    "crates/gwt-core/src/work_events_intake.rs": "f274cc181641703e9d7e88e94134e43a0458968ad2183e8d1954b29634ddac3b"
+  },
+  "head": "2744c7b6c846abbdcdcdf0595163083e703e8155",
+  "binary_sha256": "3aaf8f1447a1f51eb3d7ff8af9db35724aa6598b74ba01522be0c6fbb3807d65",
+  "label": "baseline",
+  "compiled_product_base": "2744c7b6c846abbdcdcdf0595163083e703e8155",
+  "instrumentation": "Temporary System allocator counters in main.rs; cfg(test)-only source additions were present during compilation. source_sha256 fields describe launch-time files, not compiled source, because production implementation started after baseline build."
+}

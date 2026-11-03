@@ -111,55 +111,18 @@ test("telemetry mapping projects runtime states to status strip states", () => {
   assert.equal(mapAgentTelemetryState("future-state"), "idle");
 });
 
-test("agent focus candidates match Agents view, including off-canvas and hidden tabs but excluding PM", () => {
+test("agent focus candidates are Works agents and exclude PM and auxiliary Shells", () => {
   const windows = [
-    {
-      id: "idle-agent-id",
-      preset: "shell",
-      agent_id: "custom-agent",
-      status: "idle",
-    },
-    {
-      id: "starting-hidden-tab",
-      preset: "claude",
-      status: "starting",
-      placement: { kind: "canvas" },
-      tab_group_id: "group-1",
-      tab_group_active: false,
-    },
-    { id: "running-codex", preset: "codex", status: "running" },
+    { id: "starting", preset: "claude", status: "starting" },
+    { id: "running", preset: "codex", status: "running" },
     { id: "pm", preset: "codex", status: "running", is_pm: true },
-    { id: "plain-shell", preset: "shell", status: "running" },
-    {
-      id: "blank-agent-id",
-      preset: "shell",
-      agent_id: "",
-      status: "running",
-    },
-    {
-      id: "kanban-agent",
-      preset: "agent",
-      status: "running",
-      placement: { kind: "agent_kanban" },
-    },
+    { id: "shell", preset: "shell", status: "running", agent_id: "custom-agent" },
+    { id: "embedded", preset: "agent", status: "running", placement: { kind: "agent_kanban" } },
   ];
-
-  assert.equal(
-    selectNextAgentFocusWindowId(windows, null, "forward"),
-    "starting-hidden-tab",
-  );
-  assert.equal(
-    selectNextAgentFocusWindowId(windows, "starting-hidden-tab", "forward"),
-    "running-codex",
-  );
-  assert.equal(
-    selectNextAgentFocusWindowId(windows, "running-codex", "forward"),
-    "kanban-agent",
-  );
-  assert.equal(
-    selectNextAgentFocusWindowId(windows, "kanban-agent", "forward"),
-    "starting-hidden-tab",
-  );
+  assert.equal(selectNextAgentFocusWindowId(windows, null, "forward"), "starting");
+  assert.equal(selectNextAgentFocusWindowId(windows, "starting", "forward"), "running");
+  assert.equal(selectNextAgentFocusWindowId(windows, "running", "forward"), "embedded");
+  assert.equal(selectNextAgentFocusWindowId(windows, "embedded", "forward"), "starting");
 });
 
 test("agent focus cycling prioritizes runtime buckets while preserving workspace order", () => {
@@ -275,7 +238,7 @@ test("agent focus cycling starts at the directional edge when focus is not a can
   const windows = [
     { id: "idle", preset: "agent", status: "idle" },
     { id: "running", preset: "agent", status: "running" },
-    { id: "non-agent", preset: "shell", status: "running" },
+    { id: "non-agent", preset: "settings", status: "running" },
     { id: "error", preset: "agent", status: "error" },
   ];
 
@@ -301,7 +264,7 @@ test("agent focus cycling returns null for no candidates and the same id for one
   assert.equal(
     selectNextAgentFocusWindowId(
       [
-        { id: "shell", preset: "shell", status: "running" },
+        { id: "console", preset: "console", status: "running" },
         {
           id: "pm",
           preset: "agent",
@@ -309,7 +272,7 @@ test("agent focus cycling returns null for no candidates and the same id for one
           is_pm: true,
         },
       ],
-      "shell",
+      "console",
       "forward",
     ),
     null,

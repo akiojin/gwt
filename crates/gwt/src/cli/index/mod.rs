@@ -234,6 +234,8 @@ fn run_coordinated_action(
             project_root: context.project_root.clone(),
             action: action.action.to_string(),
             qos: "interactive".to_string(),
+            session_id: None,
+            artifact_lock: None,
         }),
         || {
             let output = if repair {

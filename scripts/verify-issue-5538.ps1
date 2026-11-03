@@ -44,6 +44,8 @@ $environment.CODEX_HOME = "$checkHome/.codex"
 $environment.TEMP = "$checkHome/tmp"
 $environment.TMP = "$checkHome/tmp"
 $environment.GIT_TERMINAL_PROMPT = '0'
+$environment.GCM_INTERACTIVE = 'never'
+$environment.GIT_CONFIG_PARAMETERS = (([string]$environment['GIT_CONFIG_PARAMETERS']) + " 'credential.helper='").Trim()
 $environment.GH_PROMPT_DISABLED = '1'
 $environment.GIT_CONFIG_GLOBAL = "$checkHome/.gitconfig"
 $environment.GIT_CONFIG_NOSYSTEM = '1'
@@ -118,9 +120,11 @@ try {
     # Disposable Git fixture only; never alter the checkout's branches/worktrees.
     [void](Invoke-FixtureGit $folder @('init','--quiet'))
     [void](Invoke-FixtureGit $folder @('commit','--allow-empty','--quiet','-m','chore: initialize measurement fixture'))
-    # Work mutations require an origin-based repository identity. This reserved
-    # non-routable origin provides identity only; no remote operation is run.
+    # Work mutations require an origin-based repository identity. Settings can
+    # request remote branches, so refuse transport while preserving that identity.
     [void](Invoke-FixtureGit $folder @('remote','add','origin',"https://fixture.invalid/gwt5538/project-$index.git"))
+    [void](Invoke-FixtureGit $folder @('config','protocol.allow','never'))
+    [void](Invoke-FixtureGit $folder @('config','protocol.https.allow','never'))
     $branchName = Invoke-FixtureGit $folder @('symbolic-ref','--short','HEAD')
     [IO.File]::WriteAllText("$folder/README.txt", 'Issue #5538 measurement fixture. Inspect this file, then execute heartbeat.ps1. Its private heartbeat-progress receipt is authorized. Do not modify source, Git state, or GitHub.')
     $heartbeat = @'

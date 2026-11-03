@@ -313,6 +313,10 @@ fn detached_worktree_update_is_refused_without_a_matching_pm_registration() {
     // AC-6: the refusal names the detached HEAD, the missing registration, and
     // both recovery routes.
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        !stderr.contains("network error:"),
+        "Issue #3623: a detached HEAD refusal is not a network failure: {stderr}"
+    );
     for expected in [
         "detached HEAD",
         "resident PM",

@@ -111,6 +111,318 @@ pub struct ManagedHookRepairOutcome {
     pub repaired: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookRepairAction {
+    MaterializeManagedGitHooks,
+    RegenerateManagedProviderConfigs,
+    VerifyCodexHookTrust,
+    StartNewAgentSession,
+}
+
+/// Describes an explicit repair request, not detected faults or completed work.
+/// Automatic steps reuse the existing managed writers and their merge semantics.
+/// Trust and adoption by running sessions are outside that configuration repair.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HookRepairPlan {
+    pub automatic: Vec<HookRepairAction>,
+    pub user_actions: Vec<HookRepairAction>,
+    pub new_session_actions: Vec<HookRepairAction>,
+}
+
+impl HookRepairPlan {
+    pub fn for_worktree(worktree_root: &Path) -> Self {
+        let runtime = crate::pm_registry::pm_runtime_dir_for_pm_worktree(worktree_root);
+        let assets = runtime.as_deref().unwrap_or(worktree_root);
+        let claude_surface = assets.join(".claude").exists();
+        let codex_surface = assets.join(".codex").exists();
+        let provider_surface = assets.join(".gwt/opencode").exists()
+            || assets.join(".gwt/openclaw").exists()
+            || assets.join(".gwt/hermes").exists();
+        let mut plan = Self {
+            automatic: vec![HookRepairAction::MaterializeManagedGitHooks],
+            user_actions: Vec::new(),
+            new_session_actions: Vec::new(),
+        };
+        if claude_surface || codex_surface || provider_surface {
+            plan.automatic
+                .push(HookRepairAction::RegenerateManagedProviderConfigs);
+            plan.new_session_actions
+                .push(HookRepairAction::StartNewAgentSession);
+        }
+        if codex_surface {
+            plan.user_actions
+                .push(HookRepairAction::VerifyCodexHookTrust);
+        }
+        plan
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookDoctorPurpose {
+    ManagedBrowser,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreflightContext {
+    Current,
+    Missing,
+    Unreadable,
+    Foreign,
+    Changed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreflightCompletion {
+    Normal,
+    Blocked,
+    Missing,
+    Stale,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreflightConvergence {
+    Converged,
+    Blocked,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreflightResult {
+    Proceed,
+    Blocked,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreflightReason {
+    SourceMissing,
+    SourceUnreadable,
+    SourceForeign,
+    SourceChanged,
+    AuthorityUnavailable,
+    CompletionMissing,
+    CompletionBlocked,
+    CompletionStale,
+    TargetUnconverged,
+    LedgerUnavailable,
+    UnattributedFailure,
+    UnresolvedFailure,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetainedHookClassification {
+    Recovered,
+    Unresolved,
+    FailOpen,
+    Foreign,
+    Unattributed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RetainedHookDiagnostic {
+    pub id: String,
+    pub classification: RetainedHookClassification,
+}
+
+/// Point-in-time diagnosis. No path, policy payload, or reusable authority is
+/// included; native operations retain their own authorization checks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ManagedBrowserPreflight {
+    pub schema_version: u8,
+    pub context: PreflightContext,
+    pub normal_completion: PreflightCompletion,
+    pub convergence: PreflightConvergence,
+    pub diagnostics: Vec<RetainedHookDiagnostic>,
+    pub result: PreflightResult,
+    pub reasons: Vec<PreflightReason>,
+}
+
+pub fn read_managed_browser_preflight(input: &ManagedHookHealthInput) -> ManagedBrowserPreflight {
+    let mut input = input.clone();
+    input.worktree_root = gwt_core::paths::resolve_current_worktree_root(&input.worktree_root);
+    read_managed_browser_preflight_with(&input, &ManagedHookFailureSnapshot::read(), || {
+        super::runtime_state::current_hook_context(&input.worktree_root)
+    })
+}
+
+fn read_managed_browser_preflight_with(
+    input: &ManagedHookHealthInput,
+    failures: &ManagedHookFailureSnapshot,
+    mut current: impl FnMut() -> Result<
+        (
+            super::runtime_state::CurrentHookContext,
+            gwt_agent::SessionRuntimeState,
+        ),
+        super::runtime_state::HookContextError,
+    >,
+) -> ManagedBrowserPreflight {
+    use super::runtime_state::HookContextError;
+    use gwt_agent::session::HookCompletionOutcome;
+    let mut result = ManagedBrowserPreflight {
+        schema_version: 1,
+        context: PreflightContext::Missing,
+        normal_completion: PreflightCompletion::Missing,
+        convergence: PreflightConvergence::Unknown,
+        diagnostics: Vec::new(),
+        result: PreflightResult::Unknown,
+        reasons: Vec::new(),
+    };
+    let (before, _) = match current() {
+        Ok(pair) => pair,
+        Err(error) => {
+            (result.context, result.reasons) = match error {
+                HookContextError::Missing => (
+                    PreflightContext::Missing,
+                    vec![PreflightReason::SourceMissing],
+                ),
+                HookContextError::Unreadable => (
+                    PreflightContext::Unreadable,
+                    vec![PreflightReason::SourceUnreadable],
+                ),
+                HookContextError::Foreign => (
+                    PreflightContext::Foreign,
+                    vec![PreflightReason::SourceForeign],
+                ),
+            };
+            return result;
+        }
+    };
+    result.context = PreflightContext::Current;
+    let authority =
+        crate::cli::verification_record::caller_has_current_bound_verification_authority(
+            &input.worktree_root,
+            &before.identity.execution_binding,
+        );
+    // Audit the target's config/binary/trust without treating retained source
+    // diagnostics or a fabricated target runtime as target convergence.
+    let surface = cached_surface_audit(input, failures);
+    let mut target = ManagedHookHealth {
+        status: surface.status,
+        issues: surface.issues,
+        external_skill_conflicts: surface.external_skill_conflicts,
+        last_event: None,
+        last_event_at: None,
+        pending_discussion: None,
+        pending_goal: None,
+        slow_handlers: Vec::new(),
+    };
+    super::append_codex_trust_health_for_doctor(input, &mut target);
+    // A logical fallback is optional only when the managed runtime indirection
+    // passed the surface audit and this real daemon is executable. Merely
+    // spelling "gwtd" or omitting it from PATH is not positive evidence.
+    let executable_runtime = std::env::current_exe().ok().is_some_and(|path| {
+        path.file_stem().is_some_and(|name| name == "gwtd") && which::which(&path).is_ok()
+    });
+    let optional_logical_fallback = input.expected_hook_bin.as_deref() == Some("gwtd")
+        && executable_runtime
+        && !target.issues.is_empty()
+        && target.issues.iter().all(|issue| {
+            issue.starts_with("managed hook binary missing: ") && issue.ends_with(" uses gwtd")
+        });
+    if (target.status == ManagedHookHealthStatus::Ready && target.issues.is_empty())
+        || optional_logical_fallback
+    {
+        result.convergence = PreflightConvergence::Converged;
+    } else {
+        result.convergence = PreflightConvergence::Blocked;
+        result.reasons.push(PreflightReason::TargetUnconverged);
+    }
+    let (after, runtime) = match current() {
+        Ok(pair) if pair.0 == before => pair,
+        _ => {
+            result.context = PreflightContext::Changed;
+            result.reasons.push(PreflightReason::SourceChanged);
+            return result;
+        }
+    };
+    if !authority
+        || !crate::cli::verification_record::caller_has_current_bound_verification_authority(
+            &input.worktree_root,
+            &after.identity.execution_binding,
+        )
+    {
+        result.reasons.push(PreflightReason::AuthorityUnavailable);
+    }
+    if !failures.ledger_readable {
+        result.reasons.push(PreflightReason::LedgerUnavailable);
+    }
+    let completed_at = runtime.last_completed_hook_event_at;
+    match (runtime.last_completed_hook_outcome, completed_at) {
+        (Some(HookCompletionOutcome::Blocked), _) => {
+            result.normal_completion = PreflightCompletion::Blocked;
+            result.reasons.push(PreflightReason::CompletionBlocked);
+        }
+        (Some(HookCompletionOutcome::Normal), Some(at))
+            if at >= runtime.updated_at && at <= chrono::Utc::now() =>
+        {
+            result.normal_completion = PreflightCompletion::Normal;
+        }
+        (Some(HookCompletionOutcome::Normal), Some(_)) => {
+            result.normal_completion = PreflightCompletion::Stale;
+            result.reasons.push(PreflightReason::CompletionStale);
+        }
+        _ => {
+            result.reasons.push(PreflightReason::CompletionMissing);
+        }
+    }
+    if let Some(rows) = failures
+        .by_worktree
+        .get(&comparable_path(&input.worktree_root))
+    {
+        for row in &rows.retained {
+            let classification = if row.context.get("fail_open").map(String::as_str) == Some("true")
+            {
+                RetainedHookClassification::FailOpen
+            } else {
+                match row.target.session_id.as_deref().filter(|id| !id.is_empty()) {
+                    Some(id) if id == before.identity.session_id => {
+                        if runtime.last_completed_hook_outcome
+                            == Some(HookCompletionOutcome::Normal)
+                            && completed_at.is_some_and(|at| at > row.recorded_at)
+                        {
+                            RetainedHookClassification::Recovered
+                        } else {
+                            result.reasons.push(PreflightReason::UnresolvedFailure);
+                            if result.normal_completion == PreflightCompletion::Normal {
+                                result.normal_completion = PreflightCompletion::Stale;
+                            }
+                            RetainedHookClassification::Unresolved
+                        }
+                    }
+                    Some(_) => RetainedHookClassification::Foreign,
+                    None => {
+                        result.reasons.push(PreflightReason::UnattributedFailure);
+                        RetainedHookClassification::Unattributed
+                    }
+                }
+            };
+            result.diagnostics.push(RetainedHookDiagnostic {
+                id: row.id.clone(),
+                classification,
+            });
+        }
+    }
+    result.reasons.dedup();
+    result.result = if result.reasons.is_empty() {
+        PreflightResult::Proceed
+    } else if result.normal_completion == PreflightCompletion::Blocked
+        || result.convergence == PreflightConvergence::Blocked
+        || result.reasons.contains(&PreflightReason::UnresolvedFailure)
+    {
+        PreflightResult::Blocked
+    } else {
+        PreflightResult::Unknown
+    };
+    result
+}
+
 #[derive(Debug, Deserialize)]
 struct RuntimeStateReadModel {
     pub status: String,
@@ -138,6 +450,7 @@ struct RuntimeStateReadModel {
 /// surface on the next refresh.
 #[derive(Debug, Clone, Default)]
 pub struct ManagedHookFailureSnapshot {
+    ledger_readable: bool,
     /// Latest hard / fail-open failure per canonicalized worktree root.
     ///
     /// Folding at snapshot time keeps the per-worktree read out of the ledger
@@ -196,6 +509,7 @@ struct SurfaceAuditCounters {
 struct WorktreeHookFailures {
     latest_hard: Option<gwt_core::error_ledger::ErrorRecord>,
     latest_fail_open: Option<gwt_core::error_ledger::ErrorRecord>,
+    retained: Vec<gwt_core::error_ledger::ErrorRecord>,
 }
 
 impl ManagedHookFailureSnapshot {
@@ -209,7 +523,13 @@ impl ManagedHookFailureSnapshot {
         let since = chrono::Utc::now() - chrono::Duration::hours(HOOK_FAILURE_RETENTION_HOURS);
         let mut by_worktree: HashMap<PathBuf, WorktreeHookFailures> = HashMap::new();
         // `list_since` returns rows oldest first, so the last match wins.
-        for row in gwt_core::error_ledger::list_since(Some(since))
+        let rows = gwt_core::error_ledger::list_since(Some(since));
+        let ledger_readable = rows.as_ref().is_ok_and(|rows| {
+            !rows
+                .iter()
+                .any(|row| row.kind == ErrorKind::LedgerCorruption)
+        });
+        for row in rows
             .unwrap_or_default()
             .into_iter()
             .filter(|row| row.kind == ErrorKind::HookFailure)
@@ -219,6 +539,7 @@ impl ManagedHookFailureSnapshot {
             };
             let key = comparable_path(Path::new(project_root));
             let entry = by_worktree.entry(key).or_default();
+            entry.retained.push(row.clone());
             if row.context.get("fail_open").map(String::as_str) == Some("true") {
                 entry.latest_fail_open = Some(row);
             } else {
@@ -226,6 +547,7 @@ impl ManagedHookFailureSnapshot {
             }
         }
         Self {
+            ledger_readable,
             by_worktree,
             surface_audits: Arc::default(),
             hook_binaries: HookBinaryResolutionCache::default(),
@@ -824,21 +1146,11 @@ fn audit_managed_git_hooks(
 
 /// The binary a config at `path` is expected to fall back to.
 ///
-/// #3567: the generator writes the canonical bare `gwtd` into a git-tracked
-/// config and the absolute install path into a machine-local one, so the
-/// auditor has to ask the same question. Auditing a tracked config against the
-/// running binary's absolute path reported "binary skew" forever, and startup
-/// self-heal answered it by rewriting the tracked file on every boot — the loop
-/// that kept every worktree permanently dirty.
-fn expected_hook_bin_for_config_path<'a>(
-    path: &Path,
-    configured: Option<&'a str>,
-) -> Option<&'a str> {
-    configured?;
-    if gwt_skills::managed_hook_config_is_git_tracked(path) {
-        return configured.map(|_| gwt_skills::CANONICAL_HOOK_BIN);
-    }
-    configured
+/// Use the same destination policy as generation and trust registration.
+/// Otherwise a canonical shared-root config looks skewed against the writer's
+/// install pin, causing startup to self-heal it on every boot (#3567, #5270).
+fn expected_hook_bin_for_config_path(path: &Path, configured: Option<&str>) -> Option<String> {
+    configured.map(|bin| gwt_skills::settings_local::sanitize_hook_bin_for_config_path(path, bin))
 }
 
 fn audit_hook_json_config(
@@ -916,7 +1228,7 @@ fn audit_hook_json_config(
                 );
             }
         }
-        if let Some(expected) = expected_hook_bin {
+        if let Some(expected) = expected_hook_bin.as_deref() {
             for command in commands {
                 if !is_managed_event_command(&command, event) {
                     continue;
@@ -953,7 +1265,15 @@ fn audit_provider_hook_config(
     health: &mut ManagedHookHealth,
     dependencies: &mut Vec<PathBuf>,
 ) {
-    let expected_hook_bin = expected_hook_bin_for_config_path(path, expected_hook_bin);
+    // Provider generators keep explicit pins; only Claude/Codex JSON writers
+    // use the destination sanitizer. Preserve the provider audit contract.
+    let expected_hook_bin = expected_hook_bin.map(|bin| {
+        if gwt_skills::managed_hook_config_is_git_tracked(path) {
+            gwt_skills::CANONICAL_HOOK_BIN
+        } else {
+            bin
+        }
+    });
     let Ok(raw) = fs::read_to_string(path) else {
         degraded(
             health,
@@ -1299,19 +1619,15 @@ fn cached_runtime_state(path: &Path) -> Arc<CachedRuntimeState> {
 }
 
 pub fn repair_managed_hook_configs(worktree_root: &Path) -> io::Result<ManagedHookRepairOutcome> {
-    let runtime = crate::pm_registry::pm_runtime_dir_for_pm_worktree(worktree_root);
-    let assets = runtime.as_deref().unwrap_or(worktree_root);
-    let claude_surface =
-        assets.join(".claude").exists() || assets.join(".claude/settings.local.json").exists();
-    let codex_surface = assets.join(".codex").exists() || assets.join(".codex/hooks.json").exists();
-    let provider_surface = assets.join(".gwt/opencode").exists()
-        || assets.join(".gwt/openclaw").exists()
-        || assets.join(".gwt/hermes").exists();
+    let plan = HookRepairPlan::for_worktree(worktree_root);
     // #4339: the Git hook directory belongs to the repository, not to any agent
     // provider, so repair it even in a worktree with no agent surface at all.
     let mut repaired = !gwt_skills::materialize_managed_git_hooks(worktree_root)?.is_empty();
 
-    if claude_surface || codex_surface || provider_surface {
+    if plan
+        .automatic
+        .contains(&HookRepairAction::RegenerateManagedProviderConfigs)
+    {
         crate::managed_assets::regenerate_existing_managed_hook_configs(worktree_root)?;
         record_managed_hook_self_healed(worktree_root)?;
         repaired = true;
@@ -1323,6 +1639,18 @@ pub fn repair_managed_hook_configs(worktree_root: &Path) -> io::Result<ManagedHo
 #[cfg(test)]
 mod tests {
     use super::hook_command_binary_fallback;
+
+    #[test]
+    fn shared_root_codex_health_expects_the_canonical_fallback() {
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir(repo.path().join(".git")).unwrap();
+        let path = repo.path().join(".codex/hooks.json");
+        assert_eq!(
+            super::expected_hook_bin_for_config_path(&path, Some("/installed/gwtd")).as_deref(),
+            Some(gwt_skills::CANONICAL_HOOK_BIN)
+        );
+        assert!(super::expected_hook_bin_for_config_path(&path, None).is_none());
+    }
 
     #[test]
     fn posix_two_stage_runtime_fallback_decodes_embedded_apostrophes() {
@@ -1352,5 +1680,552 @@ mod tests {
             hook_command_binary_fallback(command).as_deref(),
             Some("C:\\Users\\O'Brien\\GWT\\gwtd.exe")
         );
+    }
+}
+
+#[cfg(test)]
+mod browser_preflight_tests {
+    use super::*;
+    use gwt_agent::session::HookCompletionOutcome::{Blocked, Normal};
+    use gwt_agent::{
+        AgentId, AgentStatus, Session, SessionExecutionBinding, SessionExecutionIdentity,
+        SessionRuntimeState,
+    };
+    use gwt_core::{
+        error_ledger::{ErrorKind, ErrorRecord, ErrorTarget},
+        test_support::{ScopedEnvVar, ScopedGwtHome},
+    };
+
+    fn with_source(
+        test: impl FnOnce(&ManagedHookHealthInput, &Session, &Path, &SessionRuntimeState),
+    ) {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let root = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(root.path().join("home"));
+        let worktree = root.path().join("repo");
+        fs::create_dir(&worktree).unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(&worktree);
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let mut session = Session::new(&worktree, "work/issue-6622", AgentId::ClaudeCode);
+        session.linked_issue_number = Some(6622);
+        let owner = crate::cli::execution_state::ExecutionOwnerKey {
+            kind: crate::cli::execution_state::ExecutionOwnerKind::Spec,
+            number: 6622,
+        };
+        crate::cli::execution_state::materialize_at_launch(
+            &worktree,
+            owner.kind,
+            owner.number,
+            &session.id,
+            "gwt-execute",
+            false,
+        )
+        .unwrap();
+        crate::cli::execution_state::ensure_generation_ledger(
+            &worktree,
+            owner,
+            crate::cli::execution_state::LegacyActiveDisposition::Live,
+        )
+        .unwrap();
+        let binding = crate::cli::execution_state::current_execution_binding(&worktree, owner)
+            .unwrap()
+            .unwrap();
+        session
+            .set_execution_binding(Some(SessionExecutionBinding {
+                schema_version: 1,
+                session_id: session.id.clone(),
+                repo_hash: session.repo_hash.clone().unwrap(),
+                owner_kind: "spec".into(),
+                owner_number: 6622,
+                identity: binding,
+                capability_generation: 1,
+            }))
+            .unwrap();
+        session.save(&sessions).unwrap();
+        let identity = SessionExecutionIdentity::from_session(&session)
+            .unwrap()
+            .unwrap();
+        let pid = std::process::id();
+        let started = crate::process::host_process_start_time(pid).unwrap();
+        let mut runtime = SessionRuntimeState::for_execution_process(
+            AgentStatus::Running,
+            &identity,
+            17,
+            started,
+            pid,
+            started,
+        );
+        runtime.updated_at = chrono::Utc::now() - chrono::Duration::seconds(5);
+        runtime.source_event = Some("PostToolUse".into());
+        runtime.last_completed_hook_event_at =
+            Some(chrono::Utc::now() - chrono::Duration::seconds(1));
+        runtime.last_completed_hook_outcome = Some(Normal);
+        let path = gwt_agent::runtime_state_path(&sessions, &session.id);
+        runtime.save(&path).unwrap();
+        let _sid = ScopedEnvVar::set("GWT_SESSION_ID", &session.id);
+        let _runtime = ScopedEnvVar::set("GWT_SESSION_RUNTIME_PATH", &path);
+        let bin = std::env::current_exe().unwrap();
+        let _bin = gwt_skills::settings_local::ScopedHookBin::set(&bin);
+        gwt_skills::generate_settings_local(&worktree).unwrap();
+        let input =
+            ManagedHookHealthInput::new(&worktree).with_expected_hook_bin(bin.to_string_lossy());
+        test(&input, &session, &path, &runtime);
+    }
+
+    fn failure(
+        input: &ManagedHookHealthInput,
+        sid: Option<&str>,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> ErrorRecord {
+        let mut row = ErrorRecord::new(
+            ErrorKind::HookFailure,
+            "PRIVATE_POLICY_PAYLOAD",
+            ErrorTarget {
+                project_root: Some(input.worktree_root.display().to_string()),
+                session_id: sid.map(str::to_string),
+                ..Default::default()
+            },
+        );
+        row.recorded_at = at;
+        row
+    }
+
+    #[test]
+    fn managed_browser_nested_cwd_completes_only_for_the_current_git_worktree() {
+        with_source(|input, _, path, runtime| {
+            let nested = input.worktree_root.join("src/deep");
+            fs::create_dir_all(&nested).unwrap();
+            let completion = super::super::runtime_state::capture_hook_completion(&nested)
+                .expect("same worktree subdirectory is a current source");
+            completion.record(Normal);
+            let completed = SessionRuntimeState::load(path).unwrap();
+            assert!(completed.last_completed_hook_event_at > runtime.last_completed_hook_event_at);
+            assert_eq!(completed.last_completed_hook_outcome, Some(Normal));
+
+            let foreign = input.worktree_root.join("vendor/other");
+            fs::create_dir_all(&foreign).unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(&foreign);
+            let foreign_nested = foreign.join("src");
+            fs::create_dir(&foreign_nested).unwrap();
+            assert_eq!(
+                super::super::runtime_state::current_hook_context(&foreign_nested).unwrap_err(),
+                super::super::runtime_state::HookContextError::Foreign
+            );
+            assert!(
+                super::super::runtime_state::capture_hook_completion(&foreign_nested).is_none()
+            );
+            let after = SessionRuntimeState::load(path).unwrap();
+            assert_eq!(
+                after.last_completed_hook_event_at,
+                completed.last_completed_hook_event_at
+            );
+            assert_eq!(
+                after.last_completed_hook_outcome,
+                completed.last_completed_hook_outcome
+            );
+        });
+    }
+
+    #[test]
+    fn managed_browser_nested_cwd_doctor_audits_and_repairs_the_current_git_worktree() {
+        with_source(|input, _, _, _| {
+            let nested = input.worktree_root.join("src/deep");
+            fs::create_dir_all(&nested).unwrap();
+            let mut nested_input = input.clone();
+            nested_input.worktree_root = nested.clone();
+            assert_eq!(
+                read_managed_browser_preflight(&nested_input).result,
+                PreflightResult::Proceed
+            );
+
+            fs::remove_file(input.worktree_root.join(".claude/settings.local.json")).unwrap();
+            let mut env = crate::cli::env::TestEnv::new(nested.clone());
+            let (code, output) = crate::cli::run_collect(
+                &mut env,
+                crate::cli::CliCommand::Hook(crate::cli::HookCommand::Doctor {
+                    purpose: Some(HookDoctorPurpose::ManagedBrowser),
+                    runtime_state_path: None,
+                    profile_path: None,
+                    expected_hook_bin: input.expected_hook_bin.clone(),
+                    repair: true,
+                }),
+            )
+            .unwrap();
+            assert_eq!(code, 0);
+            let payload: serde_json::Value = serde_json::from_str(&output).unwrap();
+            assert_eq!(payload["preflight"]["result"], "proceed", "{payload}");
+            assert!(input
+                .worktree_root
+                .join(".claude/settings.local.json")
+                .is_file());
+            assert!(!nested.join(".claude").exists());
+
+            let foreign = input.worktree_root.join("other");
+            fs::create_dir(&foreign).unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(&foreign);
+            nested_input.worktree_root = foreign;
+            assert_eq!(
+                read_managed_browser_preflight(&nested_input).context,
+                PreflightContext::Foreign
+            );
+        });
+    }
+
+    #[test]
+    fn normal_recovery_proceeds_while_legacy_health_and_failure_bytes_are_retained() {
+        with_source(|input, session, _, runtime| {
+            let row = failure(input, Some(&session.id), runtime.updated_at);
+            gwt_core::error_ledger::record(row.clone()).unwrap();
+            let before = gwt_core::error_ledger::list_since(None).unwrap();
+            let health = read_managed_hook_health(input);
+            assert_eq!(health.status, ManagedHookHealthStatus::NeedsAttention);
+            assert!(health.issues.iter().any(|s| s.contains("state=recovered")));
+            let result = read_managed_browser_preflight(input);
+            assert_eq!(result.result, PreflightResult::Proceed, "{result:?}");
+            assert_eq!(
+                result.diagnostics,
+                vec![RetainedHookDiagnostic {
+                    id: row.id,
+                    classification: RetainedHookClassification::Recovered
+                }]
+            );
+            assert_eq!(gwt_core::error_ledger::list_since(None).unwrap(), before);
+            let wire = serde_json::to_string(&result).unwrap();
+            assert!(!wire.contains("PRIVATE_POLICY_PAYLOAD"));
+            assert!(!wire.contains(&input.worktree_root.display().to_string()));
+            assert!(!wire.contains(&session.id));
+            assert!(!wire.contains("execution_binding"));
+        });
+    }
+
+    #[test]
+    fn historical_ledger_corruption_does_not_block_a_healthy_current_source() {
+        with_source(|input, _, path, _| {
+            let dir = gwt_core::paths::gwt_error_ledger_dir();
+            fs::create_dir_all(&dir).unwrap();
+            let old_day = (chrono::Utc::now() - chrono::Duration::days(3)).date_naive();
+            let ledger = dir.join(format!("errors.{old_day}.jsonl"));
+            let bytes = b"{PRIVATE_BROKEN_ROW}\n";
+            fs::write(&ledger, bytes).unwrap();
+            let source_before = fs::read(path).unwrap();
+            let result = read_managed_browser_preflight(input);
+            assert_eq!(result.result, PreflightResult::Proceed, "{result:?}");
+            assert_eq!(result.context, PreflightContext::Current);
+            assert!(result.reasons.is_empty());
+            assert_eq!(fs::read(&ledger).unwrap(), bytes);
+            assert_eq!(fs::read(path).unwrap(), source_before);
+            let history = gwt_core::error_ledger::list_since(None).unwrap();
+            assert_eq!(history.len(), 1);
+            assert_eq!(history[0].kind, ErrorKind::LedgerCorruption);
+        });
+    }
+
+    #[test]
+    fn current_unknown_and_unreadable_ledgers_still_block_a_healthy_source() {
+        with_source(|input, _, path, _| {
+            let dir = gwt_core::paths::gwt_error_ledger_dir();
+            fs::create_dir_all(&dir).unwrap();
+            let source_before = fs::read(path).unwrap();
+            for day in [
+                chrono::Utc::now().date_naive().to_string(),
+                "unknown".into(),
+            ] {
+                let ledger = dir.join(format!("errors.{day}.jsonl"));
+                fs::write(&ledger, b"{partial").unwrap();
+                let result = read_managed_browser_preflight(input);
+                assert_eq!(result.result, PreflightResult::Unknown, "{result:?}");
+                assert!(result.reasons.contains(&PreflightReason::LedgerUnavailable));
+                fs::remove_file(ledger).unwrap();
+            }
+            fs::create_dir(dir.join("errors.2026-01-01.jsonl")).unwrap();
+            let result = read_managed_browser_preflight(input);
+            assert_eq!(result.result, PreflightResult::Unknown, "{result:?}");
+            assert!(result.reasons.contains(&PreflightReason::LedgerUnavailable));
+            assert_eq!(fs::read(path).unwrap(), source_before);
+        });
+    }
+
+    #[test]
+    fn blocked_missing_old_equal_and_backward_completion_cannot_proceed() {
+        with_source(|input, session, path, runtime| {
+            let at = runtime.last_completed_hook_event_at.unwrap();
+            gwt_core::error_ledger::record(failure(input, Some(&session.id), at)).unwrap();
+            for (outcome, completed) in [
+                (Some(Blocked), Some(at + chrono::Duration::seconds(1))),
+                (None, Some(at)),
+                (Some(Normal), None),
+                (Some(Normal), Some(at)),
+                (Some(Normal), Some(at - chrono::Duration::seconds(1))),
+                (
+                    Some(Normal),
+                    Some(runtime.updated_at - chrono::Duration::seconds(1)),
+                ),
+            ] {
+                let mut state = runtime.clone();
+                state.last_completed_hook_outcome = outcome;
+                state.last_completed_hook_event_at = completed;
+                state.save(path).unwrap();
+                assert_ne!(
+                    read_managed_browser_preflight(input).result,
+                    PreflightResult::Proceed
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn foreign_rows_never_hide_related_failure_and_unattributed_rows_remain_unknown() {
+        with_source(|input, session, _, runtime| {
+            let at = runtime.last_completed_hook_event_at.unwrap();
+            let related = failure(input, Some(&session.id), at);
+            let foreign = failure(
+                input,
+                Some("foreign-session"),
+                at + chrono::Duration::seconds(1),
+            );
+            gwt_core::error_ledger::record(related).unwrap();
+            gwt_core::error_ledger::record(foreign).unwrap();
+            let result = read_managed_browser_preflight(input);
+            assert_eq!(result.result, PreflightResult::Blocked);
+            assert!(result
+                .diagnostics
+                .iter()
+                .any(|d| d.classification == RetainedHookClassification::Foreign));
+        });
+        with_source(|input, _, _, runtime| {
+            gwt_core::error_ledger::record(failure(input, None, runtime.updated_at)).unwrap();
+            let result = read_managed_browser_preflight(input);
+            assert_eq!(result.result, PreflightResult::Unknown);
+            assert!(result
+                .reasons
+                .contains(&PreflightReason::UnattributedFailure));
+        });
+    }
+
+    #[test]
+    fn missing_unreadable_foreign_and_old_schema_source_fail_closed() {
+        with_source(|input, session, path, runtime| {
+            assert_eq!(
+                read_managed_browser_preflight(input).result,
+                PreflightResult::Proceed
+            );
+            for wire in [
+                "{".to_string(),
+                {
+                    let mut wire = serde_json::to_value(runtime).unwrap();
+                    wire.as_object_mut()
+                        .unwrap()
+                        .remove("last_completed_hook_outcome");
+                    wire.to_string()
+                },
+                {
+                    let mut wire = serde_json::to_value(runtime).unwrap();
+                    wire["last_completed_hook_outcome"] = serde_json::json!("future_unknown");
+                    wire.to_string()
+                },
+            ] {
+                fs::write(path, wire).unwrap();
+                assert_ne!(
+                    read_managed_browser_preflight(input).result,
+                    PreflightResult::Proceed
+                );
+            }
+            fs::remove_file(path).unwrap();
+            assert_eq!(
+                read_managed_browser_preflight(input).context,
+                PreflightContext::Missing
+            );
+            runtime.save(path).unwrap();
+            let arbitrary = input.worktree_root.join("arbitrary-runtime.json");
+            runtime.save(&arbitrary).unwrap();
+            {
+                let _path = ScopedEnvVar::set("GWT_SESSION_RUNTIME_PATH", &arbitrary);
+                assert_eq!(
+                    read_managed_browser_preflight(input).context,
+                    PreflightContext::Foreign
+                );
+            }
+            let mut foreign = runtime.clone();
+            foreign.execution_identity.as_mut().unwrap().session_id = "foreign".into();
+            foreign.save(path).unwrap();
+            assert_eq!(
+                read_managed_browser_preflight(input).context,
+                PreflightContext::Foreign
+            );
+            runtime.save(path).unwrap();
+            let mut other = input.clone();
+            other.worktree_root = input.worktree_root.parent().unwrap().to_path_buf();
+            assert_eq!(
+                read_managed_browser_preflight(&other).context,
+                PreflightContext::Foreign
+            );
+            let session_path =
+                gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", session.id));
+            fs::write(session_path, "invalid TOML {").unwrap();
+            assert_eq!(
+                read_managed_browser_preflight(input).context,
+                PreflightContext::Unreadable
+            );
+            fs::remove_file(
+                gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", session.id)),
+            )
+            .unwrap();
+            assert_eq!(
+                read_managed_browser_preflight(input).context,
+                PreflightContext::Missing
+            );
+        });
+    }
+
+    #[test]
+    fn source_replacement_during_read_and_late_predecessor_completion_are_rejected() {
+        with_source(|input, _, path, runtime| {
+            let completion =
+                super::super::runtime_state::capture_hook_completion(&input.worktree_root).unwrap();
+            let snapshot = ManagedHookFailureSnapshot::read();
+            let mut reads = 0;
+            let result = read_managed_browser_preflight_with(input, &snapshot, || {
+                reads += 1;
+                if reads == 2 {
+                    let mut replacement = runtime.clone();
+                    replacement.runtime_incarnation = Some(18);
+                    replacement.last_completed_hook_event_at = None;
+                    replacement.last_completed_hook_outcome = None;
+                    replacement.save(path).unwrap();
+                }
+                super::super::runtime_state::current_hook_context(&input.worktree_root)
+            });
+            assert_eq!(result.context, PreflightContext::Changed);
+            assert_eq!(result.result, PreflightResult::Unknown);
+            let before = fs::read(path).unwrap();
+            completion.record(Normal);
+            assert_eq!(fs::read(path).unwrap(), before);
+            let current =
+                super::super::runtime_state::capture_hook_completion(&input.worktree_root).unwrap();
+            current.record(Blocked);
+            let state = SessionRuntimeState::load(path).unwrap();
+            assert_eq!(state.last_completed_hook_outcome, Some(Blocked));
+            assert!(state.last_completed_hook_event_at.is_some());
+        });
+        with_source(|input, session, path, _| {
+            let completion =
+                super::super::runtime_state::capture_hook_completion(&input.worktree_root).unwrap();
+            let snapshot = ManagedHookFailureSnapshot::read();
+            let mut reads = 0;
+            let result = read_managed_browser_preflight_with(input, &snapshot, || {
+                reads += 1;
+                if reads == 2 {
+                    let mut replacement = session.clone();
+                    replacement
+                        .execution_binding
+                        .as_mut()
+                        .unwrap()
+                        .capability_generation += 1;
+                    replacement
+                        .save(&gwt_core::paths::gwt_sessions_dir())
+                        .unwrap();
+                }
+                super::super::runtime_state::current_hook_context(&input.worktree_root)
+            });
+            assert_eq!(result.context, PreflightContext::Changed);
+            let before = fs::read(path).unwrap();
+            completion.record(Normal);
+            assert_eq!(fs::read(path).unwrap(), before);
+        });
+    }
+
+    #[test]
+    fn legacy_verification_compatibility_does_not_supply_bound_authority() {
+        with_source(|input, session, _, _| {
+            let binding = session.execution_binding.as_ref().unwrap();
+            assert!(
+                crate::cli::verification_record::caller_has_current_bound_verification_authority(
+                    &input.worktree_root,
+                    binding
+                )
+            );
+            let empty = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(empty.path());
+            assert!(
+                crate::cli::verification_record::caller_has_verification_authority(
+                    empty.path(),
+                    &session.id
+                )
+            );
+            assert!(
+                !crate::cli::verification_record::caller_has_current_bound_verification_authority(
+                    empty.path(),
+                    binding
+                )
+            );
+            // Native verification accepts an authentic same-Session lifecycle
+            // prefix; doctor must retain that legitimate positive case.
+            crate::cli::execution_state::settle(
+                &input.worktree_root,
+                &session.id,
+                crate::cli::execution_state::ExecutionSettlement::Blocked {
+                    reason: "fixture recovery".into(),
+                    missing_verification: None,
+                },
+            )
+            .unwrap();
+            let current = crate::cli::execution_state::current_execution_binding(
+                &input.worktree_root,
+                crate::cli::execution_state::ExecutionOwnerKey {
+                    kind: crate::cli::execution_state::ExecutionOwnerKind::Spec,
+                    number: 6622,
+                },
+            )
+            .unwrap()
+            .unwrap();
+            assert_ne!(current.ledger_head_hash, binding.identity.ledger_head_hash);
+            assert!(
+                crate::cli::verification_record::caller_has_verification_authority(
+                    &input.worktree_root,
+                    &session.id
+                )
+            );
+            assert!(
+                crate::cli::verification_record::caller_has_current_bound_verification_authority(
+                    &input.worktree_root,
+                    binding
+                )
+            );
+        });
+    }
+
+    #[test]
+    fn target_config_binary_and_trust_must_converge_and_repair_does_not_stamp_source() {
+        with_source(|input, _, path, _| {
+            let before = fs::read(path).unwrap();
+            let settings = input.worktree_root.join(".claude/settings.local.json");
+            fs::write(&settings, "{}").unwrap();
+            assert_eq!(
+                read_managed_browser_preflight(input).convergence,
+                PreflightConvergence::Blocked
+            );
+            repair_managed_hook_configs(&input.worktree_root).unwrap();
+            assert_eq!(fs::read(path).unwrap(), before);
+            assert_eq!(
+                read_managed_browser_preflight(input).result,
+                PreflightResult::Proceed
+            );
+            let wrong = input
+                .clone()
+                .with_expected_hook_bin("/missing/fixture/gwtd");
+            assert_eq!(
+                read_managed_browser_preflight(&wrong).convergence,
+                PreflightConvergence::Blocked
+            );
+            let codex = tempfile::tempdir().unwrap();
+            let _codex = ScopedEnvVar::set("CODEX_HOME", codex.path());
+            gwt_skills::generate_codex_hooks(&input.worktree_root).unwrap();
+            assert_eq!(
+                read_managed_browser_preflight(input).convergence,
+                PreflightConvergence::Blocked
+            );
+        });
     }
 }

@@ -1,0 +1,35 @@
+{
+  "label": "after",
+  "theme": "dark",
+  "browser_performance_time_origin_ms": 1792161986517.4,
+  "samples": [
+    {
+      "at_ms": 30009,
+      "ticks": 509,
+      "frames": 12316,
+      "ready_requests": 2,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 12300,
+        "maxQueue": 2048,
+        "max_long_task_ms": 364,
+        "resyncs": 1,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 60052,
+      "ticks": 1021,
+      "frames": 24647,
+      "ready_requests": 3,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 24599,
+        "maxQueue": 2048,
+        "max_long_task_ms": 364,
+        "resyncs": 2,
+        "resumes": 0
+      }
+    }
+  ]
+}

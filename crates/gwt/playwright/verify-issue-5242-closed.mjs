@@ -159,7 +159,7 @@ try {
   const originalHome = process.env.HOME, originalProfile = process.env.USERPROFILE;
   const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(GWT_|CODEX_|CLAUDE_|GIT_)/i.test(name) && !["GH_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"].includes(name.toUpperCase())));
   const pathKey = Object.keys(env).find(name => name.toUpperCase() === "PATH") ?? "PATH";
-  Object.assign(env, { HOME: checkHome, USERPROFILE: checkHome, GWT_TEST_GH: join(bin, windows ? "gh.cmd" : "gh"), GIT_TERMINAL_PROMPT: "0", GH_PROMPT_DISABLED: "1", GWT_HOOK_BIN: "gwtd" });
+  Object.assign(env, { HOME: checkHome, USERPROFILE: checkHome, GWT_TEST_GH: join(bin, windows ? "gh.cmd" : "gh"), GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never", GIT_CONFIG_PARAMETERS: "'credential.helper='", GH_PROMPT_DISABLED: "1", GWT_HOOK_BIN: "gwtd" });
   env[pathKey] = bin + delimiter + (env[pathKey] ?? "");
   const runtime = join(originalProfile || originalHome || homedir(), ".gwt/runtime");
   if (await exists(runtime)) await symlink(runtime, join(checkHome, ".gwt/runtime"), windows ? "junction" : "dir");
@@ -168,7 +168,8 @@ try {
   await writeFile(env.GWT_TEST_GH, windows ? `@echo off\r\n"${process.execPath}" "${fixtureScript}" --gh %*\r\n` : `#!/bin/sh\nexec '${process.execPath}' '${fixtureScript}' --gh "$@"\n`, { mode: 0o755 });
   const issues = [524201, 524202].map(number => ({ number, title: `Closed retirement fixture #${number}`, body: "Isolated Issue #5242 browser fixture", state: "OPEN", labels: ["bug", "auto-improve", "gwt-queued"].map(name => ({ name })), updatedAt: "2026-10-10T00:00:00Z", url: `https://github.com/fixture/closed-live/issues/${number}`, comments: [] }));
   await writeFile(join(checkHome, "github-state.json"), JSON.stringify({ revision: 0, comment_id: 0, issues }));
-  for (const arguments_ of [["init", "-q"], ["-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-q", "-m", "fixture"], ["remote", "add", "origin", "https://github.com/fixture/closed-live.git"]]) await finish(start("git", arguments_, env, project), 10_000);
+  // Preserve GitHub identity while refusing Git transport from the live fixture.
+  for (const arguments_ of [["init", "-q"], ["-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-q", "-m", "fixture"], ["remote", "add", "origin", "https://github.com/fixture/closed-live.git"], ["config", "protocol.allow", "never"], ["config", "protocol.https.allow", "never"]]) await finish(start("git", arguments_, env, project), 10_000);
   async function waitFor(predicate, child, timeout, message) {
     const deadline = Date.now() + timeout;
     while (!await predicate()) {

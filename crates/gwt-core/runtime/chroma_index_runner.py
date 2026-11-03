@@ -56,14 +56,18 @@ def default_qos_for_action(action: str) -> str:
     return "background" if action.startswith("index") else "interactive"
 
 
-def configure_qos_threads(qos: str) -> None:
+def configure_qos_threads(qos: str, *, single_query: bool = False) -> None:
     """Apply the FR-385 QoS profile: embedding thread caps (background=2 /
     interactive=4), inter-op 1, tokenizer parallelism off, and a lowered
-    process priority for background work. Must run before the lazy model
-    import; it never imports torch itself."""
+    process priority for background work. Single-query searches use one
+    thread to avoid parallel overhead and Windows Normal priority rather
+    than inheriting the launching agent's BelowNormal class. Must run before
+    the lazy model import; it never imports torch itself."""
     caps = QOS_THREAD_CAPS.get(qos)
     if caps is None:
         raise ValueError(f"unknown qos profile: {qos}")
+    if single_query and qos == "interactive":
+        caps = "1"
     for key in QOS_THREAD_ENV_KEYS:
         os.environ[key] = caps
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -78,6 +82,18 @@ def configure_qos_threads(qos: str) -> None:
             pass
     if qos == "background":
         _lower_process_priority()
+    elif single_query and os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            kernel = ctypes.windll.kernel32
+            kernel.GetCurrentProcess.restype = wintypes.HANDLE
+            kernel.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+            kernel.SetPriorityClass.restype = wintypes.BOOL
+            kernel.SetPriorityClass(kernel.GetCurrentProcess(), 0x00000020)  # Normal
+        except OSError:
+            pass
 
 
 def _lower_process_priority() -> None:
@@ -1369,8 +1385,9 @@ WORKTREE_SCOPED = {"files", "files-docs"}
 
 V2_FILES_CODE_COLLECTION = "files_code"
 V2_FILES_DOCS_COLLECTION = "files_docs"
-V2_SPECS_COLLECTION = "specs"
+V2_SPECS_COLLECTION = "issues"
 V2_ISSUES_COLLECTION = "issues"
+ISSUE_RECORD_LAYOUT = "issue-spec-chunks-v1"
 V2_MEMORY_COLLECTION = "memory"
 V2_DISCUSSIONS_COLLECTION = "discussions"
 V2_BOARD_COLLECTION = "board"
@@ -1434,7 +1451,7 @@ def resolve_db_path(
     repo_dir = root / repo_hash
 
     if scope in {"issues", "specs", "memory", "discussions", "board", "works", "reports"}:
-        return repo_dir / scope
+        return repo_dir / ("issues" if scope == "specs" else scope)
 
     return repo_dir / "worktrees" / worktree_hash / scope
 
@@ -1847,6 +1864,21 @@ _MODEL_CACHE: Optional[dict[Optional[str], Any]] = None
 # subtracts it to hold the warm remainder to its own budget.
 _MODEL_LOAD_MS = 0
 _model_load_clock = time.monotonic
+_SEARCH_WORKER_ENDPOINT: Optional[Path] = None
+
+
+def _publish_search_model_state(state: str) -> None:
+    """Expose model loading without probing or waking the resident worker."""
+    if _SEARCH_WORKER_ENDPOINT is None:
+        return
+    try:
+        endpoint = json.loads(_SEARCH_WORKER_ENDPOINT.read_text(encoding="utf-8"))
+        if isinstance(endpoint, dict) and endpoint.get("pid") == os.getpid():
+            endpoint.update(model_state=state, model_load_ms=_MODEL_LOAD_MS)
+            _write_json_atomic(_SEARCH_WORKER_ENDPOINT, endpoint)
+            _SEARCH_WORKER_ENDPOINT.chmod(0o600)
+    except (OSError, ValueError):
+        pass  # Diagnostics must never fail a query.
 
 
 def _get_embedding_model(revision: Optional[str] = None) -> Any:
@@ -1859,21 +1891,27 @@ def _get_embedding_model(revision: Optional[str] = None) -> Any:
     if _MODEL_CACHE is None:
         _MODEL_CACHE = {}
     if revision in _MODEL_CACHE:
+        _publish_search_model_state("warm")
         return _MODEL_CACHE[revision]
 
-    if os.environ.get("GWT_INDEX_FAKE_EMBEDDING") == "1":
-        _MODEL_CACHE[revision] = _FakeEmbeddingModel()
-        return _MODEL_CACHE[revision]
+    _publish_search_model_state("warming")
+    try:
+        if os.environ.get("GWT_INDEX_FAKE_EMBEDDING") == "1":
+            model = _FakeEmbeddingModel()
+        else:
+            started = _model_load_clock()
+            from sentence_transformers import SentenceTransformer  # type: ignore
 
-    started = _model_load_clock()
-    from sentence_transformers import SentenceTransformer  # type: ignore
-
-    if revision is None:
-        model = SentenceTransformer(FILE_INDEX_V2_MODEL_ID)
-    else:
-        model = SentenceTransformer(FILE_INDEX_V2_MODEL_ID, revision=revision)
-    _MODEL_LOAD_MS += int(round((_model_load_clock() - started) * 1000))
-    _MODEL_CACHE[revision] = model
+            if revision is None:
+                model = SentenceTransformer(FILE_INDEX_V2_MODEL_ID)
+            else:
+                model = SentenceTransformer(FILE_INDEX_V2_MODEL_ID, revision=revision)
+            _MODEL_LOAD_MS += int(round((_model_load_clock() - started) * 1000))
+        _MODEL_CACHE[revision] = model
+    except Exception:
+        _publish_search_model_state("cold")
+        raise
+    _publish_search_model_state("warm")
     return model
 
 
@@ -2044,9 +2082,49 @@ def _reset_chroma_store(db_path: Path) -> None:
                 pass
 
 
+SEARCH_WORKER_READ_CLIENT_LIMIT = 16
+_SEARCH_WORKER_READ_CLIENTS: Optional[Dict[tuple[Path, str], tuple[Path, Any, Any]]] = None
+
+
+@contextlib.contextmanager
+def _search_worker_read_clients() -> Iterator[None]:
+    """Retain bounded immutable Issue-store readers for one worker lifetime."""
+    global _SEARCH_WORKER_READ_CLIENTS
+    previous = _SEARCH_WORKER_READ_CLIENTS
+    retained: Dict[tuple[Path, str], tuple[Path, Any, Any]] = {}
+    _SEARCH_WORKER_READ_CLIENTS = retained
+    try:
+        yield
+    finally:
+        _SEARCH_WORKER_READ_CLIENTS = previous
+        for _, client, _ in retained.values():
+            _close_chroma_client(client)
+
+
 def _open_chroma_collection(db_path: Path, collection_name: str):
     """Open an existing collection without silently creating a new one."""
     import chromadb  # type: ignore
+
+    db_path = Path(db_path)
+    retained = _SEARCH_WORKER_READ_CLIENTS
+    cache_key = None
+    # Closing the last Chroma client stops its System. Issue indexing always
+    # publishes a new generation. Other repo scopes update the active store
+    # in place, so retaining their readers would keep stale query vectors.
+    if (
+        retained is not None
+        and db_path.parent.name.endswith(GENERATIONS_DIR_SUFFIX)
+        and db_path.name.startswith("gen-")
+        and collection_name == V2_ISSUES_COLLECTION
+    ):
+        db_path = db_path.resolve()
+        cache_key = (db_path.parent, collection_name)
+        cached = retained.pop(cache_key, None)
+        if cached is not None:
+            if cached[0] == db_path:
+                retained[cache_key] = cached
+                return cached[1], cached[2]
+            _close_chroma_client(cached[1])
 
     client = chromadb.PersistentClient(path=_chroma_store_path(db_path))
     ef = E5EmbeddingFunction()
@@ -2058,6 +2136,11 @@ def _open_chroma_collection(db_path: Path, collection_name: str):
     except Exception:
         _close_chroma_client(client)
         raise
+    if cache_key is not None:
+        retained[cache_key] = (db_path, client, collection)
+        while len(retained) > SEARCH_WORKER_READ_CLIENT_LIMIT:
+            _, oldest_client, _ = retained.pop(next(iter(retained)))
+            _close_chroma_client(oldest_client)
     return client, collection
 
 
@@ -2108,6 +2191,8 @@ def _manifest_path(worktree_dir: Path, scope: str) -> Path:
     (`.../worktrees/<wt>/files/`); both are normalized to the worktree
     level so writers and readers always agree on the location.
     """
+    if scope == "specs":
+        scope = "issues"
     if worktree_dir.name in (
         "specs",
         "files",
@@ -2989,7 +3074,7 @@ def _durably_replace_file_index_v2_directory(staging: Path, target: Path) -> Non
                 os.fsync(artifact.fileno())
         _fsync_directory(current)
     target.parent.mkdir(parents=True, exist_ok=True)
-    os.replace(staging, target)
+    _replace_staging_generation(staging, target)
     _fsync_directory(target.parent)
 
 
@@ -4435,6 +4520,25 @@ def _active_store_document_count(db_path: Path, scope: str) -> Optional[int]:
         return None
 
 
+def _replace_staging_generation(staging: Path, generation_dir: Path) -> None:
+    """Wait briefly for native SQLite workers to release a closed store.
+
+    Chroma closes its Rust bindings before SQLx's SQLite worker threads have
+    necessarily released their files. Windows cannot rename that directory
+    until those handles close; POSIX can. Retry only Windows access/sharing
+    violations, with at most 1.03 seconds of backoff, preserving the OS error.
+    """
+    for attempt in range(8):
+        try:
+            os.replace(staging, generation_dir)
+            return
+        except OSError as error:
+            if (os.name != "nt" or getattr(error, "winerror", None) not in (5, 32)
+                    or attempt == 7):
+                raise
+            time.sleep(min(0.01 * (2 ** attempt), 0.4))
+
+
 def _publish_generation(
     db_path: Path,
     staging: Path,
@@ -4481,7 +4585,7 @@ def _publish_generation(
                         "retryable": True,
                     }
             generation_dir = gen_root / generation_name
-            os.replace(staging, generation_dir)
+            _replace_staging_generation(staging, generation_dir)
             for residue in (CONTINUATION_FILENAME, LOCK_FILENAME):
                 with contextlib.suppress(OSError):
                     (generation_dir / residue).unlink()
@@ -4708,6 +4812,9 @@ def _validated_file_index_v2_action_inputs(
     return root, descriptor
 
 
+_FILE_INDEX_V2_YIELDED = False
+
+
 def _file_index_v2_yielded_result(
     scope: str, requested: int, computed: int, cache_hits: int
 ) -> dict:
@@ -4715,6 +4822,8 @@ def _file_index_v2_yielded_result(
     (FR-418). No View is materialized and no head is replaced, so readers keep
     serving whatever was already published. `yielded` is the flag the Rust
     orchestrator reads to reschedule the continuation."""
+    global _FILE_INDEX_V2_YIELDED
+    _FILE_INDEX_V2_YIELDED = True
     emit_progress(
         {
             "phase": "yielded",
@@ -5464,14 +5573,13 @@ def action_index_specs_v2(
     db_root: Optional[Path] = None,
     qos: str = "interactive",
 ) -> dict:
-    """Index cached gwt-spec Issues into the repo-scoped specs store."""
+    """Compatibility entrypoint for the shared Issue/SPEC corpus."""
     del worktree_hash
-    documents, entries = _load_cached_spec_documents(repo_hash)
-    entries.sort(key=lambda entry: entry["path"])
-    return _index_repo_records_v2(
-        repo_hash, "specs", _build_spec_records(documents),
-        entries, mode, db_root, project_root, qos,
+    result = action_index_issues_v2(
+        repo_hash, project_root, db_root=db_root, mode=mode, qos=qos,
+        allow_empty=True,
     )
+    return {**result, "scope": "specs"}
 
 
 # ---------------------------------------------------------------------
@@ -5542,6 +5650,10 @@ def _normalize_labels(labels: Any) -> List[str]:
     return []
 
 
+def _is_spec_issue(labels: Any) -> bool:
+    return any(label.casefold() == "gwt-spec" for label in _normalize_labels(labels))
+
+
 def _phase_label(labels: Sequence[str]) -> str:
     for label in labels:
         if label.startswith("phase/"):
@@ -5569,6 +5681,10 @@ def _build_cache_manifest_entry(name: str, paths: Sequence[Path]) -> Optional[Di
 
 
 def _load_cached_issue_documents(repo_hash: str) -> List[Dict[str, Any]]:
+    return _cached_issue_source(repo_hash, "documents", lambda: _read_cached_issue_documents(repo_hash))
+
+
+def _read_cached_issue_documents(repo_hash: str) -> List[Dict[str, Any]]:
     root = _issue_cache_root(repo_hash)
     if not root.is_dir():
         return []
@@ -5644,17 +5760,83 @@ def _issue_source_fingerprint(issues: Sequence[Dict[str, Any]]) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+_ISSUE_SOURCE_CACHE: Dict[tuple, tuple] = {}
+
+
+def _issue_source_revision(repo_hash: str) -> Optional[str]:
+    """Canonical IssueCache writers publish this only when source bytes change."""
+    try:
+        revision = (_issue_cache_root(repo_hash) / "source-revision").read_text(encoding="utf-8")
+        return str(uuid.UUID(revision))
+    except (OSError, ValueError, UnicodeDecodeError):
+        # Legacy/unversioned sources still use the complete read on every call.
+        return None
+
+
+def _cached_issue_source(repo_hash: str, kind: str, load: Callable[[], Any]) -> Any:
+    key = (str(_issue_cache_root(repo_hash)), kind)
+    revision = _issue_source_revision(repo_hash)
+    cached = _ISSUE_SOURCE_CACHE.get(key)
+    if revision is not None and cached is not None and cached[0] == revision:
+        return cached[1]
+    _ISSUE_SOURCE_CACHE.pop(key, None)
+    result = load()
+    # Do not retain a snapshot spanning a concurrent canonical mutation.
+    if revision is not None and revision == _issue_source_revision(repo_hash):
+        if len(_ISSUE_SOURCE_CACHE) >= 16:
+            _ISSUE_SOURCE_CACHE.pop(next(iter(_ISSUE_SOURCE_CACHE)))
+        _ISSUE_SOURCE_CACHE[key] = (revision, result)
+    return result
+
+
 def _issue_cache_source_snapshot(repo_hash: str) -> Dict[str, Any]:
-    issues = _load_cached_issue_documents(repo_hash)
+    def load() -> Dict[str, Any]:
+        records = _load_issue_records(repo_hash)
+        return {"fingerprint": _record_source_fingerprint(records), "document_count": len(records)}
+
+    source = _cached_issue_source(repo_hash, "issues", load)
     refresh_meta = _issue_cache_refresh_meta(repo_hash)
     return {
-        "fingerprint": _issue_source_fingerprint(issues),
-        "document_count": len(issues),
+        **source,
         "cache_refresh_at": refresh_meta.get("last_full_refresh"),
     }
 
 
+def _record_source_fingerprint(records: Sequence[Dict[str, Any]]) -> str:
+    raw = json.dumps(records, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _load_issue_records(repo_hash: str) -> List[Dict[str, Any]]:
+    """Store ordinary Issues once and SPECs only as full section chunks."""
+    def load() -> List[Dict[str, Any]]:
+        records = []
+        for issue in _load_cached_issue_documents(repo_hash):
+            if _is_spec_issue(issue["labels"]):
+                continue
+            records.append({
+                "id": str(issue["number"]),
+                "document": f"{issue['title']}\n{issue['body']}",
+                "metadata": {
+                    "record_kind": "issue", "number": issue["number"],
+                    "title": issue["title"], "url": "", "state": issue["state"],
+                    "labels": ",".join(issue["labels"]),
+                },
+            })
+        specs, _ = _load_cached_spec_documents(repo_hash)
+        records.extend(_build_spec_records(specs))
+        return sorted(records, key=lambda record: record["id"])
+
+    return _cached_issue_source(repo_hash, "records", load)
+
+
 def _load_cached_spec_documents(
+    repo_hash: str,
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    return _cached_issue_source(repo_hash, "specs", lambda: _read_cached_spec_documents(repo_hash))
+
+
+def _read_cached_spec_documents(
     repo_hash: str,
 ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     root = _issue_cache_root(repo_hash)
@@ -5679,7 +5861,7 @@ def _load_cached_spec_documents(
             continue
 
         labels = _normalize_labels(meta.get("labels", []))
-        if "gwt-spec" not in labels:
+        if not _is_spec_issue(labels):
             continue
 
         spec_path = entry / "sections" / "spec.md"
@@ -5948,6 +6130,167 @@ def action_index_memory_v2(
     )
 
 
+def _report_fields(value: Any, required: set[str], optional: set[str] = frozenset()) -> None:
+    if not isinstance(value, dict) or not required <= value.keys() <= required | optional:
+        raise ValueError("invalid versioned PM report fields")
+
+
+def _report_json_object(pairs: list[tuple[str, Any]]) -> dict:
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate PM report JSON field")
+        value[key] = item
+    return value
+
+
+def _validate_report_summary(summary: Any) -> None:
+    _report_fields(summary, {"result"}, {"impact", "owner", "next_action", "decision"})
+    values = [summary["result"]]
+    values.extend(summary[field] for field in ("impact", "owner", "next_action") if summary.get(field) is not None)
+    decision = summary.get("decision")
+    if decision is not None:
+        _report_fields(decision, {"question", "recommendation", "reason", "options"})
+        if not isinstance(decision["options"], list) or not 2 <= len(decision["options"]) <= 3:
+            raise ValueError("invalid PM report decision options")
+        values.extend([decision["question"], decision["recommendation"], decision["reason"], *decision["options"]])
+    if any(not isinstance(value, str) or not value.strip() or len(value) > 240
+           or any(ord(char) < 32 or 127 <= ord(char) < 160 or char in "\u2028\u2029" for char in value) for value in values):
+        raise ValueError("invalid PM report summary")
+
+
+def _validate_report_text(value: Any) -> None:
+    if not isinstance(value.get("details"), str) or not isinstance(value.get("refs", []), list) or any(
+        not isinstance(ref, str) or not ref.strip() or len(ref.encode("utf-8")) > 2048
+        or any(ord(char) < 32 or 127 <= ord(char) < 160 or char in "\u2028\u2029" for char in ref)
+        for ref in value.get("refs", [])
+    ):
+        raise ValueError("invalid PM report details or refs")
+    _validate_report_summary(value.get("summary"))
+
+
+def _report_submission_size(submission: dict) -> int:
+    """Measure validated input as Rust's compact typed JSON, without changing it."""
+    def summary(value: dict) -> dict:
+        return {**dict.fromkeys(("impact", "owner", "next_action", "decision")), **value}
+
+    def timestamp(value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        seconds, nanoseconds = _parse_rfc3339_instant(value)
+        epoch = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+        instant = epoch + datetime.timedelta(seconds=seconds)
+        base = instant.isoformat(timespec="seconds").removesuffix("+00:00")
+        # Chrono's Serde serializer uses UTC Z and AutoSi (0/3/6/9 digits).
+        if nanoseconds == 0:
+            return base + "Z"
+        digits = 3 if nanoseconds % 1_000_000 == 0 else 6 if nanoseconds % 1_000 == 0 else 9
+        return base + "." + f"{nanoseconds:09d}"[:digits] + "Z"
+
+    wire = {**submission, "events": [],
+            "digest": summary(submission["digest"]) if submission.get("digest") is not None else None}
+    for event in submission["events"]:
+        action = event["state"].get("action")
+        state = {**event["state"], "milestone_id": event["state"].get("milestone_id"),
+                 "action": {**action, "deadline": timestamp(action.get("deadline"))} if action is not None else None}
+        wire["events"].append({
+            **event, "state": state, "summary": summary(event["summary"]),
+            "refs": event.get("refs", []), "observed_at": timestamp(event.get("observed_at")),
+        })
+    return len(json.dumps(wire, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8"))
+
+
+def _versioned_report_cards(envelope: Any, requests: set[str]) -> list[dict]:
+    """Check the journal wire and project saved cards, without rerunning posting policy."""
+    _report_fields(envelope, {"journal_schema", "payload", "payload_sha256"})
+    payload = envelope["payload"]
+    if (type(envelope["journal_schema"]) is not int or envelope["journal_schema"] != 2
+            or not isinstance(payload, str) or not isinstance(envelope["payload_sha256"], str)
+            or hashlib.sha256(payload.encode("utf-8")).hexdigest() != envelope["payload_sha256"]):
+        raise ValueError("invalid or unsupported PM report journal envelope")
+    transaction = json.loads(payload, parse_constant=_reject_non_json_constant, object_pairs_hook=_report_json_object)
+    _report_fields(transaction, {"submission", "receipt"})
+    submission, receipt = transaction["submission"], transaction["receipt"]
+    _report_fields(submission, {"schema_version", "request_id", "events"}, {"digest"})
+    _report_fields(receipt, {"schema_version", "request_id", "created_at", "decisions", "reports"})
+    request_id = submission["request_id"]
+    if (type(submission["schema_version"]) is not int or submission["schema_version"] != 1
+            or type(receipt["schema_version"]) is not int or receipt["schema_version"] != 1
+            or not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_.:/-]{1,128}", request_id)
+            or receipt["request_id"] != request_id or request_id in requests
+            or not isinstance(receipt["created_at"], str)):
+        raise ValueError("invalid PM report submission or receipt identity")
+    _parse_rfc3339_instant(receipt["created_at"])
+    events, decisions, cards = submission["events"], receipt["decisions"], receipt["reports"]
+    if (not isinstance(events, list) or not 1 <= len(events) <= 32
+            or not isinstance(decisions, list) or len(decisions) != len(events) or not isinstance(cards, list)):
+        raise ValueError("invalid PM report transaction lists")
+    if submission.get("digest") is not None:
+        _validate_report_summary(submission["digest"])
+    event_keys, referenced = set(), set()
+    for event, decision in zip(events, decisions):
+        _report_fields(event, {"episode_id", "event_id", "expected_revision", "kind", "state", "summary", "details"}, {"refs", "observed_at"})
+        _report_fields(decision, {"episode_id", "event_id", "revision", "reason", "report_id"})
+        key = event["episode_id"], event["event_id"]
+        if (any(not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_.:/-]{1,128}", value) for value in key)
+                or key in event_keys or key != (decision["episode_id"], decision["event_id"])
+                or type(event["expected_revision"]) is not int or not 0 <= event["expected_revision"] < (1 << 53) - 1
+                or type(decision["revision"]) is not int or not 1 <= decision["revision"] <= (1 << 53) - 1
+                or event["kind"] not in ("progress", "decision", "blocker")
+                or decision["reason"] not in ("unchanged", "immediate", "first", "changed", "resolved", "recurrence")
+                or decision["revision"] != event["expected_revision"] + int(decision["reason"] != "unchanged")):
+            raise ValueError("invalid PM report event or decision")
+        event_keys.add(key)
+        state = event["state"]
+        _report_fields(state, {"status", "severity", "impact"}, {"action", "milestone_id"})
+        if (state["status"] not in ("active", "waiting", "completed", "resolved", "unknown")
+                or state["severity"] not in ("routine", "important", "fatal", "blackout", "needs_human", "stale_unknown")
+                or state["impact"] not in ("none", "local", "project", "service", "data_loss")):
+            raise ValueError("invalid PM report material state")
+        action = state.get("action")
+        if action is not None:
+            _report_fields(action, {"id", "kind"}, {"deadline"})
+            if action["kind"] not in ("monitor", "retry", "respond", "decide", "intervene"):
+                raise ValueError("invalid PM report action")
+            if action.get("deadline") is not None:
+                if not isinstance(action["deadline"], str):
+                    raise ValueError("invalid PM report action deadline")
+                _parse_rfc3339_instant(action["deadline"])
+        for identity in (state.get("milestone_id"), action["id"] if action else None):
+            if identity is not None and (not isinstance(identity, str) or not re.fullmatch(r"[A-Za-z0-9_.:/-]{1,128}", identity)):
+                raise ValueError("invalid PM report material identity")
+        if event.get("observed_at") is not None:
+            if not isinstance(event["observed_at"], str):
+                raise ValueError("invalid PM report observation timestamp")
+            _parse_rfc3339_instant(event["observed_at"])
+        _validate_report_text(event)
+        if len(event["details"].encode("utf-8")) > 64 * 1024 or len(event.get("refs", [])) > 16:
+            raise ValueError("PM report event exceeds details or refs limit")
+        report_id = decision["report_id"]
+        if (decision["reason"] == "unchanged") != (report_id is None):
+            raise ValueError("invalid suppressed PM report decision")
+        if report_id is not None:
+            if not isinstance(report_id, str) or not report_id:
+                raise ValueError("invalid PM report reference")
+            referenced.add(report_id)
+    if _report_submission_size(submission) > 256 * 1024:
+        raise ValueError("PM report submission exceeds 256 KiB")
+    card_ids = set()
+    for card in cards:
+        _report_fields(card, {"id", "kind", "body", "created_at", "structured"}, {"question"})
+        if (not isinstance(card["id"], str) or not card["id"] or card["id"] in card_ids
+                or card["kind"] not in ("progress", "decision", "blocker") or card.get("question") is not None
+                or card["created_at"] != receipt["created_at"]):
+            raise ValueError("invalid versioned PM report card")
+        card_ids.add(card["id"])
+        _report_fields(card["structured"], {"summary", "details", "refs"})
+        _validate_report_text(card["structured"])
+    if card_ids != referenced:
+        raise ValueError("PM report receipt references do not match saved cards")
+    requests.add(request_id)
+    return cards
+
+
 def _load_report_records(repo_hash: str) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Read posted Reports and instruction-backed Q&A for this project only.
 
@@ -5971,32 +6314,42 @@ def _load_report_records(repo_hash: str) -> tuple[List[Dict[str, Any]], List[Dic
             if text and not text.endswith("\n"):
                 raise ValueError("incomplete PM report record (missing newline)")
             seen = set()
+            requests = set()
             for line in text.split("\n"):
                 if not line.strip():
                     continue
-                report = json.loads(line, parse_constant=_reject_non_json_constant)
-                if (
-                    not isinstance(report, dict)
-                    or any(not isinstance(report.get(field), str) for field in (
-                        "id", "kind", "body", "created_at"
-                    ))
-                    or not report["id"] or report["id"] in seen
-                    or report["kind"] not in {"progress", "decision", "blocker", "qa"}
-                    or (report.get("question") is not None and not isinstance(report["question"], str))
-                ):
-                    raise ValueError("invalid PM report record")
-                if datetime.datetime.fromisoformat(report["created_at"].replace("Z", "+00:00")).tzinfo is None:
-                    raise ValueError("PM report timestamp requires timezone")
-                seen.add(report["id"])
-                report["source"] = "pm_report"
-                report["issue_numbers"] = sorted({
-                    int(number) for prefix, number in re.findall(
-                        r"((?<!\w)(?:PR|pull\s+request)\s*#|(?<!\w)#|/issues/)([1-9]\d*)\b",
-                        f"{report.get('question') or ''}\n{report['body']}",
-                        flags=re.IGNORECASE,
-                    ) if prefix.lower() in {"#", "/issues/"}
-                })
-                reports.append(report)
+                row = json.loads(line, parse_constant=_reject_non_json_constant, object_pairs_hook=_report_json_object)
+                cards = _versioned_report_cards(row, requests) if isinstance(row, dict) and "journal_schema" in row else [row]
+                for report in cards:
+                    if (
+                        not isinstance(report, dict)
+                        or any(not isinstance(report.get(field), str) for field in (
+                            "id", "kind", "body", "created_at"
+                        ))
+                        or not report["id"] or report["id"] in seen
+                        or report["kind"] not in ("progress", "decision", "blocker", "qa")
+                        or (report.get("question") is not None and not isinstance(report["question"], str))
+                    ):
+                        raise ValueError("invalid PM report record")
+                    if datetime.datetime.fromisoformat(report["created_at"].replace("Z", "+00:00")).tzinfo is None:
+                        raise ValueError("PM report timestamp requires timezone")
+                    structured = report.get("structured")
+                    detail_text = ""
+                    if structured is not None:
+                        _report_fields(structured, {"summary", "details", "refs"})
+                        _validate_report_text(structured)
+                        detail_text = "\n".join([structured["details"], *structured["refs"]])
+                    seen.add(report["id"])
+                    report["source"] = "pm_report"
+                    report["detail_document"] = detail_text
+                    report["issue_numbers"] = sorted({
+                        int(number) for prefix, number in re.findall(
+                            r"((?<!\w)(?:PR|pull\s+request)\s*#|(?<!\w)#|/issues/)([1-9]\d*)\b",
+                            f"{report.get('question') or ''}\n{report['body']}\n{detail_text}",
+                            flags=re.IGNORECASE,
+                        ) if prefix.lower() in {"#", "/issues/"}
+                    })
+                    reports.append(report)
             entries.append({
                 "path": str(source), "mtime": int(source.stat().st_mtime),
                 "size": len(content), "content_hash": hashlib.sha256(content).hexdigest(),
@@ -6023,7 +6376,7 @@ def _load_report_records(repo_hash: str) -> tuple[List[Dict[str, Any]], List[Dic
                 report["kind"], report["created_at"], question, body,
                 " ".join(f"#{number}" for number in report["issue_numbers"]),
                 report.get("instruction_document", ""),
-            ]),
+            ] + ([report["detail_document"]] if report.get("detail_document") else [])),
             "metadata": {
                 "report_id": report["id"], "source": report["source"],
                 "kind": report["kind"], "report_type": "qa" if report["kind"] == "qa" else "digest",
@@ -7128,6 +7481,7 @@ def _build_spec_records(specs: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]
                     "id": f"spec-{spec.get('spec_id', '')}:chunk-{idx}",
                     "document": document,
                     "metadata": {
+                        "record_kind": "spec",
                         "spec_id": spec.get("spec_id", ""),
                         "title": spec.get("title", ""),
                         "status": spec.get("status", ""),
@@ -7282,6 +7636,10 @@ def _legacy_residue_detected(
 
 
 def _close_chroma_client(client) -> None:
+    if _SEARCH_WORKER_READ_CLIENTS is not None and any(
+        cached[1] is client for cached in _SEARCH_WORKER_READ_CLIENTS.values()
+    ):
+        return
     try:
         client.close()
     except Exception:
@@ -7311,6 +7669,13 @@ def _scope_status_v2(
     scope: str,
     db_root: Optional[Path] = None,
 ) -> Dict[str, Any]:
+    if scope == "specs":
+        health = _issue_status_v2(repo_hash, db_root=db_root)
+        if health.get("reason") == "empty_corpus":
+            # An explicitly built empty SPEC corpus remains searchable; the
+            # agent auto-build path reports unsynced caches separately.
+            health.update(healthy=True, repair_required=False, reason="ready")
+        return health
     db_path = resolve_db_path(repo_hash, worktree_hash, scope, db_root=db_root)
     manifest_path = _manifest_path(db_path, scope)
     manifest_entries = read_manifest(db_path, scope=scope)
@@ -7427,7 +7792,8 @@ def _read_issue_repair(db_path: Path) -> Dict[str, Any]:
 
 
 def _issue_build_failure(db_path: Path, fingerprint: str, mode: str,
-                         error_code: str, actual: int, expected: int) -> dict:
+                         error_code: str, actual: int, expected: int,
+                         error: Optional[str] = None) -> dict:
     payload = {
         "schema_version": 1, "fingerprint": fingerprint, "failures": 1,
         "last_error": error_code, "actual_document_count": actual,
@@ -7435,9 +7801,11 @@ def _issue_build_failure(db_path: Path, fingerprint: str, mode: str,
     }
     if error_code == "BUILD_INCOMPLETE" and os.environ.get("GWT_INDEX_REFRESH_RUN_ID"):
         payload["refresh_run_id"] = os.environ["GWT_INDEX_REFRESH_RUN_ID"]
+    if error:
+        payload["error"] = error
     _write_json_atomic(db_path / "repair.json", payload)
     return {"ok": False, "scope": "issues", "error_code": error_code,
-            "error": f"issues rebuild failed: {error_code} ({actual}/{expected})",
+            "error": error or f"issues rebuild failed: {error_code} ({actual}/{expected})",
             "repair": payload, "mode": mode}
 
 
@@ -7486,6 +7854,10 @@ def _issue_status_v2(
         repair_required = True
     elif not meta:
         reason = "metadata_missing"
+        healthy = False
+        repair_required = True
+    elif meta.get("record_layout") != ISSUE_RECORD_LAYOUT:
+        reason = "record_layout_changed"
         healthy = False
         repair_required = True
     else:
@@ -7576,6 +7948,7 @@ def action_index_issues_v2(
     qos: str = "interactive",
     mode: str = "full",
     repair: bool = False,
+    allow_empty: bool = False,
 ) -> dict:
     db_path = resolve_db_path(repo_hash, None, "issues", db_root=db_root)
     # Separate from the publication lock so readers keep using the active
@@ -7584,7 +7957,7 @@ def action_index_issues_v2(
         if _read_issue_repair(db_path).get("last_error") == "BUILD_INCOMPLETE":
             (db_path / "repair.json").unlink(missing_ok=True)
         return _index_issues_v2_locked(repo_hash, project_root, db_root, respect_ttl,
-                                       ttl_minutes, qos, mode, repair)
+                                       ttl_minutes, qos, mode, repair, allow_empty)
 
 
 def _index_issues_v2_locked(
@@ -7596,6 +7969,7 @@ def _index_issues_v2_locked(
     qos: str = "interactive",
     mode: str = "full",
     repair: bool = False,
+    allow_empty: bool = False,
 ) -> dict:
     """Index GitHub Issues using the v2 layout. Respects TTL on demand.
 
@@ -7613,9 +7987,13 @@ def _index_issues_v2_locked(
     if (db_path / "cancel-requested").exists():
         return {"ok": False, "scope": "issues", "error_code": "CANCELLED"}
 
-    issues = _load_cached_issue_documents(repo_hash)
-    source = {"fingerprint": _issue_source_fingerprint(issues),
-              "document_count": len(issues),
+    source_revision = _issue_source_revision(repo_hash)
+    records = _load_issue_records(repo_hash)
+    issue_cache_fingerprint = _issue_source_fingerprint(_load_cached_issue_documents(repo_hash))
+    if source_revision != _issue_source_revision(repo_hash):
+        source_revision = None
+    source = {"fingerprint": _record_source_fingerprint(records),
+              "document_count": len(records),
               "cache_refresh_at": _issue_cache_refresh_meta(repo_hash).get("last_full_refresh")}
     fingerprint = source["fingerprint"]
     previous_failure = _read_issue_repair(db_path)
@@ -7634,7 +8012,7 @@ def _index_issues_v2_locked(
                 return {"ok": True, "skipped": True, "scope": "issues",
                         "mode": meta.get("mode", "full"),
                         "ttl_remaining_seconds": int(ttl_minutes * 60 - age)}
-    if not issues:
+    if not records and not allow_empty:
         return _issue_build_failure(db_path, fingerprint, mode, "EMPTY_CORPUS", 0, 0)
     old_entries = read_manifest(db_path, scope="issues")
     # Reuse only a self-consistent previous generation; source drift is expected.
@@ -7646,12 +8024,12 @@ def _index_issues_v2_locked(
     )
     if repair or not manifest_valid or not (health.get("healthy") or health.get("source_drift")):
         mode = "full"
-    new_entries = [{"path": str(issue["number"]),
-                    "content_hash": _issue_source_fingerprint([issue])} for issue in issues]
+    new_entries = [{"path": record["id"],
+                    "content_hash": _record_source_fingerprint([record])} for record in records]
 
     # Persist before staging. The held build lock distinguishes a live build
     # from an orphan left by process death. Normal yield/success clear it.
-    _issue_build_failure(db_path, fingerprint, mode, "BUILD_INCOMPLETE", 0, len(issues))
+    _issue_build_failure(db_path, fingerprint, mode, "BUILD_INCOMPLETE", 0, len(records))
 
     emit_progress(
         {
@@ -7665,7 +8043,7 @@ def _index_issues_v2_locked(
 
     staging = _staging_dir_for(db_path)
     continuation_path = staging / CONTINUATION_FILENAME
-    total = len(issues)
+    total = len(records)
     heavy_target = _heavy_target_stem(repo_hash, "issues")
 
     continuation = _read_continuation(continuation_path)
@@ -7698,7 +8076,7 @@ def _index_issues_v2_locked(
                     except Exception:  # pragma: no cover - defensive chroma fallback
                         staged_ids = set()
                 pending: List[Dict[str, Any]] = [
-                    issue for issue in issues if str(issue.get("number", 0)) not in staged_ids
+                    record for record in records if record["id"] not in staged_ids
                 ]
                 checkpoint_batch = 1 if qos == "background" else EMBED_CHECKPOINT_BATCH
                 _write_heavy_progress(
@@ -7707,28 +8085,11 @@ def _index_issues_v2_locked(
                 for start in range(0, len(pending), checkpoint_batch):
                     if (db_path / "cancel-requested").exists():
                         return {"ok": False, "scope": "issues", "error_code": "CANCELLED"}
-                    batch_issues = pending[start : start + checkpoint_batch]
+                    batch_records = pending[start : start + checkpoint_batch]
                     batch_started = time.monotonic()
-                    ids: List[str] = []
-                    documents: List[str] = []
-                    metadatas: List[Dict[str, Any]] = []
-                    for issue in batch_issues:
-                        number = issue.get("number", 0)
-                        title = issue.get("title", "")
-                        body = issue.get("body", "")
-                        state = issue.get("state", "")
-                        labels = issue.get("labels", [])
-                        ids.append(str(number))
-                        documents.append(f"{title}\n{body}")
-                        metadatas.append(
-                            {
-                                "number": number,
-                                "title": title,
-                                "url": "",
-                                "state": state,
-                                "labels": ",".join(labels),
-                            }
-                        )
+                    ids = [record["id"] for record in batch_records]
+                    documents = [record["document"] for record in batch_records]
+                    metadatas = [record["metadata"] for record in batch_records]
                     collection.upsert(ids=ids, documents=documents, metadatas=metadatas)
                     newly_embedded += len(ids)
                     done = len(staged_ids) + newly_embedded
@@ -7743,7 +8104,7 @@ def _index_issues_v2_locked(
                         heavy_target,
                         done,
                         total,
-                        len(batch_issues),
+                        len(batch_records),
                         int((time.monotonic() - batch_started) * 1000),
                     )
                     emit_progress(
@@ -7756,7 +8117,7 @@ def _index_issues_v2_locked(
                     )
                     if (db_path / "cancel-requested").exists():
                         return {"ok": False, "scope": "issues", "error_code": "CANCELLED"}
-                    remaining = len(pending) - (start + len(batch_issues))
+                    remaining = len(pending) - (start + len(batch_records))
                     if remaining > 0 and qos == "background" and _pending_higher_priority("background"):
                         yielded = True
                         break
@@ -7812,11 +8173,14 @@ def _index_issues_v2_locked(
                 db_path,
                 {
                     "schema_version": INDEX_SCHEMA_VERSION,
+                    "record_layout": ISSUE_RECORD_LAYOUT,
                     "mode": mode,
                     "last_full_refresh": _now_utc().isoformat(),
                     "ttl_minutes": ttl_minutes,
-                    "document_count": len(issues),
+                    "document_count": len(records),
                     "source_cache_fingerprint": source["fingerprint"],
+                    "issue_cache_fingerprint": issue_cache_fingerprint,
+                    **({"source_cache_revision": source_revision} if source_revision is not None else {}),
                     "source_document_count": source["document_count"],
                     "source_cache_refresh_at": source.get("cache_refresh_at"),
                 },
@@ -7833,27 +8197,27 @@ def _index_issues_v2_locked(
             db_path,
             staging,
             scope="issues",
-            document_count=len(issues),
+            document_count=len(records),
             after_publish=_commit_issue_meta,
         )
         if publication_error is not None:
             raise publication_error
         if not publish.get("ok"):
-            return _issue_build_failure(db_path, fingerprint, mode, publish.get("error_code", "PUBLISH_FAILED"), staged_count, total)
+            return _issue_build_failure(db_path, fingerprint, mode, publish.get("error_code", "PUBLISH_FAILED"), staged_count, total, error=publish.get("error"))
 
         # Verify the published generation against the exact source we embedded.
         # A concurrent cache refresh must not turn this check into source drift.
         published_health = _issue_status_v2(repo_hash, db_root=db_root, source=source, check_repair=False)
         if published_health.get("reason") == "cancelled":
             return {"ok": False, "scope": "issues", "error_code": "CANCELLED"}
-        if not published_health.get("healthy"):
+        if not published_health.get("healthy") and not (
+            allow_empty and published_health.get("reason") == "empty_corpus"
+        ):
             actual = published_health.get("document_count", 0)
             error_code = "COUNT_MISMATCH" if actual != total else "INDEX_UNHEALTHY"
             return _issue_build_failure(db_path, fingerprint, mode, error_code, actual, total)
     except Exception as error:
-        result = _issue_build_failure(db_path, fingerprint, mode, "PUBLISH_FAILED", staged_count, total)
-        result["error"] = str(error)
-        return result
+        return _issue_build_failure(db_path, fingerprint, mode, "PUBLISH_FAILED", staged_count, total, error=str(error))
 
     (db_path / "repair.json").unlink(missing_ok=True)
 
@@ -7862,14 +8226,14 @@ def _index_issues_v2_locked(
             "phase": "complete",
             "scope": "issues",
             "mode": mode,
-            "indexed": len(issues),
-            "total": len(issues),
+            "indexed": len(records),
+            "total": len(records),
         }
     )
     return {
         "ok": True,
         "scope": "issues",
-        "indexed": len(issues),
+        "indexed": len(records),
         "newly_embedded": newly_embedded,
         "mode": mode,
     }
@@ -7967,6 +8331,7 @@ def _search_collection_v2(
     query: str,
     n_results: int,
     query_embedding: Optional[List[float]] = None,
+    where: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     try:
         count = collection.count()
@@ -7975,6 +8340,7 @@ def _search_collection_v2(
     if count == 0:
         return []
     actual_n = min(n_results, count)
+    filters = {"where": where} if where is not None else {}
     if query_embedding is not None:
         # Phase 70 AS-2: reuse one query embedding across every scope in a
         # batch request instead of re-encoding per scope.
@@ -7982,12 +8348,14 @@ def _search_collection_v2(
             query_embeddings=[query_embedding],
             n_results=actual_n,
             include=["metadatas", "documents", "distances"],
+            **filters,
         )
     else:
         results = collection.query(
             query_texts=[query],
             n_results=actual_n,
             include=["metadatas", "documents", "distances"],
+            **filters,
         )
     items: List[Dict[str, Any]] = []
     if results and results.get("ids") and results["ids"][0]:
@@ -8003,6 +8371,10 @@ def _search_collection_v2(
                 }
             )
     return items
+
+
+def _scope_record_filter(scope: str) -> Dict[str, Any]:
+    return {"where": {"record_kind": "spec" if scope == "specs" else "issue"}} if scope in {"issues", "specs"} else {}
 
 
 def _wire_distance(value: Any) -> Optional[float]:
@@ -8289,13 +8661,11 @@ def action_search_v2(
         health = _scope_status_v2(repo_hash, worktree_hash, scope, db_root=db_root)
 
     needs_build = not health["exists"] or health.get("repair_required", False)
-    if scope == "issues" and health.get("building") and (
+    if scope in {"issues", "specs"} and health.get("building") and (
         health.get("healthy") or health.get("source_drift")
     ):
         needs_build = False
-    needs_spec_refresh = scope == "specs" and health.get("healthy", False) and not no_auto_build
-
-    if needs_build or needs_spec_refresh:
+    if needs_build:
         if no_auto_build and needs_build:
             error_code = "INDEX_UNHEALTHY" if health["exists"] else "INDEX_MISSING"
             return {
@@ -8314,6 +8684,12 @@ def action_search_v2(
                 "error_code": "BAD_ARGS",
                 "error": "project_root required for auto-build",
             }
+        if (
+            scope in {"issues", "specs"}
+            and not health["exists"]
+            and not _issue_cache_is_populated(repo_hash)
+        ):
+            return _empty_corpus_diagnostic(scope, repo_hash)
         emit_progress({"phase": "indexing", "scope": scope, "done": 0, "total": 0})
         if scope == "issues":
             build = action_index_issues_v2(
@@ -8387,7 +8763,7 @@ def action_search_v2(
         try:
             collection_count = _safe_collection_count(collection)
             fetch_n = _search_fetch_count(scope, n_results, match_mode)
-            items = _search_collection_v2(collection, query, fetch_n)
+            items = _search_collection_v2(collection, query, fetch_n, **_scope_record_filter(scope))
         finally:
             _close_chroma_client(client)
 
@@ -8433,8 +8809,8 @@ def _classify_scope_for_search(
       or Issue-cache drift) — serve it and queue a refresh.
     - ``fresh``: healthy and current.
     """
-    if scope == "issues":
-        health = _issue_status_v2(repo_hash, db_root=db_root)
+    if scope in {"issues", "specs"}:
+        health = _issue_status_v2(repo_hash, db_root=db_root) if scope == "issues" else _scope_status_v2(repo_hash, worktree_hash, scope, db_root=db_root)
         if not health.get("exists"):
             return "missing", health
         if health.get("building") and (health.get("healthy") or health.get("source_drift")):
@@ -9092,7 +9468,8 @@ def _search_scope_collection(
         try:
             fetch_n = _search_fetch_count(scope, n_results, match_mode)
             items = _search_collection_v2(
-                collection, query, fetch_n, query_embedding=query_embedding
+                collection, query, fetch_n, query_embedding=query_embedding,
+                **_scope_record_filter(scope),
             )
         finally:
             _close_chroma_client(client)
@@ -9680,19 +10057,22 @@ def _search_worker_request(args: argparse.Namespace) -> Dict[str, Any]:
 
 def _serve_search_worker(worker_dir: Path, idle_timeout: float = 300) -> int:
     """Serve search-multi only; release model memory after idle expiry."""
+    global _SEARCH_WORKER_ENDPOINT
     worker_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     worker_dir.chmod(0o700)
     endpoint_path = worker_dir / "endpoint.json"
     token = secrets.token_hex(32)
     pid = os.getpid()
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+    with _search_worker_read_clients(), socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
         server.bind(("127.0.0.1", 0))
         server.listen(1)
         server.settimeout(idle_timeout)
         _write_json_atomic(endpoint_path, {
             "pid": pid, "port": server.getsockname()[1], "token": token,
+            "model_state": "cold", "model_load_ms": 0,
         })
         endpoint_path.chmod(0o600)
+        _SEARCH_WORKER_ENDPOINT = endpoint_path
         try:
             while True:
                 try:
@@ -9751,6 +10131,7 @@ def _serve_search_worker(worker_dir: Path, idle_timeout: float = 300) -> int:
                     except OSError:
                         pass
         finally:
+            _SEARCH_WORKER_ENDPOINT = None
             # A stale worker must never erase a replacement worker's endpoint.
             with contextlib.suppress(OSError, ValueError):
                 if json.loads(endpoint_path.read_text(encoding="utf-8")).get("pid") == pid:
@@ -10042,7 +10423,10 @@ def main() -> int:
 
         # Phase 70 FR-385: thread caps / priority must be in place before any
         # action can trigger the lazy model import.
-        configure_qos_threads(args.qos or default_qos_for_action(action))
+        configure_qos_threads(
+            args.qos or default_qos_for_action(action),
+            single_query=action in {"search-multi", "serve-search-worker"},
+        )
 
         if action == "serve-search-worker":
             if not args.worker_dir:
@@ -10170,4 +10554,13 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    exit_code = main()
+    if exit_code == 0 and _FILE_INDEX_V2_YIELDED:
+        # Issue #5782: the yielded action has closed Chroma, persisted its CAS
+        # checkpoint and unwound its locks. Avoid seconds of unused PyTorch
+        # interpreter teardown; the parent still reaps us before releasing the
+        # heavy lease (FR-417). Other success/failure paths retain normal exit.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)
+    raise SystemExit(exit_code)

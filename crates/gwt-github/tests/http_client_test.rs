@@ -123,7 +123,7 @@ fn red_50_fetch_posts_graphql_with_auth() {
     let transport = FakeTransport::new();
     transport.enqueue(ok_body(
         r#"{"data":{"repository":{"issue":{
-            "number":2001,"title":"T","body":"B","state":"OPEN","updatedAt":"2026-04-08T00:00:00Z",
+            "number":2001,"author":{"login":"OriginalCreator"},"title":"T","body":"B","state":"OPEN","updatedAt":"2026-04-08T00:00:00Z",
             "labels":{"nodes":[{"name":"gwt-spec"},{"name":"phase/review"}]},
             "comments":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}
         }}}}"#,
@@ -159,6 +159,7 @@ fn red_50_fetch_posts_graphql_with_auth() {
     match res {
         FetchResult::Updated(snap) => {
             assert_eq!(snap.number, IssueNumber(2001));
+            assert_eq!(snap.author_login.as_deref(), Some("OriginalCreator"));
             assert_eq!(snap.title, "T");
             assert_eq!(snap.state, IssueState::Open);
             assert_eq!(snap.updated_at, UpdatedAt::new("2026-04-08T00:00:00Z"));
@@ -393,7 +394,7 @@ fn red_55_create_comment_posts_to_issue_comments() {
 fn red_56_create_issue_posts_with_labels() {
     let transport = FakeTransport::new();
     transport.enqueue(created(
-        r#"{"number":99,"title":"T","body":"B","state":"open","updated_at":"t","labels":[{"name":"gwt-spec"},{"name":"phase/draft"}]}"#,
+        r#"{"number":99,"user":{"login":"OriginalCreator"},"title":"T","body":"B","state":"open","updated_at":"t","labels":[{"name":"gwt-spec"},{"name":"phase/draft"}]}"#,
     ));
     let client = client_with(transport);
     let labels = vec!["gwt-spec".to_string(), "phase/draft".to_string()];
@@ -409,6 +410,7 @@ fn red_56_create_issue_posts_with_labels() {
     assert_eq!(payload["labels"][0], "gwt-spec");
     assert_eq!(payload["labels"][1], "phase/draft");
     assert_eq!(snap.number, IssueNumber(99));
+    assert_eq!(snap.author_login.as_deref(), Some("OriginalCreator"));
     assert_eq!(snap.labels, labels);
 }
 

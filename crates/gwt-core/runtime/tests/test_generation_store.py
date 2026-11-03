@@ -58,6 +58,47 @@ def _make_project(base: Path, docs: int) -> Path:
     return project
 
 
+class GenerationPublicationRetryTests(unittest.TestCase):
+    def test_windows_publication_waits_for_closed_sqlite_handles(self):
+        staging, target = Path("issues.staging"), Path("issues.gen/generation")
+        denied, shared = PermissionError("closing SQLite"), PermissionError("sharing violation")
+        denied.winerror, shared.winerror = 5, 32
+        with mock.patch.object(runner.os, "name", "nt"), mock.patch.object(
+            runner.os, "replace", side_effect=[denied, shared, None]
+        ) as replace, mock.patch.object(runner.time, "sleep") as sleep:
+            runner._replace_staging_generation(staging, target)
+        self.assertEqual(replace.call_args_list, [mock.call(staging, target)] * 3)
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_permanent_windows_publication_failure_is_bounded(self):
+        staging, target = Path("issues.staging"), Path("issues.gen/generation")
+        denied = PermissionError("original staging error")
+        denied.winerror = 5
+        with mock.patch.object(runner.os, "name", "nt"), mock.patch.object(
+            runner.os, "replace", side_effect=denied
+        ) as replace, mock.patch.object(runner.time, "sleep") as sleep:
+            with self.assertRaises(PermissionError) as caught:
+                runner._replace_staging_generation(staging, target)
+        self.assertIs(caught.exception, denied)
+        self.assertLessEqual(replace.call_count, 10)
+        self.assertLessEqual(sum(call.args[0] for call in sleep.call_args_list), 1.1)
+
+    def test_other_publication_errors_are_not_retried(self):
+        staging, target = Path("issues.staging"), Path("issues.gen/generation")
+        for platform, winerror in (("posix", 5), ("nt", 112), ("nt", None)):
+            with self.subTest(platform=platform, winerror=winerror):
+                error = OSError("original error")
+                error.winerror = winerror
+                with mock.patch.object(runner.os, "name", platform), mock.patch.object(
+                    runner.os, "replace", side_effect=error
+                ) as replace, mock.patch.object(runner.time, "sleep") as sleep:
+                    with self.assertRaises(OSError) as caught:
+                        runner._replace_staging_generation(staging, target)
+                self.assertIs(caught.exception, error)
+                replace.assert_called_once_with(staging, target)
+                sleep.assert_not_called()
+
+
 class GenerationStoreTests(unittest.TestCase):
     def test_staging_count_error_never_publishes_an_empty_generation(self):
         collection = mock.Mock()
