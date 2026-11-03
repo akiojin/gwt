@@ -26786,6 +26786,17 @@ mod tests {
         monitor
     }
 
+    // Compiler/verification TEMP may live on another drive. HOME fixtures must
+    // stay beneath the OS user's Temp directory required by the isolation gate.
+    fn test_home_tempdir() -> tempfile::TempDir {
+        #[cfg(windows)]
+        let root = PathBuf::from(std::env::var_os("LOCALAPPDATA").expect("OS local app data"))
+            .join("Temp");
+        #[cfg(not(windows))]
+        let root = std::env::temp_dir();
+        tempfile::tempdir_in(root).expect("temporary fixture home")
+    }
+
     // Existing lifecycle fixtures start from explicitly scheduled work. Admission
     // regression tests below call the raw scanner to exercise unqueued inputs.
     fn admit_test_candidates(
@@ -37380,6 +37391,8 @@ mod tests {
     /// published fact, not the absence of one.
     #[test]
     fn requeue_failed_issue_release_survives_a_cross_process_rebase() {
+        let temp = test_home_tempdir();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let mut recovering = agent_failed_monitor(42, "an execution generation already exists");
         recovering.record_attempt(42);
         recovering.record_attempt(42);
@@ -49383,7 +49396,7 @@ mod tests {
 
     #[test]
     fn issue_6690_delivered_failures_converge_after_reload_and_stale_rebase() {
-        let temp = tempfile::TempDir::new().unwrap();
+        let temp = test_home_tempdir();
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let parent = spec_issue(
             42,
@@ -49471,7 +49484,7 @@ mod tests {
 
     #[test]
     fn issue_6690_previous_delivery_does_not_erase_a_failed_successor() {
-        let temp = tempfile::TempDir::new().unwrap();
+        let temp = test_home_tempdir();
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         for unacked in [false, true] {
             let deliveries = BTreeMap::from([(
