@@ -4625,7 +4625,15 @@ where
     // Keep operational artifact restoration at the end of the matrix.
     let mut effective_commands = commands.to_vec();
     let restoration_start = effective_commands.len();
-    effective_commands.extend(gwtd_artifact_restoration(worktree, commands)?);
+    let mut restoration_by_command = Vec::new();
+    for command in commands {
+        for restoration in gwtd_artifact_restoration(worktree, std::slice::from_ref(command))? {
+            if !effective_commands[restoration_start..].contains(&restoration) {
+                effective_commands.push(restoration.clone());
+            }
+            restoration_by_command.push((command.clone(), restoration));
+        }
+    }
     let commands = effective_commands.as_slice();
     let request = authority.map(|authority| {
         continuation::Continuation::new(commands, options.headed_e2e_commands, authority)
@@ -4943,17 +4951,14 @@ where
             attempt.ensure_active().map_err(|error| error.to_string())?;
         }
         let command = &commands[index];
-        if failed_raw.is_some() {
-            let executed = results
-                .iter()
-                .map(|result| result.command.clone())
-                .collect::<Vec<_>>();
-            if index < restoration_start
-                || !gwtd_artifact_restoration(worktree, &executed)?.contains(command)
-            {
-                skipped_after_failure.push(command.clone());
-                continue;
-            }
+        if failed_raw.is_some()
+            && (index < restoration_start
+                || !restoration_by_command.iter().any(|(source, restoration)| {
+                    restoration == command && results.iter().any(|result| &result.command == source)
+                }))
+        {
+            skipped_after_failure.push(command.clone());
+            continue;
         }
         let admission = if position == 0 {
             first_admission.take()
@@ -9775,6 +9780,34 @@ fn default_integration_test_builds_a_guarded_binary() {
         assert!(
             fs::read(&candidate).unwrap() == b"preserved candidate",
             "unused target candidate was overwritten"
+        );
+
+        // A command-specific config may become unreadable after its test.
+        // Restoration must reuse its target without re-reading that config.
+        let config = dir.path().join("command-config.toml");
+        fs::write(&config, "").unwrap();
+        fs::write(
+            package.join("src/lib.rs"),
+            format!(
+                "#[test] fn corrupts_config() {{ std::fs::write({config:?}, \"[\").unwrap(); panic!(); }}\n"
+            ),
+        )
+        .unwrap();
+        let command = "cargo test -p gwt --lib corrupts_config --config command-config.toml --target-dir 'failed target'".to_string();
+        let (record, transcript) = run_verification(
+            dir.path(),
+            "sess-artifact-invalid-config",
+            std::slice::from_ref(&command),
+        )
+        .unwrap();
+        assert_eq!(record.commands.len(), 2, "{transcript}");
+        assert_ne!(record.commands[0].exit_code, 0, "{transcript}");
+        assert_eq!(record.commands[1].exit_code, 0, "{transcript}");
+        assert!(!record.all_passed, "{transcript}");
+        assert!(gwtd_artifact_restoration(dir.path(), &[command]).is_err());
+        assert_eq!(
+            load(dir.path()).unwrap().unwrap().record_id,
+            record.record_id
         );
     }
 
