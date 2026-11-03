@@ -197,6 +197,8 @@ test.describe("terminal-grid responsiveness (#5117)", () => {
       page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
       await gotoLiveGwt(page, base!, { enableTestBridge: true });
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await page.waitForFunction(() => (window as any).__gwtPlaywrightMessages
+        .some((entry: any) => entry.payload.kind === "workspace_state"), undefined, { timeout: 30_000 });
       try {
         const id = await createShell(page, created);
         const beforeSplit = new Set((await projectWindows(page)).map(window => window.id));
