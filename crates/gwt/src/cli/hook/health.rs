@@ -111,6 +111,114 @@ pub struct ManagedHookRepairOutcome {
     pub repaired: bool,
 }
 
+/// Configuration observations, not evidence that a command is trusted or ran.
+/// The caller's runtime override and generation pin remain separate from each
+/// observed command's fallback. No commands or environment dumps are returned.
+#[derive(Debug, Serialize)]
+pub struct HookConfigurationAudit {
+    pub asset_root: PathBuf,
+    pub gwt_bin_path: Option<String>,
+    pub gwt_hook_bin: Option<String>,
+    /// Reporting an opt-in target does not enable collection or change health.
+    pub profile_path: Option<PathBuf>,
+    pub configs: Vec<HookConfigObservation>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HookConfigObservation {
+    pub provider: &'static str,
+    pub path: PathBuf,
+    pub state: HookConfigReadState,
+    pub error: Option<String>,
+    pub event_binaries: Vec<HookEventBinaryObservation>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookConfigReadState {
+    /// Readable JSON; this does not imply managed, healthy or trusted content.
+    Present,
+    Missing,
+    Unreadable,
+    InvalidJson,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HookEventBinaryObservation {
+    pub event: &'static str,
+    pub fallback_binary: Option<String>,
+}
+
+pub fn read_hook_configuration_audit(input: &ManagedHookHealthInput) -> HookConfigurationAudit {
+    let asset_root = crate::pm_registry::pm_runtime_dir_for_pm_worktree(&input.worktree_root)
+        .unwrap_or_else(|| input.worktree_root.clone());
+    let mut configs = vec![observe_hook_config(
+        "claude",
+        asset_root.join(".claude/settings.local.json"),
+    )];
+    configs.extend(
+        crate::managed_assets::managed_codex_hook_paths(&asset_root)
+            .into_iter()
+            .map(|path| observe_hook_config("codex", path)),
+    );
+    let nonempty_env = |name| std::env::var_os(name).filter(|value| !value.is_empty());
+    HookConfigurationAudit {
+        asset_root,
+        gwt_bin_path: nonempty_env("GWT_BIN_PATH")
+            .map(|value| value.to_string_lossy().into_owned()),
+        gwt_hook_bin: nonempty_env("GWT_HOOK_BIN")
+            .map(|value| value.to_string_lossy().into_owned()),
+        profile_path: input
+            .profile_path
+            .clone()
+            .or_else(|| nonempty_env("GWT_HOOK_PROFILE_PATH").map(PathBuf::from)),
+        configs,
+    }
+}
+
+fn observe_hook_config(provider: &'static str, path: PathBuf) -> HookConfigObservation {
+    let mut observation = HookConfigObservation {
+        provider,
+        path,
+        state: HookConfigReadState::Present,
+        error: None,
+        event_binaries: Vec::new(),
+    };
+    let raw = match fs::read_to_string(&observation.path) {
+        Ok(raw) => raw,
+        Err(error) => {
+            observation.state = if error.kind() == io::ErrorKind::NotFound {
+                HookConfigReadState::Missing
+            } else {
+                HookConfigReadState::Unreadable
+            };
+            observation.error = Some(error.to_string());
+            return observation;
+        }
+    };
+    let root = match serde_json::from_str::<Value>(&raw) {
+        Ok(root) => root,
+        Err(error) => {
+            observation.state = HookConfigReadState::InvalidJson;
+            observation.error = Some(error.to_string());
+            return observation;
+        }
+    };
+    for event in MANAGED_EVENTS {
+        for command in hook_commands_for_event(&root, event) {
+            let command =
+                gwt_skills::decode_powershell_encoded_command(&command).unwrap_or(command);
+            if is_managed_event_command(&command, event) {
+                observation.event_binaries.push(HookEventBinaryObservation {
+                    event,
+                    fallback_binary: observed_hook_binary(&command),
+                });
+            }
+        }
+    }
+    observation
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HookRepairAction {
@@ -1447,6 +1555,31 @@ fn hook_commands_for_event(root: &Value, event: &str) -> Vec<String> {
 
 fn is_managed_event_command(command: &str, event: &str) -> bool {
     command.contains(&format!("hook event {event}"))
+}
+
+/// Diagnostic parsing also accepts legacy compound prefixes. The audit only
+/// reports identifiable literal binaries; ambiguous commands remain unknown.
+fn observed_hook_binary(command: &str) -> Option<String> {
+    let binary = hook_command_binary_fallback(command)?;
+    let posix_literal = format!("'{}'", binary.replace('\'', "'\\''"));
+    let powershell_literal = format!("'{}'", binary.replace('\'', "''"));
+    let assignment = ["gwt_fallback=", "then gwt_bin="]
+        .iter()
+        .any(|prefix| command.contains(&format!("{prefix}{posix_literal};")));
+    let powershell = command
+        .split_once("else {")
+        .and_then(|(_, rest)| rest.split_once('}'))
+        .is_some_and(|(body, _)| body.trim() == powershell_literal);
+    if assignment || powershell {
+        return Some(binary);
+    }
+    let prefix = command.split_once(" hook ")?.0.trim();
+    let unquoted_literal = prefix == binary
+        && !prefix.is_empty()
+        && prefix
+            .chars()
+            .all(|character| character.is_alphanumeric() || "_./:-".contains(character));
+    (unquoted_literal || prefix == posix_literal).then_some(binary)
 }
 
 fn hook_command_binary_fallback(command: &str) -> Option<String> {

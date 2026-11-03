@@ -666,6 +666,7 @@ pub(crate) fn run_collect<E: CliEnv>(
             let codex_hook_audit = hook::append_codex_trust_health_for_doctor(&input, &mut health);
             let mut payload = serde_json::json!({
                 "codex_hook_audit": codex_hook_audit,
+                "configuration_audit": hook::health::read_hook_configuration_audit(&input),
                 "managed_hook_bin": managed_hook_bin,
                 "repair_writer": repair.as_ref().map(|_| serde_json::json!({
                     "pid": std::process::id(),
