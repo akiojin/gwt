@@ -1,6 +1,27 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.148.1] - 2026-11-03
+
+### Bug Fixes
+
+- **runtime:** Preserve interleaved pane output delivery
+- **ui:** Reclaim selected work terminal after kanban remount
+- **runtime:** Reuse private HTTP connections across caller runtimes
+
+### Miscellaneous Tasks
+
+- **work:** Record backend merge delivery
+- **work:** Record UI candidate verification handoff
+
+### Performance
+
+- **ui:** Preserve terminal hosts and unchanged sparklines
+
+### Testing
+
+- **perf:** Trace native pane input verification
+
 ## [9.148.0] - 2026-11-03
 
 ### Bug Fixes

@@ -5,6 +5,7 @@ param(
     [switch]$AssertCpuBudget,
     [switch]$FunctionalOnly,
     [ValidateSet('debug', 'release')][string]$BuildProfile = 'debug',
+    [string]$BuildTargetDirectory = 'target',
     [ValidateRange(0.001, 1000)][double]$MaxCpuCores = 0.2,
     [string]$SessionsFixture,
     [Parameter(ValueFromRemainingArguments = $true)][string[]]$PlaywrightArguments
@@ -15,10 +16,19 @@ if ($FunctionalOnly -and $AssertCpuBudget) { throw '-FunctionalOnly cannot asser
 if ($FunctionalOnly -and $BuildProfile -ne 'debug') { throw 'Canonical GUI verification requires the checkout debug binaries.' }
 $measurementScope = if ($FunctionalOnly) { 'functional (includes startup)' } else { 'steady idle' }
 $checkout = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
-$gwtRelative = "target/$BuildProfile/gwt.exe"
-$gwtdRelative = "target/$BuildProfile/gwtd.exe"
-$gwtBinary = Join-Path $checkout $gwtRelative
-$gwtdBinary = Join-Path $checkout $gwtdRelative
+function Resolve-CheckoutBuildDirectory([string]$Checkout, [string]$TargetDirectory, [string]$Profile) {
+    $root = [IO.Path]::GetFullPath($Checkout).TrimEnd('/', '\')
+    $target = [IO.Path]::GetFullPath($TargetDirectory, $root)
+    if (!$target.StartsWith($root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Build target must be inside this checkout.'
+    }
+    Join-Path $target $Profile
+}
+$buildDirectory = Resolve-CheckoutBuildDirectory $checkout $BuildTargetDirectory $BuildProfile
+$gwtBinary = Join-Path $buildDirectory 'gwt.exe'
+$gwtdBinary = Join-Path $buildDirectory 'gwtd.exe'
+$gwtRelative = [IO.Path]::GetRelativePath($checkout, $gwtBinary).Replace('\', '/')
+$gwtdRelative = [IO.Path]::GetRelativePath($checkout, $gwtdBinary).Replace('\', '/')
 $deps = Join-Path $env:LOCALAPPDATA 'Temp/gwt-playwright-win-1.49.1'
 $realProfile = $env:USERPROFILE
 $runId = [Guid]::NewGuid().ToString('N')
@@ -114,6 +124,61 @@ function Assert-HookHealth($doctor) {
         }
     }
 }
+function Write-TerminalDeliveryEvidence {
+    $records = [Collections.Generic.List[object]]::new()
+    $sources = @()
+    $readErrors = @()
+    foreach ($file in Get-ChildItem -LiteralPath "$checkHome/.gwt" -Recurse -File -Filter 'gwt.log*' -ErrorAction SilentlyContinue) {
+        try {
+            $share = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+            $stream = [IO.File]::Open($file.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, $share)
+            $snapshot = [IO.MemoryStream]::new()
+            try { $stream.CopyTo($snapshot); $bytes = $snapshot.ToArray() }
+            finally { $stream.Dispose(); $snapshot.Dispose() }
+            foreach ($line in [Text.Encoding]::UTF8.GetString($bytes).Split("`n")) {
+                try { $event = $line | ConvertFrom-Json -ErrorAction Stop } catch { continue }
+                if ($event.target -eq 'gwt.terminal.delivery') { $records.Add($event) }
+            }
+            $sources += @{path=[IO.Path]::GetRelativePath($checkHome, $file.FullName);bytes=$bytes.Length;
+                sha256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()}
+        } catch { $readErrors += $_.Exception.Message }
+    }
+    $counts = @{}
+    foreach ($group in $records | Group-Object { $_.fields.stage }) { $counts[$group.Name] = $group.Count }
+    $coalesced = @{}
+    $coalescedObservations = 0L
+    $broadcastLostObservations = 0L
+    foreach ($record in $records) {
+        $fields = $record.fields
+        if ($fields.stage -ceq 'gui_output_coalesced') {
+            $key = @($fields.project_key, $fields.connection_id, $fields.pane_id, $fields.incarnation, $fields.retained_seq, $fields.discarded_seq) -join '|'
+            $coalesced[$key] = $true
+            $coalescedObservations += $fields.discarded_count
+        } elseif ($fields.stage -ceq 'owner_broadcast_lag') { $broadcastLostObservations += $fields.discarded_count }
+    }
+    $gapCauses = @{gui_inbox_coalescing=0;predecessor_unavailable=0;unattributed=0}
+    $gaps = @($records | Where-Object { $_.fields.stage -ceq 'output_gap' })
+    foreach ($gap in $gaps) {
+        $fields = $gap.fields
+        if ($fields.previous_seq -ceq 'None') { $gapCauses.predecessor_unavailable++ }
+        else {
+            $previousSeq = if ($fields.previous_seq -cmatch '^Some\((\d+)\)$') { [ulong]$Matches[1] } else { $null }
+            $key = @($fields.project_key, $fields.connection_id, $fields.pane_id, $fields.incarnation, $fields.seq, $previousSeq) -join '|'
+            if ($null -ne $previousSeq -and $previousSeq -gt [ulong]$fields.accepted_seq -and $coalesced.ContainsKey($key)) {
+                $gapCauses.gui_inbox_coalescing++
+            } else { $gapCauses.unattributed++ }
+        }
+    }
+    $summary = @{status=if ($readErrors.Count) {'partial'} elseif ($records.Count) {'observed'} else {'unobserved'};
+        target='gwt.terminal.delivery';filter='info,gwt.terminal.delivery=debug';observed_events=$records.Count;
+        counts_by_stage=$counts;observed_gap_events=if ($records.Count) {$gaps.Count} else {$null};
+        gap_causes=$gapCauses;gui_discarded_observations=$coalescedObservations;private_broadcast_lost_observations=$broadcastLostObservations;
+        cause_basis='Inbox coalescing requires exact project/connection/native-pane/incarnation/retained-seq plus discarded-seq equal to the missing predecessor above accepted-seq; broadcast lag and connection records alone do not establish a gap cause.';
+        sources=$sources;read_errors=$readErrors;
+        limitation='Observed trace counts only; buffered logs may be lost on forced exit. Global seq distance is not a dropped-chunk count. Correlate predecessor gaps with coalescing, broadcast lag, queue gauges and connection events; absence without capture evidence is unknown.'}
+    ConvertTo-Json -InputObject @($records.ToArray()) -Depth 10 | Set-Content "$artifacts/terminal-delivery-events.json" -Encoding utf8NoBOM
+    $summary | ConvertTo-Json -Depth 6 | Set-Content "$artifacts/terminal-delivery-summary.json" -Encoding utf8NoBOM
+}
 try {
     Set-Location $checkout
     if (!(Test-Path $gwtBinary) -or !(Test-Path $gwtdBinary)) { throw 'Build checkout gwt and gwtd before browser-check.' }
@@ -197,10 +262,22 @@ const events = receipt + 'l';
 fs.writeFileSync(receipt, JSON.stringify(identity));
 fs.writeFileSync(events, '');
 let ownWindow;
+let nativeWindow;
 let busy = false;
 let started = false;
 const period = 120000 / 11;
 const record = value => fs.appendFileSync(events, JSON.stringify(value) + '\n');
+function resolveNativeWindow() {
+  // The GUI compatibility ID differs from the project owner's pane ID.
+  // Read the authoritative row for this actual launch-issued Session once.
+  const result = cp.spawnSync(process.env.GWT_BIN_PATH, [], { env: process.env, windowsHide: true, encoding: 'utf8', timeout: 30000,
+    input: JSON.stringify({ schema_version: 1, operation: 'pane.health', params: {} }) });
+  const envelope = JSON.parse(result.stdout);
+  if (result.status !== 0 || envelope.ok !== true || envelope.operation !== 'pane.health') throw new Error('Own Session pane census failed');
+  const own = JSON.parse(envelope.output).panes.filter(pane => pane.session_id === session);
+  if (own.length !== 1 || typeof own[0].id !== 'string' || !own[0].id) throw new Error('Own Session pane census is missing or ambiguous');
+  return own[0].id;
+}
 async function readPane() {
   const at = new Date().toISOString();
   record({ kind: 'attempt', at });
@@ -209,7 +286,8 @@ async function readPane() {
   const clock = performance.now();
   try {
     // All launch-issued credentials stay in this process and its own CLI child.
-    // stdout is inspected in memory, never forwarded to the PTY or receipt.
+    // Pane output stays in memory. Only a failed envelope's error is retained,
+    // with the launch-issued URL and capability removed before persistence.
     const result = await new Promise(resolve => {
       const child = cp.spawn(process.env.GWT_BIN_PATH, [], { env: process.env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
       let output = '';
@@ -221,10 +299,12 @@ async function readPane() {
         clearTimeout(timeout);
         let envelope;
         try { envelope = JSON.parse(output); } catch {}
-        resolve({ ok: code === 0 && envelope?.ok === true && envelope?.operation === 'pane.read', reason: code === 0 ? 'envelope' : 'exit' });
+        const error = typeof envelope?.error === 'string' ? envelope.error
+          .replaceAll(process.env.GWT_PANE_WS_URL, '<pane-url>').replaceAll(process.env.GWT_HOOK_FORWARD_TOKEN, '<capability>') : undefined;
+        resolve({ ok: code === 0 && envelope?.ok === true && envelope?.operation === 'pane.read', reason: code === 0 ? 'envelope' : 'exit', exit_code: code, error });
       });
       child.stdin.on('error', () => {});
-      child.stdin.end(JSON.stringify({ schema_version: 1, operation: 'pane.read', params: { id: ownWindow, lines: 1 } }));
+      child.stdin.end(JSON.stringify({ schema_version: 1, operation: 'pane.read', params: { id: nativeWindow, lines: 1 } }));
     });
     record({ kind: 'read', at, ended_at: new Date().toISOString(), latency_ms: performance.now() - clock, ...result });
   } finally { busy = false; }
@@ -234,7 +314,8 @@ readline.createInterface({ input: process.stdin, crlfDelay: Infinity }).on('line
   try { command = JSON.parse(line); } catch { return; }
   if (command.kind === 'bind' && !ownWindow && typeof command.id === 'string') {
     ownWindow = command.id;
-    record({ kind: 'bound', window_id: ownWindow, index: command.index, at: new Date().toISOString() });
+    nativeWindow = resolveNativeWindow();
+    record({ kind: 'bound', window_id: ownWindow, native_window_id: nativeWindow, session_id: session, index: command.index, at: new Date().toISOString() });
     process.stdout.write(Array.from({ length: 600 }, (_, index) => '\x1b[36mGWT_IDLE_HISTORY_' + String(index).padStart(4, '0')
       + ' ' + '.'.repeat(80) + '\x1b[0m\r\n').join('') + 'GWT_IDLE_5658_SEEDED_' + command.index + '\r\n');
     void readPane();
@@ -248,6 +329,7 @@ readline.createInterface({ input: process.stdin, crlfDelay: Infinity }).on('line
     }, Math.max(0, first - Date.now()));
   } else if (command.kind === 'probe' && ownWindow && ['BEFORE', 'AFTER'].includes(command.phase)
       && ['dark', 'light'].includes(command.theme) && Number.isInteger(command.index)) {
+    record({ kind: 'probe', theme: command.theme, phase: command.phase, index: command.index, at: new Date().toISOString() });
     process.stdout.write('GWT_IDLE_5658_' + command.theme + '_' + command.phase + '_' + command.index + '\r\n');
   }
 });
@@ -277,7 +359,8 @@ defaultArgs = ["$providerToml", "$receiptsToml"]
     Set-CheckEnvironment $clearLaunch
     Set-CheckEnvironment @{HOME=$checkHome;USERPROFILE=$checkHome;CODEX_HOME="$checkHome/.codex";
         CLAUDE_CONFIG_DIR="$checkHome/.claude";GWT_BROWSER_URL_FILE="$checkHome/url.txt";
-        GWT_HOOK_BIN=$hookBinary;GIT_TERMINAL_PROMPT='0';GH_PROMPT_DISABLED='1'}
+        GWT_HOOK_BIN=$hookBinary;GIT_TERMINAL_PROMPT='0';GH_PROMPT_DISABLED='1';
+        RUST_LOG='info,gwt.terminal.delivery=debug'}
     '{"schema_version":1,"operation":"daemon.start","params":{}}' | Set-Content "$checkHome/daemon-start.json" -Encoding utf8NoBOM
     $daemon = Start-Process -FilePath $gwtdBinary -WorkingDirectory $checkout -WindowStyle Hidden -PassThru -RedirectStandardInput "$checkHome/daemon-start.json" -RedirectStandardOutput "$checkHome/daemon-stdout.log" -RedirectStandardError "$checkHome/daemon-stderr.log"
     $deadline = [DateTime]::UtcNow.AddSeconds(90)
@@ -335,6 +418,8 @@ defaultArgs = ["$providerToml", "$receiptsToml"]
     foreach ($path in @($gwtRelative, $gwtdRelative, 'crates/gwt/src/main.rs',
         'crates/gwt/src/session_inventory.rs', 'crates/gwt/src/index_worker.rs', 'crates/gwt/src/runtime_health_poller.rs', 'crates/gwt/src/agent_capacity.rs',
         'crates/gwt-terminal/src/pane.rs', 'crates/gwt-terminal/src/test_util.rs',
+        'crates/gwt/src/project_runtime/events.rs', 'crates/gwt/src/project_runtime/owner.rs',
+        'crates/gwt/src/project_runtime/transport.rs', 'crates/gwt/src/app_runtime/mod.rs',
         'scripts/diagnostics/issue-5658-browser-check.ps1', 'scripts/diagnostics/issue-5658-cpu.ps1',
         'crates/gwt/playwright/tests/idle-cpu-live.spec.ts')) { $hashes[$path] = (Get-FileHash -LiteralPath (Join-Path $checkout $path) -Algorithm SHA256).Hash.ToLowerInvariant() }
     $launchEvidence = @{git_head=$sourceHead;git_status=@(& git -C $checkout status --short);project=$fixtureProject;repo_hash=$repoHash;
@@ -343,6 +428,7 @@ defaultArgs = ["$providerToml", "$receiptsToml"]
         provider_sha256=$providerHash;ready_requests_per_minute=66;agent_count=12;
         gui_pid=$process.Id;gui_started_at=$process.StartTime.ToUniversalTime().ToString('o');daemon_pid=$daemon.Id;project_key=$projectKey;
         sha256=$hashes;sessions_fixture=$fixture;pm_auto_start=$false;issue_monitor_enabled=$false;background_index='normal';
+        delivery_diagnostic_filter='info,gwt.terminal.delivery=debug';
         user_verification_result='n/a (autonomous)'}
     $launchEvidence.managed_browser_preflight = $hookEvidence
     Set-CheckEnvironment @{GWT_PLAYWRIGHT_BASE_URL=$projectUrl;GWT_PLAYWRIGHT_CHECK_HOME=$checkHome;
@@ -352,6 +438,7 @@ defaultArgs = ["$providerToml", "$receiptsToml"]
         GWT_IDLE_PROJECT_STATE=$projectState;
         GWT_IDLE_CPU_LABEL=$Label;GWT_IDLE_SAMPLE_MS=[string]$SampleMilliseconds;
         GWT_IDLE_BUILD_PROFILE=$BuildProfile;
+        GWT_IDLE_GWTD_BINARY=$gwtdBinary;
         GWT_IDLE_FUNCTIONAL_ONLY=[string][int]$FunctionalOnly.IsPresent;
         GWT_IDLE_ASSERT_BUDGET=[string][int]$AssertCpuBudget.IsPresent;GWT_IDLE_MAX_CORES=$MaxCpuCores.ToString([Globalization.CultureInfo]::InvariantCulture);
         GWT_HEADED_E2E_REPORT=$savedEnvironment['GWT_HEADED_E2E_REPORT'];
@@ -381,6 +468,7 @@ defaultArgs = ["$providerToml", "$receiptsToml"]
             if ($hookEvidence.Count) { $hookEvidence | ConvertTo-Json -Depth 6 | Set-Content "$artifacts/managed-browser-preflight.json" -Encoding utf8NoBOM }
             if ($process) { @{gui_pid=$process.Id;gui_exited=$process.HasExited;daemon_pid=$daemon.Id;daemon_exited=$daemon.HasExited;
                 cleaned_at=[DateTime]::UtcNow.ToString('o')} | ConvertTo-Json | Set-Content "$artifacts/owned-pid-cleanup.json" -Encoding utf8NoBOM }
+            if ($launchEvidence) { Write-TerminalDeliveryEvidence }
         }
     }
 }
