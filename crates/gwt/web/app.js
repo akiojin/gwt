@@ -900,10 +900,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           connectionOverlay.reportInputDropped();
           return "unavailable";
         }
-        // Revisioned names and switches belong to this live connection.
+        // These explicit writes belong to this live connection.
         // Never replay an unacknowledged write after reconnect.
         if ((message.kind === "agent_switch" && message.action.kind !== "read") ||
-            (message.kind === "agent_roster" && message.action.kind === "rename")) {
+            (message.kind === "agent_roster" && message.action.kind === "rename") ||
+            (message.kind === "get_hook_doctor" && message.repair === true)) {
           if (!socket || socket.readyState !== WebSocket.OPEN || socketProjectKey !== activeProjectKey()) return "unavailable";
           try { socket.send(JSON.stringify(message)); return "sent"; } catch (_err) { return "unavailable"; }
         }
@@ -1315,7 +1316,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         // every cleanup event emitted while it was away. Re-subscribe to the
         // operations it still shows as running.
         if (recoverSnapshots === true) resyncSocketSurfaces();
-        else if (socketProjectKey) send({ kind: "get_system_settings" });
+        else if (socketProjectKey) {
+          send({ kind: "get_system_settings" });
+          resyncHookDoctor();
+        }
         syncRunningBranchCleanups();
         requestVisiblePmReports(true);
         requestSupportedAgentRefresh();
@@ -4375,6 +4379,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // document-level <select> guard listeners, wired through this
       // factory.
       const {
+        applyHookDoctorEvent,
         applyGlobalUpdateSettings,
         applyIssueSettingsStatus,
         applyIssueMonitorProfiles,
@@ -4390,6 +4395,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         applySupportedAgentList,
         applySupportedAgentMaintenance,
         requestSupportedAgentRefresh,
+        resyncHookDoctor,
         resyncSettings,
         renderSettingsWindow,
         renderSettingsAgentList,
@@ -5335,6 +5341,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             break;
           case "update_settings":
             applyGlobalUpdateSettings(event);
+            break;
+          case "hook_doctor":
+            applyHookDoctorEvent(event);
             break;
           case "system_settings":
           case "system_settings_updated":

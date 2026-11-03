@@ -1395,6 +1395,19 @@ Managed hooks preserve user hooks while adding gwt runtime behavior for agent
 state, workflow guardrails, Board reminders, discussion/plan/build Stop checks,
 and coordination-event summaries.
 
+**Settings → Project → Hook Center** audits the selected project's hook
+configuration, binary fallbacks, Codex discovery/trust, and opt-in profile path.
+**Regenerate managed hooks** uses the existing managed-only repair and preserves
+user hooks. Trust registration and starting a new agent session remain separate;
+regeneration does not upgrade running sessions. An unknown binary observation
+does not imply trust or successful hook execution.
+If an audit reports invalid or unreadable configuration, fix the listed file
+and refresh the audit before regeneration is available.
+Repairs require the live project connection and are never replayed after
+reconnect. A lost repair reply leaves the outcome Unknown; a read-only refresh
+does not confirm completion. The latest audit and last repair outcome are shown
+separately.
+
 If an agent stop or pane close reports unread Board evidence, read the bodies
 in that same agent session with JSON operation `board.show` and
 `params:{"all":true}`, then retry. Automatic reminders do not acknowledge a
