@@ -294,6 +294,15 @@ test("Works telemetry refresh preserves the terminal host without requesting lay
   f.surface.sync();
   assert.ok(f.mounts.length > mounts, "explicit host synchronization still reclaims runtimes");
   assert.equal(f.layouts.length, layouts + 1, "explicit host synchronization still requests layout");
+  const external = f.document.createElement("aside"); f.document.querySelector("main").append(external);
+  external.append(input);
+  const beforeReclaim = f.mounts.length, beforeLayout = f.layouts.length;
+  f.surface.sync(false);
+  assert.ok(input.parentElement === host, "telemetry reclaims a selected native terminal moved by another surface");
+  assert.equal(f.mounts.length, beforeReclaim + 1, "only the empty selected host is mounted again");
+  assert.equal(f.layouts.length, beforeLayout, "reclaim avoids a global persisted-layout pass");
+  f.surface.sync(false);
+  assert.equal(f.mounts.length, beforeReclaim + 1, "an unchanged host returns to the ordinary no-mount fast path");
   const app = readFileSync(new URL("../app.js", import.meta.url), "utf8");
   assert.match(app, /worksTelemetryModel\.subscribeFrame\(state => state, \(\) => worksSurface\.sync\(false\)\)/);
   f.surface.dispose();

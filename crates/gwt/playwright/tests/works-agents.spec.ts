@@ -399,6 +399,16 @@ test.describe("Works and Agents approved baseline", () => {
       body: JSON.stringify({ scope: "Chromium renderer metrics only; excludes native GUI CPU/RSS", updates: 20,
         observation, before, after: await cdp.send("Performance.getMetrics") }) });
     await cdp.detach();
+    await page.evaluate(() => (window as any).__worksAgentsFixture.remountInKanban());
+    await expect(page.locator('.agent-kanban-root[data-board-id="telemetry-kanban"]')).toBeAttached();
+    await page.evaluate(() => (window as any).__worksAgentsFixture.usage("measured", 21));
+    await expect.poll(() => full(page).locator(".works-terminal-host").evaluate(host => {
+      const state = (window as any).__telemetryObservation;
+      return host.firstElementChild === state.root && host.querySelector(".xterm") === state.terminal;
+    })).toBe(true);
+    await full(page).locator(".xterm-helper-textarea").press("k");
+    await expect.poll(async () => (await sent(page)).some(message =>
+      message.kind === "terminal_input" && message.id === "agent-one" && message.data === "k")).toBe(true);
     await full(page).getByRole("button", { name: "Back to Works" }).click();
     await page.screenshot({ path: info.outputPath("works-telemetry-preserved.png") });
   });
@@ -860,6 +870,13 @@ async function installWorksAgentsBackend(page: Page) {
       },
       workspaceTitle(title: string) { windows.find(data => data.id === "agent-one").dynamic_title = title; socket.emit(workspace()); },
       workspaceStatus(status: string) { windows.find(data => data.id === "agent-one").status = status; socket.emit(workspace()); },
+      remountInKanban() {
+        windows.push(baseWindow("telemetry-kanban", { preset: "agent_kanban", title: "Telemetry Kanban" }));
+        windows.find(data => data.id === "agent-one").placement = {
+          kind: "agent_kanban", board_id: "telemetry-kanban", lane_id: "active", order: 0, collapsed: false,
+        };
+        socket.emit(workspace());
+      },
       reorderMembers(ids: string[]) { members.splice(0, members.length, ...ids.map(id => members.find(member => member.agent_member_id === id))); revision++; socket.emit(rosterSnapshot()); },
       currentIdentity() { return { windows: windows.filter(data => data.session_id).map(({ id, session_id, status }) => ({ id, session_id, status })), agents, assignments: members.map(member => ({ member_id: member.agent_member_id, assignment: member.assignment })) }; },
       deferSchedule() { deferredSchedule = true; },
