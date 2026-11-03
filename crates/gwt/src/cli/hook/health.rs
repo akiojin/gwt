@@ -205,13 +205,23 @@ fn observe_hook_config(provider: &'static str, path: PathBuf) -> HookConfigObser
         }
     };
     for event in MANAGED_EVENTS {
-        for command in hook_commands_for_event(&root, event) {
-            let command =
-                gwt_skills::decode_powershell_encoded_command(&command).unwrap_or(command);
+        let commands = root
+            .get("hooks")
+            .and_then(|hooks| hooks.get(event))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|group| group.get("hooks").and_then(Value::as_array))
+            .flatten()
+            .filter(|hook| hook.get("type").and_then(Value::as_str) == Some("command"))
+            .filter_map(|hook| hook.get("command").and_then(Value::as_str));
+        for command in commands {
+            let command = gwt_skills::decode_powershell_encoded_command(command)
+                .unwrap_or_else(|| command.to_owned());
             if is_managed_event_command(&command, event) {
                 observation.event_binaries.push(HookEventBinaryObservation {
                     event,
-                    fallback_binary: observed_hook_binary(&command),
+                    fallback_binary: observed_hook_binary(&command, event),
                 });
             }
         }
@@ -1559,21 +1569,21 @@ fn is_managed_event_command(command: &str, event: &str) -> bool {
 
 /// Diagnostic parsing also accepts legacy compound prefixes. The audit only
 /// reports identifiable literal binaries; ambiguous commands remain unknown.
-fn observed_hook_binary(command: &str) -> Option<String> {
+fn observed_hook_binary(command: &str, event: &str) -> Option<String> {
+    let command = command.trim();
     let binary = hook_command_binary_fallback(command)?;
     let posix_literal = format!("'{}'", binary.replace('\'', "'\\''"));
-    let powershell_literal = format!("'{}'", binary.replace('\'', "''"));
-    let assignment = ["gwt_fallback=", "then gwt_bin="]
-        .iter()
-        .any(|prefix| command.contains(&format!("{prefix}{posix_literal};")));
-    let powershell = command
-        .split_once("else {")
-        .and_then(|(_, rest)| rest.split_once('}'))
-        .is_some_and(|(body, _)| body.trim() == powershell_literal);
-    if assignment || powershell {
+    let generated = gwt_skills::settings_local::codex_event_hook_commands_with_bin(&binary, event)
+        .into_iter()
+        .any(|expected| {
+            gwt_skills::decode_powershell_encoded_command(&expected).unwrap_or(expected) == command
+        });
+    if generated {
         return Some(binary);
     }
-    let prefix = command.split_once(" hook ")?.0.trim();
+    let prefix = command
+        .strip_suffix(&format!(" hook event {event}"))?
+        .trim();
     let unquoted_literal = prefix == binary
         && !prefix.is_empty()
         && prefix

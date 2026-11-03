@@ -1172,7 +1172,7 @@ fn dispatch_accepts_json_envelope_workspace_update_without_argv_flags() {
 }
 
 #[test]
-fn dispatch_json_envelope_hook_health_and_hook_doctor_return_managed_configuration() {
+fn dispatch_json_envelope_hook_health_returns_managed_health_json() {
     let _env_lock = crate::env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1446,22 +1446,47 @@ fn hook_doctor_reports_codex_trust_command_mismatch_without_registering_it() {
     assert_eq!(fs::read(&hooks_path).unwrap(), hooks_before);
     assert!(!codex_home.join("config.toml").exists());
 
-    // A compound user command is not an identifiable fallback binary.
-    hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"] =
-        serde_json::json!("echo private-value; gwtd hook event SessionStart");
-    fs::write(&hooks_path, serde_json::to_vec(&hooks).unwrap()).unwrap();
-    let before = fs::read(&hooks_path).unwrap();
-    env.stdout.clear();
-    env.stdin =
-        serde_json::json!({"schema_version":1,"operation":"hook.doctor","params":{}}).to_string();
-    assert_eq!(dispatch(&mut env, &["gwtd".to_string()]), 0);
-    let envelope: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
-    let doctor: serde_json::Value =
-        serde_json::from_str(envelope["output"].as_str().unwrap()).unwrap();
-    let observations = &doctor["configuration_audit"];
-    assert!(observations["configs"][1]["event_binaries"][0]["fallback_binary"].is_null());
-    assert!(!observations.to_string().contains("private-value"));
-    assert_eq!(fs::read(&hooks_path).unwrap(), before);
+    for (kind, command) in [
+        (
+            "command",
+            "echo private-value; gwtd hook event SessionStart",
+        ),
+        (
+            "command",
+            r#"printf '%s' "gwt_fallback='private-value';"; gwtd hook event SessionStart"#,
+        ),
+        (
+            "command",
+            r#"gwt_fallback='/opt/first'; gwt_fallback='/opt/second'; "$gwt_fallback" hook event SessionStart"#,
+        ),
+        ("prompt", "gwtd hook event SessionStart"),
+    ] {
+        // A displayed assignment or a reassigned variable is not a known binary.
+        hooks["hooks"]["SessionStart"][0]["hooks"][0]["type"] = serde_json::json!(kind);
+        hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"] = serde_json::json!(command);
+        fs::write(&hooks_path, serde_json::to_vec(&hooks).unwrap()).unwrap();
+        let before = fs::read(&hooks_path).unwrap();
+        env.stdout.clear();
+        env.stdin = serde_json::json!({"schema_version":1,"operation":"hook.doctor","params":{}})
+            .to_string();
+        assert_eq!(dispatch(&mut env, &["gwtd".to_string()]), 0);
+        let envelope: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
+        let doctor: serde_json::Value =
+            serde_json::from_str(envelope["output"].as_str().unwrap()).unwrap();
+        let observations = &doctor["configuration_audit"];
+        let binaries = observations["configs"][1]["event_binaries"]
+            .as_array()
+            .unwrap();
+        if kind == "command" {
+            assert!(binaries[0]["fallback_binary"].is_null(), "{command}");
+        } else {
+            assert!(!binaries
+                .iter()
+                .any(|entry| entry["event"] == "SessionStart"));
+        }
+        assert!(!observations.to_string().contains("private-value"));
+        assert_eq!(fs::read(&hooks_path).unwrap(), before);
+    }
 }
 
 #[test]
