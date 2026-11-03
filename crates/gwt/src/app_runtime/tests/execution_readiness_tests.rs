@@ -1698,6 +1698,15 @@ fn issue_monitor_scan_reconciles_activated_launch_but_preserves_unready_candidat
             .block_on(fixture.owner.wait_monitor_idle())
             .unwrap();
         if activated {
+            // Drive owner recovery after the synthetic filesystem activation.
+            fixture
+                .executor
+                .block_on(
+                    fixture
+                        .owner
+                        .check_monitor_deadlines(std::time::Instant::now()),
+                )
+                .unwrap();
             wait_owner_monitor_fresh_ack(&fixture);
         }
         let probe = fixture
