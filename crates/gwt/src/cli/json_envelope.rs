@@ -687,6 +687,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }),
         "issue.spec.repair" => CliCommand::Issue(IssueCommand::SpecRepair {
             number: required_u64(params, "number")?,
+            archive_comments: optional_u64_vec(params, "archive_comments")?,
         }),
         "issue.cache.repair" => CliCommand::Issue(IssueCommand::CacheRepair {
             number: required_u64(params, "number")?,
@@ -1021,6 +1022,8 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             number: required_u64(params, "number")?,
         }),
         "discussion.create"
+        | "actions.release_policy.add"
+        | "actions.release_policy.rollback"
         | "board.config.set"
         | "repository.required_checks.update"
         | "repository.settings.set"
@@ -1335,6 +1338,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                     .map(|_| required_string(params, "thread_id"))
                     .transpose()?,
             })
+        }
+        "actions.release_policy.status" => {
+            super::actions::release_policy::parse_status(&envelope.params)?;
+            CliCommand::Actions(ActionsCommand::ReleasePolicyStatus)
         }
         "actions.dispatch" => {
             reject_unknown_params(params, &["workflow", "ref", "inputs"], "actions.dispatch")?;
@@ -1891,42 +1898,58 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             })
         }
         "pm.report.post" => {
-            let kind: gwt_core::pm_report::PmReportKind = serde_json::from_value(Value::String(
-                required_string(params, "kind")?,
-            ))
-            .map_err(|_| CliParseError::InvalidValue {
-                flag: "kind",
-                reason: "expected one of: progress, decision, blocker, qa",
-            })?;
-            let question = if kind == gwt_core::pm_report::PmReportKind::Qa {
-                Some(required_string(params, "question")?)
-            } else {
-                optional_string(params, "question")?
-            };
-            let instruction = lookup(params, "instruction")
-                .map(|value| {
-                    serde_json::from_value::<gwt_core::user_instruction::UserInstructionInput>(
-                        value.clone(),
-                    )
-                    .map(Box::new)
-                    .map_err(|error| {
-                        CliParseError::InvalidJson(format!("invalid instruction capture: {error}"))
-                    })
+            if let Some(value) = lookup(params, "submission") {
+                reject_unknown_params(params, &["submission", "project_root"], "pm.report.post")?;
+                let submission: gwt_core::pm_report::Submission =
+                    serde_json::from_value(value.clone()).map_err(|error| {
+                        CliParseError::InvalidJson(format!("invalid report submission: {error}"))
+                    })?;
+                submission
+                    .validate()
+                    .map_err(|error| CliParseError::InvalidJson(error.to_string()))?;
+                CliCommand::Pm(crate::cli::pm::PmCommand::ReportBatch {
+                    project_root: optional_string(params, "project_root")?,
+                    submission: Box::new(submission),
                 })
-                .transpose()?;
-            if instruction.is_some() && kind != gwt_core::pm_report::PmReportKind::Qa {
-                return Err(CliParseError::InvalidValue {
-                    flag: "instruction",
-                    reason: "requires kind: qa",
-                });
+            } else {
+                let kind: gwt_core::pm_report::PmReportKind =
+                    serde_json::from_value(Value::String(required_string(params, "kind")?))
+                        .map_err(|_| CliParseError::InvalidValue {
+                            flag: "kind",
+                            reason: "expected one of: progress, decision, blocker, qa",
+                        })?;
+                let question = if kind == gwt_core::pm_report::PmReportKind::Qa {
+                    Some(required_string(params, "question")?)
+                } else {
+                    optional_string(params, "question")?
+                };
+                let instruction = lookup(params, "instruction")
+                    .map(|value| {
+                        serde_json::from_value::<gwt_core::user_instruction::UserInstructionInput>(
+                            value.clone(),
+                        )
+                        .map(Box::new)
+                        .map_err(|error| {
+                            CliParseError::InvalidJson(format!(
+                                "invalid instruction capture: {error}"
+                            ))
+                        })
+                    })
+                    .transpose()?;
+                if instruction.is_some() && kind != gwt_core::pm_report::PmReportKind::Qa {
+                    return Err(CliParseError::InvalidValue {
+                        flag: "instruction",
+                        reason: "requires kind: qa",
+                    });
+                }
+                CliCommand::Pm(crate::cli::pm::PmCommand::ReportPost {
+                    project_root: optional_string(params, "project_root")?,
+                    kind,
+                    question,
+                    body: required_string(params, "body")?,
+                    instruction,
+                })
             }
-            CliCommand::Pm(crate::cli::pm::PmCommand::ReportPost {
-                project_root: optional_string(params, "project_root")?,
-                kind,
-                question,
-                body: required_string(params, "body")?,
-                instruction,
-            })
         }
         "pm.report.list" => CliCommand::Pm(crate::cli::pm::PmCommand::ReportList {
             project_root: optional_string(params, "project_root")?,
@@ -5780,6 +5803,85 @@ mod tests {
     }
 
     #[test]
+    fn release_policy_status_is_read_only_and_has_a_fixed_target() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let mut env = TestEnv::new(repo);
+        env.stdin = envelope("actions.release_policy.status", json!({}));
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 0);
+        let reply: Value = serde_json::from_slice(&env.stdout).unwrap();
+        let status: Value = serde_json::from_str(reply["output"].as_str().unwrap()).unwrap();
+        assert_eq!(status["workflow"], "prepare-release.yml");
+        assert_eq!(status["repository"], "owner/repo");
+        assert_eq!(status["allowed"], false);
+        assert_eq!(
+            status["requirement"]["permission_stage"],
+            "instruction_or_approval"
+        );
+        assert_eq!(status["token"].as_str().unwrap().len(), 64);
+        assert!(!gwt_core::paths::gwt_config_path().exists());
+        assert!(
+            crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "actions.release_policy.status"
+            )
+        );
+        assert!(
+            !crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "actions.release_policy.add"
+            )
+        );
+        assert!(
+            !crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "actions.release_policy.rollback"
+            )
+        );
+        std::fs::create_dir_all(gwt_core::paths::gwt_home()).unwrap();
+        std::fs::write(
+            gwt_core::paths::gwt_config_path(),
+            "private_metadata = 'POLICY_SECRET_SENTINEL'\n",
+        )
+        .unwrap();
+        env.stdin = envelope("actions.release_policy.status", json!({}));
+        env.stdout.clear();
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 0);
+        assert!(!String::from_utf8_lossy(&env.stdout).contains("POLICY_SECRET_SENTINEL"));
+    }
+
+    #[test]
+    fn release_policy_contract_is_fixed_and_strict() {
+        ok("actions.release_policy.status", json!({}));
+        let request = json!({
+            "request_id": "b4ae91f1-98f3-4fa6-929c-8ce5e3510597",
+            "expected_token": "a".repeat(64),
+            "reason": "Enable the release workflow",
+            "approval_id": "recorded-approval"
+        });
+        ok("actions.release_policy.add", request.clone());
+        for (key, value) in [
+            ("repo", json!("another/repository")),
+            ("workflow", json!("other.yml")),
+            ("ref", json!("main")),
+            ("approved", json!(true)),
+            ("request_id", json!("../receipt")),
+            ("expected_token", json!("HEAD")),
+            ("reason", json!("")),
+        ] {
+            let mut invalid = request.clone();
+            invalid[key] = value;
+            err("actions.release_policy.add", invalid);
+        }
+        err(
+            "actions.release_policy.status",
+            json!({"repo":"another/repository"}),
+        );
+        let mut rollback = request;
+        rollback["added_by"] = json!("cbd15e96-bc2b-478c-a354-302baf307de4");
+        ok("actions.release_policy.rollback", rollback);
+    }
+
+    #[test]
     fn update_settings_status_is_read_only_and_does_not_write_config() {
         let temp = tempfile::TempDir::new().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
@@ -7140,6 +7242,18 @@ mod tests {
     }
 
     #[test]
+    fn issue_spec_repair_accepts_explicit_archive_comments() {
+        assert!(matches!(
+            ok(
+                "issue.spec.repair",
+                json!({"number": 3590, "archive_comments": [5565328835u64]})
+            ),
+            CliCommand::Issue(IssueCommand::SpecRepair { number: 3590, archive_comments })
+                if archive_comments == vec![5565328835]
+        ));
+    }
+
+    #[test]
     fn issue_operations_parse() {
         for op in [
             "issue.view",
@@ -7388,6 +7502,29 @@ mod tests {
     }
 
     #[test]
+    fn pm_report_structured_submission_parser_preserves_typed_contract() {
+        let input = json!({"submission": {
+            "schema_version":1,"request_id":"tick-1","events":[{
+                "episode_id":"wait-1","event_id":"worker","expected_revision":0,"kind":"progress",
+                "state":{"status":"waiting","severity":"routine","impact":"project"},
+                "summary":{"result":"Waiting for CI"},"details":"Full failure remains open","refs":[]
+            }]
+        }});
+        assert!(matches!(
+            ok("pm.report.post", input.clone()),
+            CliCommand::Pm(_)
+        ));
+        let mut mixed = input.clone();
+        mixed["body"] = json!("legacy bypass");
+        assert!(parse(&envelope("pm.report.post", mixed)).is_err());
+        for (key, value) in [("schema_version", json!(2)), ("unknown", json!(true))] {
+            let mut bad = input.clone();
+            bad["submission"][key] = value;
+            assert!(parse(&envelope("pm.report.post", bad)).is_err());
+        }
+    }
+
+    #[test]
     fn pm_report_post_requires_pm_authority_except_for_direct_cli() {
         use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
         let _lock = crate::env_test_lock()
@@ -7463,6 +7600,9 @@ mod tests {
         .unwrap();
         let error = crate::cli::pm::run(&mut env, post(), &mut output).unwrap_err();
         assert!(error.to_string().contains("instruction"), "{error}");
+        // Joined PM capture is tested with real native-message identity in
+        // pm_reporting. This fixture exercises explicit direct-CLI compatibility.
+        drop(_agent);
         let capture = || match ok(
             "pm.report.post",
             json!({"kind":"qa", "question":"Can we ship?", "body":"Checks passed.",

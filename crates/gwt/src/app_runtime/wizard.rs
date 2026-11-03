@@ -4198,7 +4198,17 @@ impl AppRuntime {
                 Some(super::IssueMonitorLaunchDeliveryState::Materializing {
                     window_id,
                     started_at,
+                    accepted_owner,
                 }) => {
+                    // A missing GUI row does not retire the owner's immutable operation.
+                    // Unknown health is not evidence of a replacement owner either.
+                    if accepted_owner.as_ref().is_some_and(|accepted| {
+                        self.project_state(&context)
+                            .and_then(|state| state.project_owner_identity.as_ref())
+                            .is_none_or(|current| current == accepted)
+                    }) {
+                        return Vec::new();
+                    }
                     let live_runtime = self.runtimes.contains_key(&window_id)
                         && self.window_status(&window_id).is_some_and(|status| {
                             !matches!(
@@ -4648,15 +4658,20 @@ impl AppRuntime {
         self.issue_monitor_launch_preparations
             .remove(&issue_monitor_launch_preparation_key(&context, &request));
         if let Some(delivery_id) = request.delivery_id {
-            self.issue_monitor_launch_deliveries.insert(
-                delivery_id,
-                super::IssueMonitorLaunchDeliveryState::LaunchFailed {
-                    message: error.clone(),
-                    session_mode: gwt_agent::SessionMode::Normal,
-                    retryable: true,
-                    fresh_execution: None,
-                },
-            );
+            if !matches!(
+                self.issue_monitor_launch_deliveries.get(&delivery_id),
+                Some(super::IssueMonitorLaunchDeliveryState::LaunchFailed { .. })
+            ) {
+                self.issue_monitor_launch_deliveries.insert(
+                    delivery_id,
+                    super::IssueMonitorLaunchDeliveryState::LaunchFailed {
+                        message: error.clone(),
+                        session_mode: gwt_agent::SessionMode::Normal,
+                        retryable: true,
+                        fresh_execution: None,
+                    },
+                );
+            }
         }
         vec![OutboundEvent::project(
             context.project_key,
@@ -5000,7 +5015,15 @@ impl AppRuntime {
                 Some(super::IssueMonitorLaunchDeliveryState::Materializing {
                     window_id,
                     started_at,
+                    accepted_owner,
                 }) => {
+                    if accepted_owner.as_ref().is_some_and(|accepted| {
+                        self.project_state(&context)
+                            .and_then(|state| state.project_owner_identity.as_ref())
+                            .is_none_or(|current| current == accepted)
+                    }) {
+                        return Vec::new();
+                    }
                     let window_exists = self.tracked_window_exists(&window_id);
                     // A live preparation or its queued completion still owns
                     // this window. The TTL only recovers abandoned placeholders.
@@ -6097,6 +6120,7 @@ impl AppRuntime {
                 super::IssueMonitorLaunchDeliveryState::Materializing {
                     window_id: holder_window_id.clone(),
                     started_at: std::time::Instant::now(),
+                    accepted_owner: None,
                 },
             );
             let proxy = self.proxy.clone();

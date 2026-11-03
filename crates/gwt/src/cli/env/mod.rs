@@ -192,6 +192,9 @@ pub trait CliEnv {
     fn rerun_actions(&mut self, target: crate::cli::ActionsRerunTarget) -> io::Result<String>;
     fn dispatch_actions(&mut self, call: crate::cli::ActionsDispatchCall) -> io::Result<String>;
     fn github_repository(&self) -> io::Result<(String, String)>;
+    fn release_policy_context(&mut self) -> io::Result<crate::cli::ReleasePolicyContext> {
+        super::actions::release_policy::context(self.repo_path())
+    }
     fn pm_settings_snapshot(
         &mut self,
         operation: &str,

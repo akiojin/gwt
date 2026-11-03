@@ -1706,26 +1706,11 @@ impl AppRuntime {
                     .pending_pm_wakes
                     .entry(window_id.clone())
                     .or_insert(delivery.decision);
-                // The user may already have cleared the composer before this
-                // completion arrived. That input event could not flush this slot.
-                let busy = self
-                    .active_agent_sessions
-                    .get(&window_id)
-                    .zip(self.runtimes.get(&window_id))
-                    .is_some_and(|(session, runtime)| {
-                        pm_wake_runtime_is_busy(
-                            &gwt_agent::runtime_state_path(&self.sessions_dir, &session.session_id),
-                            runtime.incarnation,
-                        )
-                    });
-                let paused = pm_registry::load_pm_prefs(&pm_registry::pm_prefs_path_for_repo_path(
-                    &delivery.context.project_root,
-                ))
-                .map(|prefs| prefs.settings.paused)
-                .unwrap_or(true);
-                if !busy && !paused {
-                    self.flush_pending_pm_wake(&window_id);
-                }
+                // The owner's Deferred result outranks the GUI's possibly stale
+                // busy projection. Resubmitting from this completion creates a
+                // tight completion -> worker -> Deferred loop (Issue #6678).
+                // Retain the wake for the next Monitor snapshot, completed input,
+                // runtime hook or Idle edge, which already retry held wakes.
             }
             Ok(PmWakeWrite::Injected) => {
                 tracing::info!(
@@ -2579,6 +2564,15 @@ mod delivery_tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(temp.path());
+        let trace_path = temp.path().join("pm-lock-stages.jsonl");
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_env_filter("gwt.pm.refresh=debug")
+            .with_writer(std::sync::Mutex::new(
+                std::fs::File::create(&trace_path).unwrap(),
+            ))
+            .finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
         let (repo, mut runtime, window_id) = pm_wake_fixture(&temp);
         let _pane = attach_live_pm_pane(&mut runtime, &window_id);
         let (spawner, tasks) = BlockingTaskSpawner::queued();
@@ -2603,6 +2597,15 @@ mod delivery_tests {
         state.source_event = Some("Stop".into());
         state.last_activity_at = chrono::Utc::now() - chrono::Duration::hours(1);
         state.save(&path).unwrap();
+        let lock_count = || {
+            std::fs::read_to_string(&trace_path)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                .filter(|row| row["fields"]["stage"] == "pm_prefs.lock")
+                .count()
+        };
+        let locks_before = lock_count();
         tasks.lock().unwrap().remove(0)();
         assert!(
             capture.prompts().is_empty(),
@@ -2616,11 +2619,24 @@ mod delivery_tests {
             panic!("wake completion")
         };
         assert_eq!(delivery.result, Ok(PmWakeWrite::Deferred));
+        // Native owner truth can arrive before its GUI Session projection.
+        // A missing GUI row used to mean "not busy" and immediately requeue
+        // this same Deferred operation, taking its three locks on every lap.
+        let projection = runtime.active_agent_sessions.remove(&window_id).unwrap();
         runtime.pm_wake_delivery_complete(delivery);
         assert!(
             tasks.lock().unwrap().is_empty(),
             "a silent turn must not cause a retry task storm"
         );
+        let acquisitions = lock_count() - locks_before;
+        assert!(
+            (1..=4).contains(&acquisitions),
+            "one wake acquired {acquisitions} PM locks; limit is 4"
+        );
+        println!("Issue #6678: one deferred PM wake acquired {acquisitions} locks (limit 4)");
+        runtime
+            .active_agent_sessions
+            .insert(window_id.clone(), projection);
         state.status = gwt_agent::AgentStatus::Idle;
         state.last_completed_hook_event_at = Some(state.updated_at);
         state.save(&path).unwrap();
@@ -2794,7 +2810,7 @@ mod delivery_tests {
     }
 
     #[test]
-    fn pm_wake_delivery_retries_when_composer_clears_before_deferred_completion() {
+    fn issue_6678_deferred_pm_wake_waits_for_next_event_after_composer_clears() {
         let _env_lock = env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2828,6 +2844,20 @@ mod delivery_tests {
         finish_input_task(&mut runtime, &tasks, 0);
         runtime.pm_wake_delivery_complete(delivery);
 
+        assert!(
+            tasks.lock().unwrap().is_empty(),
+            "a Deferred completion must not resubmit itself against stale GUI state"
+        );
+        assert_eq!(
+            runtime
+                .project_state(&runtime.test_context())
+                .unwrap()
+                .pending_pm_wakes
+                .get(&window_id),
+            Some(&decision),
+            "the wake remains available to the next external event"
+        );
+        runtime.flush_pending_pm_wake(&window_id);
         assert_eq!(tasks.lock().unwrap().len(), 1);
         assert!(runtime
             .project_state(&runtime.test_context())

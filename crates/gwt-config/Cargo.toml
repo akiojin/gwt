@@ -15,6 +15,7 @@ toml_edit = "0.25"
 thiserror.workspace = true
 tracing.workspace = true
 dirs.workspace = true
+fs2.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc.workspace = true

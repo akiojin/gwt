@@ -604,6 +604,13 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::GetUpdateSettings => {
             FrontendUserActionLog::new("get_update_settings", "update")
         }
+        FrontendEvent::GetHookDoctor { repair, .. } => {
+            FrontendUserActionLog::new("get_hook_doctor", "settings").mode(if *repair {
+                "repair"
+            } else {
+                "audit"
+            })
+        }
         FrontendEvent::GetBoardAuthStatus => {
             FrontendUserActionLog::new("get_board_auth_status", "settings")
         }

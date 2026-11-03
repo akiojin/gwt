@@ -1,5 +1,6 @@
 /** SPEC-1924 T-618: real snapshot loading and live Logs scope isolation. */
-import { appendFile, mkdir, realpath } from "node:fs/promises";
+import { mkdir, realpath } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -69,14 +70,40 @@ test("Logs Project and Global isolate snapshots and live events", async ({ page 
     const date = new Date().toISOString().slice(0, 10);
     const seed = async (directory: string, message: string, projectScope?: string) => {
       await mkdir(directory, { recursive: true });
-      // Appending preserves the isolated server's own concurrent log output.
-      await appendFile(join(directory, `gwt.log.${date}`), `${JSON.stringify({
+      const row = `${JSON.stringify({
         timestamp: new Date().toISOString(),
         level: "INFO",
         target: "gwt.playwright.scope",
         project_scope: projectScope,
         fields: { message },
-      })}\n`);
+      })}\n`;
+      // Cooperate with the real writer's lock-and-seek transaction. A direct
+      // append can otherwise be overwritten between its seek and write.
+      const python = process.platform === "win32" ? "python" : "python3";
+      const result = spawnSync(python, ["-I", "-c", `
+import os, sys
+from pathlib import Path
+directory = Path(sys.argv[1])
+with (directory / ".gwt-log-size.lock").open("a+b") as lock:
+    if os.name == "nt":
+        import msvcrt
+        lock.seek(0)
+        msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(lock, fcntl.LOCK_EX)
+    try:
+        with (directory / ("gwt.log." + sys.argv[2])).open("ab") as output:
+            output.write(sys.stdin.buffer.read())
+    finally:
+        if os.name == "nt":
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+`, directory, date], { input: row, encoding: "utf8", timeout: 15_000, windowsHide: true });
+      expect(result.error, `${python} on PATH is required for locked log seeding`).toBeUndefined();
+      expect(result.status, result.stderr).toBe(0);
     };
     await seed(join(CHECK_HOME, ".gwt", "projects", scope, "logs"), projectMessage, scope);
     await seed(join(CHECK_HOME, ".gwt", "projects", otherScope, "logs"), otherMessage, otherScope);

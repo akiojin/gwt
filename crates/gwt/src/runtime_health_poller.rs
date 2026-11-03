@@ -32,7 +32,7 @@ pub fn spawn_runtime_health_poller(runtime: &tokio::runtime::Runtime, clients: C
 }
 
 async fn run(clients: ClientHub) {
-    let mut poller = Poller::new();
+    let mut poller = None;
     let mut ticker = interval(Duration::from_secs(TICK_SECS));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
@@ -40,6 +40,18 @@ async fn run(clients: ClientHub) {
         if !clients.has_clients() {
             continue;
         }
+        if poller.is_none() {
+            match Poller::new() {
+                Ok(initialized) => poller = Some(initialized),
+                Err(error) => {
+                    tracing::warn!(%error, "runtime health process observation unavailable");
+                    continue;
+                }
+            }
+        }
+        let Some(poller) = poller.as_mut() else {
+            continue;
+        };
         let scope = poller.budget.begin_tick();
         let snapshot = poller.poll_once(Utc::now(), &clients, scope);
         if poller
@@ -120,11 +132,11 @@ struct Poller {
 }
 
 impl Poller {
-    fn new() -> Self {
+    fn new() -> Result<Self, sysinfo::Error> {
         let system =
-            System::new_with_specifics(RefreshKind::nothing().with_cpu(CpuRefreshKind::nothing()));
+            System::new_with_specifics(RefreshKind::nothing().with_cpu(CpuRefreshKind::nothing()))?;
         let logical_cpu_count = system.cpus().len().max(1);
-        Self {
+        Ok(Self {
             system,
             logical_cpu_count,
             root_pid: std::process::id(),
@@ -134,7 +146,7 @@ impl Poller {
             budget: PollBudget::default(),
             known_pids: Vec::new(),
             direct_focus_windows: HashMap::new(),
-        }
+        })
     }
 
     fn poll_once(
@@ -1002,7 +1014,7 @@ mod tests {
         // FR-396: the full reconciliation discovers the runtime PID set; the
         // known-PID refresh reuses it without projecting unrelated processes.
         let clients = crate::embedded_server::ClientHub::default();
-        let mut poller = Poller::new();
+        let mut poller = Poller::new().expect("initialize runtime health poller");
         assert_eq!(
             poller.logical_cpu_count,
             poller.system.cpus().len().max(1),

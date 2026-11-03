@@ -192,6 +192,19 @@ fn scheduled_tick_is_single_flight_per_canonical_project_scope() {
 
 #[test]
 fn authenticated_pm_scan_now_enqueues_one_exact_project_worker_and_refuses_overlap() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Assert committed outcomes through the real ACK and scan gates, not IPC latency.
+    let outcome_budget = gwt_core::deadline_budget::HANG_GUARD
+        .as_millis()
+        .to_string();
+    let _control_budget =
+        ScopedEnvVar::set("GWT_TEST_BUDGET_ISSUE_MONITOR_CONTROL_MS", &outcome_budget);
+    let _durable_control_budget = ScopedEnvVar::set(
+        "GWT_TEST_BUDGET_DURABLE_ISSUE_MONITOR_CONTROL_MS",
+        &outcome_budget,
+    );
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
     let (repo, owner, pm, _) =
@@ -1759,6 +1772,10 @@ fn scheduled_tick_advances_autonomous_launch_without_an_external_daemon() {
     let (completed_root, completed_prefs, completed_at, outcome) =
         run_scheduled_scan_to_completion(&scan_tasks, &recorded);
     super::super::wait_scan_generation_reaper(&completed_prefs);
+    assert!(
+        matches!(&outcome, Ok(ScheduledIssueMonitorScanOutcome::Applied(_))),
+        "the daemon-absent scan must be applied: {outcome:?}"
+    );
     let events = runtime.complete_scheduled_scan_for_test(
         &completed_root,
         &completed_prefs,
@@ -1771,7 +1788,7 @@ fn scheduled_tick_advances_autonomous_launch_without_an_external_daemon() {
             BackendEvent::IssueMonitorStatus { status } => Some(status),
             _ => None,
         })
-        .expect("scheduled status");
+        .unwrap_or_else(|| panic!("scheduled status missing; events: {events:?}"));
     assert_eq!(
         status.total_candidates, 1,
         "the live candidate reached the scheduled snapshot"

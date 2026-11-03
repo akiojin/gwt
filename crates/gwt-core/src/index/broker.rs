@@ -701,6 +701,11 @@ impl RefreshBroker {
             Err(error) if is_contended(&error) => return Ok(None),
             Err(error) => return Err(error.into()),
         }
+        let mut host_lock = PendingHostLock {
+            file: Some(host_lock),
+        };
+        #[cfg(test)]
+        tests::observe_acquired_host_lock(host_lock.file.as_ref().expect("acquired host lock"));
         let now = self.now_millis();
         let background_not_before = read_background_rest(&self.root)?;
         let mut candidates: Vec<(String, TargetRecord)> = self
@@ -779,7 +784,7 @@ impl RefreshBroker {
                         stem,
                         intent,
                         owner_lock: Some(owner_lock),
-                        host_lock: Some(host_lock),
+                        host_lock: host_lock.file.take(),
                         claimed_at_millis: now,
                         settled: false,
                     }));
@@ -1035,6 +1040,20 @@ impl Drop for RefreshClaim {
     }
 }
 
+/// An acquired host lock that has not been transferred into a claim.
+struct PendingHostLock {
+    file: Option<File>,
+}
+
+impl Drop for PendingHostLock {
+    fn drop(&mut self) {
+        if let Some(file) = &self.file {
+            // Closing one handle does not retire a lock retained by an alias.
+            let _ = fs2::FileExt::unlock(file);
+        }
+    }
+}
+
 /// Short-lived exclusive lock serializing read-modify-write of one record.
 struct StateLockGuard {
     file: File,
@@ -1094,6 +1113,20 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    type AcquiredHostLockHook = Box<dyn FnOnce(&File)>;
+
+    thread_local! {
+        static ACQUIRED_HOST_LOCK_HOOK: std::cell::RefCell<Option<AcquiredHostLockHook>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn observe_acquired_host_lock(file: &File) {
+        let hook = ACQUIRED_HOST_LOCK_HOOK.with(|hook| hook.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook(file);
+        }
+    }
 
     impl RefreshBrokerClock for AtomicU64 {
         fn now_millis(&self) -> u64 {
@@ -1222,6 +1255,65 @@ mod tests {
         assert!(broker.claim_next().expect("reclaim during rest").is_none());
         clock.store(12_000, Ordering::SeqCst);
         assert!(broker.claim_next().expect("reclaim").is_some());
+    }
+
+    #[test]
+    fn idle_claim_releases_host_lock_with_a_retained_alias() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let clock = Arc::new(AtomicU64::new(10_000));
+        let broker = RefreshBroker::open_with_clock(
+            tmp.path().join("broker"),
+            Duration::ZERO,
+            clock.clone(),
+        )
+        .expect("open broker");
+        for repo in ["repo-a", "repo-b"] {
+            broker
+                .submit(intent(
+                    RefreshTarget::base(repo, [RefreshScope::Files]),
+                    1,
+                    JobPriority::Background,
+                ))
+                .expect("submit repo");
+        }
+        let first = broker.claim_next().expect("claim").expect("first repo");
+        clock.store(56_000, Ordering::SeqCst);
+        first.complete().expect("complete first repo");
+
+        let retained = std::rc::Rc::new(std::cell::RefCell::new(None));
+        ACQUIRED_HOST_LOCK_HOOK.with(|hook| {
+            let retained = std::rc::Rc::clone(&retained);
+            *hook.borrow_mut() = Some(Box::new(move |file| {
+                // Retain the actual acquisition's open file description without
+                // assuming any historical child process inherited this handle.
+                *retained.borrow_mut() = Some(file.try_clone().expect("clone host lock"));
+            }));
+        });
+        assert!(broker.claim_next().expect("claim during rest").is_none());
+        assert!(retained.borrow().is_some(), "the acquisition hook ran");
+        let probe = open_lock_file(&broker.root.join(HOST_OWNER_LOCK_NAME)).expect("open probe");
+        fs2::FileExt::try_lock_exclusive(&probe)
+            .expect("idle return must retire the host lock even with a retained alias");
+        fs2::FileExt::unlock(&probe).expect("unlock probe");
+
+        clock.store(101_000, Ordering::SeqCst);
+        assert!(broker.claim_next().expect("claim before rest").is_none());
+        clock.store(102_000, Ordering::SeqCst);
+        let successor = broker
+            .claim_next()
+            .expect("claim after rest")
+            .expect("second repo");
+        assert!(is_contended(
+            &fs2::FileExt::try_lock_exclusive(&probe).expect_err("successor holds host lock")
+        ));
+        drop(retained.borrow_mut().take());
+        assert!(is_contended(
+            &fs2::FileExt::try_lock_exclusive(&probe)
+                .expect_err("retired alias drop must preserve successor")
+        ));
+        successor.complete().expect("complete successor");
+        fs2::FileExt::try_lock_exclusive(&probe).expect("settled successor releases host lock");
+        fs2::FileExt::unlock(&probe).expect("unlock final probe");
     }
 
     #[test]
