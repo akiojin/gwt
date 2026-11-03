@@ -330,6 +330,7 @@ fn is_review_dispatch_denied_operation(operation: &str) -> bool {
         return false;
     }
     operation.starts_with("execution.")
+        || operation.starts_with("agent.registry.")
         || operation.starts_with("workspace.")
         || operation.starts_with("build.")
         || operation.starts_with("pr.")
@@ -1468,6 +1469,7 @@ mod tests {
             "pr.checks",
             "workspace.candidates",
             "verify.lease.status",
+            "agent.registry.status",
         ] {
             assert!(
                 !is_review_dispatch_denied_operation(operation),
@@ -1480,6 +1482,7 @@ mod tests {
             "verify.adjudicate",
             "verify.lease.acquire",
             "build.complete",
+            "agent.registry.reconcile",
         ] {
             assert!(
                 is_review_dispatch_denied_operation(operation),

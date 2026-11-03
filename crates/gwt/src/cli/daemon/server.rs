@@ -3159,6 +3159,9 @@ fn try_apply_issue_monitor_control(
             // enable monitoring. Rejecting ON again here closes the whole lane.
             if (max_active_auto && monitor.prefs().agent_roster.is_some())
                 || max_active_agents == Some(0)
+                || max_active_agents.is_some_and(|size| {
+                    crate::agent_names::validate_requested_roster_size(size).is_err()
+                })
                 || (allowed_labels.is_none()
                     && enabled.is_none()
                     && autonomous_mode.is_none()
@@ -3548,6 +3551,9 @@ fn apply_routine_issue_monitor_control(
             changed_at,
             ..
         } => {
+            if max_active_agents.is_some_and(|size| size == 0 || crate::agent_names::validate_requested_roster_size(size).is_err()) {
+                return false;
+            }
             monitor.set_max_active_agents_override_with_source(
                 max_active_agents,
                 crate::issue_monitor::IssueMonitorMaxActiveChangeSource::Gui,
@@ -3556,6 +3562,9 @@ fn apply_routine_issue_monitor_control(
             true
         }
         IssueMonitorControl::MaxActiveAgents(max_active_agents) => {
+            if max_active_agents.is_some_and(|size| size == 0 || crate::agent_names::validate_requested_roster_size(size).is_err()) {
+                return false;
+            }
             monitor.set_max_active_agents_override_with_source(
                 max_active_agents,
                 crate::issue_monitor::IssueMonitorMaxActiveChangeSource::Gui,
@@ -5051,6 +5060,9 @@ fn decode_issue_monitor_control_in_repo(
                     });
                 if (!resident_pm && (enabled == Some(true) || autonomous_mode == Some(true)))
                     || max_active_agents == Some(0)
+                    || max_active_agents.is_some_and(|size| {
+                        crate::agent_names::validate_requested_roster_size(size).is_err()
+                    })
                     || (allowed_labels.is_none()
                         && enabled.is_none()
                         && autonomous_mode.is_none()
@@ -5290,11 +5302,10 @@ fn decode_issue_monitor_control_in_repo(
                 let max_active_agents = if value.is_null() {
                     None
                 } else {
-                    Some(
-                        usize::try_from(value.as_u64()?)
-                            .ok()
-                            .filter(|value| *value > 0)?,
-                    )
+                    Some(usize::try_from(value.as_u64()?).ok().filter(|value| {
+                        *value > 0
+                            && crate::agent_names::validate_requested_roster_size(*value).is_ok()
+                    })?)
                 };
                 if payload.get("control_id").is_some() || payload.get("changed_at").is_some() {
                     let control_id = payload.get("control_id")?.as_str()?;
@@ -15541,6 +15552,7 @@ exit 0
     #[test]
     fn issue_monitor_config_set_decoder_refuses_missing_or_ignored_guards() {
         for config in [
+            serde_json::json!({"max_active_agents": 257, "expected_config_token": "valid-token"}),
             serde_json::json!({"max_active_agents": 4}),
             serde_json::json!({"max_active_agents": 4, "expected_config_token": null}),
             serde_json::json!({"max_active_agents": 4, "expected_config_token": ""}),
@@ -15582,6 +15594,16 @@ exit 0
                 "a legacy or mixed frame must never discard its guard: {payload}"
             );
         }
+        let mut monitor = test_monitor_with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs::default(),
+        );
+        let before = monitor.prefs();
+        assert!(!apply_issue_monitor_control(
+            &mut monitor,
+            IssueMonitorControl::MaxActiveAgents(Some(257))
+        ));
+        assert_eq!(monitor.prefs(), before);
     }
 
     #[test]

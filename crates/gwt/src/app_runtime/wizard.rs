@@ -1792,6 +1792,29 @@ impl AppRuntime {
                 else {
                     return Some(Err("Registered Agent tool is unavailable".into()));
                 };
+                let prefs = match gwt::load_issue_monitor_prefs(
+                    &gwt::issue_monitor_prefs_path_for_repo_path(
+                        &session.wizard.context.quick_start_root,
+                    ),
+                ) {
+                    Ok(prefs) => prefs,
+                    Err(_) => {
+                        return Some(Err("Registered Agent is unavailable; reload Agents".into()))
+                    }
+                };
+                let Some(saved) = gwt::agent_registry::member_profile(
+                    &prefs,
+                    &member.agent_member_id,
+                )
+                .or_else(|| {
+                    new_agent_settings_profile(&[], member.agent_id.as_deref().unwrap_or(""))
+                }) else {
+                    return Some(Err("Registered Agent tool is unavailable".into()));
+                };
+                added.model = saved.model;
+                added.reasoning = saved.reasoning;
+                added.version = saved.version;
+                added.fast_mode = saved.fast_mode;
                 added.agent_member_id = Some(member.agent_member_id);
                 profiles.push(added);
                 sets.active = profiles.len() - 1;

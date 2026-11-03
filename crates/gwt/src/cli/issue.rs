@@ -4634,6 +4634,10 @@ fn validate_monitor_config_set(
              resident PM for this repository",
         ));
     }
+    if let Some(size) = max_active {
+        crate::agent_names::validate_requested_roster_size(size)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    }
     if max_active == Some(0) || (max_active_auto && max_active.is_some()) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -14331,6 +14335,25 @@ mod tests {
             .expect("RFC3339 change time");
 
         let before = std::fs::read(&prefs_path).expect("prefs bytes");
+        out.clear();
+        assert!(run(
+            &mut env,
+            IssueCommand::MonitorConfigSet {
+                expected_config_token: None,
+                allowed_labels: None,
+                project_root: None,
+                enabled: None,
+                autonomous_mode: None,
+                max_active: Some(257),
+                max_active_auto: false,
+                auto_close_merged_issues: None,
+                launch_agent: None,
+                update_drain: None,
+            },
+            &mut out,
+        )
+        .is_err());
+        assert_eq!(std::fs::read(&prefs_path).expect("prefs bytes"), before);
         out.clear();
         assert!(run(
             &mut env,

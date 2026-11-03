@@ -532,12 +532,25 @@ pub(crate) fn synchronize_roster_capacity(
     validate_registered_profiles(prefs, &prefs.launch_profile_pool())
 }
 
+pub(crate) const MAX_AGENT_ROSTER_SIZE: usize = 256;
+
+pub(crate) fn validate_requested_roster_size(size: usize) -> Result<(), String> {
+    if size > MAX_AGENT_ROSTER_SIZE {
+        Err(format!(
+            "Agent roster size must not exceed {MAX_AGENT_ROSTER_SIZE}"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 /// Only explicit capacity controls may resize the shared roster. Cached state
 /// and complete preference saves have no authority to change membership.
 pub(crate) fn resize_shared_roster(
     prefs: &mut crate::IssueMonitorPrefs,
     size: usize,
 ) -> Result<(), String> {
+    validate_requested_roster_size(size)?;
     let tool = prefs
         .launch_profile_pool()
         .first()
@@ -852,9 +865,12 @@ pub(crate) fn apply_roster_action(
                 .map_err(std::io::Error::other)?;
             roster.members.last_mut().expect("added member").pm_eligible = pm_eligible;
         }
-        AgentRosterAction::Resize { size } => roster
-            .resize(size, history, default_tool)
-            .map_err(std::io::Error::other)?,
+        AgentRosterAction::Resize { size } => {
+            validate_requested_roster_size(size).map_err(std::io::Error::other)?;
+            roster
+                .resize(size, history, default_tool)
+                .map_err(std::io::Error::other)?;
+        }
         AgentRosterAction::Rest { ref member_id } => {
             if roster.members.iter().any(|member| {
                 member.agent_member_id == *member_id && member.pm_project_key.is_some()
@@ -1743,12 +1759,42 @@ pub(crate) fn release_reaped_project_member(
     }
     // The real owner captured the Session before Git metadata could disappear.
     // Do not redirect its close into a new path-derived project store.
+    let mut captured_assignment = None;
     let project_key = match captured.repo_hash.as_deref() {
         Some(key) => {
             gwt_core::repo_hash::ProjectKey::parse(key).map_err(|error| error.to_string())?
         }
         None if root.exists() => gwt_core::paths::project_scope_hash(root),
-        None => return Ok(()),
+        None => {
+            let snapshot = crate::agent_registry::SessionMemberSnapshot::load()
+                .map_err(|error| error.to_string())?;
+            let assignment = snapshot
+                .member(member_id)
+                .map_err(|error| error.to_string())?
+                .and_then(|member| member.assignment)
+                .filter(|assignment| {
+                    assignment.role == AgentAssignmentRole::Implementation
+                        && assignment.reservation_id == reservation_id
+                        && assignment.session_id.as_deref() == Some(captured.id.as_str())
+                        && assignment.host_id == crate::process::current_hostname()
+                        && assignment.host_pid == std::process::id()
+                        && assignment.host_started_at.is_some_and(|started| {
+                            started > 0
+                                && Some(started)
+                                    == crate::process::host_process_start_time(std::process::id())
+                        })
+                })
+                .ok_or_else(|| {
+                    "Cannot prove the reaped Agent reservation; retry cleanup".to_string()
+                })?;
+            let key = assignment.project_key.as_deref().ok_or_else(|| {
+                "Reaped Agent reservation has no stored project; retry cleanup".to_string()
+            })?;
+            let project_key =
+                gwt_core::repo_hash::ProjectKey::parse(key).map_err(|error| error.to_string())?;
+            captured_assignment = Some(assignment);
+            project_key
+        }
     };
     if root.exists() && project_key != gwt_core::paths::project_scope_hash(root) {
         return Err("Agent reservation belongs to another project".into());
@@ -1780,15 +1826,28 @@ pub(crate) fn release_reaped_project_member(
                     ));
                 }
             }
+            gwt_agent::SessionPathState::Present(_) if captured_assignment.is_some() => {
+                return Err(std::io::Error::other(
+                    "Reaped Agent Session changed; retry cleanup",
+                ));
+            }
             gwt_agent::SessionPathState::Present(_) => return Ok(()),
             gwt_agent::SessionPathState::Error(error) => return Err(error),
         }
         crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
             let Some(roster) = prefs.agent_roster.as_mut() else {
+                if captured_assignment.is_some() {
+                    return Err(std::io::Error::other(
+                        "Reaped Agent roster unavailable; retry cleanup",
+                    ));
+                }
                 return Ok(());
             };
             let Some(member) = roster.members.iter_mut().find(|member| {
                 member.agent_member_id == member_id
+                    && captured_assignment
+                        .as_ref()
+                        .is_none_or(|expected| member.assignment.as_ref() == Some(expected))
                     && member.assignment.as_ref().is_some_and(|assignment| {
                         assignment
                             .project_key
@@ -1807,6 +1866,11 @@ pub(crate) fn release_reaped_project_member(
                             })
                     })
             }) else {
+                if captured_assignment.is_some() {
+                    return Err(std::io::Error::other(
+                        "Reaped Agent reservation changed; retry cleanup",
+                    ));
+                }
                 return Ok(());
             };
             if prefs.agent_switch_intents.values().any(|intent| {
@@ -1814,6 +1878,11 @@ pub(crate) fn release_reaped_project_member(
                     && !intent.runtime_exit_confirmed
                     && member.assignment.as_ref() == Some(&intent.source.assignment)
             }) {
+                if captured_assignment.is_some() {
+                    return Err(std::io::Error::other(
+                        "Reaped Agent reservation is pinned; retry cleanup",
+                    ));
+                }
                 return Ok(());
             }
             member.assignment = None;
@@ -2496,6 +2565,14 @@ mod tests {
             unpinned_dead_assignments(&prefs, &observed_dead),
             observed_dead
         );
+    }
+
+    #[test]
+    fn requested_roster_upper_bound_accepts_zero_through_256() {
+        for size in [0, 1, 4, 256] {
+            assert!(validate_requested_roster_size(size).is_ok());
+        }
+        assert!(validate_requested_roster_size(257).is_err());
     }
 
     #[test]

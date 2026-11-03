@@ -12159,6 +12159,72 @@ mod tests {
         assert!(!crate::issue_monitor_prefs_path_for_repo_path(&root).exists());
     }
 
+    #[test]
+    fn reaped_member_release_uses_stored_project_after_root_disappears() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let root = home.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let member = crate::agent_names::reserve_project_member(
+            &root, &sessions, "reaped", None, None, None, None,
+        )
+        .unwrap();
+        let (mut snapshot, pane) = unbound_fixture(&root);
+        snapshot.agent_member_id = Some(member.agent_member_id.clone());
+        snapshot.agent_id = gwt_agent::AgentId::Codex;
+        snapshot.repo_hash = None;
+        snapshot.save(&sessions).unwrap();
+        crate::agent_names::bind_project_member_session(
+            &root,
+            &member.agent_member_id,
+            "reaped",
+            &snapshot.id,
+        )
+        .unwrap();
+        let pty = pane.shared_pty();
+        assert!(pty.process_id().is_some_and(|pid| pid != 0));
+        crate::session_finalizer::kill_and_reap(&pty, "pane").unwrap();
+        assert!(pty.tree_exit_confirmed());
+        snapshot.update_status(gwt_agent::AgentStatus::Stopped);
+        snapshot.save(&sessions).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(crate::agent_names::release_reaped_project_member(
+            &root, &sessions, &snapshot, "wrong", &pty
+        )
+        .is_err());
+        let mut other_session = snapshot.clone();
+        other_session.id = "different-session".into();
+        assert!(crate::agent_names::release_reaped_project_member(
+            &root,
+            &sessions,
+            &other_session,
+            "reaped",
+            &pty
+        )
+        .is_err());
+        assert!(crate::agent_registry::SessionMemberSnapshot::load()
+            .unwrap()
+            .member(&member.agent_member_id)
+            .unwrap()
+            .unwrap()
+            .assignment
+            .is_some());
+        crate::agent_names::release_reaped_project_member(
+            &root, &sessions, &snapshot, "reaped", &pty,
+        )
+        .unwrap();
+        let saved = crate::agent_registry::SessionMemberSnapshot::load()
+            .unwrap()
+            .member(&member.agent_member_id)
+            .unwrap()
+            .unwrap();
+        assert!(
+            saved.assignment.is_none(),
+            "exact reaped member must be released"
+        );
+    }
+
     #[tokio::test]
     async fn natural_exit_commits_session_receipt_and_stopped_state_before_terminal_projection() {
         let root = tempfile::tempdir().unwrap();

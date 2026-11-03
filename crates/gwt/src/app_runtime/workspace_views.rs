@@ -3953,8 +3953,9 @@ fn agent_roster_view(
     entries: &[gwt_core::coordination::BoardEntry],
     past_complete: bool,
     sessions_dir: &Path,
-) -> gwt::AgentRosterView {
-    let snapshot = gwt::agent_registry::SessionMemberSnapshot::load().ok();
+) -> std::io::Result<gwt::AgentRosterView> {
+    let snapshot = gwt::agent_registry::SessionMemberSnapshot::load()?;
+    snapshot.configured_pm_member(&context.project_key)?;
     agent_roster_view_from_snapshot(
         context,
         prefs,
@@ -3962,10 +3963,12 @@ fn agent_roster_view(
         entries,
         past_complete,
         sessions_dir,
-        snapshot.as_ref(),
+        Some(&snapshot),
+        true,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn agent_roster_view_from_snapshot(
     context: &ProjectContext,
     prefs: &gwt::IssueMonitorPrefs,
@@ -3974,7 +3977,8 @@ fn agent_roster_view_from_snapshot(
     past_complete: bool,
     sessions_dir: &Path,
     member_snapshot: Option<&gwt::agent_registry::SessionMemberSnapshot>,
-) -> gwt::AgentRosterView {
+    strict: bool,
+) -> std::io::Result<gwt::AgentRosterView> {
     use std::collections::{BTreeMap, BTreeSet};
     let roster = prefs
         .agent_roster
@@ -4006,14 +4010,14 @@ fn agent_roster_view_from_snapshot(
     let member_ids: BTreeMap<_, _> = sessions
         .iter()
         .map(|session| {
-            (
-                session.id.clone(),
-                member_snapshot
-                    .as_ref()
-                    .and_then(|snapshot| snapshot.resolve_session(session).ok().flatten()),
-            )
+            let resolved = match member_snapshot {
+                Some(snapshot) if strict => snapshot.resolve_session(session)?,
+                Some(snapshot) => snapshot.resolve_session(session).ok().flatten(),
+                None => None,
+            };
+            Ok((session.id.clone(), resolved))
         })
-        .collect();
+        .collect::<std::io::Result<_>>()?;
     let posts_for = |session_id: &str| {
         entries
             .iter()
@@ -4237,7 +4241,7 @@ fn agent_roster_view_from_snapshot(
     }
     let capacity =
         gwt::agent_capacity::project_capacity(&context.project_root, &BTreeSet::new(), 0);
-    gwt::AgentRosterView {
+    Ok(gwt::AgentRosterView {
         tuning_choices: None,
         project_key: context.project_key.to_string(),
         revision: roster.revision,
@@ -4252,7 +4256,7 @@ fn agent_roster_view_from_snapshot(
         past_complete,
         by_session,
         error: None,
-    }
+    })
 }
 
 impl AppRuntime {
@@ -4376,7 +4380,7 @@ impl AppRuntime {
                             chrono::DateTime::<chrono::Utc>::MIN_UTC,
                         );
                         let complete = entries.is_ok();
-                        let mut view = if tuning {
+                        let view = if tuning {
                             agent_roster_view_from_snapshot(
                                 &context_owned,
                                 &prefs,
@@ -4385,6 +4389,7 @@ impl AppRuntime {
                                 complete,
                                 &sessions_dir,
                                 immutable_snapshot.as_ref(),
+                                false,
                             )
                         } else {
                             agent_roster_view(
@@ -4396,11 +4401,22 @@ impl AppRuntime {
                                 &sessions_dir,
                             )
                         };
-                        view.tuning_choices = Some(choices);
-                        view.error = error;
-                        BackendEvent::AgentRoster {
-                            roster: view,
-                            request_id: reply_request_id,
+                        match view {
+                            Ok(mut view) => {
+                                view.tuning_choices = Some(choices);
+                                view.error = error;
+                                BackendEvent::AgentRoster {
+                                    roster: view,
+                                    request_id: reply_request_id,
+                                }
+                            }
+                            Err(error) => BackendEvent::AgentRosterError {
+                                project_key: context_owned.project_key.to_string(),
+                                message: format!(
+                                    "Agent roster unavailable; refresh and retry: {error}"
+                                ),
+                                request_id: reply_request_id,
+                            },
                         }
                     }
                     Err(error) => BackendEvent::AgentRosterError {
@@ -6313,6 +6329,58 @@ mod bounded_cache_merge_tests {
     use super::*;
 
     #[test]
+    fn roster_view_rejects_unreadable_registry_instead_of_fabricating_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let root = temp.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let context = ProjectContext {
+            tab_id: "project".into(),
+            project_key: gwt_core::repo_hash::compute_path_hash(&root),
+            generation: 1,
+            project_root: root,
+        };
+        let prefs = gwt::IssueMonitorPrefs {
+            agent_roster: Some(
+                serde_json::from_value(
+                    serde_json::json!({"schema_version":1,"revision":1,"members":[]}),
+                )
+                .unwrap(),
+            ),
+            ..Default::default()
+        };
+        let path = gwt::agent_registry::path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"invalid registry").unwrap();
+        let result = agent_roster_view(
+            &context,
+            &prefs,
+            &[],
+            &[],
+            true,
+            &gwt_core::paths::gwt_sessions_dir(),
+        );
+        assert!(
+            result.is_err(),
+            "unreadable registry must refuse the entire roster"
+        );
+        std::fs::write(gwt::agent_registry::path(), br#"{"schema_version":2,"phase":"prepared","revision":1,"roster":null,"profiles":{},"sources":{},"pm_projects":{}}"#).unwrap();
+        gwt::agent_registry::SessionMemberSnapshot::load().expect("valid Prepared registry");
+        let result = agent_roster_view(
+            &context,
+            &prefs,
+            &[],
+            &[],
+            true,
+            &gwt_core::paths::gwt_sessions_dir(),
+        );
+        assert!(
+            result.is_err(),
+            "Prepared registry must refuse even with no Sessions"
+        );
+    }
+
+    #[test]
     fn roster_history_uses_project_and_member_identity_and_retains_legacy_contributors_without_posts(
     ) {
         let temp = tempfile::tempdir().unwrap();
@@ -6375,7 +6443,8 @@ mod bounded_cache_merge_tests {
             &[],
             true,
             &gwt_core::paths::gwt_sessions_dir(),
-        );
+        )
+        .unwrap();
         assert_eq!(view.members[0].issue_count, Some(1));
         assert_eq!(view.members[0].history.len(), 1);
         assert_eq!(view.members[0].history[0].session_id, own_id);
@@ -6423,6 +6492,7 @@ mod bounded_cache_merge_tests {
                     true,
                     &gwt_core::paths::gwt_sessions_dir(),
                 )
+                .unwrap()
                 .members
                 .remove(0),
             )
@@ -6462,7 +6532,8 @@ mod bounded_cache_merge_tests {
             &[],
             true,
             &gwt_core::paths::gwt_sessions_dir(),
-        );
+        )
+        .unwrap();
         let history = serde_json::to_value(&unknown_view.members[0].history[0]).unwrap();
         assert!(history["name"].is_null());
         assert!(history["model"].is_null());
@@ -6866,7 +6937,8 @@ mod bounded_cache_merge_tests {
                 &[],
                 true,
                 &sessions_dir,
-            );
+            )
+            .unwrap();
             serde_json::to_value(&view.by_session[&source_session.id]).unwrap()
         };
         let facts = work_facts();
