@@ -5,19 +5,34 @@ const owned = new WeakSet();
 function defaultScheduleFrame(callback) {
   let finished = false;
   let frame = null;
+  let timer = null;
+  let task = null;
   const cancel = () => {
     finished = true;
     clearTimeout(timer);
     if (frame !== null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(frame);
+    if (task) {
+      task.port1.onmessage = null;
+      task.port1.close();
+      task.port2.close();
+      task = null;
+    }
   };
   const run = () => {
     if (finished) return;
     cancel();
     callback();
   };
-  // Background WebViews may suspend rAF. Focus is never a render trigger.
-  const timer = setTimeout(run, 100);
-  if (typeof requestAnimationFrame === 'function') frame = requestAnimationFrame(run);
+  // Hidden documents suspend frames and clamp timers. Keep a yielding task
+  // boundary without waiting for either; focus is never a render trigger.
+  if (typeof document !== 'undefined' && document.hidden && typeof MessageChannel === 'function') {
+    task = new MessageChannel();
+    task.port1.onmessage = run;
+    task.port2.postMessage(null);
+  } else {
+    timer = setTimeout(run, 100);
+    if (typeof requestAnimationFrame === 'function') frame = requestAnimationFrame(run);
+  }
   return cancel;
 }
 

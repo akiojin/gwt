@@ -147,3 +147,42 @@ test('frame fallback runs while rAF is suspended and cancels the losing callback
     Object.assign(globalThis, original);
   }
 });
+
+test('hidden frame views coalesce and cancel without waiting for timers or animation frames', () => {
+  const original = Object.fromEntries(['document', 'MessageChannel', 'requestAnimationFrame', 'setTimeout']
+    .map(key => [key, globalThis[key]]));
+  const tasks = [], values = [], timers = [], frames = [];
+  globalThis.document = { hidden: true };
+  globalThis.requestAnimationFrame = callback => { frames.push(callback); return 0; };
+  globalThis.setTimeout = callback => { timers.push(callback); return 0; };
+  globalThis.MessageChannel = class {
+    constructor() {
+      this.closed = 0;
+      this.posted = 0;
+      this.port1 = { onmessage: null, close: () => this.closed++ };
+      this.port2 = { postMessage: () => this.posted++, close: () => this.closed++ };
+      tasks.push(this);
+    }
+  };
+  const store = createUiStateStore(0);
+  try {
+    store.subscribeFrame(state => state, value => values.push(value));
+    store.update(() => 1);
+    store.update(() => 2);
+    assert.equal(timers.length + frames.length, 0, 'hidden rendering must not depend on clamped timers or suspended frames');
+    assert.equal(tasks.length, 1, 'updates share one yielding task');
+    assert.equal(tasks[0].posted, 1, 'the yielding task is actually submitted');
+    tasks[0].port1.onmessage();
+    assert.deepEqual(values, [0, 2]);
+    assert.equal(tasks[0].closed, 2);
+    store.update(() => 3);
+    const stale = tasks[1].port1.onmessage;
+    store.dispose();
+    stale();
+    assert.equal(tasks[1].closed, 2);
+    assert.deepEqual(values, [0, 2], 'disposed views ignore already delivered callbacks');
+  } finally {
+    store.dispose();
+    Object.assign(globalThis, original);
+  }
+});
