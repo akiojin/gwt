@@ -26,7 +26,7 @@ async function fixture(telemetry = null, initialCatalog = catalog(windows)) {
   const systemSettingsModel = createUiStateStore({ worksPreviewLines: 3 }, options);
   const surface = createWorksSurface({ document, windowCatalogModel, activityModel, rosterModel, systemSettingsModel,
     windowDisplayTitle: w => `${w.agent_name || w.title || "Agent"}${w.dynamic_title ? ` — ${w.dynamic_title}` : ""}`,
-    mountTerminal(id, root, options) { let input = runtimes.get(id); if (!input) { input = document.createElement("textarea"); runtimes.set(id, input); } root.appendChild(input); mounts.push({ id, root, readOnly: options?.readOnly }); },
+    mountTerminal(id, root, options) { let input = runtimes.get(id); if (!input) { input = document.createElement("textarea"); input.className = "xterm"; runtimes.set(id, input); } root.appendChild(input); mounts.push({ id, root, readOnly: options?.readOnly }); },
     mountPreview(id, root, options) { const pre = document.createElement("pre"); pre.textContent = `${id} output`; root.appendChild(pre); previews.add(pre); previewMounts.push({ id, root, lines: options?.tailLines }); return () => { previews.delete(pre); pre.remove(); }; },
     onFocus: id => focused.push(id), onLayout() { layouts.push(true); }, onSelectMember: id => selected.push(id), getTelemetry: () => telemetry,
   });
@@ -295,11 +295,14 @@ test("Works telemetry refresh preserves the terminal host without requesting lay
   assert.ok(f.mounts.length > mounts, "explicit host synchronization still reclaims runtimes");
   assert.equal(f.layouts.length, layouts + 1, "explicit host synchronization still requests layout");
   const external = f.document.createElement("aside"); f.document.querySelector("main").append(external);
+  const progress = f.document.createElement("div"); progress.className = "attachment-progress"; progress.hidden = true;
+  host.append(progress);
   external.append(input);
   const beforeReclaim = f.mounts.length, beforeLayout = f.layouts.length;
   f.surface.sync(false);
-  assert.ok(input.parentElement === host, "telemetry reclaims a selected native terminal moved by another surface");
-  assert.equal(f.mounts.length, beforeReclaim + 1, "only the empty selected host is mounted again");
+  assert.ok(input.parentElement === host, "telemetry reclaims a selected native terminal even with retained attachment progress");
+  assert.ok(progress.parentElement === host, "reclaim preserves attachment progress");
+  assert.equal(f.mounts.length, beforeReclaim + 1, "only the selected host missing its xterm is mounted again");
   assert.equal(f.layouts.length, beforeLayout, "reclaim avoids a global persisted-layout pass");
   f.surface.sync(false);
   assert.equal(f.mounts.length, beforeReclaim + 1, "an unchanged host returns to the ordinary no-mount fast path");
