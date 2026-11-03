@@ -5,6 +5,7 @@ param(
     [switch]$AssertCpuBudget,
     [switch]$FunctionalOnly,
     [ValidateSet('debug', 'release')][string]$BuildProfile = 'debug',
+    [string]$BuildTargetDirectory = 'target',
     [ValidateRange(0.001, 1000)][double]$MaxCpuCores = 0.2,
     [string]$SessionsFixture,
     [Parameter(ValueFromRemainingArguments = $true)][string[]]$PlaywrightArguments
@@ -15,10 +16,19 @@ if ($FunctionalOnly -and $AssertCpuBudget) { throw '-FunctionalOnly cannot asser
 if ($FunctionalOnly -and $BuildProfile -ne 'debug') { throw 'Canonical GUI verification requires the checkout debug binaries.' }
 $measurementScope = if ($FunctionalOnly) { 'functional (includes startup)' } else { 'steady idle' }
 $checkout = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
-$gwtRelative = "target/$BuildProfile/gwt.exe"
-$gwtdRelative = "target/$BuildProfile/gwtd.exe"
-$gwtBinary = Join-Path $checkout $gwtRelative
-$gwtdBinary = Join-Path $checkout $gwtdRelative
+function Resolve-CheckoutBuildDirectory([string]$Checkout, [string]$TargetDirectory, [string]$Profile) {
+    $root = [IO.Path]::GetFullPath($Checkout).TrimEnd('/', '\')
+    $target = [IO.Path]::GetFullPath($TargetDirectory, $root)
+    if (!$target.StartsWith($root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Build target must be inside this checkout.'
+    }
+    Join-Path $target $Profile
+}
+$buildDirectory = Resolve-CheckoutBuildDirectory $checkout $BuildTargetDirectory $BuildProfile
+$gwtBinary = Join-Path $buildDirectory 'gwt.exe'
+$gwtdBinary = Join-Path $buildDirectory 'gwtd.exe'
+$gwtRelative = [IO.Path]::GetRelativePath($checkout, $gwtBinary).Replace('\', '/')
+$gwtdRelative = [IO.Path]::GetRelativePath($checkout, $gwtdBinary).Replace('\', '/')
 $deps = Join-Path $env:LOCALAPPDATA 'Temp/gwt-playwright-win-1.49.1'
 $realProfile = $env:USERPROFILE
 $runId = [Guid]::NewGuid().ToString('N')
@@ -197,10 +207,22 @@ const events = receipt + 'l';
 fs.writeFileSync(receipt, JSON.stringify(identity));
 fs.writeFileSync(events, '');
 let ownWindow;
+let nativeWindow;
 let busy = false;
 let started = false;
 const period = 120000 / 11;
 const record = value => fs.appendFileSync(events, JSON.stringify(value) + '\n');
+function resolveNativeWindow() {
+  // The GUI compatibility ID differs from the project owner's pane ID.
+  // Read the authoritative row for this actual launch-issued Session once.
+  const result = cp.spawnSync(process.env.GWT_BIN_PATH, [], { env: process.env, windowsHide: true, encoding: 'utf8', timeout: 30000,
+    input: JSON.stringify({ schema_version: 1, operation: 'pane.health', params: {} }) });
+  const envelope = JSON.parse(result.stdout);
+  if (result.status !== 0 || envelope.ok !== true || envelope.operation !== 'pane.health') throw new Error('Own Session pane census failed');
+  const own = JSON.parse(envelope.output).panes.filter(pane => pane.session_id === session);
+  if (own.length !== 1 || typeof own[0].id !== 'string' || !own[0].id) throw new Error('Own Session pane census is missing or ambiguous');
+  return own[0].id;
+}
 async function readPane() {
   const at = new Date().toISOString();
   record({ kind: 'attempt', at });
@@ -209,7 +231,8 @@ async function readPane() {
   const clock = performance.now();
   try {
     // All launch-issued credentials stay in this process and its own CLI child.
-    // stdout is inspected in memory, never forwarded to the PTY or receipt.
+    // Pane output stays in memory. Only a failed envelope's error is retained,
+    // with the launch-issued URL and capability removed before persistence.
     const result = await new Promise(resolve => {
       const child = cp.spawn(process.env.GWT_BIN_PATH, [], { env: process.env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
       let output = '';
@@ -221,10 +244,12 @@ async function readPane() {
         clearTimeout(timeout);
         let envelope;
         try { envelope = JSON.parse(output); } catch {}
-        resolve({ ok: code === 0 && envelope?.ok === true && envelope?.operation === 'pane.read', reason: code === 0 ? 'envelope' : 'exit' });
+        const error = typeof envelope?.error === 'string' ? envelope.error
+          .replaceAll(process.env.GWT_PANE_WS_URL, '<pane-url>').replaceAll(process.env.GWT_HOOK_FORWARD_TOKEN, '<capability>') : undefined;
+        resolve({ ok: code === 0 && envelope?.ok === true && envelope?.operation === 'pane.read', reason: code === 0 ? 'envelope' : 'exit', exit_code: code, error });
       });
       child.stdin.on('error', () => {});
-      child.stdin.end(JSON.stringify({ schema_version: 1, operation: 'pane.read', params: { id: ownWindow, lines: 1 } }));
+      child.stdin.end(JSON.stringify({ schema_version: 1, operation: 'pane.read', params: { id: nativeWindow, lines: 1 } }));
     });
     record({ kind: 'read', at, ended_at: new Date().toISOString(), latency_ms: performance.now() - clock, ...result });
   } finally { busy = false; }
@@ -234,7 +259,8 @@ readline.createInterface({ input: process.stdin, crlfDelay: Infinity }).on('line
   try { command = JSON.parse(line); } catch { return; }
   if (command.kind === 'bind' && !ownWindow && typeof command.id === 'string') {
     ownWindow = command.id;
-    record({ kind: 'bound', window_id: ownWindow, index: command.index, at: new Date().toISOString() });
+    nativeWindow = resolveNativeWindow();
+    record({ kind: 'bound', window_id: ownWindow, native_window_id: nativeWindow, session_id: session, index: command.index, at: new Date().toISOString() });
     process.stdout.write(Array.from({ length: 600 }, (_, index) => '\x1b[36mGWT_IDLE_HISTORY_' + String(index).padStart(4, '0')
       + ' ' + '.'.repeat(80) + '\x1b[0m\r\n').join('') + 'GWT_IDLE_5658_SEEDED_' + command.index + '\r\n');
     void readPane();
@@ -248,6 +274,7 @@ readline.createInterface({ input: process.stdin, crlfDelay: Infinity }).on('line
     }, Math.max(0, first - Date.now()));
   } else if (command.kind === 'probe' && ownWindow && ['BEFORE', 'AFTER'].includes(command.phase)
       && ['dark', 'light'].includes(command.theme) && Number.isInteger(command.index)) {
+    record({ kind: 'probe', theme: command.theme, phase: command.phase, index: command.index, at: new Date().toISOString() });
     process.stdout.write('GWT_IDLE_5658_' + command.theme + '_' + command.phase + '_' + command.index + '\r\n');
   }
 });
@@ -352,6 +379,7 @@ defaultArgs = ["$providerToml", "$receiptsToml"]
         GWT_IDLE_PROJECT_STATE=$projectState;
         GWT_IDLE_CPU_LABEL=$Label;GWT_IDLE_SAMPLE_MS=[string]$SampleMilliseconds;
         GWT_IDLE_BUILD_PROFILE=$BuildProfile;
+        GWT_IDLE_GWTD_BINARY=$gwtdBinary;
         GWT_IDLE_FUNCTIONAL_ONLY=[string][int]$FunctionalOnly.IsPresent;
         GWT_IDLE_ASSERT_BUDGET=[string][int]$AssertCpuBudget.IsPresent;GWT_IDLE_MAX_CORES=$MaxCpuCores.ToString([Globalization.CultureInfo]::InvariantCulture);
         GWT_HEADED_E2E_REPORT=$savedEnvironment['GWT_HEADED_E2E_REPORT'];

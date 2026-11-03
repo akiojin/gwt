@@ -10,6 +10,7 @@ type Snapshot = {
   phase: "start" | "end"; process_id: number; process_started_at: string;
   binary: string; binary_sha256: string; timestamp_utc: string;
   elapsed_seconds: number; process_cpu_seconds: number; threads: Thread[];
+  working_set_bytes: number; private_memory_bytes: number; peak_working_set_bytes: number;
 };
 type Traffic = { raw_chunks: number; raw_bytes: number; text: string };
 type Agent = { id: string; session_id: string; status: string };
@@ -60,7 +61,9 @@ test.describe("Issue #5658 idle GUI CPU", () => {
       const created: string[] = [];
       const agents: Agent[] = [];
       const traffic = new Map<string, Traffic>();
-      const markers = new Map<string, { id: string; sent_at: number; raw_latency_ms?: number }>();
+      const markers = new Map<string, { id: string; sent_at: number; raw_latency_ms?: number;
+        snapshot_latency_ms?: number; sent_frame_ms?: number }>();
+      const socketEvents: Array<{ event: string; at: number }> = [];
       const latency: Array<{ phase: string; id: string; raw_latency_ms: number; visible_latency_ms: number }> = [];
       const snapshots: Snapshot[] = [];
       const trafficSnapshots: Array<Record<string, { raw_chunks: number; raw_bytes: number }>> = [];
@@ -71,9 +74,29 @@ test.describe("Issue #5658 idle GUI CPU", () => {
       };
       page.on("pageerror", error => errors.push(error.message));
       page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
-      page.on("websocket", socket => socket.on("framereceived", ({ payload }) => {
+      page.on("websocket", socket => {
+        socketEvents.push({ event: "open", at: performance.now() });
+        socket.on("close", () => socketEvents.push({ event: "close", at: performance.now() }));
+        socket.on("framesent", ({ payload }) => {
+          try {
+            const event = JSON.parse(String(payload));
+            if (event.kind !== "terminal_input") return;
+            const command = JSON.parse(event.data.trim());
+            const probe = markers.get(`GWT_IDLE_5658_${command.theme}_${command.phase}_${command.index}`);
+            if (command.kind === "probe" && probe?.id === event.id) probe.sent_frame_ms = performance.now() - probe.sent_at;
+          } catch { /* Other normal input is not a fixture probe. */ }
+        });
+        socket.on("framereceived", ({ payload }) => {
         try {
           const event = JSON.parse(String(payload));
+          if (event.kind === "terminal_snapshot") {
+            const text = Buffer.from(event.data_base64, "base64").toString("utf8");
+            for (const [marker, probe] of markers) {
+              if (probe.id === event.id && probe.snapshot_latency_ms === undefined && text.includes(marker)) {
+                probe.snapshot_latency_ms = performance.now() - probe.sent_at;
+              }
+            }
+          }
           if (event.kind !== "terminal_output") return;
           const pane = traffic.get(event.id) ?? { raw_chunks: 0, raw_bytes: 0, text: "" };
           const bytes = Buffer.from(event.data_base64, "base64");
@@ -87,7 +110,8 @@ test.describe("Issue #5658 idle GUI CPU", () => {
             }
           }
         } catch (error) { errors.push(`terminal observation: ${String(error)}`); }
-      }));
+        });
+      });
       const probeInput = async (phase: string) => {
         for (const [index, id] of created.entries()) {
           const marker = `GWT_IDLE_5658_${theme}_${phase}_${index}`;
@@ -201,6 +225,11 @@ test.describe("Issue #5658 idle GUI CPU", () => {
         const elapsed = end.elapsed_seconds - start.elapsed_seconds;
         const cpuSeconds = end.process_cpu_seconds - start.process_cpu_seconds;
         const averageCores = cpuSeconds / elapsed;
+        for (const snapshot of snapshots) {
+          expect(snapshot.working_set_bytes).toBeGreaterThan(0);
+          expect(snapshot.private_memory_bytes).toBeGreaterThan(0);
+          expect(snapshot.peak_working_set_bytes).toBeGreaterThan(0);
+        }
         expect(end.process_id).toBe(start.process_id);
         expect(Date.parse(start.process_started_at), "owned GUI retains its launch creation time")
           .toBe(Date.parse(process.env.GWT_PLAYWRIGHT_GUI_STARTED_AT!));
@@ -234,6 +263,10 @@ test.describe("Issue #5658 idle GUI CPU", () => {
         await attachJson("idle-cpu", {
           label, theme, measurement_scope: measurementScope, build_profile: buildProfile, gui_pid: targetPid, requested_sample_ms: sampleMs,
           elapsed_seconds: elapsed, process_cpu_seconds: cpuSeconds, average_cores: averageCores,
+          native_memory: { scope: "owned native gwt process only; excludes external Chromium and provider processes",
+            start_working_set_bytes: start.working_set_bytes, end_working_set_bytes: end.working_set_bytes,
+            start_private_memory_bytes: start.private_memory_bytes, end_private_memory_bytes: end.private_memory_bytes,
+            peak_working_set_bytes: end.peak_working_set_bytes },
           idle_readiness: idleReadiness,
           workload: { kind: "regularly launched custom command Agent PTYs", panes: paneCount, history_lines_per_pane: historyLines,
             padding_bytes_per_line: paddingBytes, ansi_color: true, idle_input_bytes: 0,
@@ -269,7 +302,7 @@ test.describe("Issue #5658 idle GUI CPU", () => {
         verified = true;
       } catch (error) {
         await attachJson("failure-state", {
-          error: String(error), markers: Object.fromEntries(markers),
+          error: String(error), markers: Object.fromEntries(markers), socket_events: socketEvents, native_snapshots: snapshots,
           traffic: Object.fromEntries(traffic), input_latency: latency, agents,
           receipts: await readReceipts(agents).catch(() => []),
           visible: await page.evaluate(ids => Object.fromEntries(ids.map(id =>
@@ -351,7 +384,7 @@ async function readReceipts(agents: Agent[]): Promise<Receipt[]> {
     const ownedPath = relative(process.env.GWT_PLAYWRIGHT_CHECK_HOME!, identity.cwd);
     expect(isAbsolute(ownedPath) || /^\.\.(?:[\\/]|$)/.test(ownedPath), "Agent worktree belongs to the disposable HOME").toBe(false);
     expect(resolve(identity.cli_binary).toLowerCase(), "Agent CLI belongs to the checkout")
-      .toBe(resolve(checkout!, `target/${buildProfile}/gwtd.exe`).toLowerCase());
+      .toBe(resolve(process.env.GWT_IDLE_GWTD_BINARY ?? resolve(checkout!, `target/${buildProfile}/gwtd.exe`)).toLowerCase());
     const records = await readFile(file + "l", "utf8");
     // Read only complete append records while the provider is running.
     const events = records.slice(0, records.lastIndexOf("\n") + 1).split("\n").filter(Boolean).map(line => JSON.parse(line));
