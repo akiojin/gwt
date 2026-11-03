@@ -8,6 +8,7 @@ pub struct ProjectRuntimeClient {
     http: reqwest::Client,
     identity: Option<crate::daemon_subscriber::ProjectOwnerIdentity>,
 }
+
 impl ProjectRuntimeClient {
     pub fn new(endpoint: &gwt_core::daemon::DaemonEndpoint) -> Result<Self, String> {
         Ok(Self {
@@ -17,7 +18,13 @@ impl ProjectRuntimeClient {
                 .ok_or("daemon has no project transport")?,
             token: endpoint.auth_token.clone(),
             project_key: endpoint.scope.repo_hash.clone(),
-            http: reqwest::Client::new(),
+            // GUI callbacks share this client across short-lived Tokio runtimes.
+            // A pooled connection's driver belongs to its originating runtime;
+            // that caller's shutdown must not abort another caller's request.
+            http: reqwest::Client::builder()
+                .pool_max_idle_per_host(0)
+                .build()
+                .map_err(|error| error.to_string())?,
             identity: None,
         })
     }
@@ -235,5 +242,123 @@ impl ProjectRuntimeClient {
                 .unwrap_or("project command refused")
                 .into())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{extract::State, http::HeaderMap, routing::post, Json, Router};
+    use gwt_core::{
+        daemon::{DaemonEndpoint, RuntimeScope, RuntimeTarget},
+        test_support::recv_event,
+    };
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc, Arc,
+    };
+
+    #[test]
+    fn request_survives_another_callers_runtime_shutdown() {
+        struct Fixture {
+            requests: AtomicUsize,
+            received: mpsc::Sender<()>,
+            release: tokio::sync::Notify,
+        }
+        async fn command(
+            State(fixture): State<Arc<Fixture>>,
+            headers: HeaderMap,
+            Json(request): Json<OwnerRequest>,
+        ) -> Json<serde_json::Value> {
+            assert_eq!(headers["authorization"], "Bearer inert-fixture");
+            assert!(matches!(request.command, OwnerCommand::Health));
+            if fixture.requests.fetch_add(1, Ordering::SeqCst) == 1 {
+                fixture.received.send(()).unwrap();
+                fixture.release.notified().await;
+            }
+            Json(serde_json::json!({"ok": true}))
+        }
+        let server = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (received, arrivals) = mpsc::channel();
+        let fixture = Arc::new(Fixture {
+            requests: AtomicUsize::new(0),
+            received,
+            release: tokio::sync::Notify::new(),
+        });
+        let (shutdown, stop) = tokio::sync::oneshot::channel();
+        let state = fixture.clone();
+        let (address, served) = server.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let router = Router::new()
+                .route("/private/project/command", post(command))
+                .with_state(state);
+            let served = tokio::spawn(async move {
+                axum::serve(listener, router)
+                    .with_graceful_shutdown(async {
+                        let _ = stop.await;
+                    })
+                    .await
+                    .unwrap();
+            });
+            (address, served)
+        });
+        let scope = RuntimeScope::new(
+            "fixture",
+            "fixture",
+            std::env::current_dir().unwrap(),
+            RuntimeTarget::Host,
+        )
+        .unwrap();
+        let mut endpoint = DaemonEndpoint::new(
+            scope,
+            std::process::id(),
+            "fixture".into(),
+            "inert-fixture".into(),
+            "fixture".into(),
+        );
+        endpoint.project_transport_url = Some(format!("http://{address}"));
+        let client = ProjectRuntimeClient::new(&endpoint).unwrap();
+        let (finish_first, first_finished) = tokio::sync::oneshot::channel();
+        let (first_ready, ready) = mpsc::channel();
+        let initial = client.clone();
+        let first = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                initial.command(OwnerCommand::Health).await.unwrap();
+                first_ready.send(()).unwrap();
+                let _ = first_finished.await;
+            });
+            drop(runtime);
+        });
+        recv_event(&ready, "first private command completed");
+        let next = client.clone();
+        let second = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(next.command(OwnerCommand::Health))
+        });
+        recv_event(&arrivals, "second private command reached the server");
+        finish_first.send(()).unwrap();
+        first.join().unwrap();
+        fixture.release.notify_one();
+        let result = second.join().unwrap();
+        drop(client);
+        shutdown.send(()).unwrap();
+        server.block_on(served).unwrap();
+        assert!(
+            result.is_ok(),
+            "another caller's runtime teardown aborted the private command: {result:?}"
+        );
+        assert_eq!(fixture.requests.load(Ordering::SeqCst), 2);
     }
 }

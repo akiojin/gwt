@@ -503,6 +503,9 @@ pub fn read_execution_observations(
     issue_numbers: &[u64],
 ) -> BTreeMap<u64, crate::issue_monitor::IssueMonitorExecutionObservation> {
     let _timing = IssueMonitorScanTiming::start("execution-observation");
+    if issue_numbers.is_empty() {
+        return BTreeMap::new();
+    }
     let deadline = gwt_core::operation_deadline::current();
     let span = tracing::Span::current();
     #[cfg(test)]
@@ -1075,10 +1078,14 @@ pub fn refresh_issue_monitor_child_activity(
         let Some((issue, identity, observed, tools)) = owner else {
             continue;
         };
-        if !tools
-            .as_ref()
-            .map_or_else(|| advancing.contains(root), |calls| !calls.is_empty())
-        {
+        if !tools.as_ref().map_or_else(
+            || {
+                advancing
+                    .as_ref()
+                    .is_some_and(|observed| observed.contains(root))
+            },
+            |calls| !calls.is_empty(),
+        ) {
             continue;
         }
         let Some(session) = load_current_activity_session(identity) else {
@@ -1578,6 +1585,9 @@ type OpenPrLaunchObservations = (
     BTreeMap<u64, Vec<crate::cli::LinkedPrSummary>>,
 );
 
+pub(crate) type OpenPrInventoryReadback =
+    Result<std::collections::HashMap<String, u64>, IssueMonitorScanFailure>;
+
 /// Issue #4157: discover related PRs once, then read only PRs belonging to
 /// candidates this terminal could admit. Existing in-flight ownership is not
 /// changed by these normal-launch observations.
@@ -1587,6 +1597,7 @@ fn load_open_pr_launch_observations(
     repo: &str,
     issues: &[IssueMonitorIssue],
     prefs: &crate::IssueMonitorPrefs,
+    observe_inventory: &mut impl FnMut(&OpenPrInventoryReadback),
 ) -> OpenPrLaunchObservations {
     let local = prefs
         .terminal_queues
@@ -1642,6 +1653,7 @@ fn load_open_pr_launch_observations(
     let branches = run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
         gwt_git::pr_status::try_fetch_open_pr_numbers_by_branch_for_monitor(repo_path)
     });
+    observe_inventory(&branches);
     let numbers: Vec<_> = candidates.iter().map(|issue| issue.number).collect();
     let mut linked = BTreeMap::new();
     let linked_result = run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
@@ -1797,6 +1809,16 @@ pub fn load_open_issue_monitor_candidates_for_repo_path_with_provenance(
     owner: &str,
     repo: &str,
 ) -> Result<LoadedIssueMonitorCandidates, String> {
+    load_open_issue_monitor_candidates_for_repo_path_observing(repo_path, owner, repo, |_| {})
+}
+
+/// Expose this scan's inventory result without persisting a failure across scans.
+pub(crate) fn load_open_issue_monitor_candidates_for_repo_path_observing(
+    repo_path: &Path,
+    owner: &str,
+    repo: &str,
+    mut observe_inventory: impl FnMut(&OpenPrInventoryReadback),
+) -> Result<LoadedIssueMonitorCandidates, String> {
     let live_error = match gwt_git::issue::fetch_issue_monitor_listing(owner, repo) {
         Ok(listing) => {
             let source = live_candidate_source(listing.capped);
@@ -1814,6 +1836,10 @@ pub fn load_open_issue_monitor_candidates_for_repo_path_with_provenance(
                     "issue cache full refresh failed; scanning with the live list"
                 );
             }
+            // Cold launch consumers reconstruct source evidence from this cache.
+            // Publish the listed facts before committing their Live observation.
+            cache_live_plain_issue_sources(&cache_root, &listing.issues)
+                .map_err(|error| format!("Live Issue source cache: {error}"))?;
             let (mut issues, readiness_failures) =
                 issue_monitor_candidates_with_readiness_and_refresh_limit(
                     Some(repo_path),
@@ -1881,7 +1907,14 @@ pub fn load_open_issue_monitor_candidates_for_repo_path_with_provenance(
                 })
             });
             let (open_pr_observations, open_pr_observed_at, linked_prs) =
-                load_open_pr_launch_observations(repo_path, owner, repo, &issues, &prefs);
+                load_open_pr_launch_observations(
+                    repo_path,
+                    owner,
+                    repo,
+                    &issues,
+                    &prefs,
+                    &mut observe_inventory,
+                );
             return Ok(LoadedIssueMonitorCandidates {
                 issues,
                 open_pr_observations,
@@ -2006,6 +2039,71 @@ pub fn refresh_issue_cache_for_scan_if_stale(
     })
     .map_err(|error| error.to_string())?;
     Ok(true)
+}
+
+/// Keep cold launch consumers in step with ordinary Live rows, without
+/// fetching comments or certifying a complete snapshot. SPECs retain their
+/// existing targeted refresh path; the full-cache TTL is independent.
+fn cache_live_plain_issue_sources(
+    cache_root: &Path,
+    issues: &[gwt_git::issue::Issue],
+) -> Result<(), String> {
+    let cache = Cache::new(cache_root.to_path_buf());
+    for issue in issues.iter().filter(|issue| {
+        !issue
+            .labels
+            .iter()
+            .any(|label| label.eq_ignore_ascii_case("gwt-spec"))
+    }) {
+        let number = IssueNumber(issue.number);
+        let generation = cache
+            .current_generation(number)
+            .map_err(|error| error.to_string())?;
+        let cached = cache.load_entry(number);
+        let updated_at = issue
+            .updated_at
+            .as_deref()
+            .ok_or_else(|| format!("Issue #{number} has no listed revision"))?;
+        let listed_at = chrono::DateTime::parse_from_rfc3339(updated_at)
+            .map_err(|error| format!("Issue #{number} has an invalid listed revision: {error}"))?;
+        // A targeted read can be newer than a retained listing page.
+        if cached.as_ref().is_some_and(|entry| {
+            chrono::DateTime::parse_from_rfc3339(&entry.snapshot.updated_at.0)
+                .is_ok_and(|cached_at| cached_at > listed_at)
+        }) {
+            continue;
+        }
+        let snapshot = gwt_github::IssueSnapshot {
+            number,
+            author_login: issue.author_login.clone(),
+            title: issue.title.clone(),
+            body: issue.body.clone().unwrap_or_default(),
+            labels: issue.labels.clone(),
+            state: if issue.state.eq_ignore_ascii_case("closed") {
+                IssueState::Closed
+            } else {
+                IssueState::Open
+            },
+            updated_at: gwt_github::UpdatedAt::new(updated_at),
+            // The listing has no comment census. Preserve the existing payloads
+            // and let the normal CAS write invalidate full-snapshot validation.
+            comments: cached
+                .as_ref()
+                .map(|entry| entry.snapshot.comments.clone())
+                .unwrap_or_default(),
+        };
+        if cached
+            .as_ref()
+            .is_some_and(|entry| entry.snapshot == snapshot)
+        {
+            continue;
+        }
+        cache
+            .write_snapshot_if_generation(&snapshot, generation.as_ref())
+            .map_err(|error| format!("Issue #{number} write failed: {error}"))?
+            .ok_or_else(|| format!("Issue #{number} changed during Live source publication"))?;
+    }
+    Ok(())
 }
 
 fn resolve_loaded_issue_monitor_candidates<I>(
@@ -2907,6 +3005,26 @@ pub fn try_advance_autonomous_in_flight(
     daemon_secret: &[u8],
     now: &str,
 ) -> Result<Vec<IssueMonitorScanDegradation>, IssueMonitorScanFailure> {
+    try_advance_autonomous_in_flight_with_inventory(
+        monitor,
+        issues,
+        repo_slug,
+        repo_path,
+        daemon_secret,
+        now,
+        None,
+    )
+}
+
+pub(crate) fn try_advance_autonomous_in_flight_with_inventory(
+    monitor: &mut IssueMonitorState,
+    issues: &[IssueMonitorIssue],
+    repo_slug: &str,
+    repo_path: &Path,
+    daemon_secret: &[u8],
+    now: &str,
+    previously_read: Option<&OpenPrInventoryReadback>,
+) -> Result<Vec<IssueMonitorScanDegradation>, IssueMonitorScanFailure> {
     if !monitor.config.enabled || !monitor.autonomous_mode() {
         return Ok(Vec::new());
     }
@@ -2918,7 +3036,13 @@ pub fn try_advance_autonomous_in_flight(
     // it is launched, so the in-flight set is queue-sized, not slot-sized, and a
     // `gh pr list --head` per candidate grew with the queue until the fan-out
     // could not finish inside any scan budget.
-    let open_prs = read_open_pr_inventory(monitor, &in_flight, repo_path, &mut degradations);
+    let open_prs = read_open_pr_inventory(
+        monitor,
+        &in_flight,
+        repo_path,
+        &mut degradations,
+        previously_read,
+    );
     for issue_number in in_flight {
         // The branch this candidate's readbacks are about, named up front so a
         // failure can say which one went unknown even when it failed before the
@@ -2991,6 +3115,7 @@ fn read_open_pr_inventory(
     in_flight: &[u64],
     repo_path: &Path,
     degradations: &mut Vec<IssueMonitorScanDegradation>,
+    previously_read: Option<&OpenPrInventoryReadback>,
 ) -> Option<std::collections::HashMap<String, u64>> {
     let implementing = in_flight
         .iter()
@@ -3008,18 +3133,23 @@ fn read_open_pr_inventory(
     } else {
         format!("{implementing} implementing candidates")
     });
-    if !readback_fan_out_has_budget() {
-        degradations.push(IssueMonitorScanDegradation {
-            stage: IssueMonitorScanStage::OpenPrReadback,
-            target,
-            continuation: IssueMonitorScanContinuation::StaleReadback,
-            detail: "scan budget reserved for the launch stage".to_string(),
-        });
-        return None;
-    }
-    match run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
-        gwt_git::pr_status::try_fetch_open_pr_numbers_by_branch_for_monitor(repo_path)
-    }) {
+    let inventory = if let Some(result) = previously_read {
+        result.clone()
+    } else {
+        if !readback_fan_out_has_budget() {
+            degradations.push(IssueMonitorScanDegradation {
+                stage: IssueMonitorScanStage::OpenPrReadback,
+                target,
+                continuation: IssueMonitorScanContinuation::StaleReadback,
+                detail: "scan budget reserved for the launch stage".to_string(),
+            });
+            return None;
+        }
+        run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
+            gwt_git::pr_status::try_fetch_open_pr_numbers_by_branch_for_monitor(repo_path)
+        })
+    };
+    match inventory {
         Ok(index) => Some(index),
         Err(failure) => {
             tracing::warn!(
@@ -3866,6 +3996,20 @@ pub(crate) mod tests {
         let mut monitor = crate::IssueMonitorState::with_prefs(config, prefs);
         monitor.set_source_repository(Some(("example", "project")));
         monitor
+    }
+
+    #[test]
+    fn empty_execution_observations_skip_runtime_and_git_reads() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let git_spawns = gwt_core::process::thread_git_spawn_count();
+
+        assert!(read_execution_observations(home.path(), &[]).is_empty());
+        assert_eq!(
+            gwt_core::process::thread_git_spawn_count() - git_spawns,
+            0,
+            "no owners means no runtime census or worktree lookup is needed"
+        );
     }
 
     #[test]
@@ -5168,6 +5312,42 @@ pub(crate) mod tests {
             vec![51],
             "only the Issue that failed may be reported"
         );
+    }
+
+    #[test]
+    fn broken_spec_reason_reaches_monitor_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path().to_path_buf());
+        let mut broken = structured_spec(42, "2026-09-16T02:35:00Z", "Plan", "- [ ] T-001");
+        broken.body = broken.body.replace(
+            "<!-- artifact:tasks BEGIN -->",
+            "<!-- artifact:tasks BEGIN -->\n<!-- artifact:tasks BEGIN -->",
+        );
+        cache.write_snapshot(&broken).unwrap();
+        let (issues, errors) = issue_monitor_candidates_with_readiness(
+            vec![live_issue(42, &["gwt-spec"], Some("2026-09-16T02:35:00Z"))],
+            dir.path(),
+            |_| Ok(()),
+        );
+        assert_eq!(errors.len(), 1);
+        let mut monitor = test_monitor(crate::IssueMonitorConfig::default());
+        monitor.record_candidate(issues[0].clone());
+        monitor.record_readiness_refresh_failures(&errors);
+        let status = serde_json::to_value(monitor.agent_status()).unwrap();
+        let row = &status["inbox"][0];
+        assert_eq!(row["state"], "not_ready");
+        assert!(row["needs_human_reason"]
+            .as_str()
+            .unwrap()
+            .contains("nested BEGIN"));
+        assert!(monitor.queued_issue_numbers().is_empty());
+
+        // A repaired revision is re-evaluated normally; diagnostics never park it.
+        let mut repaired = issues[0].clone();
+        repaired.readiness = IssueMonitorReadiness::ReadyWithOpenTasks;
+        monitor.record_candidate(repaired);
+        let status = serde_json::to_value(monitor.agent_status()).unwrap();
+        assert!(status["inbox"][0].get("needs_human_reason").is_none());
     }
 
     /// Issue #4436 AC-3: the legacy create-body transport left `gwt-spec`
@@ -7921,6 +8101,178 @@ pub(crate) mod tests {
         let within_ttl = refresh_issue_cache_for_scan_if_stale(&repo_path, &cache_root)
             .expect("fresh cache is left alone");
         assert!(!within_ttl, "a fresh cache does not spend a list call");
+    }
+
+    #[test]
+    fn issue_5876_live_plain_source_reaches_cold_delivery_inside_cache_ttl() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _gh_lock = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let cache_root = crate::issue_cache::issue_cache_root_for_repo_slug("example", "repo");
+        let cache = Cache::new(cache_root.clone());
+        let mut source = github_issue(42);
+        source.author_login = Some("akiojin".into());
+        source.updated_at = UpdatedAt::new("2026-11-01T00:00:00Z");
+        source.comments = vec![gwt_github::client::CommentSnapshot {
+            id: gwt_github::client::CommentId(1),
+            body: "Keep the existing discussion".into(),
+            updated_at: source.updated_at.clone(),
+        }];
+        assert!(cache
+            .write_snapshot_with_receipt(&source)
+            .unwrap()
+            .renewed());
+        let refresh_meta = cache_root.join("refresh-meta.json");
+        let fresh = serde_json::json!({"last_full_refresh": chrono::Utc::now().to_rfc3339(), "ttl_minutes": 15}).to_string();
+        std::fs::write(&refresh_meta, &fresh).unwrap();
+        let fake_gh = write_fake_gh_listing(temp.path(), &[42]);
+        let _gh = gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let _path = gwt_core::test_support::ScopedEnvVar::set(
+            "PATH",
+            std::env::join_paths(
+                std::iter::once(temp.path().to_path_buf()).chain(std::env::split_paths(&path)),
+            )
+            .unwrap(),
+        );
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut monitor = test_monitor(Default::default());
+        monitor.set_source_repository(Some(("akiojin", "gwt")));
+        monitor.terminal_queue_push(&[42], "operator", &now);
+        monitor.record_candidate(cached_issue_monitor_candidate(
+            cache.load_entry(IssueNumber(42)).unwrap(),
+        ));
+        assert!(monitor.apply_confirmed_claim(42, "claim", "owner", "effect", &now));
+        let delivery = monitor.pending_launch_delivery_id(42).unwrap();
+        assert!(monitor.claim_launch_delivery(42, &delivery, "gui", 123, "tab::agent-42", |_| true));
+        let prefs = monitor.prefs();
+        for (label, body, updated_at, allowed) in [
+            (
+                "gwt-feedback",
+                "<!-- gwt-feedback:raw -->",
+                "2026-11-02T00:00:00Z",
+                false,
+            ),
+            (
+                "bug",
+                "Curated repair requirements",
+                "2026-11-02T00:01:00Z",
+                true,
+            ),
+        ] {
+            let rows = serde_json::json!([{"number":42,"user":{"login":"akiojin"},"title":"Owner","body":body,"labels":[{"name":label},{"name":"gwt-queued"}],"state":"open","html_url":"https://example.test/issues/42","updated_at":updated_at}]);
+            let response =
+                format!("HTTP/2.0 200 OK\r\nContent-Type: application/json\r\n\r\n{rows}");
+            std::fs::write(temp.path().join("gh-page-1.http"), response).unwrap();
+            let loaded = load_open_issue_monitor_candidates_for_repo_path_with_provenance(
+                &repo, "example", "repo",
+            )
+            .unwrap();
+            assert_eq!(
+                loaded.source,
+                IssueMonitorCandidateSource::Live,
+                "{loaded:?}"
+            );
+            let mut observed = test_monitor_with_prefs(Default::default(), prefs.clone());
+            observed.set_source_repository(Some(("akiojin", "gwt")));
+            observed.record_candidate(loaded.issues[0].clone());
+            assert_eq!(observed.launch_source_exclusion(42).is_none(), allowed);
+            // Each GUI boundary starts from prefs, then re-reads this cache.
+            let mut cold = test_monitor_with_prefs(Default::default(), observed.prefs());
+            cold.set_source_repository(Some(("akiojin", "gwt")));
+            cold.record_candidate(load_cached_issue_monitor_candidate(&cache_root, 42).unwrap());
+            assert_eq!(
+                cold.launch_source_exclusion(42).is_none(),
+                allowed,
+                "cold cache must preserve the Live source decision"
+            );
+            assert_eq!(cold.has_capacity_for_monitor_spawn(42, false), allowed);
+            assert_eq!(
+                cold.claim_launch_delivery(42, &delivery, "gui", 123, "tab::agent-42", |_| true),
+                allowed
+            );
+            assert_eq!(
+                cold.pending_launch_delivery_id(42).as_deref(),
+                Some(delivery.as_str())
+            );
+            assert_eq!(cold.attempt_count(42), monitor.attempt_count(42));
+            let cached = cache.load_entry(IssueNumber(42)).unwrap().snapshot;
+            assert_eq!(cached.comments.len(), 1);
+            assert_eq!(cached.comments[0].id, source.comments[0].id);
+            assert_eq!(cached.comments[0].body, source.comments[0].body);
+            assert_eq!(std::fs::read_to_string(&refresh_meta).unwrap(), fresh);
+        }
+        assert!(
+            matches!(
+                cache
+                    .load_validated_entry(IssueNumber(42), std::time::Duration::from_secs(60))
+                    .unwrap(),
+                gwt_github::ValidatedCacheEntry::Unvalidated(_)
+            ),
+            "a listing must not fabricate full-comment validation"
+        );
+        let generation = cache.current_generation(IssueNumber(42)).unwrap();
+        load_open_issue_monitor_candidates_for_repo_path_with_provenance(&repo, "example", "repo")
+            .unwrap();
+        assert_eq!(
+            cache.current_generation(IssueNumber(42)).unwrap(),
+            generation,
+            "unchanged Live rows must not rewrite the cache"
+        );
+        let mut newer = cache.load_entry(IssueNumber(42)).unwrap().snapshot;
+        newer.updated_at = UpdatedAt::new("2026-11-02T00:02:00Z");
+        newer.body = "Newer targeted read".into();
+        cache.write_snapshot_with_receipt(&newer).unwrap();
+        let newer = cache.load_entry(IssueNumber(42)).unwrap().snapshot;
+        let generation = cache.current_generation(IssueNumber(42)).unwrap();
+        load_open_issue_monitor_candidates_for_repo_path_with_provenance(&repo, "example", "repo")
+            .unwrap();
+        assert_eq!(cache.load_entry(IssueNumber(42)).unwrap().snapshot, newer);
+        assert_eq!(
+            cache.current_generation(IssueNumber(42)).unwrap(),
+            generation
+        );
+    }
+
+    #[test]
+    fn issue_5876_live_plain_cache_write_failure_refuses_live_scan() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _gh_lock = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let cache_root = crate::issue_cache::issue_cache_root_for_repo_slug("example", "repo");
+        std::fs::create_dir_all(cache_root.parent().unwrap()).unwrap();
+        std::fs::write(&cache_root, "not a cache directory").unwrap();
+        let fake_gh = write_fake_gh_listing(temp.path(), &[42]);
+        let _gh = gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let _path = gwt_core::test_support::ScopedEnvVar::set(
+            "PATH",
+            std::env::join_paths(
+                std::iter::once(temp.path().to_path_buf()).chain(std::env::split_paths(&path)),
+            )
+            .unwrap(),
+        );
+        let error = load_open_issue_monitor_candidates_for_repo_path_with_provenance(
+            &repo, "example", "repo",
+        )
+        .expect_err(
+            "a Live scan must not commit source facts that cold consumers cannot read back",
+        );
+        assert!(error.contains("Live Issue source cache:"), "{error}");
     }
 
     #[test]

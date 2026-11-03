@@ -34,12 +34,55 @@ pub struct PmReportView {
     #[serde(flatten)]
     pub report: gwt_core::pm_report::PmReport,
     pub body_html: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details_html: Option<String>,
 }
 
 impl From<gwt_core::pm_report::PmReport> for PmReportView {
     fn from(report: gwt_core::pm_report::PmReport) -> Self {
-        let body_html = crate::board_remote::markdown::markdown_to_html(&report.body);
-        Self { report, body_html }
+        let body_html = if report.structured.is_some() {
+            String::new()
+        } else {
+            crate::board_remote::markdown::markdown_to_html(&report.body)
+        };
+        let details_html = report.structured.as_ref().map(|structured| {
+            let mut html = crate::board_remote::markdown::markdown_to_html(&structured.details);
+            if !structured.refs.is_empty() {
+                html.push_str(&crate::board_remote::markdown::markdown_to_html(
+                    &structured
+                        .refs
+                        .iter()
+                        .map(|reference| {
+                            let web_url = reqwest::Url::parse(reference).is_ok_and(|url| {
+                                matches!(url.scheme(), "http" | "https") && url.has_host()
+                            }) && !reference
+                                .chars()
+                                .any(|ch| ch.is_whitespace() || matches!(ch, '<' | '>'));
+                            if web_url {
+                                format!("- <{reference}>")
+                            } else {
+                                let literal =
+                                    reference.chars().fold(String::new(), |mut text, ch| {
+                                        if ch.is_ascii_punctuation() {
+                                            text.push('\\');
+                                        }
+                                        text.push(ch);
+                                        text
+                                    });
+                                format!("- {literal}")
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ));
+            }
+            html
+        });
+        Self {
+            report,
+            body_html,
+            details_html,
+        }
     }
 }
 
@@ -3995,12 +4038,19 @@ mod tests {
             request_id: 7, version: Some(version.clone()), snapshot: false,
             current: None,
             reports: vec![super::PmReportView::from(gwt_core::pm_report::PmReport {
+                structured: None,
                 id: "one".into(), kind: gwt_core::pm_report::PmReportKind::Progress, question: None,
                 body: "# Report\n\n**Ready** and `code`\n\n- Item\n\n```sh\ncargo test\n```\n<script>bad()</script>".into(),
                 created_at: chrono::Utc::now(),
             }), super::PmReportView::from(serde_json::from_value::<gwt_core::pm_report::PmReport>(serde_json::json!({
                 "id": "qa", "kind": "qa", "question": "Can we ship?",
                 "body": "**Yes.** Checks passed.", "created_at": "2026-10-13T00:00:00Z"
+            })).unwrap()), super::PmReportView::from(serde_json::from_value::<gwt_core::pm_report::PmReport>(serde_json::json!({
+                "id": "structured", "kind": "progress", "body": "Ready",
+                "created_at": "2026-10-13T00:00:00Z",
+                "structured": {"summary": {"result": "Ready"}, "details": "**Details** <script>bad()</script>",
+                    "refs": ["https://example.com/issues/3431?a=1&b=2", "http://example.com/evidence",
+                        "Issue #3431", "<b>literal</b>", "[label](https://example.com/not-a-url-ref)", "javascript:alert(1)"]}
             })).unwrap())],
         };
         let value = serde_json::to_value(&event).unwrap();
@@ -4025,6 +4075,34 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("<strong>Yes.</strong>"));
+        let details = value["reports"][2]["details_html"].as_str().unwrap();
+        assert!(details.contains("href=\"https://example.com/issues/3431?a=1&amp;b=2\""));
+        assert!(details.contains("href=\"http://example.com/evidence\""));
+        assert_eq!(details.matches("<a ").count(), 2);
+        assert!(details.contains("Issue #3431"));
+        assert!(details.contains("&lt;b&gt;literal&lt;/b&gt;"));
+        assert!(details.contains("[label](https://example.com/not-a-url-ref)"));
+        assert!(!details.contains("<script>"));
+        assert!(!details.contains("href=\"javascript:"));
+        assert_eq!(
+            value["reports"][2]["structured"]["refs"][0],
+            "https://example.com/issues/3431?a=1&b=2"
+        );
+        let BackendEvent::PmReports { reports, .. } = &event else {
+            unreachable!()
+        };
+        for incomplete_details in [
+            "```\nunclosed code block",
+            "Visible evidence\n\n<!-- hidden",
+        ] {
+            let mut report = reports[2].report.clone();
+            report.structured.as_mut().unwrap().details = incomplete_details.into();
+            let projected = super::PmReportView::from(report);
+            let html = projected.details_html.unwrap();
+            assert_eq!(html.matches("<a ").count(), 2, "{incomplete_details}");
+            assert!(html.contains("href=\"https://example.com/issues/3431?a=1&amp;b=2\""));
+            assert!(html.contains("href=\"http://example.com/evidence\""));
+        }
         assert_eq!(
             event.delivery_policy().delivery,
             BackendEventDeliveryClass::Snapshot

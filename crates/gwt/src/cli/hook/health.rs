@@ -111,6 +111,53 @@ pub struct ManagedHookRepairOutcome {
     pub repaired: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookRepairAction {
+    MaterializeManagedGitHooks,
+    RegenerateManagedProviderConfigs,
+    VerifyCodexHookTrust,
+    StartNewAgentSession,
+}
+
+/// Describes an explicit repair request, not detected faults or completed work.
+/// Automatic steps reuse the existing managed writers and their merge semantics.
+/// Trust and adoption by running sessions are outside that configuration repair.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HookRepairPlan {
+    pub automatic: Vec<HookRepairAction>,
+    pub user_actions: Vec<HookRepairAction>,
+    pub new_session_actions: Vec<HookRepairAction>,
+}
+
+impl HookRepairPlan {
+    pub fn for_worktree(worktree_root: &Path) -> Self {
+        let runtime = crate::pm_registry::pm_runtime_dir_for_pm_worktree(worktree_root);
+        let assets = runtime.as_deref().unwrap_or(worktree_root);
+        let claude_surface = assets.join(".claude").exists();
+        let codex_surface = assets.join(".codex").exists();
+        let provider_surface = assets.join(".gwt/opencode").exists()
+            || assets.join(".gwt/openclaw").exists()
+            || assets.join(".gwt/hermes").exists();
+        let mut plan = Self {
+            automatic: vec![HookRepairAction::MaterializeManagedGitHooks],
+            user_actions: Vec::new(),
+            new_session_actions: Vec::new(),
+        };
+        if claude_surface || codex_surface || provider_surface {
+            plan.automatic
+                .push(HookRepairAction::RegenerateManagedProviderConfigs);
+            plan.new_session_actions
+                .push(HookRepairAction::StartNewAgentSession);
+        }
+        if codex_surface {
+            plan.user_actions
+                .push(HookRepairAction::VerifyCodexHookTrust);
+        }
+        plan
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookDoctorPurpose {
     ManagedBrowser,
@@ -198,7 +245,9 @@ pub struct ManagedBrowserPreflight {
 }
 
 pub fn read_managed_browser_preflight(input: &ManagedHookHealthInput) -> ManagedBrowserPreflight {
-    read_managed_browser_preflight_with(input, &ManagedHookFailureSnapshot::read(), || {
+    let mut input = input.clone();
+    input.worktree_root = gwt_core::paths::resolve_current_worktree_root(&input.worktree_root);
+    read_managed_browser_preflight_with(&input, &ManagedHookFailureSnapshot::read(), || {
         super::runtime_state::current_hook_context(&input.worktree_root)
     })
 }
@@ -1570,19 +1619,15 @@ fn cached_runtime_state(path: &Path) -> Arc<CachedRuntimeState> {
 }
 
 pub fn repair_managed_hook_configs(worktree_root: &Path) -> io::Result<ManagedHookRepairOutcome> {
-    let runtime = crate::pm_registry::pm_runtime_dir_for_pm_worktree(worktree_root);
-    let assets = runtime.as_deref().unwrap_or(worktree_root);
-    let claude_surface =
-        assets.join(".claude").exists() || assets.join(".claude/settings.local.json").exists();
-    let codex_surface = assets.join(".codex").exists() || assets.join(".codex/hooks.json").exists();
-    let provider_surface = assets.join(".gwt/opencode").exists()
-        || assets.join(".gwt/openclaw").exists()
-        || assets.join(".gwt/hermes").exists();
+    let plan = HookRepairPlan::for_worktree(worktree_root);
     // #4339: the Git hook directory belongs to the repository, not to any agent
     // provider, so repair it even in a worktree with no agent surface at all.
     let mut repaired = !gwt_skills::materialize_managed_git_hooks(worktree_root)?.is_empty();
 
-    if claude_surface || codex_surface || provider_surface {
+    if plan
+        .automatic
+        .contains(&HookRepairAction::RegenerateManagedProviderConfigs)
+    {
         crate::managed_assets::regenerate_existing_managed_hook_configs(worktree_root)?;
         record_managed_hook_self_healed(worktree_root)?;
         repaired = true;
@@ -1748,6 +1793,87 @@ mod browser_preflight_tests {
     }
 
     #[test]
+    fn managed_browser_nested_cwd_completes_only_for_the_current_git_worktree() {
+        with_source(|input, _, path, runtime| {
+            let nested = input.worktree_root.join("src/deep");
+            fs::create_dir_all(&nested).unwrap();
+            let completion = super::super::runtime_state::capture_hook_completion(&nested)
+                .expect("same worktree subdirectory is a current source");
+            completion.record(Normal);
+            let completed = SessionRuntimeState::load(path).unwrap();
+            assert!(completed.last_completed_hook_event_at > runtime.last_completed_hook_event_at);
+            assert_eq!(completed.last_completed_hook_outcome, Some(Normal));
+
+            let foreign = input.worktree_root.join("vendor/other");
+            fs::create_dir_all(&foreign).unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(&foreign);
+            let foreign_nested = foreign.join("src");
+            fs::create_dir(&foreign_nested).unwrap();
+            assert_eq!(
+                super::super::runtime_state::current_hook_context(&foreign_nested).unwrap_err(),
+                super::super::runtime_state::HookContextError::Foreign
+            );
+            assert!(
+                super::super::runtime_state::capture_hook_completion(&foreign_nested).is_none()
+            );
+            let after = SessionRuntimeState::load(path).unwrap();
+            assert_eq!(
+                after.last_completed_hook_event_at,
+                completed.last_completed_hook_event_at
+            );
+            assert_eq!(
+                after.last_completed_hook_outcome,
+                completed.last_completed_hook_outcome
+            );
+        });
+    }
+
+    #[test]
+    fn managed_browser_nested_cwd_doctor_audits_and_repairs_the_current_git_worktree() {
+        with_source(|input, _, _, _| {
+            let nested = input.worktree_root.join("src/deep");
+            fs::create_dir_all(&nested).unwrap();
+            let mut nested_input = input.clone();
+            nested_input.worktree_root = nested.clone();
+            assert_eq!(
+                read_managed_browser_preflight(&nested_input).result,
+                PreflightResult::Proceed
+            );
+
+            fs::remove_file(input.worktree_root.join(".claude/settings.local.json")).unwrap();
+            let mut env = crate::cli::env::TestEnv::new(nested.clone());
+            let (code, output) = crate::cli::run_collect(
+                &mut env,
+                crate::cli::CliCommand::Hook(crate::cli::HookCommand::Doctor {
+                    purpose: Some(HookDoctorPurpose::ManagedBrowser),
+                    runtime_state_path: None,
+                    profile_path: None,
+                    expected_hook_bin: input.expected_hook_bin.clone(),
+                    repair: true,
+                }),
+            )
+            .unwrap();
+            assert_eq!(code, 0);
+            let payload: serde_json::Value = serde_json::from_str(&output).unwrap();
+            assert_eq!(payload["preflight"]["result"], "proceed", "{payload}");
+            assert!(input
+                .worktree_root
+                .join(".claude/settings.local.json")
+                .is_file());
+            assert!(!nested.join(".claude").exists());
+
+            let foreign = input.worktree_root.join("other");
+            fs::create_dir(&foreign).unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(&foreign);
+            nested_input.worktree_root = foreign;
+            assert_eq!(
+                read_managed_browser_preflight(&nested_input).context,
+                PreflightContext::Foreign
+            );
+        });
+    }
+
+    #[test]
     fn normal_recovery_proceeds_while_legacy_health_and_failure_bytes_are_retained() {
         with_source(|input, session, _, runtime| {
             let row = failure(input, Some(&session.id), runtime.updated_at);
@@ -1771,6 +1897,53 @@ mod browser_preflight_tests {
             assert!(!wire.contains(&input.worktree_root.display().to_string()));
             assert!(!wire.contains(&session.id));
             assert!(!wire.contains("execution_binding"));
+        });
+    }
+
+    #[test]
+    fn historical_ledger_corruption_does_not_block_a_healthy_current_source() {
+        with_source(|input, _, path, _| {
+            let dir = gwt_core::paths::gwt_error_ledger_dir();
+            fs::create_dir_all(&dir).unwrap();
+            let old_day = (chrono::Utc::now() - chrono::Duration::days(3)).date_naive();
+            let ledger = dir.join(format!("errors.{old_day}.jsonl"));
+            let bytes = b"{PRIVATE_BROKEN_ROW}\n";
+            fs::write(&ledger, bytes).unwrap();
+            let source_before = fs::read(path).unwrap();
+            let result = read_managed_browser_preflight(input);
+            assert_eq!(result.result, PreflightResult::Proceed, "{result:?}");
+            assert_eq!(result.context, PreflightContext::Current);
+            assert!(result.reasons.is_empty());
+            assert_eq!(fs::read(&ledger).unwrap(), bytes);
+            assert_eq!(fs::read(path).unwrap(), source_before);
+            let history = gwt_core::error_ledger::list_since(None).unwrap();
+            assert_eq!(history.len(), 1);
+            assert_eq!(history[0].kind, ErrorKind::LedgerCorruption);
+        });
+    }
+
+    #[test]
+    fn current_unknown_and_unreadable_ledgers_still_block_a_healthy_source() {
+        with_source(|input, _, path, _| {
+            let dir = gwt_core::paths::gwt_error_ledger_dir();
+            fs::create_dir_all(&dir).unwrap();
+            let source_before = fs::read(path).unwrap();
+            for day in [
+                chrono::Utc::now().date_naive().to_string(),
+                "unknown".into(),
+            ] {
+                let ledger = dir.join(format!("errors.{day}.jsonl"));
+                fs::write(&ledger, b"{partial").unwrap();
+                let result = read_managed_browser_preflight(input);
+                assert_eq!(result.result, PreflightResult::Unknown, "{result:?}");
+                assert!(result.reasons.contains(&PreflightReason::LedgerUnavailable));
+                fs::remove_file(ledger).unwrap();
+            }
+            fs::create_dir(dir.join("errors.2026-01-01.jsonl")).unwrap();
+            let result = read_managed_browser_preflight(input);
+            assert_eq!(result.result, PreflightResult::Unknown, "{result:?}");
+            assert!(result.reasons.contains(&PreflightReason::LedgerUnavailable));
+            assert_eq!(fs::read(path).unwrap(), source_before);
         });
     }
 
