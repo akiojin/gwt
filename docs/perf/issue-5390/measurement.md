@@ -558,3 +558,17 @@ delivered separately through PR #6705.
 
 User Verification Result: n/a (autonomous).
 Agent Visual Check: n/a (no UI surface).
+
+The first canonical attempt, `vrr-a798ccdc2f1e4de8970f91d2e68368e4`, passed
+rustc and formatting but could not admit Clippy: compiler TEMP was on C,
+with a 99,961,379,020-byte free-space floor and 28,802,355,200 bytes available.
+It was cancelled through the owning operation and remains Interrupted, not PASS.
+Moving compiler TEMP/TMP to D exposed one existing HOME fixture that followed
+that redirected TEMP: the 14-case linked/closing selection passed 13 and failed
+`issue_3924_completion_batch_failure_is_recorded_once` at the OS-temp HOME guard.
+Only that test's Windows TempDir placement now uses LocalAppData/Temp; the
+guard, all assertions, non-Windows placement and worker production code remain
+unchanged. The same selection passed all 14 with D compiler TEMP afterwards.
+Independent review found no blocking issue. This proves the tested placement,
+not every USERPROFILE override or LocalAppData redirection. The complete
+five-command canonical matrix must run fresh for the final committed head.
