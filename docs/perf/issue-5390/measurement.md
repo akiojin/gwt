@@ -497,3 +497,64 @@ The intermediate native canonical record
 `vrr-0bc801c3c9ae4d9ca9ed89cbe58947eb` passed 14/14 commands, including
 1,716 frontend and 101 Rust tests. Its earlier WSL-runner FAIL is retained.
 Neither record establishes final-head, actual headed or Mac acceptance.
+
+### Initial linked-PR page fairness (2026-11-04)
+
+The current bulk timeline reader drained every continuation of the first
+25 Issues before starting the next group. A deep early timeline could therefore
+leave unrelated later Issues unobserved inside the existing 15-second readback
+budget. The installed log recorded `linked PR discovery incomplete`, a process
+deadline error, and `completed_issues=48` at 2026-11-04T06:57:04.059546500+09:00
+and 06:57:38.604358300+09:00. These two observations identify the linked-discovery
+boundary; they do not attribute all 375 open-pr-readback errors observed since
+18:00 UTC to this scheduling mechanism.
+
+The reader now queues every initial group before incomplete continuations,
+retaining each group's existing cursors, seen-cursor set, and accumulated nodes.
+It keeps complete-only publication, strict errors, all-page retrieval, the PR
+body closing-keyword fallback for develop, and the existing deadline checks.
+No cache, parallel requests, retry, or timeout extension was introduced.
+
+The deterministic 26-Issue fixture gives Issue 1 a continuation that fails;
+Issues 2 through 26 complete on their initial page. With baseline production
+from `a2ac1f13f19d35cc94390058b3eb2a4c5674c53f` and only the new regression,
+the test failed because Issue 26 was not observed. The same test then passed
+after the scheduling change:
+
+```json
+{
+  "candidate_count": 26,
+  "before": { "completed_issue_ids": [2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25], "queries": 2 },
+  "after": { "completed_issue_ids": [2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26], "queries": 3 },
+  "original_continuation_error_preserved": true,
+  "unfinished_issue_1_published": false
+}
+```
+
+The baseline related selection passed 12 tests. The new regression was RED
+(0 pass, 1 fail), followed by GREEN for the same related selection (13 pass,
+0 fail). Commands used the checkout's isolated
+`target/ui-perf-20261103/cargo`: `cargo test -p gwt --lib linked_pr` and,
+for RED, the `linked_pr_bulk_reads_later_initial_chunks` filter with
+`-- --nocapture`. Original RED/GREEN output remains in the local
+`gwt-5390-linked-first-{red,green}.log` files. Independent actual-diff review
+found no blocking issue. Final-head canonical and CI evidence belongs to the PR.
+
+The extra query before failure performs the previously blocked useful initial
+read; this is a partial-freshness improvement, not a query-count reduction.
+For stable successful responses the same page requests are still necessary;
+the existing 30-Issue single-page test retains its two-query assertion.
+A later initial-page failure can now precede an earlier continuation's
+completion, so partial results are not always a superset of the old schedule.
+More unfinished groups can retain raw bodies simultaneously. Cross-group
+duplicate input numbers can also change final insertion order; actual Monitor
+candidate sets contain unique Issue numbers.
+
+This slice does not establish a shorter successful total duration, lower RSS,
+resolution of every installed timeout, or complete 15-second fanout. Parent
+AC-1/2/3, installed rollout, real eight-Agent 60-minute/four-hour operation,
+whole-GUI CPU/RSS and Mac acceptance remain unproven. The earlier UI slice was
+delivered separately through PR #6705.
+
+User Verification Result: n/a (autonomous).
+Agent Visual Check: n/a (no UI surface).
