@@ -845,6 +845,7 @@ impl AppRuntime {
                     super::IssueMonitorLaunchDeliveryState::Materializing {
                         window_id: window_id.clone(),
                         started_at: std::time::Instant::now(),
+                        accepted_owner: None,
                     },
                 );
             }

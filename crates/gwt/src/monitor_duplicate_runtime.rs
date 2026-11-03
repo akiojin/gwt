@@ -1005,7 +1005,7 @@ mod stop_tests {
         }
         #[cfg(unix)]
         {
-            let mut system = sysinfo::System::new();
+            let mut system = sysinfo::System::new().expect("initialize test process observation");
             let pid = sysinfo::Pid::from_u32(pid);
             system.refresh_processes_specifics(
                 sysinfo::ProcessesToUpdate::Some(&[pid]),

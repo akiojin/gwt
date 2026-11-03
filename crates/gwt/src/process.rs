@@ -171,28 +171,30 @@ pub fn is_host_process_alive(pid: u32) -> bool {
 /// process tree (an agent pane's `gwtd verify.run`, for example). Walks the
 /// parent chain through `sysinfo`; a missing process or a chain longer than
 /// 64 hops counts as "not ours" so the drain never blocks on a stranger.
-pub fn is_descendant_of(pid: u32, ancestor: u32) -> bool {
+/// Initialization errors remain unknown; protection callers must retain their
+/// guard, while callers requiring positive ownership must refuse it.
+pub fn is_descendant_of(pid: u32, ancestor: u32) -> Result<bool, sysinfo::Error> {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
     if pid == 0 || ancestor == 0 || pid == ancestor {
-        return false;
+        return Ok(false);
     }
-    let mut system = System::new();
+    let mut system = System::new()?;
     system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
     let mut current = sysinfo::Pid::from_u32(pid);
     for _ in 0..64 {
         let Some(parent) = system.process(current).and_then(sysinfo::Process::parent) else {
-            return false;
+            return Ok(false);
         };
         if parent.as_u32() == ancestor {
-            return true;
+            return Ok(true);
         }
         if parent.as_u32() <= 1 {
-            return false;
+            return Ok(false);
         }
         current = parent;
     }
-    false
+    Ok(false)
 }
 
 /// Return the start identity of one host process incarnation.
@@ -268,7 +270,7 @@ pub fn host_process_start_epoch_secs(pid: u32) -> Option<u64> {
     }
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
-    let mut system = System::new();
+    let mut system = System::new().ok()?;
     let pid = sysinfo::Pid::from_u32(pid);
     system.refresh_processes_specifics(
         ProcessesToUpdate::Some(&[pid]),

@@ -22,6 +22,35 @@ use std::path::PathBuf;
 const TEST_WORKFLOW: &str = ".github/workflows/test.yml";
 
 #[test]
+fn macos_socket_targets_compile_before_the_execution_budget() {
+    let workflow: serde_yaml::Value =
+        serde_yaml::from_str(&read(".github/workflows/build.yml")).unwrap();
+    let steps = workflow["jobs"]["check-macos"]["steps"]
+        .as_sequence()
+        .unwrap();
+    let execution = steps
+        .iter()
+        .position(|step| step["run"] == "bash scripts/test-short-socket-fixtures.sh")
+        .unwrap();
+    assert_eq!(steps[execution]["timeout-minutes"].as_u64(), Some(15));
+    let preparation = steps[..execution]
+        .iter()
+        .find(|step| step["name"] == "Check macOS compilation")
+        .unwrap();
+    assert!(preparation["if"].is_null() && preparation["continue-on-error"].is_null());
+    let commands = preparation["run"].as_str().unwrap();
+    for command in [
+        "cargo test -p gwt-core --lib --test test_hygiene_test --test daemon_socket_path_limit --no-run",
+        "cargo test -p gwt --lib --test runtime_tests --no-run",
+    ] {
+        assert!(
+            commands.lines().any(|line| line.trim() == command),
+            "prepare every socket fixture target before the execution budget: {command}"
+        );
+    }
+}
+
+#[test]
 fn real_model_step_only_runs_index_runner_ignored_tests() {
     let workflow = read(TEST_WORKFLOW);
     let steps = named_steps(&workflow);
@@ -37,6 +66,26 @@ fn real_model_step_only_runs_index_runner_ignored_tests() {
         command, "cargo test -p gwt-core --test index_runner_spawn -- --ignored",
         "Do not run watcher_native or baseline regeneration in the model job"
     );
+}
+
+#[test]
+fn real_model_bootstrap_installs_cpu_torch_before_runtime_dependencies() {
+    let workflow = read(TEST_WORKFLOW);
+    let steps = named_steps(&workflow);
+    let (_, body) = steps
+        .iter()
+        .find(|(name, _)| name == "Bootstrap gwt runtime assets")
+        .expect("real model bootstrap must exist");
+    let cpu_install = body
+        .find("pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu")
+        .expect("CPU runner must select CPU torch instead of downloading the CUDA stack");
+    let runtime_install = body
+        .find(
+            "pip install --no-cache-dir -r crates/gwt-core/runtime/project_index_requirements.txt",
+        )
+        .expect("keep shared runtime requirements without caching disposable wheels");
+    assert!(cpu_install < runtime_install);
+    assert!(body.contains("pip check"));
 }
 
 const NIGHTLY_WORKFLOW: &str = ".github/workflows/nightly.yml";

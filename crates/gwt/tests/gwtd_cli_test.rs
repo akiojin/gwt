@@ -527,7 +527,8 @@ fn native_feedback_worker_pids(repo: &Path) -> BTreeSet<u32> {
                 .with_cwd(sysinfo::UpdateKind::Always)
                 .without_tasks(),
         ),
-    );
+    )
+    .expect("initialize test process observation");
     system
         .processes()
         .iter()
@@ -555,7 +556,7 @@ fn native_feedback_role_pids(pids: &BTreeSet<u32>) -> (BTreeSet<u32>, BTreeSet<u
         .iter()
         .map(|pid| sysinfo::Pid::from_u32(*pid))
         .collect();
-    let mut system = sysinfo::System::new();
+    let mut system = sysinfo::System::new().expect("initialize test process observation");
     system.refresh_processes_specifics(
         sysinfo::ProcessesToUpdate::Some(&selected),
         true,
@@ -617,7 +618,7 @@ impl NativeFeedbackProcess {
         };
         assert_eq!(unsafe { GetProcessId(owned.handle) }, pid);
         assert!(!owned.exited());
-        let mut system = sysinfo::System::new();
+        let mut system = sysinfo::System::new().expect("initialize test process observation");
         system.refresh_processes_specifics(
             sysinfo::ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(pid)]),
             true,

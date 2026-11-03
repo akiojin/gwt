@@ -635,15 +635,21 @@ pub(crate) fn run_collect<E: CliEnv>(
             let managed_hook_bin =
                 crate::managed_assets::managed_hook_bin().map_err(io_as_api_error)?;
             let _hook_bin = gwt_skills::settings_local::ScopedHookBin::set(&managed_hook_bin);
+            let worktree = if purpose == Some(hook::health::HookDoctorPurpose::ManagedBrowser) {
+                gwt_core::paths::resolve_current_worktree_root(env.repo_path())
+            } else {
+                env.repo_path().to_path_buf()
+            };
+            let repair_plan = hook::health::HookRepairPlan::for_worktree(&worktree);
             let repair = if repair {
                 Some(
-                    hook::health::repair_managed_hook_configs(env.repo_path())
+                    hook::health::repair_managed_hook_configs(&worktree)
                         .map_err(io_as_api_error)?,
                 )
             } else {
                 None
             };
-            let mut input = hook::health::ManagedHookHealthInput::new(env.repo_path());
+            let mut input = hook::health::ManagedHookHealthInput::new(&worktree);
             if let Some(path) = runtime_state_path {
                 input = input.with_runtime_state_path(path);
             }
@@ -657,14 +663,16 @@ pub(crate) fn run_collect<E: CliEnv>(
                 input = input.with_expected_hook_bin(managed_hook_bin.clone());
             }
             let mut health = hook::health::read_managed_hook_health(&input);
-            hook::append_codex_trust_health_for_doctor(&input, &mut health);
+            let codex_hook_audit = hook::append_codex_trust_health_for_doctor(&input, &mut health);
             let mut payload = serde_json::json!({
+                "codex_hook_audit": codex_hook_audit,
                 "managed_hook_bin": managed_hook_bin,
                 "repair_writer": repair.as_ref().map(|_| serde_json::json!({
                     "pid": std::process::id(),
                     "executable": std::env::current_exe().ok(),
                 })),
                 "repair": repair,
+                "repair_plan": repair_plan,
                 "repair_guarantee": "Regenerates managed hook configuration; trust registration and launch success require separate verification.",
                 "health": health,
             });
