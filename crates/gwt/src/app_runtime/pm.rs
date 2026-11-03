@@ -1734,7 +1734,10 @@ impl AppRuntime {
         if !same_pane {
             return;
         }
-        if delivery.result.is_ok() {
+        if matches!(
+            delivery.result,
+            Ok(PmWakeWrite::Injected | PmWakeWrite::Discarded)
+        ) {
             self.project_state_mut(&delivery.context)
                 .unwrap()
                 .pm_agent_idle_wakes
@@ -2725,7 +2728,12 @@ mod delivery_tests {
                     .route(
                         "/private/project/command",
                         post(|State(count): State<Arc<AtomicUsize>>| async move {
-                            count.fetch_add(1, Ordering::SeqCst);
+                            if count.fetch_add(1, Ordering::SeqCst) == 1 {
+                                return (
+                                    StatusCode::OK,
+                                    Json(serde_json::json!({ "status": "deferred" })),
+                                );
+                            }
                             (
                                 StatusCode::SERVICE_UNAVAILABLE,
                                 Json(serde_json::json!({
@@ -2792,6 +2800,20 @@ mod delivery_tests {
                         1,
                         "one external retry in flight"
                     );
+                    tasks.lock().unwrap().remove(0)();
+                    let UserEvent::ProjectCompletion { event, .. } =
+                        recorded.lock().unwrap().pop().unwrap()
+                    else {
+                        panic!("project completion");
+                    };
+                    let UserEvent::PmWakeDeliveryComplete(delivery) = *event else {
+                        panic!("wake completion");
+                    };
+                    assert_eq!(delivery.result, Ok(PmWakeWrite::Deferred));
+                    runtime.pm_wake_delivery_complete(delivery);
+                    assert!(tasks.lock().unwrap().is_empty());
+                    assert!(runtime.retry_held_pm_wake(&repo));
+                    assert_eq!(tasks.lock().unwrap().len(), 1);
                 }
             }
             if failures == 2 {
@@ -2828,7 +2850,10 @@ mod delivery_tests {
                 usize::from(failures == 2),
                 "warn once only after the retry budget is exhausted"
             );
-            assert_eq!(requests.load(Ordering::SeqCst), failures);
+            assert_eq!(
+                requests.load(Ordering::SeqCst),
+                failures + usize::from(failures == 2)
+            );
             let target = runtime.runtimes.get_mut(&window_id).unwrap();
             target.client = original_client;
             target.owner_identity = original_identity;
