@@ -837,9 +837,10 @@ test("Workspace detail surfaces Managed Hooks health without raw JSON dumps", ()
   assert.match(hookSection.textContent, /workflow-policy/);
   assert.match(hookSection.textContent, /1250ms/);
   assert.match(hookSection.textContent, /Stop/);
-  assert.match(hookSection.textContent, /2026-06-17T00:00:00Z/);
-  assert.match(hookSection.textContent, /Choose the repair path/);
-  assert.match(hookSection.textContent, /Implement hook health first/);
+  assert.deepEqual(Array.from(hookSection.querySelectorAll("dd"), node => node.textContent), [
+    "Needs attention", "PreToolUse", "2026-06-17T00:00:00Z", "Proposal A", "Implement hook health first",
+  ]);
+  assert.deepEqual(Array.from(hookSection.querySelectorAll("p"), node => node.textContent), ["Choose the repair path"]);
 });
 
 test("Work detail renders all six hook health states without inventing pending work", () => {

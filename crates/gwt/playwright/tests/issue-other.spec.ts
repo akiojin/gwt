@@ -64,9 +64,7 @@ test("Work detail preserves all six managed hook states and pending metadata", a
       fixture.__otherEmit({ kind: "active_work_projection", projection: fixture.__otherProjection });
     }, status);
     await expect(section).toHaveAttribute("data-status", status);
-    await expect(section.locator("dd").first()).toHaveText(label);
-    await expect(section).toContainText("PreToolUse");
-    await expect(section).toContainText("2026-11-03T00:00:00Z");
+    await expect(section.locator("dd")).toHaveText([label, "PreToolUse", "2026-11-03T00:00:00Z"]);
     await expect(section.locator("dt")).toHaveText(["Status", "Last event", "Last event at"]);
     await expect(row(page, "other-paused").locator(".workspace-overview-hook-health"))
       .toHaveCount(status === "degraded" ? 1 : 0);
@@ -81,9 +79,8 @@ test("Work detail preserves all six managed hook states and pending metadata", a
     fixture.__otherEmit({ kind: "active_work_projection", projection: fixture.__otherProjection });
   });
   await expect(section.locator("dt")).toHaveText(["Status", "Discussion", "Goal"]);
-  await expect(section).toContainText("Proposal A");
-  await expect(section).toContainText("Choose a repair path");
-  await expect(section).toContainText("Verify managed hooks");
+  await expect(section.locator("dd")).toHaveText(["Ready", "Proposal A", "Verify managed hooks"]);
+  await expect(section.locator("p")).toHaveText("Choose a repair path");
   await page.screenshot({ path: test.info().outputPath("managed-hook-health.png") });
 });
 
