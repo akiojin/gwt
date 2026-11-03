@@ -15,7 +15,7 @@
 //! - malformed lines are skipped leniently (warn, keep going);
 //! - terminal (Done / Discarded) items never apply events stamped at or
 //!   before their close time (no re-open, no `updated_at` rollback);
-//! - only works.json is written — sessions / current.json / journal.jsonl
+//! - only works.json and its close-projection proof are written — sessions / current.json / journal.jsonl
 //!   are untouched (SC-261).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -28,10 +28,10 @@ use serde::{Deserialize, Serialize};
 use crate::error::{GwtError, Result, WorkspaceStateLoadError, WorkspaceStateLoadErrorKind};
 use crate::workspace_projection::{
     decode_workspace_work_event_line, load_workspace_work_items_from_path,
-    resolve_workspace_work_event_container, save_workspace_work_items_projection_to_path,
-    workspace_execution_container_same, DecodedWorkspaceWorkEvent, DuplicateWorkEventProvenance,
-    WorkEvent, WorkEventApplyOutcome, WorkEventKind, WorkItem, WorkItemsIntakeSnapshot,
-    WorkItemsProjection, WorkspaceExecutionContainerRef,
+    resolve_workspace_work_event_container, workspace_execution_container_same,
+    DecodedWorkspaceWorkEvent, DuplicateWorkEventProvenance, WorkEvent, WorkEventApplyOutcome,
+    WorkEventKind, WorkItem, WorkItemsIntakeSnapshot, WorkItemsProjection,
+    WorkspaceExecutionContainerRef,
 };
 
 /// Per-run accounting so callers (and tests) can see what happened.
@@ -354,14 +354,11 @@ fn publish_work_event_containers_repair(
     }
     let prepared = if changed && !dry_run {
         previous.work_items[target_index] = repaired;
-        Some(
-            serde_json::to_vec_pretty(&previous)
-                .map_err(|error| refuse(&format!("projection json: {error}")))?,
-        )
+        Some(snapshot.prepare_container_repair(previous)?)
     } else {
         None
     };
-    snapshot.commit_container_repair(prepared.as_deref(), dry_run)?;
+    snapshot.commit_container_repair(prepared.as_ref(), dry_run)?;
     Ok(WorkEventContainersRepairReport {
         work_id: work_id.to_string(),
         changed,
@@ -471,7 +468,7 @@ pub fn ingest_work_event_sources_with_local_path(
     let prepared = projection
         .map(|projection| snapshot.prepare(projection))
         .transpose()?;
-    snapshot.commit(prepared.as_deref())?;
+    snapshot.commit(prepared.as_ref())?;
     Ok((report, local_fingerprint))
 }
 
@@ -816,7 +813,7 @@ fn publish_rebuilt_work_events(
         close_content,
         Vec::new(),
     )?;
-    let prepared = snapshot.prepare(projection)?;
+    let prepared = snapshot.prepare_rebuilt(projection)?;
     snapshot.commit(Some(&prepared))?;
     if let Some(error) = corrupt_state {
         tracing::warn!(%error, "work events rebuild: recovered corrupt projection from complete event history");
@@ -870,14 +867,12 @@ fn rebuild_work_event_sources_locked_with_legacy(
         work_items_path,
         &mut projection,
     )?;
+    crate::workspace_projection::save_workspace_work_items_projection_after_rebuild(
+        work_items_path,
+        &projection,
+    )?;
     if let Some(error) = corrupt_state {
-        crate::workspace_projection::save_workspace_work_items_projection_after_rebuild(
-            work_items_path,
-            &projection,
-        )?;
         tracing::warn!(%error, "work events rebuild: recovered corrupt projection from complete event history");
-    } else {
-        save_workspace_work_items_projection_to_path(work_items_path, &projection)?;
     }
     Ok(report)
 }
@@ -1825,6 +1820,7 @@ pub fn content_fingerprint(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace_projection::save_workspace_work_items_projection_to_path;
     use crate::workspace_projection::{WorkItemsProjection, WorkspaceStatusCategory};
     use chrono::TimeZone;
     use std::sync::Arc;

@@ -1574,7 +1574,7 @@ fn continue_work_ready_timeout_is_correlated_and_aborts_only_current_pending_att
         false,
         None,
     );
-    use gwt::project_runtime::events::OwnerCommand;
+    use gwt::project_runtime::events::OwnerEvent;
     let before = fixture
         .executor
         .block_on(
@@ -1601,6 +1601,7 @@ fn continue_work_ready_timeout_is_correlated_and_aborts_only_current_pending_att
         .unwrap();
     assert_eq!(retained.readiness_watch, before.readiness_watch);
     assert!(Arc::ptr_eq(&retained.pty, &before.pty));
+    let mut events = fixture.owner.subscribe();
     gwt::session_finalizer::kill_and_reap(&before.pty, &fixture.captured.id)
         .expect("actual candidate process exit");
     assert!(before.pty.tree_exit_confirmed());
@@ -1615,8 +1616,8 @@ fn continue_work_ready_timeout_is_correlated_and_aborts_only_current_pending_att
             ..
         }
     ));
-    // The real process is terminal. Its owner may already have consumed the
-    // natural terminal event, so exact Close also waits for that same rollback.
+    // Natural exit and the deadline may race to retire this exact candidate.
+    // Observe completion instead of closing a pane that may already be gone.
     let _deadline = fixture
         .executor
         .block_on(fixture.owner.check_readiness_deadline(
@@ -1624,13 +1625,32 @@ fn continue_work_ready_timeout_is_correlated_and_aborts_only_current_pending_att
             fixture.captured.incarnation,
             ContinueWorkReadinessWatch::new(fixture.pending.operation_id.clone()),
         ));
-    fixture
-        .executor
-        .block_on(fixture.owner.command(OwnerCommand::Close {
-            id: fixture.captured.id.clone(),
-            incarnation: fixture.captured.incarnation,
-        }))
-        .expect("exact dead candidate rollback and physical drain ACK");
+    fixture.executor.block_on(async {
+        // test-hygiene: allow-wall-clock-deadline hang guard for exact actual owner retirement after the captured process tree exits
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match events.recv().await.unwrap() {
+                    OwnerEvent::Closed {
+                        id,
+                        incarnation,
+                        error,
+                        ..
+                    } if id == fixture.captured.id
+                        && incarnation == fixture.captured.incarnation =>
+                    {
+                        assert!(
+                            error.is_none(),
+                            "actual exact terminal retirement: {error:?}"
+                        );
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+    });
     assert_owner_fresh_launch_rolled_back(&fixture);
     fixture.shutdown();
 }

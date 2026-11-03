@@ -25,8 +25,12 @@ pub struct ProcessSnapshot {
 
 impl ProcessSnapshot {
     /// Capture process names, parent links, and lifetimes without arguments.
-    pub fn capture() -> Self {
-        let mut system = System::new();
+    pub fn capture() -> Result<Self, sysinfo::Error> {
+        Self::from_system(System::new())
+    }
+
+    fn from_system(system: Result<System, sysinfo::Error>) -> Result<Self, sysinfo::Error> {
+        let mut system = system?;
         system.refresh_processes_specifics(
             ProcessesToUpdate::All,
             true,
@@ -34,7 +38,7 @@ impl ProcessSnapshot {
             // lifetimes need no CPU sampling, arguments, paths, or environment.
             ProcessRefreshKind::nothing().without_tasks(),
         );
-        Self {
+        Ok(Self {
             processes: system
                 .processes()
                 .values()
@@ -48,7 +52,7 @@ impl ProcessSnapshot {
                     },
                 })
                 .collect(),
-        }
+        })
     }
 
     /// Whether the snapshot contains a live process with this PID.
@@ -166,7 +170,7 @@ mod tests {
         let mut child = idle_child();
         let pid = child.0.id();
         let root = std::process::id();
-        let snapshot = ProcessSnapshot::capture();
+        let snapshot = ProcessSnapshot::capture().expect("capture live process table");
         let observed = snapshot
             .descendants(root)
             .into_iter()
@@ -181,7 +185,7 @@ mod tests {
         child.0.kill().expect("kill owned child");
         child.0.wait().expect("reap owned child");
 
-        let after = ProcessSnapshot::capture();
+        let after = ProcessSnapshot::capture().expect("capture process table after reap");
         assert!(!after.contains_pid(pid));
         assert!(after.descendants(pid).is_empty());
         assert!(after
@@ -190,6 +194,14 @@ mod tests {
             .all(|process| process.pid != pid));
         // Reusing an earlier snapshot never performs another OS observation.
         assert!(snapshot.contains_pid(pid));
+    }
+
+    #[test]
+    fn initialization_failure_is_an_error_instead_of_an_empty_snapshot() {
+        assert!(matches!(
+            ProcessSnapshot::from_system(Err(sysinfo::Error::Unsupported)),
+            Err(sysinfo::Error::Unsupported)
+        ));
     }
 
     #[test]

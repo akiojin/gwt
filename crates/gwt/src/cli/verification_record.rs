@@ -6314,14 +6314,15 @@ fn verify_runtime_not_revoked(worktree: &Path, session_id: &str) -> io::Result<(
         || runtime.child_started_at.is_none()
         || runtime.child_started_at != crate::process::host_process_start_time(child_pid)
         || (child_pid != std::process::id()
-            && !crate::process::is_descendant_of(std::process::id(), child_pid))
+            && !crate::process::is_descendant_of(std::process::id(), child_pid).unwrap_or(false))
         || requests.iter().any(|request| {
             // A writable sidecar cannot revive the stopped OS process or
             // its callers. The child can outlive its original GUI host.
             crate::process::host_process_start_time(request.child_pid)
                 == Some(request.child_started_at)
                 && (request.child_pid == std::process::id()
-                    || crate::process::is_descendant_of(std::process::id(), request.child_pid))
+                    || crate::process::is_descendant_of(std::process::id(), request.child_pid)
+                        .unwrap_or(true))
         })
     {
         return Err(denied());
@@ -13371,7 +13372,7 @@ fn default_integration_test_builds_a_guarded_binary() {
 
         // The actual caller is beneath this still-live OS parent. Retargeting
         // the sidecar child to the caller cannot escape its revoked ancestry.
-        let mut processes = sysinfo::System::new();
+        let mut processes = sysinfo::System::new().expect("capture caller ancestry");
         let caller = sysinfo::Pid::from_u32(pid);
         processes.refresh_processes_specifics(
             sysinfo::ProcessesToUpdate::Some(&[caller]),
@@ -13384,7 +13385,7 @@ fn default_integration_test_builds_a_guarded_binary() {
             .unwrap()
             .as_u32();
         let parent_started = crate::process::host_process_start_time(parent_pid).unwrap();
-        assert!(crate::process::is_descendant_of(pid, parent_pid));
+        assert!(crate::process::is_descendant_of(pid, parent_pid).unwrap());
         prefs.monitor_runtime_stop_requests[0].child_pid = parent_pid;
         prefs.monitor_runtime_stop_requests[0].child_started_at = parent_started;
         // The revoked child remains authoritative after its old host is gone.
@@ -13739,15 +13740,16 @@ fn default_integration_test_builds_a_guarded_binary() {
         let home = tempfile::tempdir().expect("isolated gwt home");
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
-        // This fixture verifies generation recovery, independently of host disk pressure.
+        let dir = tempfile::tempdir().expect("generation-scoped predecessor repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        // This recovery test needs successful admission in its private HOME,
+        // independent of the host's free disk space.
         fs::create_dir_all(home.path().join(".gwt")).unwrap();
         fs::write(
             gwt_config::Settings::global_config_path_for_home(home.path()),
-            "[verification]\ndisk_budget_bytes=0\n[build_artifact_gc]\nbelow_bytes=0\nbelow_percent=0\n",
+            "[verification]\nslots=1\ndisk_budget_bytes=0\n[build_artifact_gc]\nbelow_bytes=0\nbelow_percent=0\n",
         )
         .unwrap();
-        let dir = tempfile::tempdir().expect("generation-scoped predecessor repository");
-        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
         let owner = generation_scoped_owner();
 
         let predecessor = initialize_generation_scoped_execution(dir.path(), "session-predecessor");
@@ -13817,7 +13819,7 @@ fn default_integration_test_builds_a_guarded_binary() {
             Some(&successor),
             "{output}"
         );
-        assert!(completed.all_passed, "{output}");
+        assert!(completed.all_passed);
         assert_eq!(
             evaluate_evidence(dir.path(), "session-successor", Some(2359)),
             EvidenceStatus::Fresh

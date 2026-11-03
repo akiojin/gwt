@@ -4949,6 +4949,10 @@ pub struct IssueMonitorInboxSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dependency: Option<IssueMonitorDependencyStatus>,
     pub issue_number: u64,
+    /// A SPEC parse failure that needs artifact repair. Diagnostic only:
+    /// readiness remains retryable, so fixing the SPEC clears this reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_human_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_tier: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -12597,6 +12601,46 @@ impl IssueMonitorState {
         disk: &IssueMonitorPrefs,
         autonomous_policy: AutonomousRecordRebasePolicy,
     ) {
+        // Wait controls commit under the prefs lock, independently of a scan's
+        // phase changes. Capture their launch identity before additive merges
+        // can import a confirmation and make a different lifecycle look equal.
+        let committed_wait_controls =
+            if autonomous_policy == AutonomousRecordRebasePolicy::LocalSameKeyAuthoritative {
+                disk.autonomous_records
+                    .iter()
+                    .filter(|incoming| {
+                        let number = incoming.issue_number;
+                        let Some(local) = self.autonomous_records.get(&number) else {
+                            return false;
+                        };
+                        let Some(confirmation) = self.launch_confirmations.get(&number) else {
+                            return false;
+                        };
+                        self.active_launches.contains(&number)
+                            && !confirmation.window_id.is_empty()
+                            && self.launched_windows.get(&number) == Some(&confirmation.window_id)
+                            && disk.launched_issues.iter().any(|launch| {
+                                launch.issue_number == number
+                                    && launch.window_id == confirmation.window_id
+                            })
+                            && disk.launch_confirmations.get(&number) == Some(confirmation)
+                            && self.launched_claims.get(&number) == confirmation.claim_id.as_ref()
+                            && disk.launched_claims.get(&number) == confirmation.claim_id.as_ref()
+                            && local.attempts == incoming.attempts
+                            && local.active_launch_id == incoming.active_launch_id
+                            && !matches!(
+                                local.phase,
+                                AutonomousPhase::Merged | AutonomousPhase::NeedsHuman
+                            )
+                            && !matches!(
+                                incoming.phase,
+                                AutonomousPhase::Merged | AutonomousPhase::NeedsHuman
+                            )
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
         self.agent_roster = disk.agent_roster.clone();
 
         if let Some(roster) = self.agent_roster.as_ref() {
@@ -12804,6 +12848,36 @@ impl IssueMonitorState {
                 if let Some(record) = self.autonomous_records.get_mut(&number) {
                     *record = cancellation;
                 }
+            }
+        }
+        for incoming in committed_wait_controls {
+            let Some(local) = self.autonomous_records.get_mut(&incoming.issue_number) else {
+                continue;
+            };
+            if local.attempts != incoming.attempts
+                || local.active_launch_id != incoming.active_launch_id
+                || matches!(
+                    local.phase,
+                    AutonomousPhase::Merged | AutonomousPhase::NeedsHuman
+                )
+            {
+                continue;
+            }
+            // None is an explicit committed clear, not missing merge evidence.
+            local.wait.clone_from(&incoming.wait);
+            if incoming
+                .last_heartbeat
+                .as_deref()
+                .and_then(parse_rfc3339_utc)
+                .is_some_and(|at| {
+                    local
+                        .last_heartbeat
+                        .as_deref()
+                        .and_then(parse_rfc3339_utc)
+                        .is_none_or(|local_at| at > local_at)
+                })
+            {
+                local.last_heartbeat.clone_from(&incoming.last_heartbeat);
             }
         }
         let adopted = self.adopt_newer_legacy_git_launch_failure_migration_from_prefs(disk);
@@ -14953,6 +15027,14 @@ impl IssueMonitorState {
                     IssueMonitorInboxSummary {
                         dependency: item.dependency.clone(),
                         issue_number: item.issue.number,
+                        needs_human_reason: item
+                            .exclusion_reason
+                            .as_ref()
+                            .filter(|reason| {
+                                item.state == MonitorInboxState::NotReady
+                                    && reason.contains("targeted refresh parse failed:")
+                            })
+                            .cloned(),
                         state: item.state,
                         github_state: item.issue.state,
                         issue_updated_at: item.issue.updated_at.clone(),
@@ -14998,6 +15080,10 @@ impl IssueMonitorState {
                                     self.source_repository,
                                 )
                                 .map(|(_, reason)| reason)
+                                .or_else(|| {
+                                    (!self.allows_issue_labels(&item.issue))
+                                        .then(|| "excluded by allowed labels".to_string())
+                                })
                             })
                         } else {
                             item.exclusion_reason.clone()
@@ -17571,7 +17657,8 @@ impl IssueMonitorState {
                         MonitorInboxState::NotReady | MonitorInboxState::SourceExcluded,
                         _
                     ))
-                ) || confirmed_dependency_blocker)
+                ) || !self.allows_issue_labels(&item.issue)
+                    || confirmed_dependency_blocker)
                     && !self.launched_windows.contains_key(&number)
                     && !self.process_held_issues.contains(&number)
                     && !self.has_monitor_pane_for_issue(number)
@@ -19214,11 +19301,16 @@ impl IssueMonitorState {
             return true;
         }
         // Holding a new pane requires no cancellation authority. A cached
-        // readiness regression must wait even before a complete Live scan
+        // candidate exclusion must wait even before a complete Live scan
         // can compensate the claim; existing-pane ACKs above stay valid.
-        if self.inbox_item(delivery.issue_number).is_some_and(|item| {
-            issue_monitor_candidate_exclusion(&item.issue, self.source_repository).is_some()
-        }) {
+        // Cold prefs restore no candidates, so configured labels need a refresh.
+        if self
+            .inbox_item(delivery.issue_number)
+            .map_or(!self.allowed_labels.is_empty(), |item| {
+                issue_monitor_candidate_exclusion(&item.issue, self.source_repository).is_some()
+                    || !self.allows_issue_labels(&item.issue)
+            })
+        {
             return false;
         }
         if self
@@ -26378,6 +26470,77 @@ mod tests {
         assert_eq!(monitor.queued_issue_numbers(), vec![1]);
     }
 
+    #[test]
+    fn label_allowlist_restored_delivery_waits_for_candidate() {
+        let mut monitor = label_allowlist_monitor(&["Server"]);
+        monitor.terminal_queue_push(&[42], "operator", IDLE_NOW);
+        let mut candidate = issue(42);
+        candidate.labels.push("server".into());
+        monitor.record_candidate(candidate.clone());
+        monitor.record_attempt(42);
+        monitor
+            .queued_launch_session_strategies
+            .insert(42, IssueMonitorLaunchSessionStrategy::FreshRequired);
+        assert!(monitor.apply_confirmed_claim(42, "claim", "owner", "effect", IDLE_NOW));
+        let saved = monitor.prefs();
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), saved.clone());
+        assert!(restored.inbox_item(42).is_none());
+        assert!(
+            restored.take_pending_launch_requests().is_empty(),
+            "a restored allowlist needs candidate labels before creating a pane"
+        );
+        assert!(!restored.has_capacity_for_monitor_spawn(42, false));
+        assert!(!restored.claim_launch_delivery(
+            42,
+            "launch:effect",
+            "gui",
+            42,
+            "tab::agent-42",
+            |_| false
+        ));
+        assert_eq!(
+            restored.prefs().pending_launch_deliveries,
+            saved.pending_launch_deliveries
+        );
+        restored.record_candidate(issue(42));
+        assert!(restored.take_pending_launch_requests().is_empty());
+        restored.record_candidate(candidate);
+        let requests = restored.take_pending_launch_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].delivery_id.as_deref(), Some("launch:effect"));
+        assert_eq!(
+            requests[0].launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::FreshRequired
+        );
+        assert_eq!(restored.attempt_count(42), 1);
+        assert!(restored.has_capacity_for_monitor_spawn(42, false));
+        assert!(restored.claim_launch_delivery(
+            42,
+            "launch:effect",
+            "gui",
+            42,
+            "tab::agent-42",
+            |_| false
+        ));
+        assert!(restored.mark_launch_delivery_materialized(
+            42,
+            "launch:effect",
+            "gui",
+            "tab::agent-42"
+        ));
+        let mut existing = test_monitor_with_prefs(IssueMonitorConfig::default(), restored.prefs());
+        assert!(existing.inbox_item(42).is_none());
+        assert_eq!(existing.take_pending_launch_requests().len(), 1);
+        assert!(existing.claim_launch_delivery(
+            42,
+            "launch:effect",
+            "gui",
+            42,
+            "tab::agent-42",
+            |_| false
+        ));
+    }
+
     /// Issue #3676 AC-2: the auth verdict must be definitive before it may
     /// block a launch — every ambiguous shape stays fail-open (`Unknown`).
     #[test]
@@ -26856,6 +27019,7 @@ mod tests {
                 needs_human: Vec::new(),
                 released: Vec::new(),
                 inbox: vec![IssueMonitorInboxSummary {
+                    needs_human_reason: None,
                     dependency: None,
                     launch_tier: None,
                     landing_tier: None,
@@ -37199,9 +37363,16 @@ mod tests {
         }
         stale_daemon.set_autonomous_phase(42, AutonomousPhase::Implementing);
         stale_daemon.record_autonomous_heartbeat(42, "2026-08-25T20:00:00Z");
+        stale_daemon.declare_autonomous_wait(
+            42,
+            "old launch wait",
+            "old dependency",
+            "2026-08-25T20:10:00Z",
+        );
 
         stale_daemon.rebase_daemon_driver_prefs(&released);
 
+        assert!(stale_daemon.autonomous_wait(42).is_none());
         assert_eq!(stale_daemon.active_count(), 0);
         assert!(stale_daemon.prefs().launched_issues.is_empty());
         assert!(stale_daemon.prefs().launching_issues.is_empty());
@@ -45165,6 +45336,33 @@ mod tests {
             Some(MonitorInboxState::Queued)
         );
         assert_eq!(monitor.active_count(), 0, "the lost launch frees its slot");
+    }
+
+    #[test]
+    fn daemon_rebase_does_not_import_a_foreign_or_ended_launch_wait() {
+        let mut old = launched_monitor(42, "tab-1::agent-1");
+        old.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        old.declare_autonomous_wait(42, "old wait", "old dependency", "2026-06-29T00:10:00Z");
+        let old_prefs = old.prefs();
+
+        // Even a reused pane belongs to a different confirmed claim/delivery.
+        let mut successor = old.clone();
+        successor.clear_autonomous_wait(42, "2026-06-29T00:20:00Z");
+        assert!(successor.complete_active_launch_with_claim(
+            42,
+            "tab-1::agent-1".to_string(),
+            Some("successor-claim".to_string()),
+            Some("successor-delivery".to_string()),
+            Some("2026-06-29T00:20:00Z"),
+        ));
+        successor.rebase_daemon_driver_prefs(&old_prefs);
+        assert!(successor.autonomous_wait(42).is_none());
+
+        // Teardown leaves historical confirmation metadata behind. An additive
+        // rebase must not manufacture eligibility from that old confirmation.
+        old.clear_active_tracking(42);
+        old.rebase_daemon_driver_prefs(&old_prefs);
+        assert!(old.autonomous_wait(42).is_none());
     }
 
     #[test]

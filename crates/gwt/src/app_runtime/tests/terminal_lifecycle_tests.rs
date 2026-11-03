@@ -3106,6 +3106,198 @@ fn stage_host_drain_update(temp: &Path, version: &str) {
 }
 
 #[test]
+fn manual_successor_early_admission_cancel_requires_actual_cleanup_proof() {
+    use gwt::cli::execution_state::{self as execution, ContinuationAttemptStatus as Attempt};
+    use gwt::project_runtime::{events::OwnerCommand, test_support::OwnerLaunchStage};
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("manual-early-admission");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    run_git(&repo, &["branch", "-M", "work/issue-2359"]);
+    run_git(
+        &repo,
+        &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+    );
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let (authority, choice) = owner_fresh_launch_seed(
+        &repo,
+        &operation_id,
+        execution::ExecutionOwnerKind::Issue,
+        2359,
+        false,
+    );
+    let predecessor_binding = choice.expected_binding.clone();
+    let ledger = execution::load_generation_ledger(&repo, authority)
+        .unwrap()
+        .unwrap();
+    let predecessor_generation = ledger.current_generation().unwrap().identity.clone();
+    let sessions = gwt_core::paths::gwt_sessions_dir();
+    let predecessor_path = sessions.join(format!(
+        "{}.toml",
+        choice.expected_predecessor.as_ref().unwrap().session_id
+    ));
+    let predecessor_before = fs::read(&predecessor_path).unwrap();
+    let work_before = tracked_workspace_work_store_snapshot(&repo);
+    let executor = tokio::runtime::Runtime::new().unwrap();
+    let owner = executor.block_on(production_owner_fixture(&repo));
+    let command = owner_fresh_agent_command(&owner, &repo, choice, None);
+    let manual = matches!(&command, OwnerCommand::LaunchAgent { metadata, config, .. }
+        if metadata.launch_feedback_context.is_none() && metadata.manual_successor.is_some()
+            && !config.suppress_execution_control);
+    let immutable_request = serde_json::to_value(&command).unwrap();
+    // Freeze the normal Manual request before introducing this private hold.
+    let observed: Result<serde_json::Value, String> = executor.block_on(async {
+        if !manual {
+            return Err("not the ordinary Manual execution-control route".into());
+        }
+        stage_host_drain_update(temp.path(), "99.0.0");
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+        let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path).map_err(|e| e.to_string())?;
+        prefs.update_drain = Some(gwt::IssueMonitorUpdateDrain {
+            version: "99.0.0".into(),
+            since: "2026-10-13T00:00:00Z".into(),
+            reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+            automatic: None,
+            blocking: Vec::new(),
+        });
+        gwt::save_issue_monitor_prefs(&prefs_path, &prefs).map_err(|e| e.to_string())?;
+        let checkpoint = owner.pause_next_agent_launch_at(OwnerLaunchStage::MaterializedBeforeInstall).await?;
+        let client = owner.client();
+        let mut launch = tokio::spawn(async move { client.command(command).await });
+        let mut early = None;
+        let captured = tokio::select! {
+            result = &mut launch => { early = Some(result); None },
+            // test-hygiene: allow-wall-clock-deadline hang guard for the actual early-admission checkpoint
+            result = tokio::time::timeout(Duration::from_secs(30), checkpoint.wait()) => result.ok(),
+        };
+        // No assertions while paused: preserve handles and release/join on Err too.
+        let premise: Result<_, String> = (|| {
+            let captured = captured.as_ref().ok_or("missing early-admission checkpoint")?;
+            if captured.operation_id != operation_id || !captured.current.load(Ordering::Acquire)
+                || captured.session.is_some() || captured.session_id.is_some()
+                || captured.pty.is_some() || captured.pending_fresh_execution.is_some() {
+                return Err("checkpoint is not current and unmaterialized".into());
+            }
+            let prepared = execution::continuation_attempt_for_operation(&repo, authority, &operation_id)
+                .map_err(|e| e.to_string())?.ok_or("no actual preparation")?;
+            let candidate = &prepared.request.initial_session_id;
+            let recovery_path = gwt::session_launch::durable_launch_recovery_path(&sessions, candidate)?;
+            let recovery: gwt::session_launch::recovery::DurableLaunchRecoveryRecord = serde_json::from_slice(
+                &fs::read(&recovery_path).map_err(|e| e.to_string())?,
+            ).map_err(|e| e.to_string())?;
+            let files = [
+                recovery_path,
+                sessions.join(format!("{candidate}.toml")),
+                gwt_agent::runtime_state_path(&sessions, candidate),
+            ];
+            if prepared.status != Attempt::Prepared || prepared.request.operation_id != operation_id
+                || prepared.predecessor != predecessor_generation || recovery.session_id != *candidate
+                || recovery.owner()? != authority || !matches!(&recovery.kind,
+                    gwt::session_launch::recovery::DurableLaunchRecoveryKind::FreshSuccessor { operation_id: known } if known == &operation_id)
+                || !files[1..].iter().all(|p| fs::symlink_metadata(p).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)) {
+                return Err("exact Prepared/recovery/no-Session premise is absent".into());
+            }
+            Ok((prepared, files, recovery))
+        })();
+        let mut cancel = None;
+        let mut revoked = false;
+        if let (Ok(_), Some(captured)) = (&premise, captured.as_ref()) {
+            let client = owner.client();
+            let request = OwnerCommand::PendingCancelExact {
+                id: captured.id.clone(),
+                operation_id: captured.operation_id.clone(),
+                expected_request: immutable_request.clone(),
+            };
+            cancel = Some(tokio::spawn(async move { client.command(request).await }));
+            // test-hygiene: allow-wall-clock-deadline hang guard for actual exact cancellation admission while paused
+            revoked = tokio::time::timeout(Duration::from_secs(30), async {
+                while captured.current.load(Ordering::Acquire) {
+                    tokio::task::yield_now().await;
+                }
+            }).await.is_ok();
+        }
+        checkpoint.release();
+        let launch = match early {
+            Some(result) => result,
+            None => launch.await,
+        };
+        let cancel = match cancel {
+            Some(cancel) => Some(cancel.await),
+            None => None,
+        };
+        let (prepared, files, recovery) = premise?;
+        let launch = launch.map_err(|e| e.to_string())?;
+        let cancel = cancel.ok_or("cancel not started")?.map_err(|e| e.to_string())?;
+        let after = execution::continuation_attempt_for_operation(&repo, authority, &operation_id)
+            .map_err(|e| e.to_string())?.ok_or("unknown attempt after worker")?;
+        let absent = files.iter().map(|p| match fs::symlink_metadata(p) {
+            Ok(_) => Ok(false),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+            Err(e) => Err(e.to_string()),
+        }).collect::<Result<Vec<_>, _>>()?;
+        let recovery_after = if absent[0] {
+            None
+        } else {
+            Some(serde_json::from_slice::<gwt::session_launch::recovery::DurableLaunchRecoveryRecord>(
+                &fs::read(&files[0]).map_err(|e| e.to_string())?,
+            ).map_err(|e| e.to_string())?)
+        };
+        Ok(serde_json::json!({
+            "launch_result": if launch.is_ok() { "ok" } else { "err" },
+            "cancel_result": if cancel.is_ok() { "ok" } else { "err" },
+            "cancel_reconciliation_error": cancel.as_ref().err().is_some_and(|detail|
+                detail == "cancelled launch cleanup requires exact reconciliation"),
+            "revoked": revoked, "host_hold_error": launch.as_ref().err().is_some_and(|detail|
+                detail.contains("Host update_drain") && detail.contains("release.update.defer {\"version\":\"99.0.0\"}")),
+            "cancelled": cancel.as_ref().ok().and_then(|receipt| receipt["cancelled"].as_bool()),
+            "cancel_exact": cancel.as_ref().is_ok_and(|receipt| receipt["id"] == immutable_request["id"]
+                && receipt["operation_id"].as_str() == Some(operation_id.as_str())),
+            "attempt_exact": after.request == prepared.request, "attempt_status": after.status,
+            "attempt_unchanged": after == prepared, "recovery_unchanged": recovery_after.as_ref() == Some(&recovery),
+            "recovery_absent": absent[0], "session_absent": absent[1], "sidecar_absent": absent[2],
+            "predecessor_session_unchanged": fs::read(&predecessor_path).map_err(|e| e.to_string())? == predecessor_before,
+            "predecessor_binding_unchanged": execution::current_execution_binding(&repo, authority).map_err(|e| e.to_string())? == Some(predecessor_binding),
+            "work_unchanged": tracked_workspace_work_store_snapshot(&repo) == work_before,
+        }))
+    });
+    let deferred = gwt_core::update::defer_pending_update("99.0.0");
+    executor.block_on(owner.shutdown());
+    deferred.expect("setup/inconclusive: private staged hold release");
+    let summary = observed.expect("setup/inconclusive: Manual early-admission cancellation");
+    let cleaned_ack = summary["cancelled"] == true && summary["cancel_exact"] == true;
+    let reconciliation = summary["cancel_reconciliation_error"] == true;
+    assert!(
+        summary["revoked"] == true
+            && summary["host_hold_error"] == true
+            && (cleaned_ack || reconciliation)
+            && summary["attempt_exact"] == true
+            && summary["attempt_status"] != serde_json::json!(Attempt::Activated),
+        "setup/inconclusive: {summary}"
+    );
+    assert!(
+        summary["session_absent"] == true
+            && summary["sidecar_absent"] == true
+            && summary["predecessor_session_unchanged"] == true
+            && summary["predecessor_binding_unchanged"] == true
+            && summary["work_unchanged"] == true
+            && if cleaned_ack {
+                summary["attempt_status"] == serde_json::json!(Attempt::Aborted)
+                    && summary["recovery_absent"] == true
+            } else {
+                summary["attempt_status"] == serde_json::json!(Attempt::Prepared)
+                    && summary["attempt_unchanged"] == true
+                    && summary["recovery_absent"] == false
+                    && summary["recovery_unchanged"] == true
+            },
+        "cleanup consistency: {summary}"
+    );
+}
+
+#[test]
 fn issue_5351_update_drain_host_hold_requires_pending_update_and_supports_host_wide_release() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());

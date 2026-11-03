@@ -33,6 +33,10 @@ pub struct TargetIssueCreateCall {
 }
 
 pub struct TestEnv {
+    pub release_policy_context_hook:
+        Option<Box<dyn FnMut() -> io::Result<crate::cli::ReleasePolicyContext> + Send>>,
+    pub release_policy_contexts:
+        std::collections::VecDeque<io::Result<crate::cli::ReleasePolicyContext>>,
     pub client: FakeIssueClient,
     pub cache_root: PathBuf,
     pub repo_path: PathBuf,
@@ -105,6 +109,8 @@ impl TestEnv {
     pub fn new(cache_root: PathBuf) -> Self {
         let repo_path = cache_root.clone();
         TestEnv {
+            release_policy_context_hook: None,
+            release_policy_contexts: Default::default(),
             client: FakeIssueClient::new(),
             cache_root,
             repo_path,
@@ -642,6 +648,14 @@ impl CliEnv for TestEnv {
 
     fn github_repository(&self) -> io::Result<(String, String)> {
         Ok(("owner".into(), "repo".into()))
+    }
+    fn release_policy_context(&mut self) -> io::Result<crate::cli::ReleasePolicyContext> {
+        if let Some(hook) = &mut self.release_policy_context_hook {
+            return hook();
+        }
+        self.release_policy_contexts
+            .pop_front()
+            .unwrap_or_else(|| super::super::actions::release_policy::context(&self.repo_path))
     }
     fn pm_settings_snapshot(
         &mut self,

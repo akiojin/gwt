@@ -651,7 +651,7 @@ fn last_build_artifact_gc_record(
 /// read from the OS so the number is there even when the instance itself
 /// has stopped answering its pane WebSocket.
 fn attach_memory_pressure(status: &mut crate::IssueMonitorAgentStatus) {
-    status.memory_pressure = Some(crate::memory_pressure::probe());
+    status.memory_pressure = crate::memory_pressure::probe().ok();
 }
 
 /// Issue #4386 AC-1: the CPU Spotlight's indexing daemon is spending on this
@@ -7350,6 +7350,7 @@ mod tests {
         launched_window_id: Option<&str>,
     ) -> crate::issue_monitor::IssueMonitorInboxSummary {
         crate::issue_monitor::IssueMonitorInboxSummary {
+            needs_human_reason: None,
             dependency: None,
             launch_tier: None,
             landing_tier: None,
@@ -12222,6 +12223,7 @@ mod tests {
             needs_human: vec![2338],
             released: Vec::new(),
             inbox: vec![crate::issue_monitor::IssueMonitorInboxSummary {
+                needs_human_reason: None,
                 dependency: None,
                 launch_tier: None,
                 landing_tier: None,
@@ -12375,6 +12377,7 @@ mod tests {
                 needs_human: vec![2338],
                 released: Vec::new(),
                 inbox: vec![crate::issue_monitor::IssueMonitorInboxSummary {
+                    needs_human_reason: None,
                     dependency: None,
                     launch_tier: None,
                     landing_tier: None,
@@ -16793,6 +16796,7 @@ command = "my-agent-cli"
             needs_human: Vec::new(),
             released: Vec::new(),
             inbox: vec![crate::issue_monitor::IssueMonitorInboxSummary {
+                needs_human_reason: None,
                 dependency: None,
                 launch_tier: None,
                 landing_tier: None,

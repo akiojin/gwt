@@ -1194,6 +1194,159 @@ fn runtime_hook_coordination_event(session_id: &str) -> gwt::RuntimeHookEvent {
     }
 }
 
+#[test]
+fn hook_center_uses_connection_project_and_preserves_failed_repair() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let project_a = temp.path().join("a");
+    let project_b = temp.path().join("b");
+    for root in [&project_a, &project_b] {
+        fs::create_dir_all(root).unwrap();
+        init_repo(root);
+    }
+    let config = project_b.join(".claude/settings.local.json");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::write(&config, [0xff]).unwrap();
+    let original = fs::read(&config).unwrap();
+    let tabs = vec![
+        sample_project_tab("a", "A", project_a.clone(), ProjectKind::Git, &[]),
+        sample_project_tab("b", "B", project_b.clone(), ProjectKind::Git, &[]),
+    ];
+    let (mut runtime, events) = sample_runtime_with_events(temp.path(), tabs, Some("a"));
+    let context = runtime.project_context_for_root(&project_b).unwrap();
+    let other_context = runtime.project_context_for_root(&project_a).unwrap();
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let request = |request_id, repair| {
+        serde_json::from_value(serde_json::json!({
+            "kind": "get_hook_doctor", "request_id": request_id, "repair": repair
+        }))
+        .expect("Hook Center request is supported")
+    };
+    let rejected = |reply: &[OutboundEvent], client_id: &str, request_id, error: &str| {
+        assert_eq!(reply.len(), 1, "a rejected request receives its own reply");
+        assert!(matches!(&reply[0].target, DispatchTarget::Client(id) if id == client_id));
+        let wire = serde_json::to_value(&reply[0].event).unwrap();
+        assert_eq!(wire["project_root"], project_b.to_string_lossy().as_ref());
+        assert_eq!(wire["request_id"], request_id);
+        assert!(wire["report"].is_null());
+        assert!(wire["error"].as_str().unwrap().contains(error));
+    };
+    for (request_id, repair) in [(193501, false), (193502, true)] {
+        events.lock().unwrap().clear();
+        let immediate = runtime.handle_frontend_event_for_project(
+            &context,
+            "client-b".to_string(),
+            request(request_id, repair),
+        );
+        assert!(immediate.is_empty(), "Doctor runs off the UI event loop");
+        let busy = runtime.handle_frontend_event_for_project(
+            &context,
+            "client-busy".to_string(),
+            request(request_id + 10, repair),
+        );
+        rejected(&busy, "client-busy", request_id + 10, "already in progress");
+        if repair {
+            let read_during_repair = runtime.handle_frontend_event_for_project(
+                &context,
+                "client-b".to_string(),
+                request(193520, false),
+            );
+            rejected(
+                &read_during_repair,
+                "client-b",
+                193520,
+                "already in progress",
+            );
+        }
+        assert_eq!(tasks.lock().unwrap().len(), 1, "one worker per project");
+        if !repair {
+            assert!(runtime
+                .handle_frontend_event_for_project(
+                    &other_context,
+                    "client-a".to_string(),
+                    request(193599, false),
+                )
+                .is_empty());
+            assert_eq!(
+                tasks.lock().unwrap().len(),
+                2,
+                "other projects remain available"
+            );
+        }
+        drain_queued_blocking_tasks(&tasks);
+        let recorded = events.lock().unwrap();
+        let reply = recorded.iter().find_map(|event| {
+            let UserEvent::Dispatch(dispatched) = recorded_project_payload(event) else {
+                return None;
+            };
+            dispatched.iter().find_map(|outbound| {
+                let wire = serde_json::to_value(&outbound.event).unwrap();
+                (wire["kind"] == "hook_doctor" && wire["request_id"] == request_id).then(|| {
+                    assert!(matches!(&outbound.target, DispatchTarget::Client(id) if id == "client-b"));
+                    wire
+                })
+            })
+        }).expect("correlated Doctor reply");
+        assert_eq!(reply["request_id"], request_id);
+        assert_eq!(reply["project_root"], project_b.to_string_lossy().as_ref());
+        if repair {
+            assert!(reply["report"].is_null());
+            assert!(reply["error"]
+                .as_str()
+                .is_some_and(|error| !error.is_empty()));
+        } else {
+            assert!(reply["error"].is_null());
+            assert_eq!(
+                reply["report"]["configuration_audit"]["asset_root"],
+                project_b.to_string_lossy().as_ref()
+            );
+            assert_eq!(
+                reply["report"]["configuration_audit"]["configs"][0]["state"],
+                "unreadable"
+            );
+            assert!(reply["report"]["repair"].is_null());
+        }
+        assert_eq!(fs::read(&config).unwrap(), original);
+        assert!(
+            !project_a.join(".claude").exists(),
+            "active project A is untouched"
+        );
+    }
+    runtime.blocking_tasks = BlockingTaskSpawner::failing("worker unavailable");
+    let failed = runtime.handle_frontend_event_for_project(
+        &context,
+        "client-b".to_string(),
+        request(193530, false),
+    );
+    rejected(&failed, "client-b", 193530, "worker unavailable");
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    assert!(
+        runtime
+            .handle_frontend_event_for_project(
+                &context,
+                "client-b".to_string(),
+                request(193531, false),
+            )
+            .is_empty(),
+        "failed spawn must release the project"
+    );
+    tasks.lock().unwrap().clear();
+    assert!(
+        runtime
+            .handle_frontend_event_for_project(
+                &context,
+                "client-b".to_string(),
+                request(193532, false),
+            )
+            .is_empty(),
+        "dropping a queued worker must release the project"
+    );
+    assert_eq!(tasks.lock().unwrap().len(), 1);
+    drain_queued_blocking_tasks(&tasks);
+}
+
 pub(super) fn sample_runtime(
     temp_root: &Path,
     tabs: Vec<ProjectTabRuntime>,
@@ -1810,6 +1963,7 @@ fn sample_runtime_with_events(
         project_log_scopes: HashMap::new(),
         proxy,
         blocking_tasks,
+        hook_doctor_in_flight: Default::default(),
         agent_maintenance: Default::default(),
         sessions_dir,
         launch_wizard_cache,
@@ -6902,9 +7056,50 @@ fn drain_owner_launch_fixtures(
 fn spawn_owner_codex_fixture(
     runtime: &mut AppRuntime,
     tab_id: &str,
-    mut config: gwt_agent::LaunchConfig,
+    config: gwt_agent::LaunchConfig,
     expected_title: Option<&str>,
 ) -> String {
+    let wait_for_fixture_ready = config.command == config.agent_id.command();
+    let (window_id, mut output) =
+        spawn_owner_codex_fixture_with_output(runtime, tab_id, config, expected_title);
+    if wait_for_fixture_ready {
+        let pane = owner_runtime_probe(runtime, &window_id);
+        owner_fixture_block_on(async {
+            // test-hygiene: allow-wall-clock-deadline Bounds a missing native startup event; processed owner output, not elapsed time, establishes readiness.
+            tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+                loop {
+                    if let gwt::project_runtime::events::OwnerEvent::Output {
+                        id,
+                        incarnation,
+                        screen,
+                        ..
+                    } = output.recv().await.expect("native fixture output")
+                    {
+                        if id == pane.id
+                            && incarnation == pane.incarnation
+                            && screen.contains("GWT_PM_FIXTURE_READY")
+                        {
+                            break;
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("owner processed native fixture startup before synthetic screens");
+        });
+    }
+    window_id
+}
+
+fn spawn_owner_codex_fixture_with_output(
+    runtime: &mut AppRuntime,
+    tab_id: &str,
+    mut config: gwt_agent::LaunchConfig,
+    expected_title: Option<&str>,
+) -> (
+    String,
+    tokio::sync::broadcast::Receiver<gwt::project_runtime::events::OwnerEvent>,
+) {
     let root = runtime.tab(tab_id).unwrap().project_root.clone();
     pane_control_tests::control_init_repo(&root);
     config
@@ -6933,6 +7128,7 @@ fn spawn_owner_codex_fixture(
         .unwrap()
         .clone();
     let owner = project_owner_fixture(runtime, &window_id);
+    let output = owner.subscribe();
     drain_queued_blocking_tasks(&tasks);
     let completion = take_remote_owner_launch_completion(match &runtime.proxy {
         AppEventProxy::Stub(events) => events,
@@ -6971,7 +7167,7 @@ fn spawn_owner_codex_fixture(
     state.project_owner_identity = client.identity().cloned();
     runtime.handle_remote_owner_launch_complete(completion);
     assert!(runtime.active_agent_sessions.contains_key(&window_id));
-    window_id
+    (window_id, output)
 }
 
 fn owner_fixture_agent_command(
@@ -7357,6 +7553,23 @@ fn owner_monitor_fixture_with_prefs(
     )
     .unwrap();
     configure_owner_fixture_start_gate(&owner);
+    // Reserve a source scan, or join the exact scan the daemon already owns.
+    // Strict admission publishes non-idle before either reply, avoiding a
+    // stale initial idle observation on the ordinary control retry path.
+    if let Err(error) = gwt::daemon_publisher::publish_durable_issue_monitor_control(
+        &root,
+        gwt::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({"scan_now_if_idle":{}}),
+            std::process::id(),
+        ),
+    ) {
+        assert_eq!(
+            error.to_string(),
+            gwt::runtime_daemon_events::ISSUE_MONITOR_CONTROL_SCAN_ALREADY_IN_FLIGHT_ERROR,
+            "the actual initial source scan must be reserved or already running"
+        );
+    }
     owner_fixture_block_on(owner.wait_monitor_idle()).unwrap();
     (root, owner, delivery_id)
 }
@@ -7939,9 +8152,31 @@ fn approval_settle_runtime() -> (
         .branch("work/approval")
         .linked_issue_number(42)
         .build();
-    let window_id = spawn_owner_codex_fixture(&mut runtime, "tab-1", config, None);
+    let (window_id, mut output) =
+        spawn_owner_codex_fixture_with_output(&mut runtime, "tab-1", config, None);
     let owner = project_owner_fixture(&mut runtime, &window_id);
     let pane = owner_runtime_probe(&runtime, &window_id);
+    owner_fixture_block_on(async {
+        // Subscribe before launch and join the real owner's startup frame before
+        // injecting approval screens; a later real frame uses the actor's clock.
+        // test-hygiene: allow-wall-clock-deadline This only bounds the native startup output/IPC join; the approval policy uses its unchanged injected clocks.
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if matches!(
+                    output.recv().await.unwrap(),
+                    gwt::project_runtime::events::OwnerEvent::Output {
+                        id, incarnation, screen, ..
+                    } if id == pane.id
+                        && incarnation == pane.incarnation
+                        && screen.contains("GWT_PM_FIXTURE_READY")
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("actual owner-applied provider startup output");
+    });
     let hook = owner_runtime_status_event(&owner, &pane, "running", "PreToolUse");
     let context = runtime.project_context("tab-1").unwrap();
     let identity = owner.client().identity().unwrap().clone();
@@ -8150,6 +8385,14 @@ impl IssueClient for PermissionDeniedCreateIssueClient {
 
 fn assert_ack_preserves_failed_window_replacement(test_root: &Path, restart_existing_id: bool) {
     use gwt::project_runtime::events::OwnerCommand;
+    // This fixture verifies the committed ACK and replacement identity, not
+    // whether the serialized daemon can persist it in five wall-clock seconds.
+    let _control_budget = ScopedEnvVar::set(
+        "GWT_TEST_BUDGET_DURABLE_ISSUE_MONITOR_CONTROL_MS",
+        gwt_core::deadline_budget::HANG_GUARD
+            .as_millis()
+            .to_string(),
+    );
     let _home = ScopedEnvVar::set("HOME", test_root);
     let _userprofile = ScopedEnvVar::set("USERPROFILE", test_root);
     let _codex_home = ScopedEnvVar::set("CODEX_HOME", test_root.join(".codex"));
@@ -8164,12 +8407,26 @@ fn assert_ack_preserves_failed_window_replacement(test_root: &Path, restart_exis
         false,
     );
     let repo = fixture.project_root.clone();
+    // Seed historical failure before the daemon starts. Adding it later is a
+    // new terminal failure and correctly revokes the manual reservation.
+    let mut windows = fixture.runtime.tab("tab-1").unwrap().workspace.clone();
+    windows.add_window(WindowPreset::Agent); // The pending source launch.
+    let expected_failed_id = windows.next_window_id_preview(WindowPreset::Agent);
+    let failed_owner_id = format!(
+        "{}::{expected_failed_id}",
+        gwt_core::paths::project_scope_hash(&repo)
+    );
     // Auto remains OFF. This case models an explicitly reserved manual
     // launch awaiting its ACK, not an unreserved launch after revocation.
     gwt::try_mutate_issue_monitor_prefs(
         &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
         |prefs| {
             assert!(!prefs.enabled);
+            prefs.failed_issues.push(gwt::IssueMonitorFailedIssue {
+                issue_number: 3165,
+                message: "previous pane failed".into(),
+                window_id: Some(failed_owner_id.clone()),
+            });
             prefs
                 .launching_issues
                 .push(gwt::IssueMonitorLaunchingIssue {
@@ -8194,23 +8451,12 @@ fn assert_ack_preserves_failed_window_replacement(test_root: &Path, restart_exis
         .workspace
         .add_window(WindowPreset::Agent);
     let failed_raw_id = failed_window.id;
+    assert_eq!(failed_raw_id, expected_failed_id);
     let failed_id = combined_window_id("tab-1", &failed_raw_id);
     runtime.register_window("tab-1", &failed_raw_id);
-    let failed_owner_id = owner.pane_id(&failed_raw_id);
+    assert_eq!(owner.pane_id(&failed_raw_id), failed_owner_id);
     // The persisted failure names the former occupant. It cannot authorize
     // deleting the actual Issue #43 Session that now reuses this pane ID.
-    gwt::try_mutate_issue_monitor_prefs(
-        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
-        |prefs| {
-            prefs.failed_issues.push(gwt::IssueMonitorFailedIssue {
-                issue_number: 3165,
-                message: "previous pane failed".into(),
-                window_id: Some(failed_owner_id.clone()),
-            });
-            Ok(())
-        },
-    )
-    .unwrap();
     let launch_replacement = || {
         let receipt = owner_fixture_block_on(owner.command(OwnerCommand::LaunchAgent {
             id: failed_owner_id.clone(),

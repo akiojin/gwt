@@ -6,32 +6,37 @@ pub const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const RECONNECT_GRACE: Duration = Duration::from_secs(5);
 
 /// Capture before bootstrap so an orphaned launch cannot adopt its new parent.
-pub struct ParentProcess(Option<(Pid, u64)>);
+pub struct ParentProcess(Result<Option<(Pid, u64)>, sysinfo::Error>);
 
 impl ParentProcess {
     pub fn capture() -> Self {
-        let mut system = System::new();
+        Self(Self::capture_identity())
+    }
+
+    fn capture_identity() -> Result<Option<(Pid, u64)>, sysinfo::Error> {
+        let mut system = System::new()?;
         let Ok(current) = sysinfo::get_current_pid() else {
-            return Self(None);
+            return Ok(None);
         };
         refresh(&mut system, current);
         let Some(parent) = system.process(current).and_then(|process| process.parent()) else {
-            return Self(None);
+            return Ok(None);
         };
         if parent.as_u32() <= 1 {
-            return Self(None);
+            return Ok(None);
         }
         refresh(&mut system, parent);
-        Self(
-            system
-                .process(parent)
-                .map(|process| (parent, process.start_time())),
-        )
+        Ok(system
+            .process(parent)
+            .map(|process| (parent, process.start_time())))
     }
 
     pub fn is_alive(&self) -> bool {
-        let Some((pid, started)) = self.0 else {
-            return false;
+        // Unavailable observation must not end the server as an orphan.
+        let (pid, started) = match self.0 {
+            Ok(Some(identity)) => identity,
+            Ok(None) => return false,
+            Err(_) => return true,
         };
         #[cfg(unix)]
         if std::os::unix::process::parent_id() != pid.as_u32() {
@@ -39,7 +44,9 @@ impl ParentProcess {
         }
         // A fresh snapshot also detects PID reuse, rather than retaining the
         // old process metadata in a long-lived System cache.
-        let mut system = System::new();
+        let Ok(mut system) = System::new() else {
+            return true;
+        };
         refresh(&mut system, pid);
         system.process(pid).is_some_and(|process| {
             process.start_time() == started
@@ -99,7 +106,8 @@ mod tests {
 
     #[test]
     fn missing_parent_is_terminal_and_live_parent_is_detected() {
-        assert!(!ParentProcess(None).is_alive());
+        assert!(!ParentProcess(Ok(None)).is_alive());
+        assert!(ParentProcess(Err(sysinfo::Error::Unsupported)).is_alive());
         assert!(ParentProcess::capture().is_alive());
     }
 }
