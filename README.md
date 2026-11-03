@@ -630,6 +630,9 @@ the recommendation are allowed, with a warning that verification may not finish 
 timing-dependent test failures may block unrelated PRs. In roster projects, automation uses
 `issue.monitor.config.set` with `{"max_active":4}` to resize the roster to four enabled
 members; Auto requests are rejected to keep membership and requested capacity equal.
+Explicit Manual limits and roster resize requests may not exceed 256; `max_active`
+still requires a positive value. Reducing a request preserves registered members,
+and existing larger rosters remain readable.
 For legacy projects without a roster, automation uses
 `issue.monitor.config.set` with `{"max_active_mode":"auto"}` for Auto or
 `{"max_active":4}` for a Manual limit of four. `issue.monitor.status` reports the effective limit,

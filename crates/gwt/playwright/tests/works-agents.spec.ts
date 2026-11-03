@@ -635,15 +635,41 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(roster(page).locator(".roster-count")).toHaveText("4");
     await expect(roster(page).locator(".roster-capacity-value")).toHaveText("4");
     expect(await page.evaluate(() => (window as any).__worksAgentsFixture.members.find(member => member.agent_member_id === "m-added").agent_id)).toBe("codex");
+    // This is the fixture WebSocket roster, not a native backend Session.
+    await page.evaluate(() => {
+      const fixture = (window as any).__worksAgentsFixture;
+      const member = fixture.members.find((value: any) => value.agent_member_id === "m-added");
+      member.saved_manual_profile = { agent_id: "codex", agent_member_id: "m-added", model: "retained-model", reasoning: "high", runtime_target: "Host", skip_permissions: false };
+      member.saved_implementation_core = { agent_id: "codex", model: "retained-model", reasoning: "high", version: null, fast_mode: false };
+      member.saved_implementation_core_revision = "core-added-1";
+      member.history = [
+        { session_id: "s-added-old", issue_number: 4100, title: "Earlier retained", result: "landed", started_at: "2026-10-20T00:00:00Z", ended_at: "2026-10-20T02:00:00Z" },
+        { session_id: "s-added-new", issue_number: 4200, title: "Later retained", result: "landed", started_at: "2026-10-22T00:00:00Z", ended_at: "2026-10-22T02:00:00Z" },
+      ];
+      fixture.reorderMembers(["m-one", "m-two", "m-idle", "m-added"]);
+    });
+    const beforeRest = await page.evaluate(() => structuredClone((window as any).__worksAgentsFixture.members.find(member => member.agent_member_id === "m-added")));
+    expect(beforeRest.saved_implementation_core.model).toBe("retained-model");
+    expect(beforeRest.history).toHaveLength(2);
     await roster(page).locator('.roster-row[data-member-id="m-added"]').click();
+    await expect(roster(page).locator(".roster-saved-settings")).toContainText("Model: retained-model");
+    expect(await roster(page).locator(".roster-history li").allTextContents()).toEqual([
+      expect.stringContaining("Later retained"), expect.stringContaining("Earlier retained"),
+    ]);
     await roster(page).locator('.roster-detail [data-action="rest"]').click();
     await expect(roster(page).locator(".roster-count")).toHaveText("3");
     await expect(roster(page).locator(".roster-capacity-value")).toHaveText("3");
     const mutations = (await sent(page)).filter(message => message.kind === "agent_roster" && message.action.kind !== "read");
-    expect(mutations.map(message => [message.action, message.expected_revision])).toEqual([[{ kind: "add", agent_id: "codex", name: "Dahlia", pm_eligible: false }, 3], [{ kind: "rest", member_id: "m-added" }, 4]]);
+    expect(mutations.map(message => [message.action, message.expected_revision])).toEqual([[{ kind: "add", agent_id: "codex", name: "Dahlia", pm_eligible: false }, 3], [{ kind: "rest", member_id: "m-added" }, 5]]);
     expect(await page.evaluate(() => (window as any).__worksAgentsFixture.rejectedRevisions)).toEqual([]);
     expect(await page.evaluate(() => (window as any).__worksAgentsFixture.members.find(member => member.agent_member_id === "m-added").enabled)).toBe(false);
     const resting = roster(page).locator('.roster-row[data-member-id="m-added"]');
+    const restingRecord = { ...beforeRest, enabled: false };
+    expect(await page.evaluate(() => (window as any).__worksAgentsFixture.members.find(member => member.agent_member_id === "m-added"))).toEqual(restingRecord);
+    await expect(roster(page).locator(".roster-saved-settings")).toContainText("Model: retained-model");
+    expect(await roster(page).locator(".roster-history li").allTextContents()).toEqual([
+      expect.stringContaining("Later retained"), expect.stringContaining("Earlier retained"),
+    ]);
     await expect(resting).toBeVisible();
     await expect(resting.locator(".roster-state")).toHaveText("Resting");
     await expect(roster(page).locator(".roster-capacity-note")).toContainText("Registered 4");
@@ -686,6 +712,12 @@ test.describe("Works and Agents approved baseline", () => {
     await openRail(page, "agents");
     await expect(resting).toBeVisible();
     await expect(resting.locator(".roster-state")).toHaveText("Resting");
+    expect(await page.evaluate(() => (window as any).__worksAgentsFixture.members.find(member => member.agent_member_id === "m-added"))).toEqual(restingRecord);
+    await resting.click();
+    await expect(roster(page).locator(".roster-saved-settings")).toContainText("Model: retained-model");
+    expect(await roster(page).locator(".roster-history li").allTextContents()).toEqual([
+      expect.stringContaining("Later retained"), expect.stringContaining("Earlier retained"),
+    ]);
     await expect(roster(page).locator(".roster-count")).toHaveText("3");
     await expect(roster(page).locator(".roster-capacity-value")).toHaveText("3");
     await expect(roster(page).locator(".roster-capacity-note")).toContainText("Registered 4");

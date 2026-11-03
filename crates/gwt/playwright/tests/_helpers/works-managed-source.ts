@@ -305,7 +305,9 @@ export async function startWorksManagedSource(browser: Browser, info: TestInfo) 
     expect(fallback).not.toMatch(/(^|[/\\])target[/\\](?:[^/\\]+[/\\])*(?:debug|release)[/\\]gwtd/i);
 
     // The static target is separate; only public hook configuration crosses this boundary.
-    targetHome = await mkdtemp(join(checkout, "target/issue-4777-prechange/works-fresh-home."));
+    const targetParent = join(checkout, "target/issue-4777-prechange");
+    await mkdir(targetParent, { recursive: true });
+    targetHome = await mkdtemp(join(targetParent, "works-fresh-home."));
     await mkdir(join(targetHome, ".gwt"), { recursive: true });
     try {
       const runtime = join(homedir(), ".gwt/runtime");
