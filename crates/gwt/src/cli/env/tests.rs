@@ -1277,6 +1277,7 @@ fn hook_doctor_reports_codex_trust_command_mismatch_without_registering_it() {
     hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"] =
         serde_json::json!("gwtd hook event SessionStart");
     fs::write(&hooks_path, serde_json::to_string(&hooks).unwrap()).unwrap();
+    let hooks_before = fs::read(&hooks_path).unwrap();
     let mut env = TestEnv::new(temp.path().to_path_buf());
     env.stdin = serde_json::json!({
         "schema_version": 1,
@@ -1288,6 +1289,14 @@ fn hook_doctor_reports_codex_trust_command_mismatch_without_registering_it() {
     let envelope: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
     let doctor: serde_json::Value =
         serde_json::from_str(envelope["output"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        doctor["repair_plan"],
+        serde_json::json!({
+            "automatic": ["materialize_managed_git_hooks", "regenerate_managed_provider_configs"],
+            "user_actions": ["verify_codex_hook_trust"],
+            "new_session_actions": ["start_new_agent_session"]
+        })
+    );
     let audit = &doctor["codex_hook_audit"];
     assert_eq!(audit["discovery_mode"], "both");
     assert_eq!(
@@ -1332,6 +1341,7 @@ fn hook_doctor_reports_codex_trust_command_mismatch_without_registering_it() {
         audit["trust"]["modified_gwt_hooks"],
         serde_json::json!([session_start_key])
     );
+    assert_eq!(fs::read(&hooks_path).unwrap(), hooks_before);
     assert!(!codex_home.join("config.toml").exists());
 }
 
@@ -1375,6 +1385,14 @@ fn hook_doctor_keeps_unmaterialized_worktree_inactive_with_shared_hooks() {
         serde_json::from_str(envelope["output"].as_str().unwrap()).unwrap();
     assert_eq!(doctor["health"]["status"].as_str(), Some("inactive"));
     assert!(doctor["codex_hook_audit"].is_null());
+    assert_eq!(
+        doctor["repair_plan"],
+        serde_json::json!({
+            "automatic": ["materialize_managed_git_hooks"],
+            "user_actions": [],
+            "new_session_actions": []
+        })
+    );
     assert!(!codex_home.join("config.toml").exists());
 
     // A materialized local surface must audit both discovery paths even when
@@ -1504,6 +1522,14 @@ fn dispatch_json_envelope_hook_doctor_can_repair_missing_managed_configs() {
         serde_json::from_str(stdout["output"].as_str().expect("output string"))
             .expect("parse hook doctor output");
     assert_eq!(doctor["repair"]["repaired"].as_bool(), Some(true));
+    assert_eq!(
+        doctor["repair_plan"],
+        serde_json::json!({
+            "automatic": ["materialize_managed_git_hooks", "regenerate_managed_provider_configs"],
+            "user_actions": ["verify_codex_hook_trust"],
+            "new_session_actions": ["start_new_agent_session"]
+        })
+    );
     assert_eq!(
         doctor["repair_writer"]["pid"].as_u64(),
         Some(u64::from(std::process::id()))
