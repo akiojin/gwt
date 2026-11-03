@@ -263,10 +263,10 @@ test.describe("terminal-grid responsiveness (#5117)", () => {
           };
           (window as any).__gwtAc13PeerPaint = state;
         }, { id, peerId, marker });
-        // Split the printf format and argument so echoed input cannot satisfy
+        // Split the Node expression so echoed input cannot satisfy
         // the marker. This is real PTY output, with native animation scheduling.
         await sendLiveGwtEvent(page, { kind: "terminal_input", id,
-          data: `printf 'GWT_AC13_%s\\n' '${suffix}'\r` });
+          data: `node -p "'GWT_' + 'AC13_${suffix}'"\r` });
         await page.waitForFunction(() => (window as any).__gwtAc13PeerPaint.result,
           undefined, { polling: 100, timeout: 15_000 });
         const observation = await page.evaluate(() => (window as any).__gwtAc13PeerPaint.result);
