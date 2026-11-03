@@ -1,11 +1,40 @@
 //! Private Rust GUI client; the daemon token never enters a browser projection.
 use super::events::{OwnerCommand, OwnerReply, OwnerRequest};
+use std::sync::OnceLock;
+
+struct CommandTransport {
+    http: reqwest::Client,
+    runtime: tokio::runtime::Runtime,
+}
+
+fn command_transport() -> Result<&'static CommandTransport, String> {
+    static TRANSPORT: OnceLock<Result<CommandTransport, String>> = OnceLock::new();
+    TRANSPORT
+        .get_or_init(|| {
+            // Build the client first so a client initialization failure never
+            // drops a Tokio runtime inside an async caller.
+            let http = reqwest::Client::builder()
+                .pool_max_idle_per_host(8)
+                .build()
+                .map_err(|error| error.to_string())?;
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .thread_name("gwt-private-http")
+                .enable_all()
+                .build()
+                .map_err(|error| error.to_string())?;
+            Ok(CommandTransport { http, runtime })
+        })
+        .as_ref()
+        .map_err(|error| error.clone())
+}
+
 #[derive(Clone)]
 pub struct ProjectRuntimeClient {
     url: String,
     token: String,
     project_key: String,
-    http: reqwest::Client,
+    transport: &'static CommandTransport,
     identity: Option<crate::daemon_subscriber::ProjectOwnerIdentity>,
 }
 
@@ -18,13 +47,7 @@ impl ProjectRuntimeClient {
                 .ok_or("daemon has no project transport")?,
             token: endpoint.auth_token.clone(),
             project_key: endpoint.scope.repo_hash.clone(),
-            // GUI callbacks share this client across short-lived Tokio runtimes.
-            // A pooled connection's driver belongs to its originating runtime;
-            // that caller's shutdown must not abort another caller's request.
-            http: reqwest::Client::builder()
-                .pool_max_idle_per_host(0)
-                .build()
-                .map_err(|error| error.to_string())?,
+            transport: command_transport()?,
             identity: None,
         })
     }
@@ -220,7 +243,8 @@ impl ProjectRuntimeClient {
         command: OwnerCommand,
         timeout: std::time::Duration,
     ) -> OwnerReply {
-        let response = self
+        let request = self
+            .transport
             .http
             .post(format!("{}/private/project/command", self.url))
             .bearer_auth(&self.token)
@@ -228,50 +252,75 @@ impl ProjectRuntimeClient {
             .json(&OwnerRequest {
                 project_key: self.project_key.clone(),
                 command,
-            })
-            .send()
+            });
+        // Both the connection driver and response body belong to the process
+        // runtime, so ending any short-lived GUI caller cannot break the pool.
+        // JoinSet aborts the task when the caller drops this request future.
+        let mut pending = tokio::task::JoinSet::new();
+        pending.spawn_on(
+            async move {
+                let response = request.send().await.map_err(|error| error.to_string())?;
+                let status = response.status();
+                let reply: serde_json::Value =
+                    response.json().await.map_err(|error| error.to_string())?;
+                if status.is_success() {
+                    Ok(reply)
+                } else {
+                    Err(reply["error"]
+                        .as_str()
+                        .unwrap_or("project command refused")
+                        .into())
+                }
+            },
+            self.transport.runtime.handle(),
+        );
+        pending
+            .join_next()
             .await
-            .map_err(|error| error.to_string())?;
-        let status = response.status();
-        let reply: serde_json::Value = response.json().await.map_err(|error| error.to_string())?;
-        if status.is_success() {
-            Ok(reply)
-        } else {
-            Err(reply["error"]
-                .as_str()
-                .unwrap_or("project command refused")
-                .into())
-        }
+            .expect("private HTTP request task was registered")
+            .map_err(|error| error.to_string())?
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{extract::State, http::HeaderMap, routing::post, Json, Router};
+    use axum::{
+        extract::{ConnectInfo, State},
+        http::HeaderMap,
+        routing::post,
+        Json, Router,
+    };
     use gwt_core::{
         daemon::{DaemonEndpoint, RuntimeScope, RuntimeTarget},
         test_support::recv_event,
     };
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        mpsc, Arc,
+    use std::{
+        collections::HashSet,
+        net::SocketAddr,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            mpsc, Arc, Mutex,
+        },
     };
 
     #[test]
     fn request_survives_another_callers_runtime_shutdown() {
         struct Fixture {
             requests: AtomicUsize,
+            connections: Mutex<HashSet<SocketAddr>>,
             received: mpsc::Sender<()>,
             release: tokio::sync::Notify,
         }
         async fn command(
             State(fixture): State<Arc<Fixture>>,
+            ConnectInfo(peer): ConnectInfo<SocketAddr>,
             headers: HeaderMap,
             Json(request): Json<OwnerRequest>,
         ) -> Json<serde_json::Value> {
             assert_eq!(headers["authorization"], "Bearer inert-fixture");
             assert!(matches!(request.command, OwnerCommand::Health));
+            fixture.connections.lock().unwrap().insert(peer);
             if fixture.requests.fetch_add(1, Ordering::SeqCst) == 1 {
                 fixture.received.send(()).unwrap();
                 fixture.release.notified().await;
@@ -286,10 +335,10 @@ mod tests {
         let (received, arrivals) = mpsc::channel();
         let fixture = Arc::new(Fixture {
             requests: AtomicUsize::new(0),
+            connections: Mutex::new(HashSet::new()),
             received,
             release: tokio::sync::Notify::new(),
         });
-        let (shutdown, stop) = tokio::sync::oneshot::channel();
         let state = fixture.clone();
         let (address, served) = server.block_on(async {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -298,12 +347,12 @@ mod tests {
                 .route("/private/project/command", post(command))
                 .with_state(state);
             let served = tokio::spawn(async move {
-                axum::serve(listener, router)
-                    .with_graceful_shutdown(async {
-                        let _ = stop.await;
-                    })
-                    .await
-                    .unwrap();
+                axum::serve(
+                    listener,
+                    router.into_make_service_with_connect_info::<SocketAddr>(),
+                )
+                .await
+                .unwrap();
             });
             (address, served)
         });
@@ -352,13 +401,32 @@ mod tests {
         first.join().unwrap();
         fixture.release.notify_one();
         let result = second.join().unwrap();
+        // New wrappers and their clones must share the same process pool,
+        // including after each caller's runtime has been fully dropped.
+        for _ in 0..16 {
+            let fresh = ProjectRuntimeClient::new(&endpoint).unwrap();
+            for caller in [fresh.clone(), fresh] {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(caller.command(OwnerCommand::Health))
+                    .unwrap();
+            }
+        }
         drop(client);
-        shutdown.send(()).unwrap();
-        server.block_on(served).unwrap();
+        // A process-wide pool outlives this fixture; do not wait for its idle
+        // timeout during graceful server shutdown.
+        served.abort();
+        assert!(server.block_on(served).unwrap_err().is_cancelled());
+        drop(server);
         assert!(
             result.is_ok(),
             "another caller's runtime teardown aborted the private command: {result:?}"
         );
-        assert_eq!(fixture.requests.load(Ordering::SeqCst), 2);
+        assert_eq!(fixture.requests.load(Ordering::SeqCst), 34);
+        let connections = fixture.connections.lock().unwrap().len();
+        println!("private HTTP: 34 requests, {connections} TCP connections");
+        assert_eq!(connections, 1, "private HTTP connections were not reused");
     }
 }
