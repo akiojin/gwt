@@ -150,6 +150,9 @@ pub(crate) fn enforce_size_limit(
             Err(error) => {
                 retained = retained.saturating_add(bytes);
                 first_error.get_or_insert(error);
+                if retained > available {
+                    break;
+                }
             }
         }
     }
@@ -341,7 +344,9 @@ mod tests {
             .set_len(25)
             .unwrap();
         fs::write(&active, b"preserve").unwrap();
+        fs::write(&removable, b"newer history").unwrap();
         assert!(enforce_size_limit(dir.path(), &active, &opened, 24, 12).is_err());
         assert_eq!(fs::read(&active).unwrap(), b"preserve");
+        assert_eq!(fs::read(&removable).unwrap(), b"newer history");
     }
 }

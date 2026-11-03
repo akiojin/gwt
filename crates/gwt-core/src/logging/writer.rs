@@ -93,7 +93,7 @@ impl BoundedDailyWriter {
         let result = (|| {
             let path = current_log_file(&self.log_dir);
             let mut file = open_log_file(&path)?;
-            let recovery_newline = u64::from(needs_tail_newline(&mut file)?);
+            let recovery_newline = u64::from(!record.is_empty() && needs_tail_newline(&mut file)?);
             super::housekeep::enforce_size_limit(
                 &self.log_dir,
                 &path,
@@ -103,7 +103,7 @@ impl BoundedDailyWriter {
                 // room resets the old partial tail, so no recovery byte remains.
                 (record.len() as u64 + recovery_newline).min(self.max_bytes),
             )?;
-            let repair_tail = needs_tail_newline(&mut file)?;
+            let repair_tail = !record.is_empty() && needs_tail_newline(&mut file)?;
             file.seek(SeekFrom::End(0))?;
             if repair_tail {
                 file.write_all(b"\n")?;
@@ -499,7 +499,13 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "{\"n\":\"1234567\"}\n"
         );
-        assert_eq!(std::fs::metadata(path).unwrap().len(), 16);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 16);
+
+        std::fs::write(&path, [b'x'; 16]).unwrap();
+        let mut restarted = BoundedDailyWriter::new(dir.path(), 16).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), [b'x'; 16]);
+        restarted.write_all(b"{\"n\":4}\n").unwrap();
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "{\"n\":4}\n");
     }
 
     #[test]
