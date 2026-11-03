@@ -33,6 +33,8 @@ function Assert-Preflight($Doctor) {
 
 Push-Location -LiteralPath $checkout
 try {
+    & cargo build -p gwt --bin gwt --bin gwtd --target-dir (Join-Path $checkout 'target')
+    if ($LASTEXITCODE -ne 0) { throw 'cargo build failed; checkout binaries are not fresh.' }
     foreach ($file in @($gwt, $gwtd, $cli, $resolver)) {
         if (!(Test-Path -LiteralPath $file -PathType Leaf)) { throw "Required checkout binary or pinned Playwright dependency missing: $file" }
     }

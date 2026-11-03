@@ -99,6 +99,7 @@ pub fn housekeep_at(
 pub(crate) fn enforce_size_limit(
     log_dir: &Path,
     active: &Path,
+    active_file: &fs::File,
     max_bytes: u64,
     incoming_bytes: u64,
 ) -> std::io::Result<()> {
@@ -109,9 +110,14 @@ pub(crate) fn enforce_size_limit(
         )
     })?;
     let mut files = Vec::new();
-    let mut total = 0_u64;
+    // Size and reset the exact handle the writer opened. Reopening `active`
+    // could follow a replacement path or symlink into an unrelated file.
+    let mut total = active_file.metadata()?.len();
     for entry in fs::read_dir(log_dir)? {
         let entry = entry?;
+        if entry.path() == active {
+            continue;
+        }
         if !entry.file_type()?.is_file() {
             continue;
         }
@@ -133,20 +139,28 @@ pub(crate) fn enforce_size_limit(
         files.push((date, entry.path(), bytes));
     }
     files.sort_unstable_by_key(|(date, _, _)| *date);
+    let mut first_error = None;
+    let mut retained = 0_u64;
     for (_, path, bytes) in files {
         if total <= available {
             break;
         }
-        if path != active {
-            fs::remove_file(path)?;
-            total = total.saturating_sub(bytes);
+        match fs::remove_file(path) {
+            Ok(()) => total = total.saturating_sub(bytes),
+            Err(error) => {
+                retained = retained.saturating_add(bytes);
+                first_error.get_or_insert(error);
+            }
         }
     }
+    // A failed history deletion need not disable logging if resetting the
+    // active file can still fit the next record. Preserve the original error
+    // and fail closed when undeletable history alone exhausts the budget.
+    if let Some(error) = first_error.filter(|_| retained > available) {
+        return Err(error);
+    }
     if total > available {
-        fs::OpenOptions::new()
-            .write(true)
-            .open(active)?
-            .set_len(0)?;
+        active_file.set_len(0)?;
     }
     Ok(())
 }
@@ -257,15 +271,77 @@ mod tests {
             fs::write(path, b"12345678").unwrap();
         }
         fs::write(&unrelated, b"unrelated diagnostics").unwrap();
+        let opened = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&active)
+            .unwrap();
 
-        enforce_size_limit(dir.path(), &active, 16, 0).unwrap();
+        enforce_size_limit(dir.path(), &active, &opened, 16, 0).unwrap();
         assert!(!oldest.exists());
         assert_eq!(fs::read(&recent).unwrap(), b"12345678");
         assert_eq!(fs::read(&active).unwrap(), b"12345678");
 
-        enforce_size_limit(dir.path(), &active, 16, 12).unwrap();
+        enforce_size_limit(dir.path(), &active, &opened, 16, 12).unwrap();
         assert!(!recent.exists());
         assert!(fs::read(&active).unwrap().is_empty());
         assert_eq!(fs::read(&unrelated).unwrap(), b"unrelated diagnostics");
+    }
+
+    #[test]
+    fn size_reset_preserves_a_replacement_at_the_active_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let active = dir.path().join("gwt.log.2026-04-10");
+        fs::write(&active, b"original").unwrap();
+        let opened = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&active)
+            .unwrap();
+        fs::rename(&active, dir.path().join("opened-original")).unwrap();
+        fs::write(&active, b"replacement").unwrap();
+
+        enforce_size_limit(dir.path(), &active, &opened, 4, 0).unwrap();
+        assert_eq!(fs::read(&active).unwrap(), b"replacement");
+        assert_eq!(opened.metadata().unwrap().len(), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn size_limit_continues_after_a_delete_refusal_without_exceeding_the_budget() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = dir.path().join("gwt.log.2026-04-08");
+        let removable = dir.path().join("gwt.log.2026-04-09");
+        let active = dir.path().join("gwt.log.2026-04-10");
+        for path in [&blocked, &removable, &active] {
+            fs::write(path, b"12345678").unwrap();
+        }
+        let _held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE).0)
+            .open(&blocked)
+            .unwrap();
+        let opened = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&active)
+            .unwrap();
+        enforce_size_limit(dir.path(), &active, &opened, 24, 12).unwrap();
+        assert!(!removable.exists());
+        assert!(fs::read(&active).unwrap().is_empty());
+        assert_eq!(fs::read(&blocked).unwrap(), b"12345678");
+
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&blocked)
+            .unwrap()
+            .set_len(25)
+            .unwrap();
+        fs::write(&active, b"preserve").unwrap();
+        assert!(enforce_size_limit(dir.path(), &active, &opened, 24, 12).is_err());
+        assert_eq!(fs::read(&active).unwrap(), b"preserve");
     }
 }
