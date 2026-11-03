@@ -503,6 +503,9 @@ pub fn read_execution_observations(
     issue_numbers: &[u64],
 ) -> BTreeMap<u64, crate::issue_monitor::IssueMonitorExecutionObservation> {
     let _timing = IssueMonitorScanTiming::start("execution-observation");
+    if issue_numbers.is_empty() {
+        return BTreeMap::new();
+    }
     let deadline = gwt_core::operation_deadline::current();
     let span = tracing::Span::current();
     #[cfg(test)]
@@ -1582,6 +1585,9 @@ type OpenPrLaunchObservations = (
     BTreeMap<u64, Vec<crate::cli::LinkedPrSummary>>,
 );
 
+pub(crate) type OpenPrInventoryReadback =
+    Result<std::collections::HashMap<String, u64>, IssueMonitorScanFailure>;
+
 /// Issue #4157: discover related PRs once, then read only PRs belonging to
 /// candidates this terminal could admit. Existing in-flight ownership is not
 /// changed by these normal-launch observations.
@@ -1591,6 +1597,7 @@ fn load_open_pr_launch_observations(
     repo: &str,
     issues: &[IssueMonitorIssue],
     prefs: &crate::IssueMonitorPrefs,
+    observe_inventory: &mut impl FnMut(&OpenPrInventoryReadback),
 ) -> OpenPrLaunchObservations {
     let local = prefs
         .terminal_queues
@@ -1646,6 +1653,7 @@ fn load_open_pr_launch_observations(
     let branches = run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
         gwt_git::pr_status::try_fetch_open_pr_numbers_by_branch_for_monitor(repo_path)
     });
+    observe_inventory(&branches);
     let numbers: Vec<_> = candidates.iter().map(|issue| issue.number).collect();
     let mut linked = BTreeMap::new();
     let linked_result = run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
@@ -1801,6 +1809,16 @@ pub fn load_open_issue_monitor_candidates_for_repo_path_with_provenance(
     owner: &str,
     repo: &str,
 ) -> Result<LoadedIssueMonitorCandidates, String> {
+    load_open_issue_monitor_candidates_for_repo_path_observing(repo_path, owner, repo, |_| {})
+}
+
+/// Expose this scan's inventory result without persisting a failure across scans.
+pub(crate) fn load_open_issue_monitor_candidates_for_repo_path_observing(
+    repo_path: &Path,
+    owner: &str,
+    repo: &str,
+    mut observe_inventory: impl FnMut(&OpenPrInventoryReadback),
+) -> Result<LoadedIssueMonitorCandidates, String> {
     let live_error = match gwt_git::issue::fetch_issue_monitor_listing(owner, repo) {
         Ok(listing) => {
             let source = live_candidate_source(listing.capped);
@@ -1889,7 +1907,14 @@ pub fn load_open_issue_monitor_candidates_for_repo_path_with_provenance(
                 })
             });
             let (open_pr_observations, open_pr_observed_at, linked_prs) =
-                load_open_pr_launch_observations(repo_path, owner, repo, &issues, &prefs);
+                load_open_pr_launch_observations(
+                    repo_path,
+                    owner,
+                    repo,
+                    &issues,
+                    &prefs,
+                    &mut observe_inventory,
+                );
             return Ok(LoadedIssueMonitorCandidates {
                 issues,
                 open_pr_observations,
@@ -2980,6 +3005,26 @@ pub fn try_advance_autonomous_in_flight(
     daemon_secret: &[u8],
     now: &str,
 ) -> Result<Vec<IssueMonitorScanDegradation>, IssueMonitorScanFailure> {
+    try_advance_autonomous_in_flight_with_inventory(
+        monitor,
+        issues,
+        repo_slug,
+        repo_path,
+        daemon_secret,
+        now,
+        None,
+    )
+}
+
+pub(crate) fn try_advance_autonomous_in_flight_with_inventory(
+    monitor: &mut IssueMonitorState,
+    issues: &[IssueMonitorIssue],
+    repo_slug: &str,
+    repo_path: &Path,
+    daemon_secret: &[u8],
+    now: &str,
+    previously_read: Option<&OpenPrInventoryReadback>,
+) -> Result<Vec<IssueMonitorScanDegradation>, IssueMonitorScanFailure> {
     if !monitor.config.enabled || !monitor.autonomous_mode() {
         return Ok(Vec::new());
     }
@@ -2991,7 +3036,13 @@ pub fn try_advance_autonomous_in_flight(
     // it is launched, so the in-flight set is queue-sized, not slot-sized, and a
     // `gh pr list --head` per candidate grew with the queue until the fan-out
     // could not finish inside any scan budget.
-    let open_prs = read_open_pr_inventory(monitor, &in_flight, repo_path, &mut degradations);
+    let open_prs = read_open_pr_inventory(
+        monitor,
+        &in_flight,
+        repo_path,
+        &mut degradations,
+        previously_read,
+    );
     for issue_number in in_flight {
         // The branch this candidate's readbacks are about, named up front so a
         // failure can say which one went unknown even when it failed before the
@@ -3064,6 +3115,7 @@ fn read_open_pr_inventory(
     in_flight: &[u64],
     repo_path: &Path,
     degradations: &mut Vec<IssueMonitorScanDegradation>,
+    previously_read: Option<&OpenPrInventoryReadback>,
 ) -> Option<std::collections::HashMap<String, u64>> {
     let implementing = in_flight
         .iter()
@@ -3081,18 +3133,23 @@ fn read_open_pr_inventory(
     } else {
         format!("{implementing} implementing candidates")
     });
-    if !readback_fan_out_has_budget() {
-        degradations.push(IssueMonitorScanDegradation {
-            stage: IssueMonitorScanStage::OpenPrReadback,
-            target,
-            continuation: IssueMonitorScanContinuation::StaleReadback,
-            detail: "scan budget reserved for the launch stage".to_string(),
-        });
-        return None;
-    }
-    match run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
-        gwt_git::pr_status::try_fetch_open_pr_numbers_by_branch_for_monitor(repo_path)
-    }) {
+    let inventory = if let Some(result) = previously_read {
+        result.clone()
+    } else {
+        if !readback_fan_out_has_budget() {
+            degradations.push(IssueMonitorScanDegradation {
+                stage: IssueMonitorScanStage::OpenPrReadback,
+                target,
+                continuation: IssueMonitorScanContinuation::StaleReadback,
+                detail: "scan budget reserved for the launch stage".to_string(),
+            });
+            return None;
+        }
+        run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
+            gwt_git::pr_status::try_fetch_open_pr_numbers_by_branch_for_monitor(repo_path)
+        })
+    };
+    match inventory {
         Ok(index) => Some(index),
         Err(failure) => {
             tracing::warn!(
@@ -3939,6 +3996,20 @@ pub(crate) mod tests {
         let mut monitor = crate::IssueMonitorState::with_prefs(config, prefs);
         monitor.set_source_repository(Some(("example", "project")));
         monitor
+    }
+
+    #[test]
+    fn empty_execution_observations_skip_runtime_and_git_reads() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let git_spawns = gwt_core::process::thread_git_spawn_count();
+
+        assert!(read_execution_observations(home.path(), &[]).is_empty());
+        assert_eq!(
+            gwt_core::process::thread_git_spawn_count() - git_spawns,
+            0,
+            "no owners means no runtime census or worktree lookup is needed"
+        );
     }
 
     #[test]

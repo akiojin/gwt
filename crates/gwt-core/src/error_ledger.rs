@@ -358,8 +358,9 @@ fn read_ledger_files(since: Option<DateTime<Utc>>) -> io::Result<Vec<ErrorRecord
     let dir = ledger_dir();
     let mut paths = match fs::read_dir(&dir) {
         Ok(entries) => entries
-            .flatten()
-            .map(|entry| entry.path())
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<io::Result<Vec<_>>>()?
+            .into_iter()
             .filter(|path| {
                 path.file_name()
                     .and_then(|name| name.to_str())

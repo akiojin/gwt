@@ -1,0 +1,809 @@
+{
+  "schema_version": 1,
+  "case": "private HTTP connection driver belongs to a short-lived caller runtime",
+  "classification": "gwt runtime function; Issue #5390 private RPC cause slice",
+  "baseline_commit": "f2b3a1d1bc574695eaf5c33fc92da978fccf3572",
+  "environment": {
+    "system": "Windows",
+    "architecture": "AMD64",
+    "locked_dependencies": {
+      "hyper-util": "0.1.20",
+      "reqwest": "0.12.28",
+      "tokio": "1.54.1"
+    }
+  },
+  "baseline_client_blob": "6e78c70c6f9b4fe2b100e3109058635744dea59e",
+  "release_source_comparison": {
+    "release": "v9.147.0",
+    "commit": "f85ec13d29d4120013dfa81bb99e0366871f9681",
+    "client": {
+      "baseline_client_blob": "6e78c70c6f9b4fe2b100e3109058635744dea59e",
+      "release_9_147_client_blob": "6e78c70c6f9b4fe2b100e3109058635744dea59e",
+      "identical": true
+    },
+    "locked_dependencies": {
+      "f2b3a1d1bc574695eaf5c33fc92da978fccf3572": {
+        "hyper-util": "0.1.20",
+        "reqwest": "0.12.28",
+        "tokio": "1.54.1"
+      },
+      "f85ec13d": {
+        "hyper-util": "0.1.20",
+        "reqwest": "0.12.28",
+        "tokio": "1.54.1"
+      }
+    },
+    "limitation": "identical source blob and dependency versions do not establish the running installed binary or attribute historical notifications"
+  },
+  "fixed_client_worktree": {
+    "path": "crates/gwt/src/project_runtime/client.rs",
+    "bytes": 14681,
+    "sha256": "c4cde53183b42523f06f13865f2655caef24c49cb2443c1ce1832b4b648b1bf2"
+  },
+  "measured_client_source": {
+    "path": "target/issue-5390-rpc-measured-client.rs",
+    "bytes": 14316,
+    "sha256": "123c1726180fa04f07cf8b29d679a01a55f58f1380aa84648e1c9f4f66f35669"
+  },
+  "source_layout_note": "native and direct RED/GREEN used the regression above the impl; its final relocation below the impl changes no production/test logic and is checked again canonically",
+  "source_state": "uncommitted root fix and its regression on the baseline commit; not final-head verification",
+  "ownership_ack": [
+    "28a4b417-a223-4e82-a2d2-ba1eb00fee1d",
+    "2f229d38-32e0-4edc-b145-7a257088c3d2"
+  ],
+  "fixture": {
+    "scope": "owned inert authenticated loopback HTTP server and actual ProjectRuntimeClient",
+    "agent_count": 0,
+    "command_kinds": [
+      "health",
+      "resize"
+    ],
+    "ordering": [
+      "A health completes and A remains driven",
+      "B resize request(s) received by server",
+      "A runtime fully dropped",
+      "server releases B response(s)",
+      "B result and owned cleanup observed"
+    ],
+    "native_source": {
+      "path": "target/issue-5390-rpc-probe-source.rs",
+      "bytes": 4997,
+      "sha256": "01a36c750c7efd5762cea3657d3bde52db64d75969378905b3c5e632129f4f04",
+      "text": "use axum::{extract::{ConnectInfo, State}, http::{HeaderMap, StatusCode}, routing::post, Json, Router};\nuse gwt::project_runtime::{client::ProjectRuntimeClient, events::{OwnerCommand, OwnerRequest}};\nuse gwt_core::daemon::{DaemonEndpoint, RuntimeScope, RuntimeTarget};\nuse serde_json::json;\nuse std::{net::SocketAddr, sync::{atomic::{AtomicUsize, Ordering}, mpsc, Arc}, time::{Duration, Instant}};\n\n#[derive(Clone)]\nstruct Fixture {\n    requests: Arc<AtomicUsize>,\n    received: mpsc::Sender<u16>,\n    response: Arc<tokio::sync::Barrier>,\n}\n\nasync fn command(\n    State(fixture): State<Fixture>, ConnectInfo(peer): ConnectInfo<SocketAddr>,\n    headers: HeaderMap, Json(request): Json<OwnerRequest>,\n) -> Result<Json<serde_json::Value>, StatusCode> {\n    if headers.get(\"authorization\").and_then(|value| value.to_str().ok()) != Some(\"Bearer inert-fixture\") {\n        return Err(StatusCode::UNAUTHORIZED);\n    }\n    assert!(matches!(request.command, OwnerCommand::Health | OwnerCommand::Resize { .. }));\n    let index = fixture.requests.fetch_add(1, Ordering::SeqCst);\n    fixture.received.send(peer.port()).unwrap();\n    if index != 0 { fixture.response.wait().await; }\n    Ok(Json(json!({\"ok\": true})))\n}\n\nfn main() {\n    for callers in [1, 2, 12] {\n        let server = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();\n        let (received, arrivals) = mpsc::channel();\n        let response = Arc::new(tokio::sync::Barrier::new(callers + 1));\n        let requests = Arc::new(AtomicUsize::new(0));\n        let fixture = Fixture { requests: requests.clone(), received, response: response.clone() };\n        let (shutdown, stop) = tokio::sync::oneshot::channel();\n        let (address, served) = server.block_on(async {\n            let listener = tokio::net::TcpListener::bind(\"127.0.0.1:0\").await.unwrap();\n            let address = listener.local_addr().unwrap();\n            let router = Router::new().route(\"/private/project/command\", post(command)).with_state(fixture);\n            let served = tokio::spawn(async move {\n                axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>())\n                    .with_graceful_shutdown(async { let _ = stop.await; }).await.unwrap();\n            });\n            (address, served)\n        });\n        let scope = RuntimeScope::new(\"inert-probe\", \"inert-probe\", std::env::current_dir().unwrap(), RuntimeTarget::Host).unwrap();\n        let mut endpoint = DaemonEndpoint::new(scope, std::process::id(), \"fixture\".into(), \"inert-fixture\".into(), \"fixture\".into());\n        endpoint.project_transport_url = Some(format!(\"http://{address}\"));\n        let client = ProjectRuntimeClient::new(&endpoint).unwrap();\n        let (finish_first, first_finished) = tokio::sync::oneshot::channel();\n        let (first_ready, ready) = mpsc::channel();\n        let initial = client.clone();\n        let first = std::thread::spawn(move || {\n            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();\n            runtime.block_on(async {\n                initial.command(OwnerCommand::Health).await.unwrap();\n                first_ready.send(()).unwrap();\n                let _ = first_finished.await;\n            });\n            drop(runtime);\n        });\n        ready.recv_timeout(Duration::from_secs(10)).unwrap();\n        let first_port = arrivals.recv_timeout(Duration::from_secs(10)).unwrap();\n        let started = Instant::now();\n        let pending = (0..callers).map(|index| {\n            let client = client.clone();\n            std::thread::spawn(move || {\n                let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();\n                runtime.block_on(client.command(OwnerCommand::Resize { id: format!(\"inert-{index}\"), incarnation: 1, cols: 80, rows: 24 }))\n            })\n        }).collect::<Vec<_>>();\n        let ports = (0..callers).map(|_| arrivals.recv_timeout(Duration::from_secs(10)).unwrap()).collect::<Vec<_>>();\n        finish_first.send(()).unwrap();\n        first.join().unwrap();\n        server.block_on(response.wait());\n        let replies = pending.into_iter().map(|thread| thread.join().unwrap()).collect::<Vec<_>>();\n        println!(\"{}\", json!({\"case\":\"reply_after_first_runtime_dropped\", \"command_kind\":\"resize\", \"callers\":callers,\n            \"reused_first_runtime_connection\":ports.iter().filter(|port| **port == first_port).count(),\n            \"passed\":replies.iter().filter(|result| result.is_ok()).count(),\n            \"failed\":replies.iter().filter(|result| result.is_err()).count(),\n            \"generic_send_errors\":replies.iter().filter(|result| result.as_ref().err().is_some_and(|error| error.starts_with(\"error sending request\"))).count(),\n            \"server_requests\":requests.load(Ordering::SeqCst), \"elapsed_ms\":started.elapsed().as_millis()}));\n        drop(client);\n        shutdown.send(()).unwrap();\n        server.block_on(served).unwrap();\n    }\n}\n"
+    },
+    "baseline_binary": {
+      "path": "target/issue-5390-rpc-probe-before.exe",
+      "bytes": 10929664,
+      "sha256": "26279eb699d81b74178bba80f258ac733995154b88f3602a012d397ef1996730"
+    },
+    "fixed_binary": {
+      "path": "target/issue-5390-rpc-probe-after.exe",
+      "bytes": 10930176,
+      "sha256": "eb6ccb9575399a2df1beae30854640bd1f8103b42daaa465f783d62037874233"
+    },
+    "baseline": [
+      {
+        "callers": 1,
+        "case": "reply_after_first_runtime_dropped",
+        "command_kind": "resize",
+        "elapsed_ms": 1,
+        "failed": 1,
+        "generic_send_errors": 1,
+        "passed": 0,
+        "reused_first_runtime_connection": 1,
+        "server_requests": 2
+      },
+      {
+        "callers": 2,
+        "case": "reply_after_first_runtime_dropped",
+        "command_kind": "resize",
+        "elapsed_ms": 4,
+        "failed": 1,
+        "generic_send_errors": 1,
+        "passed": 1,
+        "reused_first_runtime_connection": 1,
+        "server_requests": 3
+      },
+      {
+        "callers": 12,
+        "case": "reply_after_first_runtime_dropped",
+        "command_kind": "resize",
+        "elapsed_ms": 23,
+        "failed": 1,
+        "generic_send_errors": 1,
+        "passed": 11,
+        "reused_first_runtime_connection": 1,
+        "server_requests": 13
+      }
+    ],
+    "fixed": [
+      {
+        "callers": 1,
+        "case": "reply_after_first_runtime_dropped",
+        "command_kind": "resize",
+        "elapsed_ms": 2,
+        "failed": 0,
+        "generic_send_errors": 0,
+        "passed": 1,
+        "reused_first_runtime_connection": 0,
+        "server_requests": 2
+      },
+      {
+        "callers": 2,
+        "case": "reply_after_first_runtime_dropped",
+        "command_kind": "resize",
+        "elapsed_ms": 2,
+        "failed": 0,
+        "generic_send_errors": 0,
+        "passed": 2,
+        "reused_first_runtime_connection": 0,
+        "server_requests": 3
+      },
+      {
+        "callers": 12,
+        "case": "reply_after_first_runtime_dropped",
+        "command_kind": "resize",
+        "elapsed_ms": 4,
+        "failed": 0,
+        "generic_send_errors": 0,
+        "passed": 12,
+        "reused_first_runtime_connection": 0,
+        "server_requests": 13
+      }
+    ],
+    "cold_health": "all three initial health requests completed successfully in both native runs",
+    "replays": "server received exactly callers + 1 requests in each case, before and after",
+    "baseline_log": {
+      "path": "target/issue-5390-rpc-probe-before.log",
+      "bytes": 800,
+      "sha256": "310113f3f3acaad35972def553bdcc002a966250f5c5c9ca786c330eeb5dbf14",
+      "text": "   Compiling gwt v9.147.0 (E:\\gwt\\work\\issue-5390\\crates\\gwt)\r\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2m 45s\r\n     Running `target\\debug\\examples\\issue5390_rpc_probe.exe`\r\n{\"callers\":1,\"case\":\"reply_after_first_runtime_dropped\",\"command_kind\":\"resize\",\"elapsed_ms\":1,\"failed\":1,\"generic_send_errors\":1,\"passed\":0,\"reused_first_runtime_connection\":1,\"server_requests\":2}\r\n{\"callers\":2,\"case\":\"reply_after_first_runtime_dropped\",\"command_kind\":\"resize\",\"elapsed_ms\":4,\"failed\":1,\"generic_send_errors\":1,\"passed\":1,\"reused_first_runtime_connection\":1,\"server_requests\":3}\r\n{\"callers\":12,\"case\":\"reply_after_first_runtime_dropped\",\"command_kind\":\"resize\",\"elapsed_ms\":23,\"failed\":1,\"generic_send_errors\":1,\"passed\":11,\"reused_first_runtime_connection\":1,\"server_requests\":13}\r\n"
+    },
+    "fixed_log": {
+      "path": "target/issue-5390-rpc-probe-after.log",
+      "bytes": 798,
+      "sha256": "229fa87d4e1c3ed18b36f350bfe9cdb0bc8abf00f67096b9cccc97c4a1d65d28",
+      "text": "   Compiling gwt v9.147.0 (E:\\gwt\\work\\issue-5390\\crates\\gwt)\r\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.22s\r\n     Running `target\\debug\\examples\\issue5390_rpc_probe.exe`\r\n{\"callers\":1,\"case\":\"reply_after_first_runtime_dropped\",\"command_kind\":\"resize\",\"elapsed_ms\":2,\"failed\":0,\"generic_send_errors\":0,\"passed\":1,\"reused_first_runtime_connection\":0,\"server_requests\":2}\r\n{\"callers\":2,\"case\":\"reply_after_first_runtime_dropped\",\"command_kind\":\"resize\",\"elapsed_ms\":2,\"failed\":0,\"generic_send_errors\":0,\"passed\":2,\"reused_first_runtime_connection\":0,\"server_requests\":3}\r\n{\"callers\":12,\"case\":\"reply_after_first_runtime_dropped\",\"command_kind\":\"resize\",\"elapsed_ms\":4,\"failed\":0,\"generic_send_errors\":0,\"passed\":12,\"reused_first_runtime_connection\":0,\"server_requests\":13}\r\n"
+    }
+  },
+  "library_control": {
+    "scope": "separate raw reqwest control; same gated fixture, no private production credentials",
+    "source": {
+      "path": "target/issue-5390-rpc-library-source.rs",
+      "bytes": 6533,
+      "sha256": "bfc36661f9686d5cfa3a949291139bbd500cdda81a17f06187d197bf4089b08a",
+      "text": "use axum::{extract::{ConnectInfo, State}, http::{HeaderMap, StatusCode}, routing::post, Json, Router};\r\nuse gwt::project_runtime::{client::ProjectRuntimeClient, events::{OwnerCommand, OwnerRequest}};\r\nuse gwt_core::daemon::{DaemonEndpoint, RuntimeScope, RuntimeTarget};\r\nuse serde_json::json;\r\nuse std::{net::SocketAddr, sync::{atomic::{AtomicUsize, Ordering}, mpsc, Arc}, time::{Duration, Instant}};\r\n\r\n\r\n#[derive(Clone)]\r\nstruct ProbeClient {\r\n    http: reqwest::Client,\r\n    url: String,\r\n    key: String,\r\n}\r\nimpl ProbeClient {\r\n    fn new(endpoint: &DaemonEndpoint) -> Result<Self, String> {\r\n        let http = if std::env::args().any(|value| value == \"no-idle\") {\r\n            reqwest::Client::builder().pool_max_idle_per_host(0).build().map_err(|error| error.to_string())?\r\n        } else { reqwest::Client::new() };\r\n        Ok(Self { http, url: endpoint.project_transport_url.clone().unwrap(), key: endpoint.scope.repo_hash.clone() })\r\n    }\r\n    async fn command(&self, command: OwnerCommand) -> Result<serde_json::Value, String> {\r\n        let response = self.http.post(format!(\"{}/private/project/command\", self.url))\r\n            .bearer_auth(\"inert-fixture\")\r\n            .timeout(std::time::Duration::from_secs(120))\r\n            .json(&OwnerRequest { project_key: self.key.clone(), command })\r\n            .send().await.map_err(|error| observed_error(\"send\", error))?;\r\n        response.json().await.map_err(|error| observed_error(\"body\", error))\r\n    }\r\n}\r\nfn observed_error(phase: &'static str, error: reqwest::Error) -> String {\r\n    println!(\"{}\", json!({\"client\":\"raw_reqwest_control\", \"phase\":phase,\r\n        \"is_timeout\":error.is_timeout(), \"is_connect\":error.is_connect(),\r\n        \"is_request\":error.is_request(), \"is_body\":error.is_body(), \"is_decode\":error.is_decode()}));\r\n    error.to_string()\r\n}\r\n\r\n#[derive(Clone)]\r\nstruct Fixture {\r\n    requests: Arc<AtomicUsize>,\r\n    received: mpsc::Sender<u16>,\r\n    response: Arc<tokio::sync::Barrier>,\r\n}\r\n\r\nasync fn command(\r\n    State(fixture): State<Fixture>, ConnectInfo(peer): ConnectInfo<SocketAddr>,\r\n    headers: HeaderMap, Json(request): Json<OwnerRequest>,\r\n) -> Result<Json<serde_json::Value>, StatusCode> {\r\n    if headers.get(\"authorization\").and_then(|value| value.to_str().ok()) != Some(\"Bearer inert-fixture\") {\r\n        return Err(StatusCode::UNAUTHORIZED);\r\n    }\r\n    assert!(matches!(request.command, OwnerCommand::Health | OwnerCommand::Resize { .. }));\r\n    let index = fixture.requests.fetch_add(1, Ordering::SeqCst);\r\n    fixture.received.send(peer.port()).unwrap();\r\n    if index != 0 { fixture.response.wait().await; }\r\n    Ok(Json(json!({\"ok\": true})))\r\n}\r\n\r\nfn main() {\r\n    for callers in [1, 2, 12] {\r\n        let server = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();\r\n        let (received, arrivals) = mpsc::channel();\r\n        let response = Arc::new(tokio::sync::Barrier::new(callers + 1));\r\n        let requests = Arc::new(AtomicUsize::new(0));\r\n        let fixture = Fixture { requests: requests.clone(), received, response: response.clone() };\r\n        let (shutdown, stop) = tokio::sync::oneshot::channel();\r\n        let (address, served) = server.block_on(async {\r\n            let listener = tokio::net::TcpListener::bind(\"127.0.0.1:0\").await.unwrap();\r\n            let address = listener.local_addr().unwrap();\r\n            let router = Router::new().route(\"/private/project/command\", post(command)).with_state(fixture);\r\n            let served = tokio::spawn(async move {\r\n                axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>())\r\n                    .with_graceful_shutdown(async { let _ = stop.await; }).await.unwrap();\r\n            });\r\n            (address, served)\r\n        });\r\n        let scope = RuntimeScope::new(\"inert-probe\", \"inert-probe\", std::env::current_dir().unwrap(), RuntimeTarget::Host).unwrap();\r\n        let mut endpoint = DaemonEndpoint::new(scope, std::process::id(), \"fixture\".into(), \"inert-fixture\".into(), \"fixture\".into());\r\n        endpoint.project_transport_url = Some(format!(\"http://{address}\"));\r\n        let client = ProbeClient::new(&endpoint).unwrap();\r\n        let (finish_first, first_finished) = tokio::sync::oneshot::channel();\r\n        let (first_ready, ready) = mpsc::channel();\r\n        let initial = client.clone();\r\n        let first = std::thread::spawn(move || {\r\n            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();\r\n            runtime.block_on(async {\r\n                initial.command(OwnerCommand::Health).await.unwrap();\r\n                first_ready.send(()).unwrap();\r\n                let _ = first_finished.await;\r\n            });\r\n            drop(runtime);\r\n        });\r\n        ready.recv_timeout(Duration::from_secs(10)).unwrap();\r\n        let first_port = arrivals.recv_timeout(Duration::from_secs(10)).unwrap();\r\n        let started = Instant::now();\r\n        let pending = (0..callers).map(|index| {\r\n            let client = client.clone();\r\n            std::thread::spawn(move || {\r\n                let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();\r\n                runtime.block_on(client.command(OwnerCommand::Resize { id: format!(\"inert-{index}\"), incarnation: 1, cols: 80, rows: 24 }))\r\n            })\r\n        }).collect::<Vec<_>>();\r\n        let ports = (0..callers).map(|_| arrivals.recv_timeout(Duration::from_secs(10)).unwrap()).collect::<Vec<_>>();\r\n        finish_first.send(()).unwrap();\r\n        first.join().unwrap();\r\n        server.block_on(response.wait());\r\n        let replies = pending.into_iter().map(|thread| thread.join().unwrap()).collect::<Vec<_>>();\r\n        println!(\"{}\", json!({\"client\":\"raw_reqwest_control\", \"case\":\"reply_after_first_runtime_dropped\", \"command_kind\":\"resize\", \"callers\":callers,\r\n            \"reused_first_runtime_connection\":ports.iter().filter(|port| **port == first_port).count(),\r\n            \"passed\":replies.iter().filter(|result| result.is_ok()).count(),\r\n            \"failed\":replies.iter().filter(|result| result.is_err()).count(),\r\n            \"generic_send_errors\":replies.iter().filter(|result| result.as_ref().err().is_some_and(|error| error.starts_with(\"error sending request\"))).count(),\r\n            \"server_requests\":requests.load(Ordering::SeqCst), \"elapsed_ms\":started.elapsed().as_millis()}));\r\n        drop(client);\r\n        shutdown.send(()).unwrap();\r\n        server.block_on(served).unwrap();\r\n    }\r\n}\r\n"
+    },
+    "default": [
+      {
+        "client": "raw_reqwest_control",
+        "is_body": false,
+        "is_connect": false,
+        "is_decode": false,
+        "is_request": true,
+        "is_timeout": false,
+        "phase": "send"
+      },
+      {
+        "callers": 1,
+        "case": "reply_after_first_runtime_dropped",
+        "client": "raw_reqwest_control",
+        "command_kind": "resize",
+        "elapsed_ms": 1,
+        "failed": 1,
+        "generic_send_errors": 1,
+        "passed": 0,
+        "reused_first_runtime_connection": 1,
+        "server_requests": 2
+      },
+      {
+        "client": "raw_reqwest_control",
+        "is_body": false,
+        "is_connect": false,
+        "is_decode": false,
+        "is_request": true,
+        "is_timeout": false,
+        "phase": "send"
+      },
+      {
+        "callers": 2,
+        "case": "reply_after_first_runtime_dropped",
+        "client": "raw_reqwest_control",
+        "command_kind": "resize",
+        "elapsed_ms": 3,
+        "failed": 1,
+        "generic_send_errors": 1,
+        "passed": 1,
+        "reused_first_runtime_connection": 1,
+        "server_requests": 3
+      },
+      {
+        "client": "raw_reqwest_control",
+        "is_body": false,
+        "is_connect": false,
+        "is_decode": false,
+        "is_request": true,
+        "is_timeout": false,
+        "phase": "send"
+      },
+      {
+        "callers": 12,
+        "case": "reply_after_first_runtime_dropped",
+        "client": "raw_reqwest_control",
+        "command_kind": "resize",
+        "elapsed_ms": 14,
+        "failed": 1,
+        "generic_send_errors": 1,
+        "passed": 11,
+        "reused_first_runtime_connection": 1,
+        "server_requests": 13
+      }
+    ],
+    "no_idle": [
+      {
+        "callers": 1,
+        "case": "reply_after_first_runtime_dropped",
+        "client": "raw_reqwest_control",
+        "command_kind": "resize",
+        "elapsed_ms": 3,
+        "failed": 0,
+        "generic_send_errors": 0,
+        "passed": 1,
+        "reused_first_runtime_connection": 0,
+        "server_requests": 2
+      },
+      {
+        "callers": 2,
+        "case": "reply_after_first_runtime_dropped",
+        "client": "raw_reqwest_control",
+        "command_kind": "resize",
+        "elapsed_ms": 2,
+        "failed": 0,
+        "generic_send_errors": 0,
+        "passed": 2,
+        "reused_first_runtime_connection": 0,
+        "server_requests": 3
+      },
+      {
+        "callers": 12,
+        "case": "reply_after_first_runtime_dropped",
+        "client": "raw_reqwest_control",
+        "command_kind": "resize",
+        "elapsed_ms": 6,
+        "failed": 0,
+        "generic_send_errors": 0,
+        "passed": 12,
+        "reused_first_runtime_connection": 0,
+        "server_requests": 13
+      }
+    ],
+    "default_log": {
+      "path": "target/issue-5390-rpc-library-default.log",
+      "bytes": 1819,
+      "sha256": "773dbacfcc51fc0efdd418754228c188487e5561a679d52aa3fcbeffa5cbc2b7",
+      "text": "   Compiling gwt v9.147.0 (E:\\gwt\\work\\issue-5390\\crates\\gwt)\r\nwarning: unused import: `client::ProjectRuntimeClient`\r\n --> crates\\gwt\\examples\\issue5390_rpc_probe.rs:2:28\r\n  |\r\n2 | use gwt::project_runtime::{client::ProjectRuntimeClient, events::{OwnerCommand, OwnerRequest}};\r\n  |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\r\n  |\r\n  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default\r\n\r\nwarning: `gwt` (example \"issue5390_rpc_probe\") generated 1 warning (run `cargo fix --example \"issue5390_rpc_probe\" -p gwt` to apply 1 suggestion)\r\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.88s\r\n     Running `target\\debug\\examples\\issue5390_rpc_probe.exe`\r\n{\"client\":\"raw_reqwest_control\",\"is_body\":false,\"is_connect\":false,\"is_decode\":false,\"is_request\":true,\"is_timeout\":false,\"phase\":\"send\"}\r\n{\"callers\":1,\"case\":\"reply_after_first_runtime_dropped\",\"client\":\"raw_reqwest_control\",\"command_kind\":\"resize\",\"elapsed_ms\":1,\"failed\":1,\"generic_send_errors\":1,\"passed\":0,\"reused_first_runtime_connection\":1,\"server_requests\":2}\r\n{\"client\":\"raw_reqwest_control\",\"is_body\":false,\"is_connect\":false,\"is_decode\":false,\"is_request\":true,\"is_timeout\":false,\"phase\":\"send\"}\r\n{\"callers\":2,\"case\":\"reply_after_first_runtime_dropped\",\"client\":\"raw_reqwest_control\",\"command_kind\":\"resize\",\"elapsed_ms\":3,\"failed\":1,\"generic_send_errors\":1,\"passed\":1,\"reused_first_runtime_connection\":1,\"server_requests\":3}\r\n{\"client\":\"raw_reqwest_control\",\"is_body\":false,\"is_connect\":false,\"is_decode\":false,\"is_request\":true,\"is_timeout\":false,\"phase\":\"send\"}\r\n{\"callers\":12,\"case\":\"reply_after_first_runtime_dropped\",\"client\":\"raw_reqwest_control\",\"command_kind\":\"resize\",\"elapsed_ms\":14,\"failed\":1,\"generic_send_errors\":1,\"passed\":11,\"reused_first_runtime_connection\":1,\"server_requests\":13}\r\n"
+    },
+    "no_idle_log": {
+      "path": "target/issue-5390-rpc-library-no-idle.log",
+      "bytes": 1346,
+      "sha256": "c03e88b7f0a05cf36b59597772f6e4bce6e551f2a772510cde03542ef2e4d4a1",
+      "text": "warning: unused import: `client::ProjectRuntimeClient`\r\n --> crates\\gwt\\examples\\issue5390_rpc_probe.rs:2:28\r\n  |\r\n2 | use gwt::project_runtime::{client::ProjectRuntimeClient, events::{OwnerCommand, OwnerRequest}};\r\n  |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\r\n  |\r\n  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default\r\n\r\nwarning: `gwt` (example \"issue5390_rpc_probe\") generated 1 warning (run `cargo fix --example \"issue5390_rpc_probe\" -p gwt` to apply 1 suggestion)\r\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.58s\r\n     Running `target\\debug\\examples\\issue5390_rpc_probe.exe no-idle`\r\n{\"callers\":1,\"case\":\"reply_after_first_runtime_dropped\",\"client\":\"raw_reqwest_control\",\"command_kind\":\"resize\",\"elapsed_ms\":3,\"failed\":0,\"generic_send_errors\":0,\"passed\":1,\"reused_first_runtime_connection\":0,\"server_requests\":2}\r\n{\"callers\":2,\"case\":\"reply_after_first_runtime_dropped\",\"client\":\"raw_reqwest_control\",\"command_kind\":\"resize\",\"elapsed_ms\":2,\"failed\":0,\"generic_send_errors\":0,\"passed\":2,\"reused_first_runtime_connection\":0,\"server_requests\":3}\r\n{\"callers\":12,\"case\":\"reply_after_first_runtime_dropped\",\"client\":\"raw_reqwest_control\",\"command_kind\":\"resize\",\"elapsed_ms\":6,\"failed\":0,\"generic_send_errors\":0,\"passed\":12,\"reused_first_runtime_connection\":0,\"server_requests\":13}\r\n"
+    },
+    "warning": "temporary library-control example had an unused import; the example is removed before canonical lint"
+  },
+  "regression": {
+    "selector": "project_runtime::client::tests::request_survives_another_callers_runtime_shutdown",
+    "red_exit": 101,
+    "green_exit": 0,
+    "red": {
+      "path": "target/issue-5390-rpc-red.log",
+      "bytes": 1098,
+      "sha256": "fcb8463640be127291b1f2f785143fdc9fa3bcb65b10f876a439a01997e95483",
+      "text": "   Compiling gwt v9.147.0 (E:\\gwt\\work\\issue-5390\\crates\\gwt)\r\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 4m 54s\r\n     Running unittests src\\lib.rs (target\\debug\\deps\\gwt-4a4fc3d5308ecaf2.exe)\r\n\r\nrunning 1 test\r\ntest project_runtime::client::tests::request_survives_another_callers_runtime_shutdown ... FAILED\r\n\r\nfailures:\r\n\r\n---- project_runtime::client::tests::request_survives_another_callers_runtime_shutdown stdout ----\r\n\r\nthread 'project_runtime::client::tests::request_survives_another_callers_runtime_shutdown' (38188) panicked at crates\\gwt\\src\\project_runtime\\client.rs:86:9:\r\nanother caller's runtime teardown aborted the private command: Err(\"error sending request for url (http://127.0.0.1:60520/private/project/command)\")\r\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\r\n\r\n\r\nfailures:\r\n    project_runtime::client::tests::request_survives_another_callers_runtime_shutdown\r\n\r\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4984 filtered out; finished in 0.02s\r\n\r\nerror: test failed, to rerun pass `-p gwt --lib`\r\n"
+    },
+    "green": {
+      "path": "target/issue-5390-rpc-green.log",
+      "bytes": 433,
+      "sha256": "05a025e4217a5a5214126e60cbef9bc02b8b777a37d0af25ea11250ffab50b48",
+      "text": "   Compiling gwt v9.147.0 (E:\\gwt\\work\\issue-5390\\crates\\gwt)\r\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 4m 29s\r\n     Running unittests src\\lib.rs (target\\debug\\deps\\gwt-4a4fc3d5308ecaf2.exe)\r\n\r\nrunning 1 test\r\ntest project_runtime::client::tests::request_survives_another_callers_runtime_shutdown ... ok\r\n\r\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4984 filtered out; finished in 0.02s\r\n\r\n"
+    },
+    "related_tests": {
+      "selection": "project_runtime::",
+      "passed": 56,
+      "failed": 0,
+      "log": {
+        "path": "target/issue-5390-rpc-existing-green.log",
+        "bytes": 8028,
+        "sha256": "df14a90a5d36713f57e9adb63cbc5173c49c971b5cf6a93553e204d922629bbc"
+      }
+    },
+    "synchronization": "server request receipt, oneshot runtime teardown, Notify response release, shared recv_event hang guard; no short wall-clock ordering assertion",
+    "cleanup": "intended RED/GREEN path joins caller threads and server before the result assertion; does not claim explicit joins on every fixture panic",
+    "limitation": "native baseline measured reuse in each case; the regression asserts survival, not an implementation-specific permanent reuse requirement"
+  },
+  "historical_log_observation": {
+    "source": "logs\\gwt.log.2026-11-02",
+    "source_bytes_at_start": 1625227091,
+    "segment_start_offset": 1335116389,
+    "segment_bytes": 110343752,
+    "segment_sha256": "e5b3127320f3561e61d215d9730d9d9be78a5da18846109b3c0f95748fee9b8e",
+    "window_utc": [
+      "2026-11-02T05:10:00Z",
+      "2026-11-02T05:26:00Z"
+    ],
+    "selection": "timestamp-guided bounded segment with padding; local RFC3339 timestamps normalized to UTC",
+    "private_send_warning_rows": 71,
+    "target": "gwt::app_runtime::pm",
+    "static_source_message": "PM wake prompt injection failed",
+    "static_source_message_sha256": "7f3b83e281c96f457e9dd23e216cb35752c08a6c06e3deed0059f07bcaf241af",
+    "event_hashes": [
+      {
+        "line_in_segment": 27421,
+        "timestamp": "2026-11-02T14:10:40.250648900+09:00",
+        "raw_line_sha256": "8e0e19288c7b2ec8addb5c4a4366e5f9ac3e7260b12c44f94b8f2ab56e36c689"
+      },
+      {
+        "line_in_segment": 32382,
+        "timestamp": "2026-11-02T14:10:50.680731800+09:00",
+        "raw_line_sha256": "b165c075c200a7e14ef8d43a6aa1dcf54b0ed234345b37fdbf877fd69cd8712b"
+      },
+      {
+        "line_in_segment": 32950,
+        "timestamp": "2026-11-02T14:10:53.083820200+09:00",
+        "raw_line_sha256": "c3bf1986d3ed2a0089125cce1c30ee60e31d8df1a27dd89641421783cced7930"
+      },
+      {
+        "line_in_segment": 53521,
+        "timestamp": "2026-11-02T14:11:39.965759500+09:00",
+        "raw_line_sha256": "702b396aaf23883de8daba5907e73e438d1ae65e6aef139437c3a4dc9af01516"
+      },
+      {
+        "line_in_segment": 55593,
+        "timestamp": "2026-11-02T14:11:44.909+09:00",
+        "raw_line_sha256": "de1c31410370572f9b6a5b50aba124d906c5c8fcce3a2bca9b6f1ca8d3b80fc0"
+      },
+      {
+        "line_in_segment": 95901,
+        "timestamp": "2026-11-02T14:13:10.955856700+09:00",
+        "raw_line_sha256": "6ed5291153e968342b3e0314750ac32d3d6f60239fa24dd82d908d53756ba046"
+      },
+      {
+        "line_in_segment": 95959,
+        "timestamp": "2026-11-02T14:13:11.148458200+09:00",
+        "raw_line_sha256": "0a59505215b2fb972875fbea234ead32dab2a7928ea51d73299ef34a20f89f26"
+      },
+      {
+        "line_in_segment": 97508,
+        "timestamp": "2026-11-02T14:13:18.625727800+09:00",
+        "raw_line_sha256": "d5348877c090d3e7f731b1b6fe5494fcdd8ee6ffa0347cec1781c58dffb0d7c4"
+      },
+      {
+        "line_in_segment": 105213,
+        "timestamp": "2026-11-02T14:13:36.447488100+09:00",
+        "raw_line_sha256": "50b7d339c93fab5c433af7de03ec1d7bb94d8004d24f608458dee740640759f8"
+      },
+      {
+        "line_in_segment": 107391,
+        "timestamp": "2026-11-02T14:13:41.134706100+09:00",
+        "raw_line_sha256": "8541092726f7df011f700beb0c2dedb5eb2c7f34c55802007af06c2a14fb368c"
+      },
+      {
+        "line_in_segment": 111604,
+        "timestamp": "2026-11-02T14:13:52.976124200+09:00",
+        "raw_line_sha256": "559f3d3b0aaf5de890cb7e61796140e94fcba1e498b7ef85e256135243e93cd5"
+      },
+      {
+        "line_in_segment": 113090,
+        "timestamp": "2026-11-02T14:13:57.963859100+09:00",
+        "raw_line_sha256": "055d5437e04877ffa2daeb2f0b6089360b3e5049a3820683f4fd19972397f7a2"
+      },
+      {
+        "line_in_segment": 115623,
+        "timestamp": "2026-11-02T14:14:04.991115300+09:00",
+        "raw_line_sha256": "aa728a2781474d6001048ff4ce072d50d62f7dbdbbaaf3b6f1230c262ea424da"
+      },
+      {
+        "line_in_segment": 119312,
+        "timestamp": "2026-11-02T14:14:12.177170+09:00",
+        "raw_line_sha256": "08cea050dfdf854fa7aa1e2fbb41fdd059e6d309887f477b49e4e14849164987"
+      },
+      {
+        "line_in_segment": 119583,
+        "timestamp": "2026-11-02T14:14:13.180315100+09:00",
+        "raw_line_sha256": "ac48ea3cf2e3bb56e7a026f51d9e2b8328d0c7dc6d5d9d87a4d8d8a1a5bf3d6c"
+      },
+      {
+        "line_in_segment": 127184,
+        "timestamp": "2026-11-02T14:14:33.474548200+09:00",
+        "raw_line_sha256": "99d79f4268c61b04e487b6e2c3a0648d03fb7b6c2312b611f76b360c91d2b5d7"
+      },
+      {
+        "line_in_segment": 129309,
+        "timestamp": "2026-11-02T14:14:38.525280300+09:00",
+        "raw_line_sha256": "12c1670521c0c34a9e69f99d47041c8cae2230a7611c54b255664c6aac0c2916"
+      },
+      {
+        "line_in_segment": 137713,
+        "timestamp": "2026-11-02T14:14:57.115677900+09:00",
+        "raw_line_sha256": "5cfd9da43cd977c8610e45302cae50b57edd02a7a6a93aacf5c98fd6b03b578d"
+      },
+      {
+        "line_in_segment": 153218,
+        "timestamp": "2026-11-02T14:15:29.088766700+09:00",
+        "raw_line_sha256": "eaaa23b074d2984c0c26f27e6d624df24627136bb0f909e9e27e7d16f883e015"
+      },
+      {
+        "line_in_segment": 169020,
+        "timestamp": "2026-11-02T14:16:01.723278900+09:00",
+        "raw_line_sha256": "ffe04b31f37ce72857d4cff516364d6fdbc36e32fd8b6a447617fb638f04a047"
+      },
+      {
+        "line_in_segment": 175885,
+        "timestamp": "2026-11-02T14:16:16.111659300+09:00",
+        "raw_line_sha256": "fa5653d10fd16fb72c70dac02a810d71c01749bba9dff810a60eb81a21869e57"
+      },
+      {
+        "line_in_segment": 175887,
+        "timestamp": "2026-11-02T14:16:16.120397100+09:00",
+        "raw_line_sha256": "a028178d168a20bb0a6482e0aa4c0576dd95db3098d06a0296d2d78db073f2ad"
+      },
+      {
+        "line_in_segment": 178369,
+        "timestamp": "2026-11-02T14:16:24.970788600+09:00",
+        "raw_line_sha256": "44cb5c978de1ca7fd7e41a4895beaceaa1cc7340878dcf04770275d5650e8fc9"
+      },
+      {
+        "line_in_segment": 178409,
+        "timestamp": "2026-11-02T14:16:25.120854700+09:00",
+        "raw_line_sha256": "78c2e487a009b3ebf74fe919a1c2de5647cc4c9853830ff38564d3719f720e6c"
+      },
+      {
+        "line_in_segment": 178699,
+        "timestamp": "2026-11-02T14:16:26.001931200+09:00",
+        "raw_line_sha256": "d450acdd4bfff2caf252199ef43d2fd3a8ea5cbd6127522e22546e1808b7b40f"
+      },
+      {
+        "line_in_segment": 178701,
+        "timestamp": "2026-11-02T14:16:26.008699400+09:00",
+        "raw_line_sha256": "73849b7b85e93ca039ef24c98d7e158648910c50d14ab4f392ce30c1daa1f9a0"
+      },
+      {
+        "line_in_segment": 180598,
+        "timestamp": "2026-11-02T14:16:34.421514800+09:00",
+        "raw_line_sha256": "f2ce96019b148e2bcc605a6f864cad87817722ddbeedb7cf7576ebfa5a791397"
+      },
+      {
+        "line_in_segment": 181909,
+        "timestamp": "2026-11-02T14:16:37.533950700+09:00",
+        "raw_line_sha256": "f54ddd166269f565bccde3cb2f6f9aeaab87f47c26aa26ad118024f94552cab5"
+      },
+      {
+        "line_in_segment": 182968,
+        "timestamp": "2026-11-02T14:16:39.616178200+09:00",
+        "raw_line_sha256": "a88ceee71dfb7546359e7b8c88723584d91049c69a3eabc375a4bf3031a1fe28"
+      },
+      {
+        "line_in_segment": 183085,
+        "timestamp": "2026-11-02T14:16:40.034015300+09:00",
+        "raw_line_sha256": "0e9d6fea9f2bc368f4cf5d08e38cdcc6c0f2e822689912db6c9a79cbf2af066e"
+      },
+      {
+        "line_in_segment": 183508,
+        "timestamp": "2026-11-02T14:16:41.172316300+09:00",
+        "raw_line_sha256": "6cdcecc8de1009a1566ccc6ffe958068097a20f879b9ce2ddfa36d072203cac1"
+      },
+      {
+        "line_in_segment": 183512,
+        "timestamp": "2026-11-02T14:16:41.181723700+09:00",
+        "raw_line_sha256": "aae6c2825c91436d68154ff511940320421e69b1d81331a251a017ffb382e676"
+      },
+      {
+        "line_in_segment": 184473,
+        "timestamp": "2026-11-02T14:16:46.745689300+09:00",
+        "raw_line_sha256": "05ff3678bc70a95281e3c23ed3e7e40c1f001affa964edec08b1319b33b323da"
+      },
+      {
+        "line_in_segment": 184794,
+        "timestamp": "2026-11-02T14:16:47.705024+09:00",
+        "raw_line_sha256": "5b42b992fa2dfbfaa391f4394fbc9221bdcdaff65d3b0d85d9f960cf705ffd54"
+      },
+      {
+        "line_in_segment": 189286,
+        "timestamp": "2026-11-02T14:16:58.576341500+09:00",
+        "raw_line_sha256": "f91fc7710546bc2208a0e83544058c41fc0049eca1340a532a6f403710cf0e1e"
+      },
+      {
+        "line_in_segment": 193802,
+        "timestamp": "2026-11-02T14:17:08.414862200+09:00",
+        "raw_line_sha256": "667c027dde13a892bac6f043d0230881651ff04ff56493ccf01a7b52bedc4818"
+      },
+      {
+        "line_in_segment": 195542,
+        "timestamp": "2026-11-02T14:17:12.883641700+09:00",
+        "raw_line_sha256": "e9a35efe0fff11e6576f48de60aee0c7e053f647fa5c39341a8a68de93d32f0b"
+      },
+      {
+        "line_in_segment": 207027,
+        "timestamp": "2026-11-02T14:17:40.156107700+09:00",
+        "raw_line_sha256": "2bcd5fa8cb4cdfbcb0212a672cfa90bcfcb254a7704cca3ab0a73dd3f9e840aa"
+      },
+      {
+        "line_in_segment": 208658,
+        "timestamp": "2026-11-02T14:17:43.897407500+09:00",
+        "raw_line_sha256": "fb57cb565a52a25c4c8dfd71a2685e1c723afbb0a820e94163136c99fc5ed24e"
+      },
+      {
+        "line_in_segment": 209306,
+        "timestamp": "2026-11-02T14:17:46.071525200+09:00",
+        "raw_line_sha256": "38bb09c0868190d9ec0437571acd03a4622df1fbcc28ad901763742fb0dc0127"
+      },
+      {
+        "line_in_segment": 229830,
+        "timestamp": "2026-11-02T14:18:35.887279200+09:00",
+        "raw_line_sha256": "db869df6ba9ebd6515052397e0f13f0fb33eb26d64644daf52bbdaa1c9d87ad4"
+      },
+      {
+        "line_in_segment": 230234,
+        "timestamp": "2026-11-02T14:18:37.422303300+09:00",
+        "raw_line_sha256": "d086b633b6342a75031355ca79d74933eb88d28588ee372aa1e665cc47cbef32"
+      },
+      {
+        "line_in_segment": 231707,
+        "timestamp": "2026-11-02T14:18:41.742314+09:00",
+        "raw_line_sha256": "deaae33d8faae6e53fc96849a5ec1b0f643222a7ac36a5a3f9a9d971b51c4662"
+      },
+      {
+        "line_in_segment": 232893,
+        "timestamp": "2026-11-02T14:18:45.643821600+09:00",
+        "raw_line_sha256": "7b97757383e8d31c6e01320f47e0abb8d6470b54a7fbdce8fcfaf4010f280129"
+      },
+      {
+        "line_in_segment": 237177,
+        "timestamp": "2026-11-02T14:18:56.650789800+09:00",
+        "raw_line_sha256": "cf06cf765ad8248622da54b55dcbc8391442b71ea5429bfad62f78e4030489b3"
+      },
+      {
+        "line_in_segment": 242173,
+        "timestamp": "2026-11-02T14:19:08.316673700+09:00",
+        "raw_line_sha256": "17abba0f82fc2295991242976e4f03f96d137f00ebf5d1a67ed1c74e35c8f301"
+      },
+      {
+        "line_in_segment": 246982,
+        "timestamp": "2026-11-02T14:19:18.517052800+09:00",
+        "raw_line_sha256": "de36dc8105e186496c9227e955e729b07118205bdccd58d33d5764f97dcf926c"
+      },
+      {
+        "line_in_segment": 247731,
+        "timestamp": "2026-11-02T14:19:21.060682100+09:00",
+        "raw_line_sha256": "1caa4cdb1fe61a37809f4d5a07e7572e1529fc11472bd4c75fb46246875f8d81"
+      },
+      {
+        "line_in_segment": 251896,
+        "timestamp": "2026-11-02T14:19:32.827496100+09:00",
+        "raw_line_sha256": "fa47a1e4c36a1e6ef6694744be844b685e8d38cf3c795784190d7f3fe74a61c0"
+      },
+      {
+        "line_in_segment": 257949,
+        "timestamp": "2026-11-02T14:19:47.057360100+09:00",
+        "raw_line_sha256": "5dd15b62dad3cf6f0851f27568bdce213482ccd7cbdf119d5233a13b49cf799c"
+      },
+      {
+        "line_in_segment": 270564,
+        "timestamp": "2026-11-02T14:20:15.261109+09:00",
+        "raw_line_sha256": "c9693e3a672c0b6db7c9094706825db8acfe815300ae493bf19e978559d7d338"
+      },
+      {
+        "line_in_segment": 304816,
+        "timestamp": "2026-11-02T14:21:36.298262300+09:00",
+        "raw_line_sha256": "9faf594433489baac2e318aa3d03c122f88142c3b8e181c491f21839c97886bd"
+      },
+      {
+        "line_in_segment": 310874,
+        "timestamp": "2026-11-02T14:21:50.555603200+09:00",
+        "raw_line_sha256": "e511c9a6989de3c21e14c03c60daa4cdcdcd58d4095737f6ae305cb16d5e7204"
+      },
+      {
+        "line_in_segment": 313751,
+        "timestamp": "2026-11-02T14:21:59.237288300+09:00",
+        "raw_line_sha256": "619245f2660def487e9e948daf0943ca9e95c803f91273530c1584f913cdfdcb"
+      },
+      {
+        "line_in_segment": 314688,
+        "timestamp": "2026-11-02T14:22:01.608706900+09:00",
+        "raw_line_sha256": "be8c304441749b387517755eb0237ae10b707b32b564646b8bd2a0a9aca93c6b"
+      },
+      {
+        "line_in_segment": 316997,
+        "timestamp": "2026-11-02T14:22:07.513915700+09:00",
+        "raw_line_sha256": "0215884315b853745683ff1f411abe86de94445f31e0006ce1a70f959d00661f"
+      },
+      {
+        "line_in_segment": 319023,
+        "timestamp": "2026-11-02T14:22:13.048118100+09:00",
+        "raw_line_sha256": "c4a2cd5677b963c26ae62f9ef673ebbeb1b5f6b5b98984d44bb4648e49b6b966"
+      },
+      {
+        "line_in_segment": 324546,
+        "timestamp": "2026-11-02T14:22:25.582989800+09:00",
+        "raw_line_sha256": "716b85e5f9487a1a7aaf5a6691a511081f704b82a99d355ce771f885686b752c"
+      },
+      {
+        "line_in_segment": 326015,
+        "timestamp": "2026-11-02T14:22:31.347029100+09:00",
+        "raw_line_sha256": "2e25408c277f7bc08f2a1342aee06c430226c81d237b62a5d3a7fb8b87ba65d2"
+      },
+      {
+        "line_in_segment": 332447,
+        "timestamp": "2026-11-02T14:22:45.813474600+09:00",
+        "raw_line_sha256": "ad6a21b2de4b03932eacf51f855edfe9f8a6e03b21b7c3e0ec1f1e3c26dac90f"
+      },
+      {
+        "line_in_segment": 337099,
+        "timestamp": "2026-11-02T14:22:57.529677600+09:00",
+        "raw_line_sha256": "a3b0fed92da3d3b6723f887aa4d32eaa67df06a529afd3d3244c0bbb6620c6bd"
+      },
+      {
+        "line_in_segment": 362101,
+        "timestamp": "2026-11-02T14:23:55.771743200+09:00",
+        "raw_line_sha256": "4f9a2063c316cf79f08cb4916b183f8dbb28a91bb901766f1cbff654982a2f32"
+      },
+      {
+        "line_in_segment": 366328,
+        "timestamp": "2026-11-02T14:24:06.583021+09:00",
+        "raw_line_sha256": "5a6a68ab394a893c824422c49034d1f65e2d9503131f4c556277360c3234c77d"
+      },
+      {
+        "line_in_segment": 369815,
+        "timestamp": "2026-11-02T14:24:13.988912900+09:00",
+        "raw_line_sha256": "be85bc636ea7b54b5b3acc75c99da832d277766ff7c0b6806b94f48961290fbd"
+      },
+      {
+        "line_in_segment": 369907,
+        "timestamp": "2026-11-02T14:24:14.264734100+09:00",
+        "raw_line_sha256": "15a3cce532a420bf1930c62c117a8f882d9259611ae643522bf3ea60c3860df1"
+      },
+      {
+        "line_in_segment": 375608,
+        "timestamp": "2026-11-02T14:24:27.368300700+09:00",
+        "raw_line_sha256": "5082fc2e6f07530cf6a8bbe03f2958bbcf115edb4e5f2a12aef106301d3f890e"
+      },
+      {
+        "line_in_segment": 377010,
+        "timestamp": "2026-11-02T14:24:32.381647200+09:00",
+        "raw_line_sha256": "3063b6d537997cbab212c0e893b78ef58a6d875eba43a58b2d621636499add3d"
+      },
+      {
+        "line_in_segment": 377554,
+        "timestamp": "2026-11-02T14:24:34.286080700+09:00",
+        "raw_line_sha256": "c4b4428307abd593adbfb5d78f709216b1ebd4ad5bb7b7443f1c4607f7d8ef32"
+      },
+      {
+        "line_in_segment": 380437,
+        "timestamp": "2026-11-02T14:24:41.168400300+09:00",
+        "raw_line_sha256": "341c2953c1b5d7dd01a20280e64fe92b11238e37eb9c9b2fa748ad44e8a4b051"
+      },
+      {
+        "line_in_segment": 384747,
+        "timestamp": "2026-11-02T14:24:52.639890800+09:00",
+        "raw_line_sha256": "63bc0627deb1ae3a3cdc055a60c746ea6bb9fec831c7c44b9e87f855d4f0c971"
+      },
+      {
+        "line_in_segment": 398159,
+        "timestamp": "2026-11-02T14:25:22.488907300+09:00",
+        "raw_line_sha256": "c73865fc075a7f572c994941aa14115f24f8af804f73c5e870b248eb97151e6e"
+      }
+    ],
+    "limitation": "not the three pictured Agent Error packets; no request-id/phase/error-flag correlation exists for those historical failures; no unexported log absence claim"
+  },
+  "intermediate_backend_verification": {
+    "scope": "backend-first pre-pr plan on dirty baseline; not the full UI matrix or final-head Ready proof",
+    "record": {
+      "path": "target/issue-5390-rpc-backend-run-record.json",
+      "bytes": 15551,
+      "sha256": "5ef73c5c13c68bf228136e22a1894d9f6d25ca274e632b0311990b70e865d6a1"
+    },
+    "plan": {
+      "path": "target/issue-5390-rpc-backend-plan-record.json",
+      "bytes": 2615,
+      "sha256": "20a6204283a9f5c71ea7af2a5a4bd05b59ece714f6105c11d1ac3667456b060d"
+    },
+    "record_id": "vrr-d833d31fddff43a7bb2e36aad4cf2f13",
+    "created_at": "2026-11-02T06:59:33.283514500Z",
+    "verified_head": "f2b3a1d1bc574695eaf5c33fc92da978fccf3572",
+    "worktree_fingerprint": "366bd5ddccbde7140926fcd087487813ca572d2b70706476e8c07876cb98b3ed",
+    "all_passed": true,
+    "plan_covered": true,
+    "commands": [
+      {
+        "command": "rustc --version",
+        "exit_code": 0
+      },
+      {
+        "command": "cargo fmt --all -- --check",
+        "exit_code": 0
+      },
+      {
+        "command": "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+        "exit_code": 0
+      },
+      {
+        "command": "TEMP=C:/Users/AKIOJI~1/AppData/Local/Temp TMP=C:/Users/AKIOJI~1/AppData/Local/Temp TMPDIR=C:/Users/AKIOJI~1/AppData/Local/Temp cargo test -p gwt --lib project_runtime::",
+        "exit_code": 0
+      },
+      {
+        "command": "TEMP=C:/Users/AKIOJI~1/AppData/Local/Temp TMP=C:/Users/AKIOJI~1/AppData/Local/Temp TMPDIR=C:/Users/AKIOJI~1/AppData/Local/Temp cargo test -p gwt --lib daemon_subscriber::",
+        "exit_code": 0
+      },
+      {
+        "command": "TEMP=C:/Users/AKIOJI~1/AppData/Local/Temp TMP=C:/Users/AKIOJI~1/AppData/Local/Temp TMPDIR=C:/Users/AKIOJI~1/AppData/Local/Temp cargo test -p gwt --lib empty_execution_observations_skip_runtime_and_git_reads",
+        "exit_code": 0
+      },
+      {
+        "command": "TEMP=C:/Users/AKIOJI~1/AppData/Local/Temp TMP=C:/Users/AKIOJI~1/AppData/Local/Temp TMPDIR=C:/Users/AKIOJI~1/AppData/Local/Temp cargo test -p gwt --lib issue_5535_stopped_holder_requeues_and_activates_a_fresh_launch",
+        "exit_code": 0
+      },
+      {
+        "command": "TEMP=C:/Users/AKIOJI~1/AppData/Local/Temp TMP=C:/Users/AKIOJI~1/AppData/Local/Temp TMPDIR=C:/Users/AKIOJI~1/AppData/Local/Temp cargo test -p gwt --lib issue_4446_blocked_execution_with_dead_host_releases_capacity_without_requeue",
+        "exit_code": 0
+      },
+      {
+        "command": "TEMP=C:/Users/AKIOJI~1/AppData/Local/Temp TMP=C:/Users/AKIOJI~1/AppData/Local/Temp TMPDIR=C:/Users/AKIOJI~1/AppData/Local/Temp cargo test -p gwt-core --test test_hygiene_test",
+        "exit_code": 0
+      },
+      {
+        "command": "pwsh -NoProfile -File scripts/diagnostics/issue-5658-browser-check.test.ps1",
+        "exit_code": 0
+      },
+      {
+        "command": "cargo build -p gwt --bin gwt --bin gwtd",
+        "exit_code": 0
+      },
+      {
+        "command": "git diff --check",
+        "exit_code": 0
+      },
+      {
+        "command": "cargo build -p gwt --bin gwtd --target-dir target",
+        "exit_code": 0
+      }
+    ],
+    "rust_results": {
+      "passed": 101,
+      "failed": 0,
+      "existing_helper_ignored": 1
+    },
+    "managed_browser_contract": "normal accepted; seven invalid observations rejected",
+    "execution_status_at_capture": {
+      "ecr_status": "active",
+      "verification_state": "fresh",
+      "binding_state": "bound",
+      "launch_route": "autonomous"
+    },
+    "status_capture": {
+      "path": "target/issue-5390-rpc-post-backend-status.json",
+      "bytes": 4778,
+      "sha256": "c441012d0553daf780ff23e414621799b3605b35f481c43b379c5bbf7ecd526a"
+    },
+    "preflight_after_backend": {
+      "result": "unknown",
+      "context": "current",
+      "normal_completion": "normal",
+      "convergence": "converged",
+      "reasons": [
+        "ledger_unavailable"
+      ]
+    },
+    "actual_headed_passes": 0,
+    "coverage": "unmeasured; required PR coverage has not run"
+  },
+  "limits": [
+    "1/2/12 are concurrent HTTP command callers, not genuine Agent counts.",
+    "The inert server is responsive; this does not measure the production owner mailbox or GUI/client event delivery.",
+    "The historical three notifications and 71 PM warnings have not all been attributed to this cause.",
+    "Raw control flags describe its induced send failures, not the historical generic strings.",
+    "Single elapsed samples are not throughput, GUI CPU/RSS, a fleet budget, or a timing acceptance measurement.",
+    "Installed rollout, EO3/EO4, actual headed dark/light, final-head canonical, PR/CI/coverage/base inclusion remain unproven."
+  ],
+  "user_verification_result": "n/a (autonomous)",
+  "agent_visual_check": "not run; existing canonical runtime/ledger gates remain in force"
+}

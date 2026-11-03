@@ -11350,6 +11350,7 @@ mod tests {
     #[tokio::test]
     async fn shutdown_retains_failed_close_and_accepts_exact_retry() {
         let root = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(root.path());
         let (snapshot, pane) = unbound_fixture(root.path());
         let pty = pane.shared_pty();
         let (mut state, receiver, handle) = owner_fixture(root.path());
@@ -11381,7 +11382,7 @@ mod tests {
             readiness_deadline: None,
         });
         set_fixture_incarnation(&snapshot, 2);
-        let owner = thread::spawn(move || run_fixture_owner(state, receiver));
+        let owner = spawn_owner_worker(move || run_fixture_owner(state, receiver));
         let (shutdown, mut done) = oneshot::channel();
         handle
             .sender
@@ -11708,6 +11709,7 @@ mod tests {
     #[tokio::test]
     async fn natural_exit_commits_session_receipt_and_stopped_state_before_terminal_projection() {
         let root = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(root.path());
         let sessions = gwt_core::paths::gwt_sessions_dir();
         let (mut state, receiver, handle) = owner_fixture(root.path());
         let (mut snapshot, pane) = unbound_fixture(root.path());
@@ -11744,7 +11746,7 @@ mod tests {
             readiness_deadline: None,
         });
         let mut events = handle.subscribe();
-        let actor = thread::spawn(move || run_fixture_owner(state, receiver));
+        let actor = spawn_owner_worker(move || run_fixture_owner(state, receiver));
         handle
             .request(request(OwnerCommand::Input {
                 id: "pane".into(),
