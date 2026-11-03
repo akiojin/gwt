@@ -118,6 +118,96 @@ fn archive_explicit_orphan_preserves_payload_and_active_sections() {
 }
 
 #[test]
+fn archive_multipart_and_incomplete_orphans_preserves_bytes_and_can_retry() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let client = FakeIssueClient::new();
+    let original = seed_spec(&client, &cache, 1, "current spec", "current tasks");
+    let bodies = [
+        "<!-- artifact:tasks BEGIN part=1/2 -->\r\n\r\n古い本文 artifact:tasks\r\n<!-- artifact:tasks END part=1/2 -->",
+        "<!-- artifact:tasks BEGIN part=2/2 -->\nremaining tasks\n\n<!-- artifact:tasks END part=2/2 -->",
+        "<!-- artifact:spec BEGIN part=1/9 -->\nincomplete staged spec\n<!-- artifact:spec END part=1/9 -->",
+    ];
+    let ids: Vec<_> = bodies
+        .iter()
+        .map(|body| client.create_comment(IssueNumber(1), body).unwrap().id.0)
+        .collect();
+    let ops = SpecOps::new(client, cache);
+    assert!(ops.diagnose(IssueNumber(1)).unwrap().contains("part=1/9"));
+
+    let expected: Vec<_> = ids.iter().map(|id| format!("comment:{id}")).collect();
+    // A previous attempt may have retired only the first selected comment.
+    ops.archive_orphan_comments(IssueNumber(1), &ids[..1])
+        .unwrap();
+    assert_eq!(
+        ops.archive_orphan_comments(IssueNumber(1), &ids).unwrap(),
+        expected
+    );
+    for (comment, body) in ops.client().comments(IssueNumber(1)).iter().zip(bodies) {
+        assert_eq!(
+            comment.body,
+            body.replace("<!-- artifact:", "<!-- archived-artifact:")
+        );
+    }
+    let gwt_github::client::FetchResult::Updated(after) =
+        ops.client().fetch(IssueNumber(1), None).unwrap()
+    else {
+        panic!("expected unconditional snapshot");
+    };
+    assert_eq!(after.body, original.body);
+    assert_eq!(
+        ops.read_section(IssueNumber(1), &n("spec")).unwrap(),
+        "current spec"
+    );
+    assert_eq!(
+        ops.read_section(IssueNumber(1), &n("tasks")).unwrap(),
+        "current tasks"
+    );
+    assert!(ops.diagnose(IssueNumber(1)).unwrap().is_empty());
+
+    let calls = ops.client().call_log().len();
+    assert_eq!(
+        ops.archive_orphan_comments(IssueNumber(1), &ids).unwrap(),
+        expected
+    );
+    assert!(!ops.client().call_log()[calls..]
+        .iter()
+        .any(|call| call.starts_with("patch_")
+            || call.starts_with("create_")
+            || call.starts_with("delete_")));
+    assert_eq!(
+        ops.client().fetch(IssueNumber(1), None).unwrap(),
+        gwt_github::client::FetchResult::Updated(after)
+    );
+}
+
+#[test]
+fn archive_refuses_an_orphan_changed_after_preflight() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let client = FakeIssueClient::new();
+    seed_spec(&client, &cache, 1, "current spec", "current tasks");
+    let orphan = client.create_comment(IssueNumber(1),
+        "<!-- artifact:tasks BEGIN part=1/9 -->\nold tasks\n<!-- artifact:tasks END part=1/9 -->").unwrap();
+    let writer = client.clone();
+    client.after_next_fetch(move || {
+        writer
+            .patch_comment(orphan.id, "another writer's content")
+            .unwrap();
+    });
+    let ops = SpecOps::new(client, cache);
+
+    assert!(matches!(
+        ops.archive_orphan_comments(IssueNumber(1), &[orphan.id.0]),
+        Err(SpecOpsError::ConcurrentWrite)
+    ));
+    assert_eq!(
+        ops.client().comments(IssueNumber(1))[0].body,
+        "another writer's content"
+    );
+}
+
+#[test]
 fn archive_validates_all_ids_before_touching_an_orphan() {
     let tmp = TempDir::new().unwrap();
     let cache = Cache::new(tmp.path().to_path_buf());

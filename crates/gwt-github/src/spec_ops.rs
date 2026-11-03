@@ -529,37 +529,58 @@ impl<C: IssueClient> SpecOps<C> {
                 .iter()
                 .find(|comment| comment.id.0 == *id)
                 .ok_or_else(|| SpecOpsError::Validation(format!("comment:{id} not found")))?;
-            let sections = crate::sections::extract_sections(&comment.body).map_err(|error| {
+            // Normalize only the two outer archive markers for validation, so
+            // retrying a partially completed selection does not rewrite it.
+            let mut body = comment.body.clone();
+            if body.trim_start().starts_with("<!-- archived-artifact:") {
+                body = body.replacen("<!-- archived-artifact:", "<!-- artifact:", 1);
+                let end = body.rfind("<!-- archived-artifact:").ok_or_else(|| {
+                    SpecOpsError::Validation(format!(
+                        "comment:{id} has incomplete archived artifact markers"
+                    ))
+                })?;
+                body.replace_range(end..end + "<!-- archived-artifact:".len(), "<!-- artifact:");
+            }
+            let sections = crate::sections::extract_sections(&body).map_err(|error| {
                 SpecOpsError::Validation(format!(
                     "comment:{id} has malformed artifact markers: {error}"
                 ))
             })?;
             let [section] = sections.as_slice() else {
                 return Err(SpecOpsError::Validation(format!(
-                    "comment:{id} must contain one unmarked orphan artifact"
+                    "comment:{id} must contain one orphan artifact"
                 )));
             };
-            let begin = format!("<!-- artifact:{} BEGIN -->", section.name);
-            let end = format!("<!-- artifact:{} END -->", section.name);
-            if section.part.is_some()
-                || !original.sections.contains_key(&section.name)
-                || !comment.body.trim().starts_with(&begin)
-                || !comment.body.trim().ends_with(&end)
+            let part = match &section.part {
+                Some(part) if part.index > 0 && part.index <= part.total => {
+                    format!(" part={}/{}", part.index, part.total)
+                }
+                Some(_) => {
+                    return Err(SpecOpsError::Validation(format!(
+                        "comment:{id} has invalid artifact part numbering"
+                    )));
+                }
+                None => String::new(),
+            };
+            let begin = format!("<!-- artifact:{} BEGIN{part} -->", section.name);
+            let end = format!("<!-- artifact:{} END{part} -->", section.name);
+            if !original.sections.contains_key(&section.name)
+                || !body.trim().starts_with(&begin)
+                || !body.trim().ends_with(&end)
             {
                 return Err(SpecOpsError::Validation(format!(
-                    "comment:{id} must be an unmarked canonical artifact for an active section"
+                    "comment:{id} must be a canonical artifact for an active section"
                 )));
             }
-            let archived = comment
-                .body
+            let archived = body
                 .replacen(
                     &begin,
-                    &format!("<!-- archived-artifact:{} BEGIN -->", section.name),
+                    &format!("<!-- archived-artifact:{} BEGIN{part} -->", section.name),
                     1,
                 )
                 .replacen(
                     &end,
-                    &format!("<!-- archived-artifact:{} END -->", section.name),
+                    &format!("<!-- archived-artifact:{} END{part} -->", section.name),
                     1,
                 );
             if !archives.iter().any(|(existing, _, _)| existing.0 == *id) {
@@ -579,7 +600,9 @@ impl<C: IssueClient> SpecOps<C> {
             {
                 return Err(SpecOpsError::ConcurrentWrite);
             }
-            self.client.patch_comment(*id, archived)?;
+            if expected != archived {
+                self.client.patch_comment(*id, archived)?;
+            }
         }
         let fresh = self.fetch_fresh(number)?;
         self.cache.write_snapshot(&fresh)?;

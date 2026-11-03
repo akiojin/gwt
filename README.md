@@ -2025,8 +2025,10 @@ JSON
   duplicated markers. After confirming that an old orphan artifact has been
   superseded, pass its comment ID in `archive_comments` to the repair operation
   (for example, `{"number":1784,"archive_comments":[12345]}`). This preserves
-  the comment text and retires only its outer markers; indexed comments are
-  refused. Run `issue.spec.lint` again to confirm index health.
+  the comment text and retires only its outer markers, including `part=N/M`
+  markers from complete or incomplete orphan groups. Indexed comments are
+  refused. Retrying the same IDs skips comments already archived.
+  Run `issue.spec.lint` again to confirm index health.
 
 ```bash
 gwtd <<'JSON'

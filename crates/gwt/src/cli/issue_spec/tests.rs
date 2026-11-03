@@ -514,7 +514,7 @@ fn run_supports_read_create_pull_repair_and_rename_workflows() {
         .client
         .create_comment(
             IssueNumber(42),
-            "<!-- artifact:tasks BEGIN -->\nold tasks\n<!-- artifact:tasks END -->",
+            "<!-- artifact:tasks BEGIN part=1/9 -->\nold tasks\n<!-- artifact:tasks END part=1/9 -->",
         )
         .unwrap();
     out.clear();
