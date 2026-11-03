@@ -4572,6 +4572,7 @@ impl AppRuntime {
                     candidate.window_id == agent.window_id
                         && candidate.session_id == agent.session_id
                         && candidate.runtime_incarnation == agent.runtime_incarnation
+                        && candidate.is_pm == agent.is_pm
                 })
             });
         }
@@ -6849,12 +6850,8 @@ mod bounded_cache_merge_tests {
         let window_id = format!("tab-1::{}", window.id);
         runtime.register_window("tab-1", &window.id);
         super::super::tests::init_repo_with_initial_commit(&context.project_root);
+        runtime.blocking_tasks = super::super::BlockingTaskSpawner::queued().0;
         let _pane = super::super::tests::attach_live_pm_pane(&mut runtime, &window_id);
-        let prefs = gwt::pm_registry::load_pm_prefs(
-            &gwt::pm_registry::pm_prefs_path_for_repo_path(&context.project_root),
-        )
-        .unwrap();
-        runtime.sync_pm_session_cache(&context.project_root, prefs.registration.as_ref());
         assert!(runtime.active_agent_sessions.contains_key(&window_id));
         assert!(!runtime.tab("tab-1").unwrap().workspace.persisted().windows[0].is_pm);
 
@@ -6864,6 +6861,103 @@ mod bounded_cache_merge_tests {
             candidates[0].is_pm,
             "the registered PM must retain its role"
         );
+
+        runtime.sync_pm_session_cache(&context.project_root, None);
+        let old_candidates = runtime.local_agent_activity_candidates("tab-1");
+        let old =
+            observe_local_agent_activity(&context, &old_candidates, &runtime.sessions_dir, None)
+                .unwrap();
+        assert!(!old.agents.as_ref().unwrap()[0].is_pm);
+        let refresh = runtime
+            .active_work_projection_refresh
+            .borrow_mut()
+            .projects
+            .entry(context.project_root.clone())
+            .or_default()
+            .local_activity_refresh
+            .clone();
+        lock_recover(&refresh).latest = Some(old.clone());
+        let identity = runtime.runtimes[&window_id].owner_identity.clone();
+        assert!(runtime.refresh_pm_session_cache_for_current_owner(&context, &window_id, &identity));
+        let owner = runtime.local_agent_activity_owner("tab-1").unwrap();
+        assert_eq!(
+            old.host_id,
+            format!("{}:{}", owner.pid, owner.host_started_at)
+        );
+        assert_eq!(
+            lock_recover(&refresh).latest.as_ref().unwrap().agents,
+            old.agents
+        );
+        let retained = runtime
+            .retain_current_local_agent_activity("tab-1", Some(old.clone()))
+            .unwrap();
+        assert!(
+            retained.agents.as_ref().unwrap().is_empty(),
+            "old-role observation must be subtracted"
+        );
+        assert!(!old.agents.as_ref().unwrap()[0].is_pm);
+        let current = observe_local_agent_activity(
+            &context,
+            &runtime.local_agent_activity_candidates("tab-1"),
+            &runtime.sessions_dir,
+            None,
+        )
+        .unwrap();
+        assert!(current.agents.as_ref().unwrap()[0].is_pm);
+        lock_recover(&refresh).latest = Some(current.clone());
+        assert_eq!(
+            runtime.retain_current_local_agent_activity("tab-1", Some(current.clone())),
+            Some(current)
+        );
+    }
+
+    #[test]
+    fn registered_pm_cache_rejects_foreign_owner_projection() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let (mut runtime, context, _, _) = retired_activity_fixture(temp.path());
+        let window = runtime
+            .tab_mut("tab-1")
+            .unwrap()
+            .workspace
+            .add_window(gwt::WindowPreset::Agent);
+        let window_id = format!("tab-1::{}", window.id);
+        runtime.register_window("tab-1", &window.id);
+        super::super::tests::init_repo_with_initial_commit(&context.project_root);
+        runtime.blocking_tasks = super::super::BlockingTaskSpawner::queued().0;
+        let _pane = super::super::tests::attach_live_pm_pane(&mut runtime, &window_id);
+        let owner = runtime.test_project_owners[&context.project_root].clone();
+        let current = &runtime.runtimes[&window_id];
+        let snapshot = super::super::tests::owner_fixture_block_on(owner.command(
+            gwt::project_runtime::events::OwnerCommand::Snapshot {
+                id: current.owner_pane_id.clone(),
+                incarnation: current.incarnation,
+            },
+        ))
+        .unwrap();
+        let snapshot: super::super::RemoteRuntimeSnapshot =
+            serde_json::from_value(snapshot).unwrap();
+        let client = current.client.clone();
+        let foreign_root = temp.path().join("foreign");
+        std::fs::create_dir_all(&foreign_root).unwrap();
+        let foreign = super::super::tests::owner_fixture_block_on(
+            gwt::project_runtime::test_support::ProjectOwnerHarness::start(&foreign_root),
+        )
+        .unwrap();
+        runtime.sync_pm_session_cache(&context.project_root, None);
+        assert!(runtime
+            .install_remote_owner_projection(
+                &context,
+                &window_id,
+                foreign.client(),
+                snapshot.clone(),
+                None
+            )
+            .is_empty());
+        assert!(runtime.pm_session_for_root(&context.project_root).is_none());
+        assert!(!runtime.local_agent_activity_candidates("tab-1")[0].is_pm);
+        runtime.install_remote_owner_projection(&context, &window_id, client, snapshot, None);
+        assert!(runtime.local_agent_activity_candidates("tab-1")[0].is_pm);
     }
 
     #[test]

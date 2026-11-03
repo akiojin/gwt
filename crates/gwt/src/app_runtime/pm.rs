@@ -2092,6 +2092,40 @@ impl AppRuntime {
             .get(project_root)
     }
 
+    pub(super) fn refresh_pm_session_cache_for_current_owner(
+        &mut self,
+        context: &super::ProjectContext,
+        window_id: &str,
+        owner: &gwt::daemon_subscriber::ProjectOwnerIdentity,
+    ) -> bool {
+        if !self.project_context_is_current(context)
+            || self.project_key_for_window(window_id) != Some(&context.project_key)
+            || self
+                .project_state(context)
+                .and_then(|state| state.project_owner_identity.as_ref())
+                .is_some_and(|accepted| accepted != owner)
+        {
+            return false;
+        }
+        let path = pm_registry::pm_prefs_path_for_repo_path(&context.project_root);
+        let prefs = match pm_registry::load_pm_prefs(&path) {
+            Ok(prefs) => prefs,
+            Err(error) => {
+                tracing::warn!(project = %context.project_root.display(), %error, "failed to read PM registration");
+                return false;
+            }
+        };
+        let changed = self
+            .pm_session_for_root(&context.project_root)
+            .map(String::as_str)
+            != prefs
+                .registration
+                .as_ref()
+                .map(|registration| registration.session_id.as_str());
+        self.sync_pm_session_cache(&context.project_root, prefs.registration.as_ref());
+        changed
+    }
+
     /// Keep the per-broadcast PM marker in step with the durable record.
     pub(super) fn sync_pm_session_cache(
         &mut self,

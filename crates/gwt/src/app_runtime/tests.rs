@@ -10699,7 +10699,67 @@ fn assert_pm_ensure_spawns_from_default_branch(default_branch: &str, cached_defa
         "actual PM launch: {:?}",
         completion.result.as_ref().err()
     );
-    runtime.handle_remote_owner_launch_complete(completion);
+    let (snapshot, session) = match completion.result.as_ref().unwrap() {
+        super::RemoteOwnerLaunchOutcome::Runtime(snapshot, session) => {
+            (snapshot.clone(), session.clone())
+        }
+        _ => panic!("expected actual PM runtime"),
+    };
+    let client = completion
+        .client_cell
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .clone();
+    runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    runtime.install_remote_owner_projection(
+        &completion.context,
+        &window_id,
+        client,
+        snapshot.clone(),
+        session,
+    );
+    runtime.sync_pm_session_cache(&repo, None);
+    let events = runtime.handle_remote_owner_launch_complete(completion);
+    assert_eq!(
+        runtime.runtimes[&window_id].incarnation,
+        snapshot.incarnation
+    );
+    assert_eq!(
+        runtime.pm_session_for_root(&repo).map(String::as_str),
+        snapshot.session_id.as_deref(),
+        "same-runtime completion must refresh the registered PM cache"
+    );
+    let workspace = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::WorkspaceState { workspace } => Some(workspace),
+            _ => None,
+        })
+        .expect("same-runtime cache refresh publishes workspace");
+    let pm_window = &workspace.tabs[0].workspace.windows[0];
+    assert!(pm_window.is_pm);
+    assert_eq!(
+        pm_window.session_id.as_deref(),
+        snapshot.session_id.as_deref()
+    );
+    drain_queued_blocking_tasks(&tasks);
+    assert!(recorded_events.lock().unwrap().iter().any(|event| {
+        match recorded_project_payload(event) {
+            UserEvent::ProjectDispatch { events, .. } => events.iter().any(|event| {
+                matches!(&event.event, BackendEvent::LocalAgentActivity { activity }
+                    if activity.agents.as_ref().is_some_and(|agents| agents.iter().any(|agent|
+                        agent.window_id == window_id && agent.session_id == snapshot.session_id.as_deref().unwrap()
+                        && agent.runtime_incarnation == snapshot.incarnation && agent.is_pm)))
+            }),
+            _ => false,
+        }
+    }), "same-runtime cache refresh queues current registered PM activity");
     assert!(
         runtime
             .tab("tab-1")

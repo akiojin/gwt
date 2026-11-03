@@ -15426,7 +15426,29 @@ impl AppRuntime {
                     }) {
                         // Inventory may have installed this same owner before the HTTP launch reply.
                         // A fresh post-install snapshot repairs it without replaying older status/data.
-                        return self.request_owner_snapshot(&window_id, None);
+                        let mut events = Vec::new();
+                        if snapshot.agent_id.is_some()
+                            && snapshot.session_id.is_some()
+                            && snapshot
+                                .agent_name
+                                .as_deref()
+                                .is_some_and(|name| !name.trim().is_empty())
+                            && self.window_lookup.contains_key(&window_id)
+                            && client.identity().is_some_and(|identity| {
+                                self.refresh_pm_session_cache_for_current_owner(
+                                    &context, &window_id, identity,
+                                )
+                            })
+                        {
+                            self.invalidate_project_caches(&context.project_root);
+                            self.invalidate_workspace_projection_patch(&context.tab_id);
+                            events.push(self.workspace_state_broadcast(&context));
+                            events.extend(
+                                self.active_work_projection_broadcast_for_tab(&context.tab_id),
+                            );
+                        }
+                        events.extend(self.request_owner_snapshot(&window_id, None));
+                        return events;
                     }
                     self.record_restore_window_outcome(&window_id, Ok(()));
                     self.restore_launch_windows.remove(&window_id);
@@ -15783,6 +15805,9 @@ impl AppRuntime {
         let Some(address) = self.window_lookup.get(window_id).cloned() else {
             return Vec::new();
         };
+        let pm_cache_changed = snapshot.agent_id.is_some()
+            && self.refresh_pm_session_cache_for_current_owner(context, window_id, &identity);
+        let activity_changed = activity_changed || pm_cache_changed;
         if let Some(tab) = self.tab_mut(&address.tab_id) {
             tab.workspace
                 .set_session_id(&address.raw_id, snapshot.session_id.clone());
