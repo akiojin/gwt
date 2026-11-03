@@ -399,12 +399,15 @@ test.describe("Works and Agents approved baseline", () => {
       body: JSON.stringify({ scope: "Chromium renderer metrics only; excludes native GUI CPU/RSS", updates: 20,
         observation, before, after: await cdp.send("Performance.getMetrics") }) });
     await cdp.detach();
+    await page.evaluate(() => (window as any).__worksAgentsFixture.attachmentProgress());
+    await expect(full(page).locator(".attachment-progress")).toContainText("Staging");
     await page.evaluate(() => (window as any).__worksAgentsFixture.remountInKanban());
     await expect(page.locator('.agent-kanban-root[data-board-id="telemetry-kanban"]')).toBeAttached();
     await page.evaluate(() => (window as any).__worksAgentsFixture.usage("measured", 21));
     await expect.poll(() => full(page).locator(".works-terminal-host").evaluate(host => {
       const state = (window as any).__telemetryObservation;
-      return host.firstElementChild === state.root && host.querySelector(".xterm") === state.terminal;
+      return host.firstElementChild === state.root && host.querySelector(".xterm") === state.terminal
+        && !!host.querySelector(".attachment-progress");
     })).toBe(true);
     await full(page).locator(".xterm-helper-textarea").press("k");
     await expect.poll(async () => (await sent(page)).some(message =>
@@ -870,6 +873,8 @@ async function installWorksAgentsBackend(page: Page) {
       },
       workspaceTitle(title: string) { windows.find(data => data.id === "agent-one").dynamic_title = title; socket.emit(workspace()); },
       workspaceStatus(status: string) { windows.find(data => data.id === "agent-one").status = status; socket.emit(workspace()); },
+      attachmentProgress() { socket.emit({ kind: "attachment_progress", id: "agent-one",
+        operation_id: "telemetry-attachment", phase: "staging", filename: "fixture.txt", bytes_done: 8, bytes_total: 16 }); },
       remountInKanban() {
         windows.push(baseWindow("telemetry-kanban", { preset: "agent_kanban", title: "Telemetry Kanban" }));
         windows.find(data => data.id === "agent-one").placement = {
