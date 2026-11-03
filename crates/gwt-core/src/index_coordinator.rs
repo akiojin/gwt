@@ -2158,7 +2158,7 @@ fn try_acquire_heavy_storage(
             fs::create_dir_all(&storage)?;
             let file = open_lock_file(&storage.join("heavy.lock"))?;
             #[cfg(test)]
-            tests::after_new_slot_created(&storage, &file);
+            tests::after_new_slot_created(&storage, &file, &root_file);
             match fs2::FileExt::try_lock_exclusive(&file) {
                 Ok(()) => {}
                 Err(err) if is_contended(&err) => return Ok(None),
@@ -3505,7 +3505,7 @@ mod tests {
     use crate::deadline_budget::HANG_GUARD;
 
     type RegistrationSnapshotHook = Box<dyn FnOnce(&Path)>;
-    type NewSlotCreatedHook = Box<dyn FnOnce(&Path, &File)>;
+    type NewSlotCreatedHook = Box<dyn FnOnce(&Path, &File, &File)>;
     type PoolRootStatusHook = Box<dyn FnOnce(&File, &File)>;
 
     thread_local! {
@@ -3679,10 +3679,10 @@ mod tests {
         }
     }
 
-    pub(super) fn after_new_slot_created(storage: &Path, file: &File) {
+    pub(super) fn after_new_slot_created(storage: &Path, file: &File, root_file: &File) {
         let hook = NEW_SLOT_CREATED_HOOK.with(|hook| hook.borrow_mut().take());
         if let Some(hook) = hook {
-            hook(storage, file);
+            hook(storage, file, root_file);
         }
     }
 
@@ -3701,7 +3701,7 @@ mod tests {
         let probe = std::rc::Rc::new(std::cell::RefCell::new(None));
         NEW_SLOT_CREATED_HOOK.with(|hook| {
             let probe = std::rc::Rc::clone(&probe);
-            *hook.borrow_mut() = Some(Box::new(move |storage, _| {
+            *hook.borrow_mut() = Some(Box::new(move |storage, _, _| {
                 let file = open_lock_file(&storage.join("heavy.lock")).unwrap();
                 fs2::FileExt::try_lock_exclusive(&file).unwrap();
                 *probe.borrow_mut() = Some(file);
@@ -4612,7 +4612,7 @@ mod tests {
             let cancelled = std::rc::Rc::clone(&cancelled);
             let retained = std::rc::Rc::clone(&retained);
             let root = tmp.path().to_path_buf();
-            *hook.borrow_mut() = Some(Box::new(move |storage, file| {
+            *hook.borrow_mut() = Some(Box::new(move |storage, file, root_file| {
                 let observer = IndexCoordinator::open(root).unwrap();
                 let queue = published_heavy_queue(&observer.heavy_pending_dir()).unwrap();
                 assert!(queue[0].resident);
@@ -4620,8 +4620,11 @@ mod tests {
                 assert_eq!(queue[0].job_status, Some(JobStatus::Running));
                 // Keep the actual acquisition's open file description alive,
                 // modelling a descriptor retained by a concurrent process spawn.
-                *retained.borrow_mut() =
-                    Some((file.try_clone().unwrap(), storage.join("heavy.lock")));
+                *retained.borrow_mut() = Some((
+                    file.try_clone().unwrap(),
+                    storage.join("heavy.lock"),
+                    root_file.try_clone().unwrap(),
+                ));
                 cancelled.set(true);
             }));
         });
@@ -4640,6 +4643,10 @@ mod tests {
         fs2::FileExt::try_lock_exclusive(&probe)
             .expect("Cancelled must retire the physical slot even with a retained alias");
         fs2::FileExt::unlock(&probe).unwrap();
+        let root_probe = open_lock_file(&tmp.path().join("heavy.lock")).unwrap();
+        fs2::FileExt::try_lock_exclusive(&root_probe)
+            .expect("Cancelled must retire the compatibility lock even with a retained alias");
+        fs2::FileExt::unlock(&root_probe).unwrap();
         let status = coordinator.heavy_pool_status().unwrap();
         assert_eq!(status.available, 1);
         assert!(status.queue.is_empty());
@@ -4648,6 +4655,9 @@ mod tests {
         drop(retained.borrow_mut().take());
         assert!(is_contended(
             &fs2::FileExt::try_lock_exclusive(&probe).unwrap_err()
+        ));
+        assert!(is_contended(
+            &fs2::FileExt::try_lock_exclusive(&root_probe).unwrap_err()
         ));
         drop(successor);
     }
