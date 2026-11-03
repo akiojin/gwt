@@ -7,7 +7,7 @@
 
 use std::{
     fs::{File, OpenOptions},
-    io::{self, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
@@ -93,17 +93,36 @@ impl BoundedDailyWriter {
         let result = (|| {
             let path = current_log_file(&self.log_dir);
             let mut file = open_log_file(&path)?;
+            let recovery_newline = u64::from(!record.is_empty() && needs_tail_newline(&mut file)?);
             super::housekeep::enforce_size_limit(
                 &self.log_dir,
                 &path,
+                &file,
                 self.max_bytes,
-                record.len() as u64,
+                // If an otherwise valid record needs the whole budget, making
+                // room resets the old partial tail, so no recovery byte remains.
+                (record.len() as u64 + recovery_newline).min(self.max_bytes),
             )?;
+            let repair_tail = !record.is_empty() && needs_tail_newline(&mut file)?;
+            file.seek(SeekFrom::End(0))?;
+            if repair_tail {
+                file.write_all(b"\n")?;
+            }
             file.write_all(record)
         })();
         let unlock = FileExt::unlock(&self.lock);
         result.and(unlock)
     }
+}
+
+fn needs_tail_newline(file: &mut File) -> io::Result<bool> {
+    if file.metadata()?.len() == 0 {
+        return Ok(false);
+    }
+    file.seek(SeekFrom::End(-1))?;
+    let mut last = [0];
+    file.read_exact(&mut last)?;
+    Ok(last[0] != b'\n')
 }
 
 impl Write for BoundedDailyWriter {
@@ -148,9 +167,10 @@ impl Write for BoundedDailyWriter {
 
 fn open_log_file(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
-    // LockFileEx on Windows rejects an append-only handle; the stable lock
-    // file needs read access as well. The log writer still always appends.
-    options.create(true).read(true).append(true);
+    // LockFileEx needs read access and set_len needs write-data access on
+    // Windows. Append by seeking under the shared lock rather than opening
+    // append-only, which does not grant permission to reset the file.
+    options.create(true).read(true).write(true).truncate(false);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -448,6 +468,44 @@ mod tests {
             let value: serde_json::Value = serde_json::from_str(line).unwrap();
             assert_eq!(value["n"], 49);
         }
+    }
+
+    #[test]
+    fn bounded_writers_repair_shared_partial_tails_within_the_size_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut first = BoundedDailyWriter::new(dir.path(), 64).unwrap();
+        let mut second = BoundedDailyWriter::new(dir.path(), 64).unwrap();
+        let path = current_log_file(dir.path());
+        std::fs::write(&path, b"{\"broken\":").unwrap();
+        first.write_all(b"{\"n\":1}\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{\"broken\":\n{\"n\":1}\n"
+        );
+        std::fs::write(&path, b"partial").unwrap();
+        second.write_all(b"{\"n\":2}\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "partial\n{\"n\":2}\n"
+        );
+
+        let mut limited = BoundedDailyWriter::new(dir.path(), 16).unwrap();
+        std::fs::write(&path, b"partialx").unwrap();
+        limited.write_all(b"{\"n\":3}\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"n\":3}\n");
+        std::fs::write(&path, b"partial").unwrap();
+        limited.write_all(b"{\"n\":\"1234567\"}\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{\"n\":\"1234567\"}\n"
+        );
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 16);
+
+        std::fs::write(&path, [b'x'; 16]).unwrap();
+        let mut restarted = BoundedDailyWriter::new(dir.path(), 16).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), [b'x'; 16]);
+        restarted.write_all(b"{\"n\":4}\n").unwrap();
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "{\"n\":4}\n");
     }
 
     #[test]

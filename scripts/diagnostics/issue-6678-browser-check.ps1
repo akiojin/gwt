@@ -33,6 +33,21 @@ function Assert-Preflight($Doctor) {
 
 Push-Location -LiteralPath $checkout
 try {
+    $cargoArtifacts = & cargo build -p gwt --bin gwt --bin gwtd --target-dir (Join-Path $checkout 'target') --message-format=json
+    if ($LASTEXITCODE -ne 0) { throw 'cargo build failed; checkout binaries are not fresh.' }
+    $executables = @{}
+    foreach ($line in $cargoArtifacts) {
+        $artifact = $line | ConvertFrom-Json
+        if ($artifact.reason -eq 'compiler-artifact' -and $artifact.target.kind -contains 'bin' -and $artifact.executable) {
+            $executables[$artifact.target.name] = [IO.Path]::GetFullPath($artifact.executable)
+        }
+    }
+    foreach ($expected in @($gwt, $gwtd)) {
+        $name = [IO.Path]::GetFileNameWithoutExtension($expected)
+        if (!$executables.ContainsKey($name) -or $executables[$name] -ne [IO.Path]::GetFullPath($expected)) {
+            throw "Fresh Cargo artifact for $name must be $expected; reported path: $($executables[$name])."
+        }
+    }
     foreach ($file in @($gwt, $gwtd, $cli, $resolver)) {
         if (!(Test-Path -LiteralPath $file -PathType Leaf)) { throw "Required checkout binary or pinned Playwright dependency missing: $file" }
     }
@@ -114,7 +129,7 @@ try {
         $savedRunner[$key] = [Environment]::GetEnvironmentVariable($key)
         [Environment]::SetEnvironmentVariable($key, $runner[$key])
     }
-    & node $cli test pm-refresh-log-budget-live.spec.ts --config crates/gwt/playwright/playwright.config.ts --workers=1 --retries=0 --headed --output "$checkHome/playwright" @PlaywrightArguments
+    & node $cli test pm-refresh-log-budget-live.spec.ts logs-scope-live.spec.ts --config crates/gwt/playwright/playwright.config.ts --workers=1 --retries=0 --headed --output "$checkHome/playwright" @PlaywrightArguments
     $exitCode = $LASTEXITCODE
 } finally {
     foreach ($key in $savedRunner.Keys) { [Environment]::SetEnvironmentVariable($key, $savedRunner[$key]) }
