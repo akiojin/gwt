@@ -26790,8 +26790,9 @@ mod tests {
     // stay beneath the OS user's Temp directory required by the isolation gate.
     fn test_home_tempdir() -> tempfile::TempDir {
         #[cfg(windows)]
-        let root = PathBuf::from(std::env::var_os("LOCALAPPDATA").expect("OS local app data"))
-            .join("Temp");
+        let root =
+            std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA").expect("OS local app data"))
+                .join("Temp");
         #[cfg(not(windows))]
         let root = std::env::temp_dir();
         tempfile::tempdir_in(root).expect("temporary fixture home")
