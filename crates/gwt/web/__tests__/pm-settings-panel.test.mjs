@@ -31,6 +31,7 @@ const RUNNING_STATUS = {
   project_key: "project", configured_member_id: "pm-member", profile_revision: "profile-token",
   available: true,
   auto_start: true,
+  paused: false,
   configured_agent_id: "claude",
   configured_model: null,
   configured_reasoning: null,
@@ -60,7 +61,7 @@ function fixture({ confirmAnswer = true, mounts = 1 } = {}) {
   const { document } = parseHTML(html);
   document.getElementById("pm-settings-panel")?.remove();
   const sent = [];
-  const confirmed = [], openedMembers = [], reloaded = [];
+  const confirmed = [], openedMembers = [], reloaded = [], openedAgents = [];
   const frames = new Set();
   const flush = () => {
     const callbacks = [...frames];
@@ -69,7 +70,7 @@ function fixture({ confirmAnswer = true, mounts = 1 } = {}) {
   };
   const tuningController = createMemberTuningModel("project", { onSave: event => sent.push(event), scheduleFrame: callback => { frames.add(callback); return () => frames.delete(callback); } });
   const panel = createPmSettingsPanel({
-    projectKey: "project", onOpenMember: memberId => openedMembers.push(memberId), onReloadProfile: () => reloaded.push(true),
+    projectKey: "project", projectName: () => "Readable project", onOpenAgents: () => openedAgents.push(true), onOpenMember: memberId => openedMembers.push(memberId), onReloadProfile: () => reloaded.push(true),
     document,
     scheduleFrame(callback) { frames.add(callback); return () => frames.delete(callback); },
     send: (event) => sent.push(event),
@@ -91,7 +92,7 @@ function fixture({ confirmAnswer = true, mounts = 1 } = {}) {
   const applyStatus = status => { tuningController.applyPmTuningStatus(status); applyPanelStatus(status); };
   // Existing interaction assertions observe a completed display frame.
   panel.applyStatus = status => { applyStatus(status); flush(); };
-  return { document, sent, confirmed, panel, views, applyStatus, frames, flush, tuningController, openedMembers, reloaded };
+  return { document, sent, confirmed, panel, views, applyStatus, frames, flush, tuningController, openedMembers, reloaded, openedAgents };
 }
 
 function changeEvent(document) {
@@ -191,7 +192,7 @@ test("AC-6: PM Settings explains existing controls on focus and hover without ac
   panel.mount(view);
   assert.equal(required(view, '[data-role="pm-loop-interval"]').value, "84",
     "remount pulls the latest committed snapshot");
-  assert.match(appJs, /pmSettingsPanel\.unmount\(element\.querySelector\('\[data-settings-panel="project-manager"\]'\)\)/);
+  assert.match(readFileSync(resolve(here, "../agents-surface.js"), "utf8"), /pmSettingsPanel\?\.unmount/);
   assert.deepEqual(sent, []);
   assert.deepEqual(confirmed, []);
 });
@@ -223,36 +224,30 @@ test("FR-132: rail gear remains separate from the PM launcher without a standalo
   assert.match(appJs, /send\(\{\s*kind:\s*"open_pm_agent"\s*\}\)/);
 });
 
-test("FR-132: shared controller routes gear and pm-settings command to Settings", () => {
-  const { document, panel, sent } = fixture({ mounts: 0 });
-  assert.equal(typeof panel.bindEntryPoints, "function");
+test("FR-132: gear and command route to Agents without mutation", () => {
+  const { document, panel, sent, openedAgents } = fixture({ mounts: 0 });
   panel.bindEntryPoints({ document });
-
-  const openedTargets = [];
-  const openedOwners = [];
-  document.addEventListener("settings:open", (event) => {
-    openedTargets.push(event.detail?.target);
-    openedOwners.push(event.detail?.surface_owner);
-  });
-
   required(document, "#op-pm-settings-button").click();
-  assert.deepEqual(openedTargets, ["project-manager"]);
-  assert.deepEqual(openedOwners, ["pm"], "PM Settings must retain its opening surface");
-  assert.deepEqual(sent, [], "opening Settings must not start or mutate the PM");
+  document.dispatchEvent(new document.defaultView.CustomEvent("op:command", { detail: { id: "pm-settings" } }));
+  assert.deepEqual(openedAgents, [true, true]);
+  assert.deepEqual(sent, []);
+});
 
-  openedTargets.length = 0;
-  let observedCommands = 0;
-  document.addEventListener("op:command", () => {
-    observedCommands += 1;
-  });
-  document.dispatchEvent(
-    new document.defaultView.CustomEvent("op:command", {
-      detail: { id: "pm-settings" },
-    }),
-  );
-  assert.deepEqual(openedTargets, ["project-manager"]);
-  assert.equal(observedCommands, 1, "routing must not hide the command from observers");
-  assert.deepEqual(sent, [], "the PM settings command must not mutate the PM");
+test("own operations retain drafts and refuse writes on incomplete or foreign status", () => {
+  const { document, panel, sent } = fixture();
+  panel.applyStatus({ ...RUNNING_STATUS, auto_start: false, loop_interval_secs: 75 });
+  assert.match(document.querySelector('[data-settings-panel="project-manager"] h3').textContent, /Project Manager · Readable project/);
+  const interval = document.querySelector('[data-role="pm-loop-interval"]');
+  const auto = document.querySelector('[data-role="pm-auto-start"]');
+  interval.value = "77";
+  panel.applyStatus({ ...RUNNING_STATUS, auto_start: undefined, loop_interval_secs: 90 });
+  assert.equal(interval.value, "77"); assert.equal(auto.checked, false); assert.equal(interval.disabled, true);
+  interval.dispatchEvent(changeEvent(document)); auto.dispatchEvent(changeEvent(document));
+  document.querySelector('[data-role="pm-pause-toggle"]').click(); assert.deepEqual(sent, []);
+  panel.applyStatus({ ...RUNNING_STATUS, project_key: "foreign", auto_start: true, loop_interval_secs: 99 });
+  assert.equal(interval.value, "77"); assert.equal(auto.checked, false); assert.equal(interval.disabled, true);
+  panel.applyStatus({ ...RUNNING_STATUS, configured_member_id: null, profile_revision: null, configured_agent_id: null, loop_interval_secs: 80 });
+  assert.equal(interval.disabled, false); assert.equal(interval.value, "80");
 });
 
 test("FR-132: late and existing mounts share the latest frame snapshot while actions read synchronously", () => {
@@ -265,7 +260,7 @@ test("FR-132: late and existing mounts share the latest frame snapshot while act
     configured_model: "gpt-5.1-codex-max",
     loop_interval_secs: 42,
   });
-  assert.equal(required(views[0], '[data-role="pm-loop-interval"]').value, "60",
+  assert.equal(required(views[0], '[data-role="pm-loop-interval"]').value, "",
     "received updates must wait for the display frame");
   assert.equal(frames.size, 1, "PM operational status reserves one frame for every mount");
 
@@ -455,7 +450,7 @@ test("#3812 AC-5: Pause/Resume shares backend state without changing PM residenc
   }
 });
 
-test("FR-132: missing loop interval displays the effective 60 second default", () => {
+test("FR-132: missing loop interval remains unknown and disabled", () => {
   const { views, panel } = fixture();
   const statusWithoutInterval = { ...RUNNING_STATUS };
   delete statusWithoutInterval.loop_interval_secs;
@@ -465,7 +460,8 @@ test("FR-132: missing loop interval displays the effective 60 second default", (
   assert.ok(input, "loop interval input is required");
   assert.equal(input.type, "number");
   assert.equal(input.min, "10");
-  assert.equal(input.value, "60");
+  assert.equal(input.value, "");
+  assert.equal(input.disabled, true);
 });
 
 test("FR-132: unavailable project clears and disables every PM editor mount", () => {

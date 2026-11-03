@@ -213,25 +213,7 @@ function scopeSettingsControlIds(panel) {
   }
 }
 
-export function mountProjectManagerSettingsPanel(
-  document,
-  parent,
-  pmSettingsPanel,
-  windowId = "shared",
-) {
-  const panel = document.createElement("section");
-  panel.className = "settings-panel hidden";
-  panel.setAttribute("role", "tabpanel");
-  panel.dataset.settingsPanel = "project-manager";
-  panel.id = `settings-${windowId}-panel-project-manager`;
-  panel.setAttribute(
-    "aria-labelledby",
-    `settings-${windowId}-tab-project-manager`,
-  );
-  parent.appendChild(panel);
-  pmSettingsPanel?.mount?.(panel);
-  return panel;
-}
+
 
 function renderIssuesSettingsPanel(panel, options) {
   const { project, status, send, launchControls = [] } = options;
@@ -736,6 +718,10 @@ export function installSettingsOpenHandler(options) {
     const target = event?.detail?.section || event?.detail?.target || "system";
     const projectRoot = event?.detail?.project_root || activeProjectTab?.()?.project_root || "";
     const surfaceOwner = event?.detail?.surface_owner === "pm" ? "pm" : null;
+    if (target === "project-manager") {
+      (options.onOpenAgents || (() => focusOrSpawnPreset("agents")))();
+      return;
+    }
     if (target === "index") {
       focusOrSpawnPreset("index");
       return;
@@ -763,7 +749,7 @@ export function createSettingsSurface({
   focusOrSpawnPreset,
   renderUsagePanel,
   getIndexStatus,
-  pmSettingsPanel,
+  onOpenAgents,
   rosterModel,
   tuningController,
   onReloadProfile,
@@ -1314,14 +1300,6 @@ export function createSettingsSurface({
           buildSettingsTab("supported-agents", "Supported Agents", false, windowData.id),
         );
         tabs.appendChild(
-          buildSettingsTab(
-            "project-manager",
-            "Project Manager",
-            false,
-            windowData.id,
-          ),
-        );
-        tabs.appendChild(
           buildSettingsTab("custom-agents", "Custom Agents", false, windowData.id),
         );
         // SPEC-1921 2026-05-18 amendment / FR-099: Agent Backends tab is the
@@ -1337,8 +1315,6 @@ export function createSettingsSurface({
         );
         tabs.appendChild(createNode("span", "settings-label", `Project settings · ${body.dataset.settingsProjectName}`));
         tabs.appendChild(buildSettingsTab("issues", "Issues execution settings", false, windowData.id));
-        // PM settings are also project-owned; keep all project tabs together.
-        tabs.appendChild(tabs.querySelector('[data-settings-tab="project-manager"]'));
 
         toolbar.appendChild(heading);
 
@@ -1404,12 +1380,6 @@ export function createSettingsSurface({
 
         bodyEl.appendChild(panelSystem);
         bodyEl.appendChild(panelSupportedAgents);
-        mountProjectManagerSettingsPanel(
-          document,
-          bodyEl,
-          pmSettingsPanel,
-          windowData.id,
-        );
         bodyEl.appendChild(panelAgents);
         bodyEl.appendChild(panelBackends);
         bodyEl.appendChild(panelUsage);
@@ -1596,6 +1566,7 @@ export function createSettingsSurface({
         document,
         send,
         settingsWindowBodies,
+        onOpenAgents,
         focusOrSpawnPreset,
         activeProjectTab,
         setPendingTarget: (target, surfaceOwner) => {

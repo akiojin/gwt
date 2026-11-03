@@ -102,7 +102,7 @@ function agentLabel(state, agentId) {
   return match ? match.name : agentId;
 }
 
-export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, projectKey, onOpenMember = () => {}, onNavigateProject = () => {}, onReloadProfile = null } = {}) {
+export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, projectKey, projectName = () => "", onOpenMember = () => {}, onOpenAgents = () => {}, onRender = () => {}, onNavigateProject = () => {}, onReloadProfile = null } = {}) {
   if (!document) throw new TypeError("createPmSettingsPanel requires a document");
   const dispatch = typeof send === "function" ? send : () => {};
   const ask = typeof confirm === "function"
@@ -142,6 +142,7 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, 
   model.subscribe(state => state, pruneDetachedMounts);
 
   function renderView(view, state) {
+    view.heading.textContent = `Project Manager · ${projectName() || projectKey || "Unknown project"}`;
     const runningName = agentLabel(state, state.runningAgentId);
     const runningProfile = [runningName];
     if (state.runningModel) runningProfile.push(`Model: ${state.runningModel}`);
@@ -173,23 +174,25 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, 
       )
     );
 
-    const foreign = state.projectKey && projectKey && state.projectKey !== projectKey;
+    const foreign = state.foreignProjectKey;
     view.profileStatus.textContent = state.available && state.profileRevision && state.configuredAgentId
       ? `Saved profile: ${[agentLabel(state, state.configuredAgentId), state.configuredModel || "Default model", state.configuredReasoning || "Default reasoning"].join(" · ")}`
       : "Saved profile unavailable. Reload the current profile; any Agents draft is retained.";
     view.openMember.disabled = !canEdit() || !state.memberId;
     view.reload.disabled = !canEdit() || !onReloadProfile;
-    view.navigate.hidden = !foreign; view.navigate.disabled = !foreign; view.navigate.textContent = foreign ? `Open project ${state.projectKey}` : "";
-    view.navigate.onclick = () => onNavigateProject(state.projectKey);
-    view.intervalInput.value = String(state.loopIntervalSecs);
-    view.autoStartInput.checked = state.autoStart;
+    view.navigate.hidden = !foreign; view.navigate.disabled = !foreign; view.navigate.textContent = foreign ? `Open project ${state.foreignProjectKey}` : "";
+    view.navigate.onclick = () => onNavigateProject(state.foreignProjectKey);
+    if (state.available) {
+      view.intervalInput.value = String(state.loopIntervalSecs);
+      view.autoStartInput.checked = state.autoStart;
+    }
     for (const control of [
       view.intervalInput,
       view.autoStartInput,
       view.pauseToggle,
       view.restart,
     ]) {
-      control.disabled = !state.available || foreign;
+      control.disabled = !canEdit();
     }
     // #4486 AC-7: when the PM is held back by something a Restart cannot
     // clear, say so and name the operation that can. Leaving the button live
@@ -206,6 +209,7 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, 
     view.intervalError.textContent = "";
     view.intervalInput.setAttribute("aria-invalid", "false");
     view.explanations.refresh();
+    onRender();
   }
 
   function setIntervalError(view, message) {
@@ -247,7 +251,7 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, 
     container.replaceChildren();
 
     const section = el("div", "settings-section");
-    const heading = el("h3", "settings-section-heading", "Project Manager");
+    const heading = el("h3", "settings-section-heading");
     section.appendChild(heading);
 
     const runningLine = el("p", "settings-status");
@@ -336,7 +340,7 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, 
     const explanations = bindControlExplanations({ document, root: container, id: `pm-control-explanation-${intervalError.id}` });
 
     const view = {
-      navigate, profileStatus, openMember, reload,
+      heading, navigate, profileStatus, openMember, reload,
       autoStartInput,
       autonomyStatus,
       explanations,
@@ -375,20 +379,27 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, 
     return view;
   }
 
-  function openSettings(entryDocument) {
-    const CustomEventCtor = entryDocument.defaultView?.CustomEvent || CustomEvent;
-    entryDocument.dispatchEvent(
-      new CustomEventCtor("settings:open", {
-        detail: { target: "project-manager", surface_owner: "pm" },
-      }),
-    );
+  function openSettings() {
+    onOpenAgents(model.read().memberId);
   }
 
   function applyPmSettingsReceiveEvent(status) {
-    model.update(previous => { const next = normalizeStatus(status); return { ...next, memberId: next.available ? next.memberId || previous.memberId : next.memberId }; });
+    const interval = status?.loop_interval_secs_decimal ?? status?.loop_interval_secs;
+    const decimal = String(interval ?? "").trim();
+    let validInterval = false;
+    try { validInterval = /^\d+$/.test(decimal) && BigInt(decimal) >= BigInt(MIN_LOOP_INTERVAL_SECS) && BigInt(decimal) <= MAX_U64; } catch {}
+    const own = !!projectKey && status?.project_key === projectKey && status.available === true
+      && typeof status.paused === "boolean" && typeof status.auto_start === "boolean" && validInterval;
+    model.update(previous => {
+      if (!own) return { ...previous, available: false,
+        foreignProjectKey: status?.project_key && status.project_key !== projectKey ? status.project_key : null };
+      const next = normalizeStatus(status);
+      return { ...next, foreignProjectKey: null };
+    });
   }
 
   return {
+    openAgents: openSettings,
     mount(container) {
       if (!container) {
         throw new TypeError("pmSettingsPanel.mount requires a container");

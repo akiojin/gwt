@@ -67,7 +67,7 @@ test("Settings entry points reuse only the requested surface owner", () => {
     assert.equal(body.hidden, false, "reveal the surface before focusing its section");
     selected.push([body.id, target]);
   } })({
-    document, settingsWindowBodies: new Set([normal, pm]), activeProjectTab: () => ({ project_root: "/A" }),
+    document, onOpenAgents: () => focused.push(["agents"]), settingsWindowBodies: new Set([normal, pm]), activeProjectTab: () => ({ project_root: "/A" }),
     focusOrSpawnPreset: (...args) => {
       focused.push(args);
       (args[1].surfaceOwner === "pm" ? pm : normal).hidden = false;
@@ -75,11 +75,12 @@ test("Settings entry points reuse only the requested surface owner", () => {
   });
   document.dispatchEvent(new CustomEvent("settings:open", { detail: { target: "project-manager", surface_owner: "pm" } }));
   document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "issues" } }));
-  assert.deepEqual(selected, [["pm", "project-manager"], ["normal", "issues"]]);
-  assert.deepEqual(focused, [["settings", { surfaceOwner: "pm" }], ["settings", { surfaceOwner: null }]]);
+  assert.deepEqual(selected, [["normal", "issues"]]);
+  assert.deepEqual(focused, [["agents"], ["settings", { surfaceOwner: null }]]);
   pm.remove();
   document.dispatchEvent(new CustomEvent("settings:open", { detail: { target: "project-manager", surface_owner: "pm" } }));
-  assert.deepEqual(pending, [["project-manager", "pm"]]);
+  assert.deepEqual(pending, []);
+  assert.deepEqual(focused.at(-1), ["agents"]);
 });
 
 test("Reopening an existing System Settings window reloads CLI update preferences", () => {
@@ -729,4 +730,14 @@ test("retired shared tuning inputs cannot finish another member's composition", 
   render('a'); const restored = host.querySelector('[data-member-tuning-field="model"]');
   assert.equal(restored.value, 'unfinished a'); restored.value = 'proper a'; restored.dispatchEvent(new Event('input'));
   assert.equal(sent[1].action.member_id, 'a'); assert.equal(sent[1].action.model, 'proper a');
+});
+
+test("legacy PM Settings target opens Agents and never creates a PM tab", () => {
+  const { document, CustomEvent } = parseHTML('<div></div>'); const opened = [];
+  load("installSettingsOpenHandler", { switchSettingsTab: () => assert.fail("no PM tab") })({
+    document, settingsWindowBodies: new Set(), activeProjectTab: () => null,
+    focusOrSpawnPreset: preset => opened.push(preset), setPendingTarget: () => assert.fail("no pending PM tab") });
+  document.dispatchEvent(new CustomEvent("settings:open", { detail: { target: "project-manager" } }));
+  assert.deepEqual(opened, ["agents"]);
+  assert.doesNotMatch(source, /buildSettingsTab\(\s*"project-manager"/);
 });

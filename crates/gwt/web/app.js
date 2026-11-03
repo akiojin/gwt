@@ -4082,7 +4082,13 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       // shared snapshot before the first Settings window is mounted.
       const { applyStatus: applyPmSettingsReceiveEvent, ...pmSettingsPanel } = createPmSettingsPanel({
         document, send, projectKey: routeProjectKey,
+        projectName: () => {
+          const project = (appState?.tabs || []).find(tab => tab.project_key === routeProjectKey);
+          return project?.name || project?.title || project?.project_root?.split(/[\\/]/).pop() || "";
+        },
         onReloadProfile: () => requestAgentRoster(),
+        onOpenAgents: memberId => { openSurface("agents"); agentsSurface?.openPmSettings(memberId); },
+        onRender: () => agentsSurface?.syncPreview(),
         onOpenMember: memberId => { openSurface("agents"); agentsSurface.selectMember(memberId); },
         onNavigateProject: projectKey => window.location.assign(projectUrlPath(projectKey)),
         confirm: (message) => window.confirm(message),
@@ -4568,7 +4574,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         focusOrSpawnPreset,
         renderUsagePanel,
         getIndexStatus,
-        pmSettingsPanel,
+        onOpenAgents: () => pmSettingsPanel.openAgents(),
         rosterModel, tuningController, onReloadProfile: () => requestAgentRoster(),
       });
 
@@ -4808,7 +4814,6 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
                     workspaceOverviewSurface.deleteState(windowId);
                     clearBranchCleanupForWindow(windowId);
 
-                    pmSettingsPanel.unmount(element.querySelector('[data-settings-panel="project-manager"]'));
                     disposeSettingsBody(element.querySelector(".window-body"));
                     element.remove();
                     windowMap.delete(windowId);
@@ -5806,7 +5811,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         openSurface("works");
         return worksSurface.openWork(live);
       }
-      agentsSurface = createAgentsSurface({ document, rosterModel, tuningController, scheduleModel, switchModel, activityModel: agentActivityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
+      agentsSurface = createAgentsSurface({ document, rosterModel, tuningController, pmSettingsPanel, scheduleModel, switchModel, activityModel: agentActivityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
         onReloadProfile: () => requestAgentRoster(),
         onSetPmEligibility: (memberId, eligible) => requestAgentRoster({ kind: "set_pm_eligibility", member_id: memberId, eligible }),
         onSelectPm: memberId => requestAgentRoster({ kind: "select_pm", member_id: memberId }),
