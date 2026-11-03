@@ -3,6 +3,10 @@
 This is a gwt runtime performance fix. It applies to every project opened with
 gwt. The parent performance family remains open.
 
+The current delivery is the [backend-only slice](backend-delivery.md). UI
+experiments below remain historical results of their named commits; their
+source is preserved at `0df66c0e1` for later headed verification and delivery.
+
 ## Observed production context
 
 The unchanged installed v9.145.0 process was PID 33132, started at
@@ -373,3 +377,123 @@ verification, headed dark/light checks, required CI and base inclusion belong
 to the delivery record. The initial discovery fanout timeout, installed
 rollout, PM20s availability, parent CPU/RSS and real fleet 60-minute/four-hour
 acceptance remain unproven.
+
+## Empty execution observation (2026-11-01)
+
+`read_execution_observations` used to collect the Session/OS inventory and
+Git worktree list even when its input contained no Issues. Its eventual map
+was always empty. Return that empty map before collecting those inputs; keep
+the existing timing, nonempty diagnosis and caller's process-held-set update.
+No deadline, cache, scheduler, schema or effect authority changes.
+
+The focused regression failed with one Git spawn versus zero expected, then
+passed after the three-line guard. Existing stopped-holder/reaper recovery
+and blocked/dead-host release regressions also passed. The test directly
+counts Git; source review establishes the census is skipped before the worker
+is constructed.
+
+The identical temporary native probe called the read-only function twelve
+times against the real `E:/llmlb` and Session store. Before: 3463.9462ms total
+wall time and 3.40625 probe CPU seconds. After: 0.0407ms and no observed CPU
+ticks. The first before call was 938.4819ms; subsequent calls benefited from
+warm process-local caches. These are probe-process measurements, excluding
+child Git CPU, startup and the rest of the scan. Zero ticks means below the
+observed resolution of `GetProcessTimes` for this short loop.
+
+`empty-execution-observation.json` preserves the probe source, identical source
+hash, executable hashes, per-call results, RED/GREEN output and limitations.
+The baseline executable preceded the test-only addition; its recorded worktree
+source hash includes that regression. The fixed library adds the guard.
+The temporary example was removed after measurement.
+
+Installed PID 38952 still consumed 51.265625 CPU seconds over 30.0667689 wall
+seconds, about 1.705 cores. Sampled native stacks had no product symbols.
+Recent execution-observation logs mix projects and daemon processes, omit
+owner counts, and include nested stages. Neither those wall times nor this
+empty-input probe proves a reduction in production GUI CPU or fleet budgets.
+
+The managed-browser preflight returned `unknown` with `ledger_unavailable`
+and `completion_missing` despite a current context and converged target.
+Feedback Issue #6635 records the complete output. PM ruling `db103f30` directs
+backend canonical verification first, followed by the original headed gate
+after Issue #6622 is delivered. Parent AC-1/2/3 and overall delivery remain
+unproven; this record does not replace headed, required CI or base inclusion.
+
+### Resume checkpoint (2026-11-02)
+
+The previous four commits were preserved and merged with fetched develop at
+`ef7fdfe67d3a266ee8a0a3cafd7e137f935b6308`, including the delivered
+Issue #6622 source. The current managed caller now has a normal hook completion.
+Checkout `hook.doctor` reports current/converged/normal, but still returns
+`unknown` with only `ledger_unavailable`. Host diagnostics identify September
+corruption rows with November 2 read-time timestamps. This separate reader
+problem is reported to Issue #1935 and existing feedback Issue #6635; no
+ledger, completion, authority or preflight condition was changed.
+
+The existing Windows functional runner used a fabricated missing runtime and
+legacy health checks. It now runs typed managed-browser doctor checks before
+launch and after readiness. Only doctor children receive the original caller
+environment; GUI, daemon and Playwright children retain their isolation.
+Before/post preflight observations are saved without source credentials.
+The focused regression first proved missing typed evidence was accepted.
+Review also exposed PowerShell string/number and case coercion; its separate
+RED accepted a string schema. The final direct test accepts normal evidence
+and rejects seven invalid observations. Independent final review found no
+blocking issues. The twelve-Agent workload and owned-PID cleanup are retained.
+
+Canonical record `vrr-988afe482cd64d438ac4c203259836ec` belongs to the merge
+head above plus the then-uncommitted runner, before the final coercion/depth
+review fixes. Record-file SHA256:
+`6595ddecf8fdd4a1bef00c605ff2eded4f34ba5fb5a713c36ab8e52bbca106bb`.
+Ten commands passed, including strict workspace Clippy, the three selected
+regressions, hygiene, both checkout binaries and driver restoration. Before
+the headed command could start, canonical measurement admission refused:
+`ENVIRONMENT_INCOMPATIBLE: PID 37900 has unregistered ancestor gwt PID 22480; restart that GUI with the updated runtime before measuring`.
+The command exited 125 and two later commands were skipped. Overall is not
+PASS. This is environment incompatibility, with zero measured headed tests;
+the target runner did not launch a browser or GUI. The shared ancestor was
+not stopped, registered or bypassed. The later runner fixes passed their
+direct contract test and diff check, but still need fresh canonical evidence.
+
+EO3/EO4 remain incomplete pending normal runtime recovery, a successful
+current-source preflight, actual headed dark/light checks, final-head
+verification, Ready PR, required CI/coverage and fetched base inclusion.
+Coverage is unmeasured for this slice; it is not a threshold failure.
+User Verification Result: n/a (autonomous).
+Agent Visual Check: not run (canonical environment admission refused).
+
+### Private RPC cause slice (2026-11-02)
+
+The actual private client reproduced a shared-connection lifetime failure:
+dropping runtime A after another caller's request reused its idle connection
+aborted that caller's send. The single regression was RED with the generic
+private command send error, then GREEN after disabling idle connection
+retention for this client. Existing project-runtime tests passed 56/56.
+The same inert native fixture with 1/2/12 concurrent command callers changed
+from one failed reused connection in every case to zero failed requests,
+without increasing server request counts. These are not genuine Agent counts.
+The backend-first canonical record `vrr-d833d31fddff43a7bb2e36aad4cf2f13`
+passed 13/13 commands, including 101 Rust tests and strict workspace Clippy.
+It covers the dirty fix before this checkpoint commit, with no headed passes;
+the current doctor still reports `ledger_unavailable`.
+See [the scoped measurements and limits](rpc-runtime-lifetime.md) and
+[the evidence artifact](rpc-runtime-lifetime.json). Historical notifications,
+installed rollout, original EO3/EO4, final verification and delivery remain
+unproven; this controlled repair is not a parent CPU/fleet acceptance result.
+
+### Works telemetry layout slice (2026-11-02)
+
+Telemetry updates forced native terminal rehosting and persisted layout even
+without a host transition. The telemetry caller now uses the existing render
+path without forced rehosting; ordinary host synchronization keeps its default.
+The same finite module probe's 20-update burst changes from one layout and
+two mount calls to zero, with one frame and no pending work in both cases.
+A single regression was RED, then all 105 related tests passed. These are
+fixture callback counts, not measured Chromium/PTY traffic or CPU improvement.
+See [the preserved observations and limits](https://github.com/akiojin/gwt/blob/0df66c0e18be4622519b8d194b23771eb4520f84/docs/perf/issue-5390/ui-telemetry-fit.md) and
+[the preserved evidence artifact](https://github.com/akiojin/gwt/blob/0df66c0e18be4622519b8d194b23771eb4520f84/docs/perf/issue-5390/ui-telemetry-fit.json). Mac scroll/typing recovery,
+actual headed acceptance and delivery remain unverified.
+The intermediate native canonical record
+`vrr-0bc801c3c9ae4d9ca9ed89cbe58947eb` passed 14/14 commands, including
+1,716 frontend and 101 Rust tests. Its earlier WSL-runner FAIL is retained.
+Neither record establishes final-head, actual headed or Mac acceptance.

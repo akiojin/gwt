@@ -3087,6 +3087,84 @@ pub fn emit_workspace_terminal_event_for_resolved_work_target(
     )
 }
 
+/// Hold the assignment/Work locks while confirming one exact Done Work and
+/// running unrelated bookkeeping. Unlike terminalization ConfirmOnly, this
+/// never recovers, quarantines, publishes, or repairs Workspace state.
+pub fn with_exact_workspace_done_read_only<T>(
+    target: &SessionBoundWorkspaceTerminalTarget,
+    expected_work_id: &str,
+    operation: impl FnOnce() -> T,
+) -> Result<T> {
+    validate_session_bound_target_identity_shape(target)?;
+    if expected_work_id.trim().is_empty()
+        || session_bound_owner_is_blank(target.owner.as_deref())
+        || target.agent_id.trim().is_empty()
+    {
+        return Err(GwtError::Other(
+            "exact Done confirmation requires complete Work authority".into(),
+        ));
+    }
+    let current_path = gwt_workspace_projection_path_for_repo_path(&target.project_state_root);
+    let works_path = gwt_workspace_work_items_path_for_repo_path(&target.project_state_root);
+    let lock_targets = vec![
+        current_path.with_file_name("works.json"),
+        works_path.clone(),
+    ];
+    with_workspace_work_items_locks(&lock_targets, || {
+        let mut markers = vec![
+            pending_workspace_state_transaction_path(&current_path),
+            pending_workspace_state_transaction_path_for_work_items(&works_path),
+        ];
+        markers.extend(discover_pending_workspace_state_transaction_coordinators(
+            &lock_targets,
+        )?);
+        for marker in markers {
+            if marker.try_exists()? {
+                return Err(GwtError::Other("exact Done confirmation refuses a pending Workspace transaction; resolve it through canonical Workspace recovery before retrying".into()));
+            }
+        }
+        let projection = load_workspace_projection_from_path(&current_path)?.ok_or_else(|| {
+            GwtError::Other("exact Done confirmation requires the current assignment".into())
+        })?;
+        let works = load_workspace_work_items_from_path(&works_path)?.ok_or_else(|| {
+            GwtError::Other("exact Done confirmation requires canonical WorkItems".into())
+        })?;
+        if projection
+            .agents
+            .iter()
+            .filter(|agent| agent.session_id == target.session_id)
+            .count()
+            != 1
+        {
+            return Err(GwtError::Other("exact Done Work Session assignment became ambiguous; inspect execution.status for available recoveries".into()));
+        }
+        if !matches!(resolve_session_bound_terminal_target_locked(
+            &projection, &works, target, Some(expected_work_id),
+        )?, LockedSessionBoundTerminalTarget::Existing(id) if id == expected_work_id)
+        {
+            return Err(GwtError::Other(
+                "exact Done Work assignment changed before confirmation".into(),
+            ));
+        }
+        let item = works
+            .work_items
+            .iter()
+            .find(|work| work.id == expected_work_id)
+            .ok_or_else(|| GwtError::Other("exact Done Work is missing".into()))?;
+        if item.status_category != WorkspaceStatusCategory::Done || item.discarded {
+            return Err(GwtError::Other(
+                "exact Work is not unambiguously Done".into(),
+            ));
+        }
+        validate_exact_work_machine_local_close_events_read_only(
+            item,
+            &works_path,
+            &gwt_workspace_work_events_closed_path_for_repo_path(&target.project_state_root),
+        )?;
+        Ok(operation())
+    })
+}
+
 /// Whether an exact-Work compatibility continuation may create the requested
 /// terminal event or may only confirm an already-terminal canonical Work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3243,7 +3321,11 @@ fn emit_workspace_terminal_event_for_resolved_work_target_inner(
                         "exact Work terminal confirmation lost its canonical Work".to_string(),
                     )
                 })?;
-            validate_exact_work_machine_local_close_events_read_only(item, &events_path)?;
+            validate_exact_work_machine_local_close_events_read_only(
+                item,
+                &work_items_path,
+                &events_path,
+            )?;
             let requested_kind = match close_kind {
                 WorkCloseKind::Done => WorkEventKind::Done,
                 WorkCloseKind::Discarded => WorkEventKind::Discard,
@@ -4180,6 +4262,7 @@ enum WorkItemsReadSnapshot {
 /// the lock. Missing files and empty files are deliberately distinct CAS inputs.
 pub(crate) struct WorkItemsIntakeSnapshot {
     files: Vec<(PathBuf, Option<Vec<u8>>)>,
+    has_local_path: bool,
 }
 
 impl WorkItemsIntakeSnapshot {
@@ -4195,11 +4278,17 @@ impl WorkItemsIntakeSnapshot {
             container_detachments_path(works_path),
         ];
         paths.extend(local_path.map(Path::to_path_buf));
+        let proofs_path = workspace_close_projection_proofs_path(works_path);
+        validate_workspace_local_close_path(&proofs_path)?;
+        paths.push(proofs_path);
         let files = paths
             .into_iter()
             .map(|path| Ok((path.clone(), read_intake_snapshot_file(&path)?)))
             .collect::<Result<_>>()?;
-        let snapshot = Self { files };
+        let snapshot = Self {
+            files,
+            has_local_path: local_path.is_some(),
+        };
         snapshot.check_container_repair_snapshot()?;
         Ok(snapshot)
     }
@@ -4232,7 +4321,7 @@ impl WorkItemsIntakeSnapshot {
 
     pub(crate) fn commit_container_repair(
         &self,
-        prepared: Option<&[u8]>,
+        prepared: Option<&PreparedWorkItemsPublication>,
         dry_run: bool,
     ) -> Result<()> {
         if dry_run {
@@ -4241,8 +4330,8 @@ impl WorkItemsIntakeSnapshot {
         let works_path = &self.files[0].0;
         with_workspace_work_items_locks(std::slice::from_ref(works_path), || {
             self.check_container_repair_snapshot()?;
-            if let Some(bytes) = prepared {
-                write_atomic(works_path, bytes)?;
+            if let Some(prepared) = prepared {
+                publish_work_items_with_close_proofs(works_path, prepared)?;
             }
             Ok(())
         })
@@ -4255,6 +4344,9 @@ impl WorkItemsIntakeSnapshot {
                 container_detachments_path(works_path),
             ];
             paths.extend(local_path.map(Path::to_path_buf));
+            let proofs_path = workspace_close_projection_proofs_path(works_path);
+            validate_workspace_local_close_path(&proofs_path)?;
+            paths.push(proofs_path);
             let files = paths
                 .into_iter()
                 .map(|path| {
@@ -4262,7 +4354,10 @@ impl WorkItemsIntakeSnapshot {
                     Ok((path, bytes))
                 })
                 .collect::<Result<_>>()?;
-            Ok(Self { files })
+            Ok(Self {
+                files,
+                has_local_path: local_path.is_some(),
+            })
         })
     }
 
@@ -4299,6 +4394,9 @@ impl WorkItemsIntakeSnapshot {
     }
 
     pub(crate) fn local_content(&self) -> Result<Option<&str>> {
+        if !self.has_local_path {
+            return Ok(None);
+        }
         self.files
             .get(2)
             .and_then(|(_, bytes)| bytes.as_ref())
@@ -4315,17 +4413,53 @@ impl WorkItemsIntakeSnapshot {
         Ok(())
     }
 
-    pub(crate) fn prepare(&self, mut projection: WorkItemsProjection) -> Result<Vec<u8>> {
-        self.apply_detachments(&mut projection)?;
-        projection.compact_inline_events();
-        serde_json::to_vec_pretty(&projection)
-            .map_err(|error| GwtError::Other(format!("workspace work items json: {error}")))
+    pub(crate) fn prepare(
+        &self,
+        projection: WorkItemsProjection,
+    ) -> Result<PreparedWorkItemsPublication> {
+        self.prepare_publication(projection, true, true)
+    }
+
+    pub(crate) fn prepare_rebuilt(
+        &self,
+        projection: WorkItemsProjection,
+    ) -> Result<PreparedWorkItemsPublication> {
+        self.prepare_publication(projection, false, true)
+    }
+
+    pub(crate) fn prepare_container_repair(
+        &self,
+        projection: WorkItemsProjection,
+    ) -> Result<PreparedWorkItemsPublication> {
+        // Scoped container repairs must preserve every unrelated stored row.
+        self.prepare_publication(projection, true, false)
+    }
+
+    fn prepare_publication(
+        &self,
+        mut projection: WorkItemsProjection,
+        inherit: bool,
+        compact: bool,
+    ) -> Result<PreparedWorkItemsPublication> {
+        if compact {
+            self.apply_detachments(&mut projection)?;
+        }
+        let previous = self.files[0].1.as_deref();
+        let proofs = self.files.last().and_then(|(_, bytes)| bytes.as_deref());
+        let accepted =
+            projected_close_events_for_publication(&projection, previous, proofs, inherit)?;
+        if compact {
+            projection.compact_inline_events();
+        }
+        let bytes = serde_json::to_vec_pretty(&projection)
+            .map_err(|error| GwtError::Other(format!("workspace work items json: {error}")))?;
+        prepare_work_items_publication(bytes, accepted, previous, proofs)
     }
 
     /// The caller strictly decoded the snapshot (or proved complete-source
     /// malformed recovery). Exact byte comparison protects that admission and
     /// concurrent writers without re-decoding/serializing under the lock.
-    pub(crate) fn commit(&self, prepared: Option<&[u8]>) -> Result<()> {
+    pub(crate) fn commit(&self, prepared: Option<&PreparedWorkItemsPublication>) -> Result<()> {
         let works_path = &self.files[0].0;
         with_workspace_work_items_lock(works_path, || {
             for (path, expected) in &self.files {
@@ -4335,8 +4469,8 @@ impl WorkItemsIntakeSnapshot {
                     ));
                 }
             }
-            if let Some(bytes) = prepared {
-                write_atomic(works_path, bytes)?;
+            if let Some(prepared) = prepared {
+                publish_work_items_with_close_proofs(works_path, prepared)?;
             }
             Ok(())
         })
@@ -4591,7 +4725,7 @@ pub fn save_workspace_work_items_projection_to_path(
     // Callers already hold the non-reentrant Workspace transaction lock.
     // Validate before every ordinary write, including a GUI default snapshot.
     validate_existing_workspace_state::<WorkItemsProjection>(path)?;
-    save_workspace_work_items_projection_after_rebuild(path, projection)
+    save_workspace_work_items_projection_with_close_proofs(path, projection, true)
 }
 
 /// Only the complete-source rebuild may replace a syntactically corrupt file.
@@ -4600,7 +4734,19 @@ pub(crate) fn save_workspace_work_items_projection_after_rebuild(
     path: &Path,
     projection: &WorkItemsProjection,
 ) -> Result<()> {
+    save_workspace_work_items_projection_with_close_proofs(path, projection, false)
+}
+
+fn save_workspace_work_items_projection_with_close_proofs(
+    path: &Path,
+    projection: &WorkItemsProjection,
+    inherit: bool,
+) -> Result<()> {
     ensure_supported_workspace_layout(path)?;
+    let proofs_path = workspace_close_projection_proofs_path(path);
+    validate_workspace_local_close_path(&proofs_path)?;
+    let previous_bytes = read_intake_snapshot_file(path)?;
+    let previous_proofs = read_intake_snapshot_file(&proofs_path)?;
     let detachments = load_container_detachments(path)?;
     let has_detached_refs = projection.work_items.iter().any(|item| {
         detachments.get(&item.id).is_some_and(|removed| {
@@ -4611,6 +4757,12 @@ pub(crate) fn save_workspace_work_items_projection_after_rebuild(
             })
         })
     });
+    let accepted = projected_close_events_for_publication(
+        projection,
+        previous_bytes.as_deref(),
+        previous_proofs.as_deref(),
+        inherit,
+    )?;
     // Issue #4508: the projection is the file's only writer, so capping the
     // inline history here is what actually stops works.json from growing with
     // uptime. A projection already inside the cap is written without the copy.
@@ -4626,7 +4778,13 @@ pub(crate) fn save_workspace_work_items_projection_after_rebuild(
     };
     let bytes = serde_json::to_vec_pretty(projection)
         .map_err(|error| GwtError::Other(format!("workspace work items json: {error}")))?;
-    write_atomic(path, &bytes)
+    let prepared = prepare_work_items_publication(
+        bytes,
+        accepted,
+        previous_bytes.as_deref(),
+        previous_proofs.as_deref(),
+    )?;
+    publish_work_items_with_close_proofs(path, &prepared)
 }
 
 /// Issue #4850: the operation label every Work items transaction records as
@@ -7629,7 +7787,7 @@ fn rebuild_work_items_from_event_records(
         projection.apply_event(event);
     }
     projection.updated_at = chrono::Utc::now();
-    save_workspace_work_items_projection_to_path(work_items_path, &projection)?;
+    save_workspace_work_items_projection_after_rebuild(work_items_path, &projection)?;
     write_rebuild_marker(marker_path)?;
     Ok(WorkItemsRebuildOutcome::Applied)
 }
@@ -8523,30 +8681,271 @@ fn machine_local_close_event_matches_projected_lifecycle(
         && durable.updated_at == projected.updated_at
 }
 
+// Keep proof outside works.json: its older readers reject unknown fields.
+// Each snapshot authenticates exact accepted close identities for one byte-exact
+// projection. A watermark or a raw event shard never establishes acceptance.
+type ProjectedCloseEvents = BTreeMap<String, BTreeMap<String, String>>;
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CloseProjectionSnapshot {
+    projection_hash: String,
+    events: ProjectedCloseEvents,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CloseProjectionProofs {
+    version: u32,
+    snapshots: Vec<CloseProjectionSnapshot>,
+}
+
+pub(crate) struct PreparedWorkItemsPublication {
+    projection: Vec<u8>,
+    proofs: Vec<u8>,
+}
+
+fn workspace_close_projection_proofs_path(works_path: &Path) -> PathBuf {
+    works_path.with_extension("close-proofs.json")
+}
+
+fn close_projection_hash(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn close_event_projection_digest(event: &WorkEvent) -> Result<String> {
+    // Match machine_local_close_event_matches_projected_lifecycle exactly.
+    // Work re-keying and descriptive identity sanitization remain compatible.
+    let bytes = serde_json::to_vec(&(
+        event.kind,
+        &event.progress_summary,
+        event.status_category,
+        &event.agent_session_id,
+        &event.agent_id,
+        &event.display_name,
+        &event.board_entry_id,
+        &event.execution_container,
+        &event.related_work_item_id,
+        event.updated_at,
+    ))
+    .map_err(|error| GwtError::Other(format!("close projection digest: {error}")))?;
+    Ok(close_projection_hash(&bytes))
+}
+
+fn matching_close_projection_snapshot(
+    projection: Option<&[u8]>,
+    proofs: Option<&[u8]>,
+) -> Result<Option<CloseProjectionSnapshot>> {
+    let (Some(projection), Some(proofs)) = (projection, proofs) else {
+        return Ok(None);
+    };
+    let proofs: CloseProjectionProofs = serde_json::from_slice(proofs).map_err(|error| {
+        GwtError::Other(format!("malformed close projection proof: {error}; inspect execution.status for available recoveries; restoring proof requires a canonical complete Work event rebuild"))
+    })?;
+    if proofs.version != 1 || proofs.snapshots.len() > 2 {
+        return Err(GwtError::Other("unsupported close projection proof; inspect execution.status for available recoveries; restoring proof requires a canonical complete Work event rebuild".into()));
+    }
+    let hash = close_projection_hash(projection);
+    let mut matching = proofs
+        .snapshots
+        .into_iter()
+        .filter(|snapshot| snapshot.projection_hash == hash);
+    let found = matching.next();
+    if matching.next().is_some() {
+        return Err(GwtError::Other("ambiguous close projection proof; inspect execution.status for available recoveries; restoring proof requires a canonical complete Work event rebuild".into()));
+    }
+    Ok(found)
+}
+
+fn collect_projected_close_events(
+    projection: &WorkItemsProjection,
+    accepted: &mut ProjectedCloseEvents,
+) -> Result<()> {
+    for item in &projection.work_items {
+        let mut ids = HashMap::new();
+        for event in &item.events {
+            if let Some(previous) = ids.insert(event.id.as_str(), event) {
+                if previous != event {
+                    return Err(GwtError::Other(format!("close projection proof refuses divergent duplicate projected event IDs in Work {}; inspect execution.status for available recoveries; restoring proof requires a canonical complete Work event rebuild", item.id)));
+                }
+            }
+        }
+        for event in &item.events {
+            if matches!(
+                event.kind,
+                WorkEventKind::Pause | WorkEventKind::Done | WorkEventKind::Discard
+            ) {
+                accepted
+                    .entry(item.id.clone())
+                    .or_default()
+                    .insert(event.id.clone(), close_event_projection_digest(event)?);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn projected_close_events_for_publication(
+    projection: &WorkItemsProjection,
+    previous: Option<&[u8]>,
+    proofs: Option<&[u8]>,
+    inherit: bool,
+) -> Result<ProjectedCloseEvents> {
+    // Replayed inline events may lose acceptance during chronological refold.
+    // Only an explicitly preserved compacted base can retain older proof; all
+    // replayable close identities are regenerated from the resulting fold.
+    let mut accepted = BTreeMap::new();
+    if inherit {
+        if let Some(previous) = previous {
+            if let Ok(raw) = serde_json::from_slice::<WorkItemsProjection>(previous) {
+                let mut raw_close_events = BTreeMap::new();
+                collect_projected_close_events(&raw, &mut raw_close_events)?;
+                let old_proof = matching_close_projection_snapshot(Some(previous), proofs)
+                    .ok()
+                    .flatten()
+                    .map(|snapshot| snapshot.events)
+                    .unwrap_or_default();
+                let mut decoded = raw.clone();
+                decoded.compact_inline_events();
+                for old in &decoded.work_items {
+                    let Some(boundary) = old.events_compacted_through() else {
+                        continue;
+                    };
+                    let Some(current) = projection.work_items.iter().find(|item| item.id == old.id)
+                    else {
+                        continue;
+                    };
+                    if current.events_compacted_through() != Some(boundary) {
+                        continue;
+                    }
+                    let replayable = old
+                        .events
+                        .iter()
+                        .map(|event| event.id.as_str())
+                        .collect::<HashSet<_>>();
+                    let inherited = accepted.entry(old.id.clone()).or_insert_with(BTreeMap::new);
+                    if let Some(proven) = old_proof.get(&old.id) {
+                        inherited.extend(
+                            proven
+                                .iter()
+                                .filter(|(id, _)| !replayable.contains(id.as_str()))
+                                .map(|(id, digest)| (id.clone(), digest.clone())),
+                        );
+                    }
+                    // Raw persisted history may predate read-time compaction.
+                    // Capture only the actual folded prefix that decode drops.
+                    if let Some(raw_events) = raw_close_events.get(&old.id) {
+                        inherited.extend(
+                            raw_events
+                                .iter()
+                                .filter(|(id, _)| !replayable.contains(id.as_str()))
+                                .map(|(id, digest)| (id.clone(), digest.clone())),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    collect_projected_close_events(projection, &mut accepted)?;
+    Ok(accepted)
+}
+
+fn prepare_work_items_publication(
+    projection: Vec<u8>,
+    accepted: ProjectedCloseEvents,
+    previous: Option<&[u8]>,
+    proofs: Option<&[u8]>,
+) -> Result<PreparedWorkItemsPublication> {
+    let next = CloseProjectionSnapshot {
+        projection_hash: close_projection_hash(&projection),
+        events: accepted,
+    };
+    let mut snapshots = Vec::new();
+    if let Some(previous) = previous {
+        if close_projection_hash(previous) != next.projection_hash {
+            let mut old = matching_close_projection_snapshot(Some(previous), proofs)
+                .ok()
+                .flatten()
+                .unwrap_or(CloseProjectionSnapshot {
+                    projection_hash: close_projection_hash(previous),
+                    events: BTreeMap::new(),
+                });
+            if let Ok(raw) = serde_json::from_slice::<WorkItemsProjection>(previous) {
+                if collect_projected_close_events(&raw, &mut old.events).is_err() {
+                    old.events.clear();
+                }
+            }
+            snapshots.push(old);
+        }
+    }
+    snapshots.push(next);
+    let proofs = serde_json::to_vec_pretty(&CloseProjectionProofs {
+        version: 1,
+        snapshots,
+    })
+    .map_err(|error| GwtError::Other(format!("close projection proof json: {error}")))?;
+    Ok(PreparedWorkItemsPublication { projection, proofs })
+}
+
+fn publish_work_items_with_close_proofs(
+    path: &Path,
+    prepared: &PreparedWorkItemsPublication,
+) -> Result<()> {
+    let proofs_path = workspace_close_projection_proofs_path(path);
+    validate_workspace_local_close_path(&proofs_path)?;
+    // Preserve both current and next proof before publishing Works. A failed
+    // Works write leaves current evidence usable; a completed write selects
+    // next evidence. Existing transaction recovery needs no new wire fields.
+    write_atomic(&proofs_path, &prepared.proofs)?;
+    write_atomic(path, &prepared.projection)
+}
+
 fn validate_exact_work_machine_local_close_events_read_only(
     item: &WorkItem,
+    works_path: &Path,
     path: &Path,
 ) -> Result<()> {
     let mut projected_events = HashMap::new();
     for event in &item.events {
-        if projected_events.insert(event.id.as_str(), event).is_some() {
-            return Err(GwtError::Other(format!(
-                "exact Work terminal confirmation found duplicate projected event {}",
-                event.id
-            )));
+        if let Some(previous) = projected_events.insert(event.id.as_str(), event) {
+            if previous != event {
+                return Err(GwtError::Other(format!(
+                    "exact Work terminal confirmation found divergent duplicate projected event {}",
+                    event.id
+                )));
+            }
         }
     }
+    let mut compacted_proof = None;
     for durable_event in read_machine_local_workspace_work_events_from_path_read_only(path)? {
         let projected_event = projected_events.get(durable_event.id.as_str());
         if projected_event.is_none() && durable_event.work_item_id != item.id {
             continue;
         }
-        let projected_event = projected_event.ok_or_else(|| {
-            GwtError::Other(format!(
-                "exact Work terminal confirmation found unprojected machine-local close event {}",
+        let Some(projected_event) = projected_event else {
+            if compacted_proof.is_none() {
+                let proofs_path = workspace_close_projection_proofs_path(works_path);
+                validate_workspace_local_close_path(&proofs_path)?;
+                let bytes = read_intake_snapshot_file(works_path)?;
+                let proofs = read_intake_snapshot_file(&proofs_path)?;
+                compacted_proof = Some(matching_close_projection_snapshot(
+                    bytes.as_deref(),
+                    proofs.as_deref(),
+                )?);
+            }
+            let accepted = compacted_proof
+                .as_ref()
+                .and_then(Option::as_ref)
+                .and_then(|snapshot| snapshot.events.get(&item.id))
+                .and_then(|events| events.get(&durable_event.id));
+            if accepted == Some(&close_event_projection_digest(&durable_event)?) {
+                continue;
+            }
+            return Err(GwtError::Other(format!(
+                "exact Work terminal confirmation found unprojected machine-local close event {} (missing, stale, or divergent close projection proof); inspect execution.status for available recoveries; restoring proof requires a canonical complete Work event rebuild",
                 durable_event.id
-            ))
-        })?;
+            )));
+        };
         if !machine_local_close_event_matches_projected_lifecycle(&durable_event, projected_event) {
             return Err(GwtError::Other(format!(
                 "exact Work terminal confirmation found divergent machine-local close event {}",

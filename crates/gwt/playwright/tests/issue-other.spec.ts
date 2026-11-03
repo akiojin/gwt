@@ -46,6 +46,44 @@ async function messages(page: Page, kind: string) {
   ), kind);
 }
 
+test("Work detail preserves all six managed hook states and pending metadata", async ({ page }) => {
+  await boot(page);
+  await page.locator(".issue-other-summary").click();
+  await row(page, "other-paused").click();
+  const section = page.locator('.workspace-overview-detail-pane [data-section="managed-hooks"]');
+  await expect(section).toHaveCount(0);
+  for (const [status, label] of [
+    ["ready", "Ready"], ["needs_attention", "Needs attention"],
+    ["self_healed", "Self healed"], ["degraded", "Degraded"],
+    ["inactive", "Inactive"], ["waiting_for_first_hook_event", "Waiting for first hook event"],
+  ]) {
+    await page.evaluate(status => {
+      const fixture = window as any;
+      const work = fixture.__otherProjection.active_works.find((work: any) => work.id === "other-paused");
+      work.managed_hook_health = { status, last_event: "PreToolUse", last_event_at: "2026-11-03T00:00:00Z" };
+      fixture.__otherEmit({ kind: "active_work_projection", projection: fixture.__otherProjection });
+    }, status);
+    await expect(section).toHaveAttribute("data-status", status);
+    await expect(section.locator("dd")).toHaveText([label, "PreToolUse", "2026-11-03T00:00:00Z"]);
+    await expect(section.locator("dt")).toHaveText(["Status", "Last event", "Last event at"]);
+    await expect(row(page, "other-paused").locator(".workspace-overview-hook-health"))
+      .toHaveCount(status === "degraded" ? 1 : 0);
+  }
+  await page.evaluate(() => {
+    const fixture = window as any;
+    const work = fixture.__otherProjection.active_works.find((work: any) => work.id === "other-paused");
+    work.managed_hook_health = {
+      status: "ready", pending_discussion: { proposal_label: "Proposal A", next_question: "Choose a repair path" },
+      pending_goal: { condition: "Verify managed hooks" },
+    };
+    fixture.__otherEmit({ kind: "active_work_projection", projection: fixture.__otherProjection });
+  });
+  await expect(section.locator("dt")).toHaveText(["Status", "Discussion", "Goal"]);
+  await expect(section.locator("dd")).toHaveText(["Ready", "Proposal A", "Verify managed hooks"]);
+  await expect(section.locator("p")).toHaveText("Choose a repair path");
+  await page.screenshot({ path: test.info().outputPath("managed-hook-health.png") });
+});
+
 test("Work projection snapshots and patches update Other while retaining session history", async ({ page }, info) => {
   await boot(page);
   const other = page.locator("details.issue-other-group");

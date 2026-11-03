@@ -548,6 +548,27 @@ fn fresh_execution_queued_session_start_rejects_foreign_identity() {
     fixture
         .owner
         .transport_event(gwt::project_transport::TransportEvent::RuntimeHook(early));
+    fixture.executor.block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Observe the valid queued SessionStart's actual completion before a separate positive HTTP resend; no scheduler delay or elapsed-time assertion.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let active = fixture
+                    .owner
+                    .probe(&fixture.captured.id, fixture.captured.incarnation)
+                    .await
+                    .expect("the queued SessionStart's exact runtime");
+                if active.readiness_watch.is_none()
+                    && !active.readiness_inflight
+                    && active.pending_fresh_execution.is_none()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the valid queued SessionStart must complete actual readiness");
+    });
     commit_owner_fresh_readiness(&fixture);
     assert_eq!(
         gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.authority)
@@ -1677,6 +1698,15 @@ fn issue_monitor_scan_reconciles_activated_launch_but_preserves_unready_candidat
             .block_on(fixture.owner.wait_monitor_idle())
             .unwrap();
         if activated {
+            // Drive owner recovery after the synthetic filesystem activation.
+            fixture
+                .executor
+                .block_on(
+                    fixture
+                        .owner
+                        .check_monitor_deadlines(std::time::Instant::now()),
+                )
+                .unwrap();
             wait_owner_monitor_fresh_ack(&fixture);
         }
         let probe = fixture
@@ -2051,49 +2081,67 @@ fn leave_owner_fresh_activated_before_projection_commit(fixture: &OwnerFreshLaun
             .unwrap();
     });
     let active = probe.active_session.as_ref().unwrap();
-    let transaction = gwt_core::workspace_projection::transact_workspace_state_for_work_event_root_with_supersession_commit(
-        &fixture.pending.project_root, &fixture.pending.worktree_path, &fixture.pending.operation_id,
-        |projection, work_items, _| {
-            let events = gwt::project_runtime::workspace::apply_workspace_launch_for_current_work(
-                &fixture.pending.project_root, projection, work_items, active,
-                gwt::project_runtime::workspace::WorkspaceLaunchTransition {
-                    work_id: None, base_branch: fixture.pending.base_branch.as_deref(),
-                    linked_issue_number: fixture.pending.linked_issue_number,
-                    canonical_owner: Some(fixture.pending.owner), resume_context: fixture.pending.resume_context.as_ref(),
-                    kind: WorkspaceLaunchProjectionKind::StartWork,
-                    live_session_ids: &HashSet::from([fixture.pending.binding.session_id.clone()]), now: Utc::now(),
-                }, true)?;
-            Ok(((), events))
-        },
-        || {
-            gwt::cli::execution_state::activate_successor(&fixture.repo, fixture.authority,
-                &fixture.pending.request).map_err(gwt_core::error::GwtError::Io)?;
-            Err(gwt_core::error::GwtError::Other("simulated response loss after ledger activation".into()))
-        });
-    assert!(transaction.is_err());
+    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
     let trusted = gwt::cli::trusted_store::trusted_dir_for_worktree(&fixture.repo).unwrap();
-    for path in [
-        trusted.join("execution-control.json"),
-        trusted.join("execution-generation-pointer.json"),
-        fixture
-            .repo
-            .join(gwt::cli::execution_state::EXECUTION_CONTROL_STATE_RELATIVE),
-        fixture
-            .repo
-            .join(gwt::cli::execution_state::EXECUTION_GENERATION_POINTER_STATE_RELATIVE),
-    ] {
-        if path.exists() {
-            fs::remove_file(path).unwrap();
-        }
-    }
-    assert!(
-        gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.authority)
-            .is_err()
-    );
-    assert!(durable_launch_recovery_exists(
-        &gwt_core::paths::gwt_sessions_dir(),
-        &fixture.pending.binding.session_id
-    ));
+    // Finish constructing the partial state before the live owner can repair it.
+    gwt::cli::execution_state::with_prepared_successor_exact_session_activation(
+        &fixture.repo,
+        fixture.authority,
+        &fixture.pending.request,
+        &sessions_dir,
+        &fixture.pending.session_identity,
+        |activate| {
+            let transaction = gwt_core::workspace_projection::transact_workspace_state_for_work_event_root_with_supersession_commit(
+                &fixture.pending.project_root, &fixture.pending.worktree_path, &fixture.pending.operation_id,
+                |projection, work_items, _| {
+                    let events = gwt::project_runtime::workspace::apply_workspace_launch_for_current_work(
+                        &fixture.pending.project_root, projection, work_items, active,
+                        gwt::project_runtime::workspace::WorkspaceLaunchTransition {
+                            work_id: None, base_branch: fixture.pending.base_branch.as_deref(),
+                            linked_issue_number: fixture.pending.linked_issue_number,
+                            canonical_owner: Some(fixture.pending.owner), resume_context: fixture.pending.resume_context.as_ref(),
+                            kind: WorkspaceLaunchProjectionKind::StartWork,
+                            live_session_ids: &HashSet::from([fixture.pending.binding.session_id.clone()]), now: Utc::now(),
+                        }, true)?;
+                    Ok(((), events))
+                },
+                || {
+                    activate().map_err(gwt_core::error::GwtError::Io)?;
+                    Err(gwt_core::error::GwtError::Other("simulated response loss after ledger activation".into()))
+                });
+            assert!(transaction.is_err());
+            assert!(
+                transaction.as_ref().unwrap_err().to_string()
+                    .contains("simulated response loss after ledger activation"),
+                "unexpected fixture transaction failure: {transaction:?}"
+            );
+            for path in [
+                trusted.join("execution-control.json"),
+                trusted.join("execution-generation-pointer.json"),
+                fixture
+                    .repo
+                    .join(gwt::cli::execution_state::EXECUTION_CONTROL_STATE_RELATIVE),
+                fixture
+                    .repo
+                    .join(gwt::cli::execution_state::EXECUTION_GENERATION_POINTER_STATE_RELATIVE),
+            ] {
+                if path.exists() {
+                    fs::remove_file(path).unwrap();
+                }
+            }
+            assert!(
+                gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.authority)
+                    .is_err()
+            );
+            assert!(durable_launch_recovery_exists(
+                &sessions_dir,
+                &fixture.pending.binding.session_id
+            ));
+            Ok(())
+        },
+    )
+    .unwrap()
+    .expect("the exact Prepared fixture Session must remain current");
 }
 #[test]
 fn fresh_execution_continue_repairs_activated_response_loss_before_acknowledging() {

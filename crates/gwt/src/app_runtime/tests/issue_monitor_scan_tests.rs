@@ -1772,6 +1772,10 @@ fn scheduled_tick_advances_autonomous_launch_without_an_external_daemon() {
     let (completed_root, completed_prefs, completed_at, outcome) =
         run_scheduled_scan_to_completion(&scan_tasks, &recorded);
     super::super::wait_scan_generation_reaper(&completed_prefs);
+    assert!(
+        matches!(&outcome, Ok(ScheduledIssueMonitorScanOutcome::Applied(_))),
+        "the daemon-absent scan must be applied: {outcome:?}"
+    );
     let events = runtime.complete_scheduled_scan_for_test(
         &completed_root,
         &completed_prefs,
@@ -1784,7 +1788,7 @@ fn scheduled_tick_advances_autonomous_launch_without_an_external_daemon() {
             BackendEvent::IssueMonitorStatus { status } => Some(status),
             _ => None,
         })
-        .expect("scheduled status");
+        .unwrap_or_else(|| panic!("scheduled status missing; events: {events:?}"));
     assert_eq!(
         status.total_candidates, 1,
         "the live candidate reached the scheduled snapshot"

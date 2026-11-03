@@ -28,6 +28,8 @@ $process = $null
 $daemon = $null
 $keeper = $null
 $launchEvidence = $null
+$hookEvidence = @{}
+$sourceEnvironment = [Environment]::GetEnvironmentVariables()
 $savedEnvironment = @{}
 function Invoke-FixtureGit([string[]]$Arguments) {
     $start = [Diagnostics.ProcessStartInfo]::new('git')
@@ -55,13 +57,18 @@ function Set-CheckEnvironment($variables) {
         [Environment]::SetEnvironmentVariable($key, $variables[$key])
     }
 }
-function Invoke-CheckoutEnvelope($operation, $parameters) {
+function Invoke-CheckoutEnvelope($operation, $parameters, [switch]$SourceContext) {
     $attempts = if ($operation -eq 'issue.monitor.status') { 6 } else { 1 }
     for ($attempt = 1; $attempt -le $attempts; $attempt++) {
         $startInfo = [Diagnostics.ProcessStartInfo]::new($gwtdBinary)
         $startInfo.WorkingDirectory = $checkout
         $startInfo.UseShellExecute = $false
         $startInfo.CreateNoWindow = $true
+        if ($SourceContext) {
+            $startInfo.Environment.Clear()
+            foreach ($key in $sourceEnvironment.Keys) { $startInfo.Environment[$key] = $sourceEnvironment[$key] }
+            $null = $startInfo.Environment.Remove('GWT_BIN_PATH')
+        }
         $startInfo.RedirectStandardInput = $true
         $startInfo.RedirectStandardOutput = $true
         $startInfo.RedirectStandardError = $true
@@ -91,9 +98,21 @@ function Invoke-CheckoutEnvelope($operation, $parameters) {
         throw "$operation failed (exit $nativeExitCode): $diagnostic"
     }
 }
-function Assert-HookHealth($health) {
-    $blocking = @($health.issues | Where-Object { $_ -notlike 'managed hook failure:*state=fail-open*' })
-    if ($health.status -eq 'inactive' -or $blocking.Count) { throw "hook convergence failed: $($blocking -join ', ')" }
+function Assert-HookHealth($doctor) {
+    $preflight = $doctor.preflight
+    if (!$preflight -or $preflight.schema_version -isnot [ValueType] -or
+        $preflight.schema_version -is [bool] -or $preflight.schema_version -ne 1 -or $preflight.result -cne 'proceed' -or
+        $preflight.context -cne 'current' -or $preflight.normal_completion -cne 'normal' -or
+        $preflight.convergence -cne 'converged' -or $preflight.reasons -isnot [Array] -or
+        $preflight.reasons.Count -ne 0 -or $preflight.diagnostics -isnot [Array]) {
+        throw "Managed-browser preflight refused: $($preflight | ConvertTo-Json -Depth 5 -Compress)"
+    }
+    foreach ($diagnostic in $preflight.diagnostics) {
+        if ($diagnostic.id -isnot [string] -or [string]::IsNullOrWhiteSpace($diagnostic.id) -or
+            $diagnostic.classification -cnotin @('recovered', 'fail_open', 'foreign')) {
+            throw 'Managed-browser preflight contains an invalid retained diagnostic.'
+        }
+    }
 }
 try {
     Set-Location $checkout
@@ -245,10 +264,12 @@ agentType = "command"
 command = "$nodeToml"
 defaultArgs = ["$providerToml", "$receiptsToml"]
 "@, [Text.UTF8Encoding]::new($false))
-    $hookBinary = ((Invoke-CheckoutEnvelope 'hook.doctor' @{}).output | ConvertFrom-Json).managed_hook_bin
+    $hookBinary = ((Invoke-CheckoutEnvelope 'hook.doctor' @{} -SourceContext).output | ConvertFrom-Json).managed_hook_bin
     if (!$hookBinary -or $hookBinary -match '[/\\]target[/\\].*[/\\]gwtd(\.exe)?$') { throw 'Stable hook fallback missing' }
-    $hookParams = @{repair=$true;expected_hook_bin=$hookBinary;runtime_state_path="$checkHome/.gwt/missing-runtime.json"}
-    Assert-HookHealth ((Invoke-CheckoutEnvelope 'hook.doctor' $hookParams).output | ConvertFrom-Json).health
+    $hookParams = @{purpose='managed_browser';repair=$true;expected_hook_bin=$hookBinary}
+    $doctor = (Invoke-CheckoutEnvelope 'hook.doctor' $hookParams -SourceContext).output | ConvertFrom-Json
+    $hookEvidence.before = $doctor.preflight
+    Assert-HookHealth $doctor
     # Launch children without the calling agent's capability, Session, execution,
     # hook-forwarding URLs, or launch-scoped binary. Never print their values.
     $clearLaunch = @{}
@@ -305,12 +326,11 @@ defaultArgs = ["$providerToml", "$receiptsToml"]
     } finally { $frame.Dispose(); $readyDeadline.Dispose() }
     $projectUrl = [Uri]::new([Uri]$baseUrl, "/p/$projectKey").AbsoluteUri
     Write-Host 'Checkout Hub ready: seeded project catalog entry is present.'
-    $healthParams = @{expected_hook_bin=$hookBinary;runtime_state_path="$checkHome/.gwt/missing-runtime.json"}
-    # Audit the same existing provider hook surfaces repaired before launch.
-    Set-CheckEnvironment @{HOME=$savedEnvironment.HOME;USERPROFILE=$realProfile;
-        CODEX_HOME=$savedEnvironment.CODEX_HOME;CLAUDE_CONFIG_DIR=$savedEnvironment.CLAUDE_CONFIG_DIR}
-    Assert-HookHealth ((Invoke-CheckoutEnvelope 'hook.health' $healthParams).output | ConvertFrom-Json)
-    Set-CheckEnvironment @{HOME=$checkHome;USERPROFILE=$checkHome;CODEX_HOME="$checkHome/.codex";CLAUDE_CONFIG_DIR="$checkHome/.claude"}
+    $healthParams = @{purpose='managed_browser';expected_hook_bin=$hookBinary}
+    # Only the doctor child receives the original managed source context.
+    $doctor = (Invoke-CheckoutEnvelope 'hook.doctor' $healthParams -SourceContext).output | ConvertFrom-Json
+    $hookEvidence.after = $doctor.preflight
+    Assert-HookHealth $doctor
     $hashes = @{}
     foreach ($path in @($gwtRelative, $gwtdRelative, 'crates/gwt/src/main.rs',
         'crates/gwt/src/session_inventory.rs', 'crates/gwt/src/index_worker.rs', 'crates/gwt/src/runtime_health_poller.rs', 'crates/gwt/src/agent_capacity.rs',
@@ -324,6 +344,7 @@ defaultArgs = ["$providerToml", "$receiptsToml"]
         gui_pid=$process.Id;gui_started_at=$process.StartTime.ToUniversalTime().ToString('o');daemon_pid=$daemon.Id;project_key=$projectKey;
         sha256=$hashes;sessions_fixture=$fixture;pm_auto_start=$false;issue_monitor_enabled=$false;background_index='normal';
         user_verification_result='n/a (autonomous)'}
+    $launchEvidence.managed_browser_preflight = $hookEvidence
     Set-CheckEnvironment @{GWT_PLAYWRIGHT_BASE_URL=$projectUrl;GWT_PLAYWRIGHT_CHECK_HOME=$checkHome;
         GWT_PLAYWRIGHT_PID=[string]$process.Id;GWT_PLAYWRIGHT_PROJECT_ROOT=$checkout;
         GWT_PLAYWRIGHT_GUI_STARTED_AT=$process.StartTime.ToUniversalTime().ToString('o');
@@ -356,7 +377,8 @@ defaultArgs = ["$providerToml", "$receiptsToml"]
             foreach ($key in $savedEnvironment.Keys) { [Environment]::SetEnvironmentVariable($key, $savedEnvironment[$key]) }
             # Playwright clears its output directory on entry; retain launch
             # measurements in memory until the runner has finished.
-            if ($launchEvidence) { $launchEvidence | ConvertTo-Json -Depth 4 | Set-Content "$artifacts/launch.json" -Encoding utf8NoBOM }
+            if ($launchEvidence) { $launchEvidence | ConvertTo-Json -Depth 6 | Set-Content "$artifacts/launch.json" -Encoding utf8NoBOM }
+            if ($hookEvidence.Count) { $hookEvidence | ConvertTo-Json -Depth 6 | Set-Content "$artifacts/managed-browser-preflight.json" -Encoding utf8NoBOM }
             if ($process) { @{gui_pid=$process.Id;gui_exited=$process.HasExited;daemon_pid=$daemon.Id;daemon_exited=$daemon.HasExited;
                 cleaned_at=[DateTime]::UtcNow.ToString('o')} | ConvertTo-Json | Set-Content "$artifacts/owned-pid-cleanup.json" -Encoding utf8NoBOM }
         }
