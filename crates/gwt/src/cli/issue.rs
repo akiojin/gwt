@@ -1891,6 +1891,7 @@ fn run_monitor_queue_push<E: CliEnv>(
     let mut accepted_numbers = Vec::new();
     let mut outcomes: Vec<QueuePushOutcome> = Vec::new();
     let mut urgent_observations = Vec::new();
+    let mut accepted_snapshots = Vec::new();
     let source_repository = monitor_client_source_repository(env, &root);
     let mut source_monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
     source_monitor.set_source_repository(
@@ -2010,6 +2011,7 @@ fn run_monitor_queue_push<E: CliEnv>(
                 );
             }
             accepted_numbers.push(*number);
+            accepted_snapshots.push(snapshot);
             outcomes.push(QueuePushOutcome::accepted(*number));
         } else {
             accepted_numbers.push(*number);
@@ -2027,6 +2029,33 @@ fn run_monitor_queue_push<E: CliEnv>(
                 .map(|(owner, repo)| (owner.as_str(), repo.as_str())),
         );
         if !accepted_numbers.is_empty() {
+            // The CLI starts with a cold inbox. Reuse the accepted live fetch
+            // so timeout recovery can validate the candidate before releasing
+            // its persisted failure; membership alone is not that evidence.
+            for snapshot in &accepted_snapshots {
+                if prefs.autonomous_mode
+                    && prefs.failed_issues.iter().any(|failed| {
+                        failed.issue_number == snapshot.number.0
+                            && crate::issue_monitor::MonitorFailureKind::classify(&failed.message)
+                                == crate::issue_monitor::MonitorFailureKind::LaunchWindowTimeout
+                    })
+                {
+                    monitor.record_candidate(crate::IssueMonitorIssue {
+                        author_login: snapshot.author_login.clone(),
+                        number: snapshot.number.0,
+                        title: snapshot.title.clone(),
+                        labels: snapshot.labels.clone(),
+                        state: match snapshot.state {
+                            IssueState::Open => crate::IssueMonitorIssueState::Open,
+                            IssueState::Closed => crate::IssueMonitorIssueState::Closed,
+                        },
+                        body: Some(snapshot.body.clone()),
+                        url: None,
+                        readiness: crate::IssueMonitorReadiness::NotApplicable,
+                        updated_at: Some(snapshot.updated_at.0.clone()),
+                    });
+                }
+            }
             monitor.terminal_queue_push(&accepted_numbers, "operation", &now);
         }
         for (snapshot, assignment) in &urgent_observations {
@@ -11251,6 +11280,39 @@ mod tests {
         assert_eq!(code, 0);
         assert_eq!(payload["refused"], serde_json::json!([]));
         assert_eq!(queued_numbers(&repo), vec![4812]);
+    }
+
+    #[test]
+    fn issue_6689_queue_push_releases_a_cold_timeout_failure() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        queue_push_issue(&mut env, 6689, None);
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &path,
+            &crate::IssueMonitorPrefs {
+                autonomous_mode: true,
+                failed_issues: vec![crate::issue_monitor::IssueMonitorFailedIssue {
+                    issue_number: 6689,
+                    message: "Launch timed out: no window was created within 120s".to_string(),
+                    window_id: None,
+                }],
+                ..Default::default()
+            },
+        )
+        .expect("seed historical failure");
+        let (code, _) = run_queue_push(&mut env, vec![6689], false);
+        assert_eq!(code, 0);
+        let prefs = crate::load_issue_monitor_prefs(&path).expect("saved prefs");
+        assert!(
+            prefs.failed_issues.is_empty(),
+            "queue.push must release the old failure immediately"
+        );
+        assert_eq!(prefs.autonomous_records[0].attempts, 1);
+        assert_eq!(prefs.released_failures.len(), 1);
     }
 
     /// #5133 AC-1/AC-4: queue.push and the Monitor run in different processes.

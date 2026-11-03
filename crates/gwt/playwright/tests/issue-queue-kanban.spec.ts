@@ -806,6 +806,14 @@ test("Issue #4862 failed launches with no window show their reason outside Activ
   await expect(row(page, 43).locator('[data-key="reason"]')).toContainText("autonomous launch attempts exhausted (3/3)");
   await expect(column(page, "backlog").locator('[data-issue-number="43"]')).toBeVisible();
   await expect(column(page, "active").locator('[data-issue-number="43"]')).toHaveCount(0);
+  // Issue #6689: a recovered timeout is queued even while its backoff reason
+  // remains observable; the previous Agent failed badge must disappear.
+  await confirm(page, [43]);
+  await page.evaluate(() => (window as any).__queueInbox([{ issue: { number: 43 }, state: "queued",
+    error_message: "Launch timed out: no window was created within 120s" }]));
+  await expect(column(page, "queued").locator('[data-issue-number="43"]')).toBeVisible();
+  await expect(row(page, 43).locator(".knowledge-row-badge")).toHaveText("Queued");
+  await expect(row(page, 43)).not.toContainText("Agent failed");
   await page.evaluate(() => (window as any).__queueInbox([{ issue: { number: 43 }, state: "needs_human",
     error_message: "autonomous launch attempts exhausted (3/3) with an unchanging failure: successor work-43-next is duplicated; use workspace.close" }]));
   await expect(column(page, "backlog").locator('[data-issue-number="43"]')).toBeVisible();
