@@ -499,6 +499,9 @@ mod tests {
 
     #[test]
     fn release_policy_add_replays_without_effect_and_rollback_preserves_preexisting_permission() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(home.path());
         let repo = home.path().join("repo");
@@ -592,6 +595,9 @@ mod tests {
 
     #[test]
     fn release_policy_changed_issuer_and_stale_cas_refuse_before_consumption() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(home.path());
         let repo = home.path().join("repo");
@@ -634,6 +640,9 @@ mod tests {
 
     #[test]
     fn release_policy_persistence_failure_is_unknown_without_resend() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(home.path());
         let repo = home.path().join("repo");
@@ -684,6 +693,9 @@ mod tests {
 
     #[test]
     fn release_policy_audit_failure_preserves_unknown_and_pending_never_reapplies() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(home.path());
         let repo = home.path().join("repo");
