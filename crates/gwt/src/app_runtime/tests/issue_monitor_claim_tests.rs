@@ -7187,6 +7187,13 @@ fn issue_5642_materializing_replay_preserves_the_unconsumed_initial_launch() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // This verifies replay ownership, not the daemon's wall-clock ACK latency.
+    let _control_budget = ScopedEnvVar::set(
+        "GWT_TEST_BUDGET_DURABLE_ISSUE_MONITOR_CONTROL_MS",
+        gwt_core::deadline_budget::HANG_GUARD
+            .as_millis()
+            .to_string(),
+    );
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
