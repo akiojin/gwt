@@ -2034,6 +2034,10 @@ Open the Logs surface and select **Project** for that project’s events, or
 **Global** for startup and diagnostics without a project. Background events
 remain with their originating project when you switch projects.
 
+Diagnostic logs keep seven days of history by default, with a 2 GiB total
+limit per log directory. Oldest dated files are removed first. If the current
+day alone reaches the limit, it restarts with the next complete log entry.
+
 - App logs:
   `~/.gwt/projects/<repo-hash>/logs/gwt.log.YYYY-MM-DD`
 - Startup and global diagnostics:
