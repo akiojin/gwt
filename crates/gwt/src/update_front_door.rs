@@ -725,12 +725,13 @@ pub fn stage_graceful_update_apply(
     if !respect_defer {
         // Explicit Restart now authorizes the existing interactive installer.
         manifest.origin = gwt_core::update::PendingUpdateOrigin::ManualLater;
-    } else if manifest.origin == gwt_core::update::PendingUpdateOrigin::Automatic
-        && gwt_core::update::prepared_payload_requires_elevation(&manifest.payload, &current_exe)
-    {
-        return Err(
-            "Administrator privileges required; update stays staged for manual apply.".into(),
-        );
+    } else if manifest.origin == gwt_core::update::PendingUpdateOrigin::Automatic {
+        if let Some(reason) = gwt_core::update::prepared_payload_automatic_apply_refusal(
+            &manifest.payload,
+            &current_exe,
+        ) {
+            return Err(format!("{reason}; update stays staged for manual apply."));
+        }
     }
     let mut ops = RealUpdateApplyOps::default();
     stage_graceful_update_apply_with_ops(

@@ -503,7 +503,15 @@ fn update_notice(level: &str, message: String) -> OutboundEvent {
 }
 
 fn update_elevation_notice(version: &str) -> String {
-    format!("Update v{version}: Administrator privileges required; the update stays staged. Use the update button to apply manually.")
+    let reason = gwt_core::update::load_pending_update_manifest()
+        .filter(|manifest| manifest.version == version)
+        .and_then(|manifest| {
+            std::env::current_exe().ok().and_then(|exe| {
+                gwt_core::update::prepared_payload_automatic_apply_refusal(&manifest.payload, &exe)
+            })
+        })
+        .unwrap_or_else(|| "Administrator privileges required".into());
+    format!("Update v{version}: {reason}; the update stays staged. Use the update button to apply manually.")
 }
 
 fn record_pending_update_observation(

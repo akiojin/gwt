@@ -3824,6 +3824,39 @@ fn issue_5343_reconnect_restores_staged_cta_and_elevation_notice() {
 }
 
 #[test]
+fn issue_5343_unknown_msi_scope_reconnect_names_reason_and_preserves_staged_payload() {
+    let temp = tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let payload = temp.path().join("update.msi");
+    fs::write(&payload, "invalid MSI fixture").unwrap();
+    gwt_core::update::persist_pending_update_manifest(&gwt_core::update::PendingUpdateManifest {
+        version: "999.0.0".into(),
+        asset_url: "https://example.invalid/update.msi".into(),
+        payload: gwt_core::update::PreparedPayload::Installer {
+            path: payload.clone(),
+            kind: gwt_core::update::InstallerKind::WindowsMsi,
+        },
+        downloaded_at: chrono::Utc::now().to_rfc3339(),
+        origin: gwt_core::update::PendingUpdateOrigin::Automatic,
+        auto_apply_deferred: false,
+    })
+    .unwrap();
+    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let events = runtime.frontend_sync_events("browser");
+    assert!(events.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::UpdateApplyPendingPersisted { .. }
+    )));
+    assert!(update_resume_toasts(&events)
+        .iter()
+        .any(|(level, message)| {
+            *level == "warn" && message.contains("Windows MSI") && message.contains("manually")
+        }));
+    assert!(gwt_core::update::load_pending_update_manifest().is_some());
+    assert!(payload.exists());
+}
+
+#[test]
 fn app_runtime_enabled_fallback_epoch_overflow_is_zero_write_error() {
     let temp = tempdir().expect("tempdir");
     let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
