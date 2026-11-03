@@ -9,7 +9,32 @@ export const DEFAULT_MAX_CHARS_PER_FLUSH = 65536;
 export const DEFAULT_MAX_WINDOWS_PER_FLUSH = 8;
 export const DEFAULT_MAX_TOTAL_CHARS_PER_FLUSH = DEFAULT_MAX_CHARS_PER_FLUSH;
 
+// A background document can suspend frames and clamp timers to one second.
+// MessageChannel preserves a yielding task boundary without either delay.
+export function scheduleTerminalTask(callback) {
+  if (typeof document !== "undefined" && document.hidden && typeof MessageChannel === "function") {
+    const channel = new MessageChannel();
+    let cancelled = false;
+    const cancel = () => {
+      cancelled = true;
+      channel.port1.onmessage = null;
+      channel.port1.close();
+      channel.port2.close();
+    };
+    channel.port1.onmessage = () => {
+      if (cancelled) return;
+      cancel();
+      callback();
+    };
+    channel.port2.postMessage(null);
+    return cancel;
+  }
+  const timer = setTimeout(callback, 0);
+  return () => clearTimeout(timer);
+}
+
 function defaultSchedule(callback) {
+  if (typeof document !== "undefined" && document.hidden) return scheduleTerminalTask(callback);
   const hasFrames = typeof requestAnimationFrame === "function";
   let finished = false;
   const run = () => {
