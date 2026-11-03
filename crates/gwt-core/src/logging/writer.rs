@@ -102,7 +102,7 @@ impl BoundedDailyWriter {
             file.write_all(record)
         })();
         let unlock = FileExt::unlock(&self.lock);
-        result.and_then(|()| unlock)
+        result.and(unlock)
     }
 }
 
