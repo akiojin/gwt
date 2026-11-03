@@ -590,6 +590,7 @@ fn owner_output_backpressure_bounds_a_stream_and_preserves_other_project_and_sta
             incarnation: 7,
             data: vec![b'x'; 1024],
             seq,
+            previous_seq: Some(seq - 1),
             screen: "latest screen".into(),
             screen_ansi: b"latest ANSI".to_vec(),
             screen_seq: seq,

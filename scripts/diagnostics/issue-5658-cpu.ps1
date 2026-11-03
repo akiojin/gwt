@@ -59,6 +59,8 @@ try {
             phase = $phase; process_id = $TargetProcessId; process_started_at = $identity
             binary = $binary; binary_sha256 = $binaryHash; timestamp_utc = $capturedAt
             elapsed_seconds = $elapsed; process_cpu_seconds = $cpu
+            working_set_bytes = $process.WorkingSet64; private_memory_bytes = $process.PrivateMemorySize64
+            peak_working_set_bytes = $process.PeakWorkingSet64
             threads = @([Issue5658Threads]::Read($TargetProcessId))
         }
         [Console]::Out.WriteLine(($snapshot | ConvertTo-Json -Depth 5 -Compress))
