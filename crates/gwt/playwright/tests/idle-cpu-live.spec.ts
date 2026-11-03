@@ -13,6 +13,8 @@ type Snapshot = {
   working_set_bytes: number; private_memory_bytes: number; peak_working_set_bytes: number;
 };
 type Traffic = { raw_chunks: number; raw_bytes: number; text: string };
+type InputProbe = { id: string; sent_at: number; sent_at_utc: string; raw_latency_ms?: number;
+  snapshot_latency_ms?: number; sent_frame_ms?: number };
 type Agent = { id: string; session_id: string; status: string };
 type ReadEvent = { kind: string; at: string; ended_at?: string; ok?: boolean; latency_ms?: number; reason?: string };
 type Receipt = { session_id: string; pid: number; started_at: string; cwd: string; history_lines: number;
@@ -61,10 +63,13 @@ test.describe("Issue #5658 idle GUI CPU", () => {
       const created: string[] = [];
       const agents: Agent[] = [];
       const traffic = new Map<string, Traffic>();
-      const markers = new Map<string, { id: string; sent_at: number; raw_latency_ms?: number;
-        snapshot_latency_ms?: number; sent_frame_ms?: number }>();
-      const socketEvents: Array<{ event: string; at: number }> = [];
-      const latency: Array<{ phase: string; id: string; raw_latency_ms: number; visible_latency_ms: number }> = [];
+      const markers = new Map<string, InputProbe>();
+      const socketEvents: Array<{ event: string; connection: number; channel: string; at: number; at_utc: string }> = [];
+      const queueSamples: Array<{ at_utc: string; queue: Record<string, number> }> = [];
+      const latency: Array<InputProbe & { phase: string; visible_latency_ms: number; delivery_route: string }> = [];
+      let socketOrdinal = 0;
+      const messageKinds = new Map<number, { channel: string; counts: Record<string, number> }>();
+      const workspaceFrames = new Map<number, unknown>();
       const snapshots: Snapshot[] = [];
       const trafficSnapshots: Array<Record<string, { raw_chunks: number; raw_bytes: number }>> = [];
       const attachJson = async (name: string, value: unknown) => {
@@ -75,8 +80,15 @@ test.describe("Issue #5658 idle GUI CPU", () => {
       page.on("pageerror", error => errors.push(error.message));
       page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
       page.on("websocket", socket => {
-        socketEvents.push({ event: "open", at: performance.now() });
-        socket.on("close", () => socketEvents.push({ event: "close", at: performance.now() }));
+        const connection = ++socketOrdinal;
+        const url = new URL(socket.url());
+        const channel = `${url.pathname}|${url.searchParams.get("repo_hash") ?? ""}`;
+        const counts: Record<string, number> = {};
+        messageKinds.set(connection, { channel, counts });
+        const observeSocket = (event: string) => socketEvents.push({ event, connection, channel,
+          at: performance.now(), at_utc: new Date().toISOString() });
+        observeSocket("open");
+        socket.on("close", () => observeSocket("close"));
         socket.on("framesent", ({ payload }) => {
           try {
             const event = JSON.parse(String(payload));
@@ -87,45 +99,63 @@ test.describe("Issue #5658 idle GUI CPU", () => {
           } catch { /* Other normal input is not a fixture probe. */ }
         });
         socket.on("framereceived", ({ payload }) => {
-        try {
-          const event = JSON.parse(String(payload));
-          if (event.kind === "terminal_snapshot") {
-            const text = Buffer.from(event.data_base64, "base64").toString("utf8");
-            for (const [marker, probe] of markers) {
-              if (probe.id === event.id && probe.snapshot_latency_ms === undefined && text.includes(marker)) {
-                probe.snapshot_latency_ms = performance.now() - probe.sent_at;
+          try {
+            const event = JSON.parse(String(payload));
+            counts[event.kind] = (counts[event.kind] ?? 0) + 1;
+            if (event.kind === "workspace_state") {
+              workspaceFrames.set(connection, { channel, at_utc: new Date().toISOString(),
+                tabs: event.workspace?.tabs?.map((tab: any) => ({ project_key: tab.project_key,
+                  windows: tab.workspace?.windows?.map((pane: any) => ({ id: pane.id,
+                    agent_id: pane.agent_id, session_id: pane.session_id, status: pane.status })) })) ?? null });
+            }
+            if (event.kind === "runtime_health" && event.snapshot?.queue) {
+              queueSamples.push({ at_utc: new Date().toISOString(), queue: event.snapshot.queue });
+            }
+            if (event.kind === "terminal_snapshot") {
+              const text = Buffer.from(event.data_base64, "base64").toString("utf8");
+              for (const [marker, probe] of markers) {
+                if (probe.id === event.id && probe.snapshot_latency_ms === undefined && text.includes(marker)) {
+                  probe.snapshot_latency_ms = performance.now() - probe.sent_at;
+                }
               }
             }
-          }
-          if (event.kind !== "terminal_output") return;
-          const pane = traffic.get(event.id) ?? { raw_chunks: 0, raw_bytes: 0, text: "" };
-          const bytes = Buffer.from(event.data_base64, "base64");
-          pane.raw_chunks += 1;
-          pane.raw_bytes += bytes.length;
-          pane.text = (pane.text + bytes.toString("utf8")).slice(-32_768);
-          traffic.set(event.id, pane);
-          for (const [marker, probe] of markers) {
-            if (probe.id === event.id && probe.raw_latency_ms === undefined && pane.text.includes(marker)) {
-              probe.raw_latency_ms = performance.now() - probe.sent_at;
+            if (event.kind !== "terminal_output") return;
+            const pane = traffic.get(event.id) ?? { raw_chunks: 0, raw_bytes: 0, text: "" };
+            const bytes = Buffer.from(event.data_base64, "base64");
+            pane.raw_chunks += 1;
+            pane.raw_bytes += bytes.length;
+            pane.text = (pane.text + bytes.toString("utf8")).slice(-32_768);
+            traffic.set(event.id, pane);
+            for (const [marker, probe] of markers) {
+              if (probe.id === event.id && probe.raw_latency_ms === undefined && pane.text.includes(marker)) {
+                probe.raw_latency_ms = performance.now() - probe.sent_at;
+              }
             }
-          }
-        } catch (error) { errors.push(`terminal observation: ${String(error)}`); }
+          } catch (error) { errors.push(`terminal observation: ${String(error)}`); }
         });
       });
       const probeInput = async (phase: string) => {
         for (const [index, id] of created.entries()) {
           const marker = `GWT_IDLE_5658_${theme}_${phase}_${index}`;
           const sentAt = performance.now();
-          const probe = { id, sent_at: sentAt, raw_latency_ms: undefined as number | undefined };
+          const probe: InputProbe = { id, sent_at: sentAt, sent_at_utc: new Date().toISOString() };
           markers.set(marker, probe);
           // The input contains only phase/index, so terminal input echo cannot
           // satisfy the complete marker produced by the launched provider.
           await sendLiveGwtEvent(page, { kind: "terminal_input", id,
             data: JSON.stringify({ kind: "probe", theme, phase, index }) + "\r" });
-          await expect.poll(() => probe.raw_latency_ms, { timeout: 15_000 }).toBeDefined();
+          // PM a587: the same visible deadline covers raw and formal snapshot
+          // replacement. Neither arrival time is substituted for the other.
+          const remaining = 15_000 - (performance.now() - sentAt);
+          expect(remaining, "input dispatch remains inside the visible deadline").toBeGreaterThan(0);
           await expect.poll(() => page.evaluate(id => window.__gwtTerminalTestApi.bufferText(id), id),
-            { timeout: 15_000 }).toContain(marker);
-          latency.push({ phase, id, raw_latency_ms: probe.raw_latency_ms!, visible_latency_ms: performance.now() - sentAt });
+            { timeout: remaining }).toContain(marker);
+          const visibleMs = performance.now() - sentAt;
+          expect(visibleMs, "complete provider marker appears within 15 seconds of input").toBeLessThanOrEqual(15_000);
+          latency.push({ phase, ...probe, visible_latency_ms: visibleMs,
+            delivery_route: probe.raw_latency_ms !== undefined
+              ? (probe.snapshot_latency_ms !== undefined ? "raw+snapshot" : "raw")
+              : (probe.snapshot_latency_ms !== undefined ? "snapshot" : "unobserved") });
         }
       };
       let verified = false;
@@ -152,7 +182,8 @@ test.describe("Issue #5658 idle GUI CPU", () => {
           const expected = savedFleet.agents.map(agent => agent.id + "/" + agent.session_id).sort();
           await expect.poll(() => page.evaluate(agentId => (window as any).__gwt5658Workspace?.tabs
             .flatMap((tab: any) => tab.workspace.windows).filter((pane: any) => pane.agent_id === agentId
-              && ["running", "idle"].includes(pane.status))
+              // Custom command PTYs do not assert provider hook Ready.
+              && ["starting", "running", "idle"].includes(pane.status))
             .map((pane: any) => pane.id + "/" + pane.session_id).sort() ?? [], agentId),
           { timeout: 30_000, message: "same twelve live Sessions belong to the current fixture workspace" }).toEqual(expected);
           agents.push(...savedFleet.agents);
@@ -277,6 +308,9 @@ test.describe("Issue #5658 idle GUI CPU", () => {
             ipc_success_count: successes, observed_ready_requests_per_minute: successes * 60 / elapsed, agents: ipc },
           budget: { asserted: !functionalOnly && assertCpuBudget, max_average_cores: maxCores },
           raw_deltas: rawDeltas, input_latency: latency, native_snapshots: snapshots,
+          delivery_observation: { socket_events: socketEvents, queue_samples: queueSamples,
+            message_kinds: Object.fromEntries(messageKinds), workspace_frames: Object.fromEntries(workspaceFrames),
+            queue_scope: "live-client gauges; disconnected queues disappear and deltas may decrease; not a complete loss counter" },
           user_verification_result: "n/a (autonomous)",
           agent_visual_check: errors.length === 0 && rawDeltas.every(pane => pane.raw_bytes === 0)
             ? "pass" : "fail(console/page error or unexpected idle output)",
@@ -302,7 +336,15 @@ test.describe("Issue #5658 idle GUI CPU", () => {
         verified = true;
       } catch (error) {
         await attachJson("failure-state", {
-          error: String(error), markers: Object.fromEntries(markers), socket_events: socketEvents, native_snapshots: snapshots,
+          error: String(error), markers: Object.fromEntries(markers), socket_events: socketEvents,
+          message_kinds: Object.fromEntries(messageKinds), workspace_frames: Object.fromEntries(workspaceFrames),
+          workspace_observer: await page.evaluate(() => {
+            const workspace = (window as any).__gwt5658Workspace;
+            return { observed: Boolean(workspace), tabs: workspace?.tabs?.map((tab: any) => ({ project_key: tab.project_key,
+              windows: tab.workspace?.windows?.map((pane: any) => ({ id: pane.id, agent_id: pane.agent_id,
+                session_id: pane.session_id, status: pane.status })) })) ?? null };
+          }).catch(String),
+          queue_samples: queueSamples, native_snapshots: snapshots,
           traffic: Object.fromEntries(traffic), input_latency: latency, agents,
           receipts: await readReceipts(agents).catch(() => []),
           visible: await page.evaluate(ids => Object.fromEntries(ids.map(id =>

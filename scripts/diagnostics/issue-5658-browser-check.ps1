@@ -124,6 +124,61 @@ function Assert-HookHealth($doctor) {
         }
     }
 }
+function Write-TerminalDeliveryEvidence {
+    $records = [Collections.Generic.List[object]]::new()
+    $sources = @()
+    $readErrors = @()
+    foreach ($file in Get-ChildItem -LiteralPath "$checkHome/.gwt" -Recurse -File -Filter 'gwt.log*' -ErrorAction SilentlyContinue) {
+        try {
+            $share = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+            $stream = [IO.File]::Open($file.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, $share)
+            $snapshot = [IO.MemoryStream]::new()
+            try { $stream.CopyTo($snapshot); $bytes = $snapshot.ToArray() }
+            finally { $stream.Dispose(); $snapshot.Dispose() }
+            foreach ($line in [Text.Encoding]::UTF8.GetString($bytes).Split("`n")) {
+                try { $event = $line | ConvertFrom-Json -ErrorAction Stop } catch { continue }
+                if ($event.target -eq 'gwt.terminal.delivery') { $records.Add($event) }
+            }
+            $sources += @{path=[IO.Path]::GetRelativePath($checkHome, $file.FullName);bytes=$bytes.Length;
+                sha256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()}
+        } catch { $readErrors += $_.Exception.Message }
+    }
+    $counts = @{}
+    foreach ($group in $records | Group-Object { $_.fields.stage }) { $counts[$group.Name] = $group.Count }
+    $coalesced = @{}
+    $coalescedObservations = 0L
+    $broadcastLostObservations = 0L
+    foreach ($record in $records) {
+        $fields = $record.fields
+        if ($fields.stage -ceq 'gui_output_coalesced') {
+            $key = @($fields.project_key, $fields.connection_id, $fields.pane_id, $fields.incarnation, $fields.retained_seq, $fields.discarded_seq) -join '|'
+            $coalesced[$key] = $true
+            $coalescedObservations += $fields.discarded_count
+        } elseif ($fields.stage -ceq 'owner_broadcast_lag') { $broadcastLostObservations += $fields.discarded_count }
+    }
+    $gapCauses = @{gui_inbox_coalescing=0;predecessor_unavailable=0;unattributed=0}
+    $gaps = @($records | Where-Object { $_.fields.stage -ceq 'output_gap' })
+    foreach ($gap in $gaps) {
+        $fields = $gap.fields
+        if ($fields.previous_seq -ceq 'None') { $gapCauses.predecessor_unavailable++ }
+        else {
+            $previousSeq = if ($fields.previous_seq -cmatch '^Some\((\d+)\)$') { [ulong]$Matches[1] } else { $null }
+            $key = @($fields.project_key, $fields.connection_id, $fields.pane_id, $fields.incarnation, $fields.seq, $previousSeq) -join '|'
+            if ($null -ne $previousSeq -and $previousSeq -gt [ulong]$fields.accepted_seq -and $coalesced.ContainsKey($key)) {
+                $gapCauses.gui_inbox_coalescing++
+            } else { $gapCauses.unattributed++ }
+        }
+    }
+    $summary = @{status=if ($readErrors.Count) {'partial'} elseif ($records.Count) {'observed'} else {'unobserved'};
+        target='gwt.terminal.delivery';filter='info,gwt.terminal.delivery=debug';observed_events=$records.Count;
+        counts_by_stage=$counts;observed_gap_events=if ($records.Count) {$gaps.Count} else {$null};
+        gap_causes=$gapCauses;gui_discarded_observations=$coalescedObservations;private_broadcast_lost_observations=$broadcastLostObservations;
+        cause_basis='Inbox coalescing requires exact project/connection/native-pane/incarnation/retained-seq plus discarded-seq equal to the missing predecessor above accepted-seq; broadcast lag and connection records alone do not establish a gap cause.';
+        sources=$sources;read_errors=$readErrors;
+        limitation='Observed trace counts only; buffered logs may be lost on forced exit. Global seq distance is not a dropped-chunk count. Correlate predecessor gaps with coalescing, broadcast lag, queue gauges and connection events; absence without capture evidence is unknown.'}
+    ConvertTo-Json -InputObject @($records.ToArray()) -Depth 10 | Set-Content "$artifacts/terminal-delivery-events.json" -Encoding utf8NoBOM
+    $summary | ConvertTo-Json -Depth 6 | Set-Content "$artifacts/terminal-delivery-summary.json" -Encoding utf8NoBOM
+}
 try {
     Set-Location $checkout
     if (!(Test-Path $gwtBinary) -or !(Test-Path $gwtdBinary)) { throw 'Build checkout gwt and gwtd before browser-check.' }
@@ -304,7 +359,8 @@ defaultArgs = ["$providerToml", "$receiptsToml"]
     Set-CheckEnvironment $clearLaunch
     Set-CheckEnvironment @{HOME=$checkHome;USERPROFILE=$checkHome;CODEX_HOME="$checkHome/.codex";
         CLAUDE_CONFIG_DIR="$checkHome/.claude";GWT_BROWSER_URL_FILE="$checkHome/url.txt";
-        GWT_HOOK_BIN=$hookBinary;GIT_TERMINAL_PROMPT='0';GH_PROMPT_DISABLED='1'}
+        GWT_HOOK_BIN=$hookBinary;GIT_TERMINAL_PROMPT='0';GH_PROMPT_DISABLED='1';
+        RUST_LOG='info,gwt.terminal.delivery=debug'}
     '{"schema_version":1,"operation":"daemon.start","params":{}}' | Set-Content "$checkHome/daemon-start.json" -Encoding utf8NoBOM
     $daemon = Start-Process -FilePath $gwtdBinary -WorkingDirectory $checkout -WindowStyle Hidden -PassThru -RedirectStandardInput "$checkHome/daemon-start.json" -RedirectStandardOutput "$checkHome/daemon-stdout.log" -RedirectStandardError "$checkHome/daemon-stderr.log"
     $deadline = [DateTime]::UtcNow.AddSeconds(90)
@@ -362,6 +418,8 @@ defaultArgs = ["$providerToml", "$receiptsToml"]
     foreach ($path in @($gwtRelative, $gwtdRelative, 'crates/gwt/src/main.rs',
         'crates/gwt/src/session_inventory.rs', 'crates/gwt/src/index_worker.rs', 'crates/gwt/src/runtime_health_poller.rs', 'crates/gwt/src/agent_capacity.rs',
         'crates/gwt-terminal/src/pane.rs', 'crates/gwt-terminal/src/test_util.rs',
+        'crates/gwt/src/project_runtime/events.rs', 'crates/gwt/src/project_runtime/owner.rs',
+        'crates/gwt/src/project_runtime/transport.rs', 'crates/gwt/src/app_runtime/mod.rs',
         'scripts/diagnostics/issue-5658-browser-check.ps1', 'scripts/diagnostics/issue-5658-cpu.ps1',
         'crates/gwt/playwright/tests/idle-cpu-live.spec.ts')) { $hashes[$path] = (Get-FileHash -LiteralPath (Join-Path $checkout $path) -Algorithm SHA256).Hash.ToLowerInvariant() }
     $launchEvidence = @{git_head=$sourceHead;git_status=@(& git -C $checkout status --short);project=$fixtureProject;repo_hash=$repoHash;
@@ -370,6 +428,7 @@ defaultArgs = ["$providerToml", "$receiptsToml"]
         provider_sha256=$providerHash;ready_requests_per_minute=66;agent_count=12;
         gui_pid=$process.Id;gui_started_at=$process.StartTime.ToUniversalTime().ToString('o');daemon_pid=$daemon.Id;project_key=$projectKey;
         sha256=$hashes;sessions_fixture=$fixture;pm_auto_start=$false;issue_monitor_enabled=$false;background_index='normal';
+        delivery_diagnostic_filter='info,gwt.terminal.delivery=debug';
         user_verification_result='n/a (autonomous)'}
     $launchEvidence.managed_browser_preflight = $hookEvidence
     Set-CheckEnvironment @{GWT_PLAYWRIGHT_BASE_URL=$projectUrl;GWT_PLAYWRIGHT_CHECK_HOME=$checkHome;
@@ -409,6 +468,7 @@ defaultArgs = ["$providerToml", "$receiptsToml"]
             if ($hookEvidence.Count) { $hookEvidence | ConvertTo-Json -Depth 6 | Set-Content "$artifacts/managed-browser-preflight.json" -Encoding utf8NoBOM }
             if ($process) { @{gui_pid=$process.Id;gui_exited=$process.HasExited;daemon_pid=$daemon.Id;daemon_exited=$daemon.HasExited;
                 cleaned_at=[DateTime]::UtcNow.ToString('o')} | ConvertTo-Json | Set-Content "$artifacts/owned-pid-cleanup.json" -Encoding utf8NoBOM }
+            if ($launchEvidence) { Write-TerminalDeliveryEvidence }
         }
     }
 }

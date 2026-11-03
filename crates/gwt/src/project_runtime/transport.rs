@@ -35,6 +35,7 @@ pub(crate) struct BoundProjectTransport {
 #[derive(Clone)]
 struct PrivateState {
     token: String,
+    project_key: String,
     owner: OwnerHandle,
 }
 impl BoundProjectTransport {
@@ -76,6 +77,7 @@ impl BoundProjectTransport {
             private_url,
             state: PrivateState {
                 token: endpoint.auth_token.clone(),
+                project_key: endpoint.scope.repo_hash.clone(),
                 owner: owner.clone(),
             },
             owner,
@@ -195,13 +197,14 @@ async fn events(
         None
     };
     websocket
-        .on_upgrade(move |socket| event_socket(socket, receiver, presence))
+        .on_upgrade(move |socket| event_socket(socket, receiver, presence, state.project_key))
         .into_response()
 }
 async fn event_socket(
     socket: WebSocket,
     mut receiver: tokio::sync::broadcast::Receiver<OwnerEvent>,
     _presence: Option<GuiPresenceLease>,
+    project_key: String,
 ) {
     use futures_util::{SinkExt, StreamExt};
     let (mut writer, mut reader) = socket.split();
@@ -214,7 +217,17 @@ async fn event_socket(
             event = receiver.recv() => {
                 let event = match event {
                     Ok(event) => event,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => OwnerEvent::Invalidated,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(discarded_count)) => {
+                        tracing::debug!(
+                            target: "gwt.terminal.delivery",
+                            stage = "owner_broadcast_lag",
+                            process_id = std::process::id(),
+                            project_key = project_key.as_str(),
+                            discarded_count,
+                            "private owner broadcast discarded observations"
+                        );
+                        OwnerEvent::Invalidated
+                    },
                     Err(_) => return,
                 };
                 let send = writer.send(Message::Text(serde_json::to_string(&event).expect("private event serializes").into()));
