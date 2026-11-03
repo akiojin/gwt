@@ -559,6 +559,9 @@ In terminal windows, drag to select text and release the mouse button to copy.
 On Windows, `Ctrl+C` copies the current terminal selection and clears it; if no
 selection exists, `Ctrl+C` stays mapped to the running terminal process. On
 Linux, `Ctrl+Shift+C` also copies the current terminal selection.
+The mouse wheel scrolls retained history even when an agent tracks the mouse.
+Use `Shift+drag` to select text in mouse-tracking applications (`Option+drag` on
+macOS); the terminal's hover hint also shows these modifiers.
 
 ## Issue surface and Issue Monitor
 
