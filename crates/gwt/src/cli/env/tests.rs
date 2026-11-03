@@ -504,6 +504,186 @@ fn dispatch_prepare_release_uses_allowed_loopback_http_and_rejects_invalid_input
 }
 
 #[test]
+fn release_policy_checkout_bootstrap_uses_the_existing_host_proof_with_inspection_pm() {
+    use axum::{http::HeaderMap, routing::post, Json};
+    use gwt_core::{
+        pm_authorization::{self as authority, OperationIntent},
+        test_support::{ScopedEnvVar, ScopedGwtHome},
+    };
+    use serde_json::{json, Value};
+    use std::sync::atomic::AtomicBool;
+
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().unwrap();
+    let _home = ScopedGwtHome::set(home.path());
+    let repo = tempfile::tempdir().unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/akiojin/gwt.git",
+        ],
+    ] {
+        assert!(gwt_core::process::hidden_command("git")
+            .args(args)
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+    }
+    let mut session = gwt_agent::Session::new(repo.path(), "develop", gwt_agent::AgentId::Codex);
+    session.status = gwt_agent::AgentStatus::Running;
+    session.project_state_root = Some(repo.path().to_path_buf());
+    session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+    assert!(
+        session.execution_binding.is_none(),
+        "PM inspection is not producing authority"
+    );
+    let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
+    let prefs = serde_json::from_value(json!({"registration":{
+        "session_id":session.id, "agent_id":"codex", "worktree_path":repo.path(),
+    }}))
+    .unwrap();
+    crate::pm_registry::save_pm_prefs(
+        &crate::pm_registry::pm_prefs_path_for_repo_path(repo.path()),
+        &prefs,
+    )
+    .unwrap();
+
+    let proofs = Arc::new(AtomicUsize::new(0));
+    let malformed = Arc::new(AtomicBool::new(false));
+    let (count, corrupt, host_session) = (proofs.clone(), malformed.clone(), session.id.clone());
+    let app = axum::Router::new().route(
+        "/internal/host-contract",
+        post(
+            move |headers: HeaderMap, Json(request): Json<crate::AgentHostContractRequest>| {
+                let (count, corrupt, host_session) =
+                    (count.clone(), corrupt.clone(), host_session.clone());
+                async move {
+                    assert_eq!(headers["authorization"], "Bearer release-policy-fixture");
+                    count.fetch_add(1, Ordering::SeqCst);
+                    let mut receipt = crate::describe_authenticated_host_contract(
+                        &request,
+                        &host_session,
+                        "fixture-original-host",
+                        0,
+                    )
+                    .unwrap();
+                    if corrupt.load(Ordering::SeqCst) {
+                        receipt.nonce = "foreign-proof".into();
+                    }
+                    Json(receipt)
+                }
+            },
+        ),
+    );
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let listener = runtime
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
+    let bridge = format!(
+        "http://{}/internal/hook-live",
+        listener.local_addr().unwrap()
+    );
+    runtime.spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let _url = ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_URL_ENV, bridge);
+    let _token = ScopedEnvVar::set(
+        gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+        "release-policy-fixture",
+    );
+    let github_clients = Arc::new(AtomicUsize::new(0));
+    let mut env = DefaultCliEnv::new_with_client_factory(
+        "akiojin",
+        "gwt",
+        repo.path().to_path_buf(),
+        failing_factory(github_clients.clone()),
+    );
+    let run = |env: &mut DefaultCliEnv, operation: &str, params: Value| {
+        crate::cli::run_collect(
+            env,
+            crate::cli::json_envelope::parse_operation(operation, &params).unwrap(),
+        )
+    };
+    let (code, output) = run(&mut env, "actions.release_policy.status", json!({})).unwrap();
+    assert_eq!(code, 0);
+    let status: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(status["current"]["host_verified"], true);
+    assert_eq!(status["current"]["context"]["capability_generation"], 0);
+    assert_eq!(
+        status["current"]["context"]["host_instance_id"],
+        "fixture-original-host"
+    );
+    let intent = OperationIntent {
+        operation: "actions.release_policy.add".into(),
+        params: json!({"request_id":uuid::Uuid::new_v4().to_string(),
+            "expected_token":status["token"],"reason":"Fixture release workflow permission"}),
+    };
+    // Fixture authority proves the production route, not real native consent.
+    let approval = authority::record_approval(
+        repo.path(),
+        &intent,
+        "Fixture release workflow permission",
+        "Rollback the fixture addition",
+        false,
+    )
+    .unwrap();
+    let mut params = intent.params.clone();
+    params["approval_id"] = approval.id.clone().into();
+    let audit_before = fs::read(authority::audit_path(repo.path())).unwrap();
+    let config = gwt_core::paths::gwt_config_path();
+    session.repo_hash = Some("foreign-repository".into());
+    session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+    assert!(run(&mut env, &intent.operation, params.clone()).is_err());
+    session.repo_hash =
+        gwt_core::repo_hash::detect_repo_hash(repo.path()).map(|hash| hash.as_str().to_owned());
+    session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+    {
+        let _foreign_session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "unregistered-fixture");
+        assert!(run(&mut env, &intent.operation, params.clone()).is_err());
+    }
+    malformed.store(true, Ordering::SeqCst);
+    assert!(run(&mut env, &intent.operation, params.clone()).is_err());
+    assert!(
+        !config.exists(),
+        "rejected context/proof must not write policy"
+    );
+    assert!(
+        !gwt_core::paths::gwt_project_dir_for_repo_path(repo.path())
+            .join("project-state/release-policy")
+            .exists(),
+        "rejected context/proof must not create a request receipt"
+    );
+    assert_eq!(
+        fs::read(authority::audit_path(repo.path())).unwrap(),
+        audit_before
+    );
+    assert!(!authority::approvals(repo.path()).unwrap()[0].consumed);
+    malformed.store(false, Ordering::SeqCst);
+    let (code, output) = run(&mut env, &intent.operation, params).unwrap();
+    assert_eq!(code, 0);
+    let result: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(result["outcome"], "succeeded");
+    assert!(gwt_config::Settings::load_from_path(&config)
+        .unwrap()
+        .allowed_workflows["akiojin/gwt"]
+        .contains(&"prepare-release.yml".into()));
+    assert_eq!(
+        proofs.load(Ordering::SeqCst),
+        4,
+        "status, malformed proof and two fresh add proofs"
+    );
+    assert_eq!(
+        github_clients.load(Ordering::SeqCst),
+        0,
+        "configuration bootstrap must not instantiate GitHub or dispatch"
+    );
+}
+
+#[test]
 fn pm_settings_operations_reach_loopback_http_through_the_production_env() {
     use axum::http::{HeaderMap, Method, StatusCode, Uri};
     use gwt_core::{

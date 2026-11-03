@@ -4,13 +4,21 @@ use gwt_github::SpecOpsError;
 
 use crate::cli::{CliEnv, CliParseError};
 
+pub(crate) mod release_policy;
+pub use release_policy::ReleasePolicyContext;
+
 /// SPEC-1942 command model for `actions.*` JSON operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionsCommand {
+    ReleasePolicyStatus,
     /// Issue #4249: submit an explicitly permitted workflow dispatch.
-    Dispatch { call: ActionsDispatchCall },
+    Dispatch {
+        call: ActionsDispatchCall,
+    },
     /// `actions.logs`.
-    Logs { run_id: u64 },
+    Logs {
+        run_id: u64,
+    },
     /// `actions.job_logs`. Issue #4849: `failed_only` returns only the lines
     /// around failure markers (`FAILED`, `panicked at`, `error:`, `error[E`,
     /// `##[error]`) with `context_lines` of context on each side.
@@ -21,9 +29,13 @@ pub enum ActionsCommand {
     },
     /// `actions.rerun` (Issue #3515): re-run a failed run or a single failed
     /// job without pushing a throwaway commit to retrigger CI.
-    Rerun { target: ActionsRerunTarget },
+    Rerun {
+        target: ActionsRerunTarget,
+    },
     /// Issue #4188: cancel an active repository-owned workflow run.
-    Cancel { run_id: u64 },
+    Cancel {
+        run_id: u64,
+    },
     /// Issue #4188: list queued runs that have no jobs, with their elapsed age.
     Queued,
 }
@@ -239,6 +251,12 @@ pub(super) fn run<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let code = match cmd {
+        ActionsCommand::ReleasePolicyStatus => {
+            let status = release_policy::status(env).map_err(super::io_as_api_error)?;
+            out.push_str(&serde_json::to_string(&status).map_err(super::serde_as_api_error)?);
+            out.push('\n');
+            0
+        }
         ActionsCommand::Dispatch { call } => {
             let outcome = env.dispatch_actions(call).map_err(super::io_as_api_error)?;
             out.push_str(outcome.trim_end());

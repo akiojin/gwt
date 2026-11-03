@@ -391,6 +391,22 @@ in `~/.gwt/config.toml`:
 "akiojin/gwt" = ["prepare-release.yml"]
 ```
 
+For the release workflow, the registered PM can configure this permission through
+`actions.release_policy.status` and `actions.release_policy.add`. Read the status
+first, then submit a UUID `request_id`, its current `expected_token`, a short
+`reason`, and an exact scoped `instruction_id` or native `approval_id`. This adds
+only `prepare-release.yml` for the current repository and retains existing
+configuration. The verified checkout CLI can use the PM's existing Host bridge
+before the installed app is updated; replacement credentials are not needed.
+Read `pm.capabilities` when a runtime does not recognize these operations.
+
+Repeating a completed request returns its receipt without applying it again.
+For an unknown outcome, read the status and preserve the request; do not resend.
+`actions.release_policy.rollback` also requires a fresh request and scoped
+authority, plus `added_by` naming the successful add request. It removes only
+permission added by that request while its recorded post-state remains current.
+These operations configure permission; workflow submission remains separate.
+
 ```bash
 gwtd <<'JSON'
 {"schema_version":1,"operation":"actions.dispatch","params":{"workflow":"prepare-release.yml","ref":"develop","inputs":{"bump":"auto"}}}

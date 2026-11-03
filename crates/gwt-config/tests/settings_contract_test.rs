@@ -275,3 +275,148 @@ fn global_config_path_for_home_is_dot_gwt_config_toml() {
         home.join(".gwt").join("config.toml")
     );
 }
+
+#[test]
+fn settings_writers_reject_an_unusable_shared_lock_without_changing_config() {
+    for operation in ["save", "update", "port", "auto_update"] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(&path, "debug = false\n").unwrap();
+        std::fs::create_dir(path.with_extension("settings.lock")).unwrap();
+        let result = match operation {
+            "save" => Settings::default().save(&path),
+            "update" => Settings::update_at_path(&path, |settings| {
+                settings.debug = true;
+                Ok(())
+            }),
+            "port" => Settings::persist_embedded_port(&path, NonZeroU16::new(44000).unwrap()),
+            _ => Settings::persist_auto_apply_updates(&path, |_| Ok(true)).map(|_| ()),
+        };
+        assert!(
+            result.is_err(),
+            "{operation} bypassed the unusable shared lock"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "debug = false\n");
+    }
+}
+
+#[test]
+fn release_policy_merge_preserves_other_settings_and_allows_a_checked_rollback() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    let original = "# operator comment\ndebug = true\nfuture_unknown_key = { mode = \"new\" }\n\n[allowed_workflows]\n# keep this policy comment\n\"akiojin/gwt\" = [\"build.yml\"] # existing workflow\n\"other/repo\" = [\"other.yml\"]\n";
+    std::fs::write(&path, original).unwrap();
+    let before = Settings::release_policy_snapshot(&path, "akiojin/gwt").unwrap();
+    assert!(!before.allowed);
+    assert_eq!(before.content, original);
+    assert!(
+        !path.with_extension("settings.lock").exists(),
+        "snapshot stays read-only"
+    );
+
+    let mut lock_probe = None;
+    let (receipt, after) =
+        Settings::with_locked_release_policy(&path, "akiojin/gwt", true, |actual, proposed| {
+            let probe = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path.with_extension("settings.lock"))
+                .unwrap();
+            let contention = fs2::FileExt::try_lock_exclusive(&probe)
+                .expect_err("the actual Settings file lock must cover the precommit callback");
+            assert_eq!(
+                contention.raw_os_error(),
+                fs2::lock_contended_error().raw_os_error()
+            );
+            lock_probe = Some(probe);
+            assert_eq!(actual.content, before.content);
+            assert!(!actual.allowed && proposed.allowed);
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                original,
+                "callback precedes the effect"
+            );
+            Ok(17)
+        })
+        .unwrap();
+    let probe = lock_probe.expect("precommit callback ran");
+    fs2::FileExt::try_lock_exclusive(&probe)
+        .expect("return releases the actual Settings file lock");
+    fs2::FileExt::unlock(&probe).unwrap();
+    assert_eq!(receipt, 17);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), after.content);
+    assert!(after.content.contains("# operator comment"));
+    assert!(after
+        .content
+        .contains("future_unknown_key = { mode = \"new\" }"));
+    assert!(after.content.contains("# keep this policy comment"));
+    assert!(after.content.contains("# existing workflow"));
+    let settings = Settings::load_from_path(&path).unwrap();
+    assert_eq!(
+        settings.allowed_workflows["akiojin/gwt"],
+        ["build.yml", "prepare-release.yml"]
+    );
+    assert_eq!(settings.allowed_workflows["other/repo"], ["other.yml"]);
+
+    let (called, unchanged) =
+        Settings::with_locked_release_policy(&path, "akiojin/gwt", true, |actual, proposed| {
+            assert_eq!(actual.content, proposed.content);
+            Ok(true)
+        })
+        .unwrap();
+    assert!(
+        called,
+        "an unchanged add still requires the caller's authority check"
+    );
+    assert_eq!(after.content, unchanged.content);
+    let (_, rolled_back) =
+        Settings::with_locked_release_policy(&path, "akiojin/gwt", false, |actual, proposed| {
+            assert_eq!(
+                actual.content, after.content,
+                "rollback CAS checks the current post-state"
+            );
+            assert!(!proposed.allowed);
+            Ok(())
+        })
+        .unwrap();
+    assert!(!rolled_back.allowed);
+    let settings = Settings::load_from_path(&path).unwrap();
+    assert_eq!(settings.allowed_workflows["akiojin/gwt"], ["build.yml"]);
+    assert_eq!(settings.allowed_workflows["other/repo"], ["other.yml"]);
+}
+
+#[test]
+fn release_policy_missing_snapshot_and_rejected_precommit_do_not_write_config() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("missing/config.toml");
+    let before = Settings::release_policy_snapshot(&path, "akiojin/gwt").unwrap();
+    assert!(before.content.is_empty() && !before.allowed);
+    assert!(
+        !path.parent().unwrap().exists(),
+        "read must not create the config directory"
+    );
+    let result = Settings::with_locked_release_policy(
+        &path,
+        "akiojin/gwt",
+        true,
+        |actual, proposed| -> Result<(), ConfigError> {
+            assert!(actual.content.is_empty() && proposed.allowed);
+            Err(ConfigError::ValidationError {
+                reason: "stale CAS token".into(),
+            })
+        },
+    );
+    assert!(result.is_err());
+    assert!(
+        !path.exists(),
+        "rejected CAS/authority must have zero configuration effects"
+    );
+    for repository in [
+        "",
+        "foreign/repo/extra",
+        "https://github.com/other/repo",
+        "../repo",
+    ] {
+        assert!(Settings::release_policy_snapshot(&path, repository).is_err());
+    }
+}
