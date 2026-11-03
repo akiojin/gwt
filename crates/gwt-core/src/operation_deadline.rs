@@ -234,12 +234,21 @@ impl NamedFileLock {
             }
         });
         if operation == "pm_prefs" {
-            tracing::info!(
-                target: "gwt.pm.refresh",
-                stage = "pm_prefs.lock", duration_ms = started.elapsed().as_secs_f64() * 1000.0,
-                ?remaining_budget_ms, contention_observed, success = result.is_ok(),
-                "PM refresh stage"
-            );
+            if contention_observed || result.is_err() {
+                tracing::warn!(
+                    target: "gwt.pm.refresh",
+                    stage = "pm_prefs.lock", duration_ms = started.elapsed().as_secs_f64() * 1000.0,
+                    ?remaining_budget_ms, contention_observed, success = result.is_ok(),
+                    "PM refresh stage"
+                );
+            } else {
+                tracing::debug!(
+                    target: "gwt.pm.refresh",
+                    stage = "pm_prefs.lock", duration_ms = started.elapsed().as_secs_f64() * 1000.0,
+                    ?remaining_budget_ms, contention_observed, success = true,
+                    "PM refresh stage"
+                );
+            }
         }
         result.map_err(|error| {
             if contention_observed {
@@ -537,6 +546,23 @@ fn deadline_error(operation: &str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn issue_6678_uncontended_pm_lock_does_not_emit_info_events() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("events.log");
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(File::create(&output).unwrap()))
+            .finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+        NamedFileLock::acquire(&directory.path().join("pm.lock"), "pm_prefs")
+            .unwrap()
+            .unlock()
+            .unwrap();
+        assert!(std::fs::read_to_string(output).unwrap().is_empty());
+    }
 
     #[test]
     fn issue_5391_expired_uncontended_lock_does_not_invent_an_unknown_holder() {
