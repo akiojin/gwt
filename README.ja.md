@@ -373,6 +373,20 @@ workflow のファイル名を許可します。
 "akiojin/gwt" = ["prepare-release.yml"]
 ```
 
+リリース用の許可は、登録済み PM が `actions.release_policy.status` と
+`actions.release_policy.add` で設定できます。先に status を読み、UUID の
+`request_id`、現在の `expected_token`、短い `reason`、exact scope の
+`instruction_id` または native `approval_id` を指定します。現在のリポジトリの
+`prepare-release.yml` だけを追加し、既存設定を保持します。検証済み checkout CLI は
+アプリ更新前でも PM の既存 Host bridge を使用でき、代替の認証情報は不要です。
+稼働版が操作を認識しない場合は `pm.capabilities` を確認してください。
+
+完了した同じ要求の再送は、変更を再適用せず receipt を返します。結果不明の場合は
+status を読み、要求を保全して再送しないでください。
+`actions.release_policy.rollback` は新しい要求と scoped 権限に加え、成功した add の
+request_id を `added_by` に指定します。その要求が追加し、記録した変更後の状態が
+維持されている許可だけを取り消せます。許可設定と workflow の送信は別操作です。
+
 ```bash
 gwtd <<'JSON'
 {"schema_version":1,"operation":"actions.dispatch","params":{"workflow":"prepare-release.yml","ref":"develop","inputs":{"bump":"auto"}}}

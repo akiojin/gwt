@@ -1381,6 +1381,7 @@ name = "gwt-config"
 version = "9.147.0"
 dependencies = [
  "dirs 7.0.0",
+ "fs2",
  "libc",
  "serde",
  "tempfile",

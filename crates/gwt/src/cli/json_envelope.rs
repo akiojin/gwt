@@ -1022,6 +1022,8 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             number: required_u64(params, "number")?,
         }),
         "discussion.create"
+        | "actions.release_policy.add"
+        | "actions.release_policy.rollback"
         | "board.config.set"
         | "repository.required_checks.update"
         | "repository.settings.set"
@@ -1336,6 +1338,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                     .map(|_| required_string(params, "thread_id"))
                     .transpose()?,
             })
+        }
+        "actions.release_policy.status" => {
+            super::actions::release_policy::parse_status(&envelope.params)?;
+            CliCommand::Actions(ActionsCommand::ReleasePolicyStatus)
         }
         "actions.dispatch" => {
             reject_unknown_params(params, &["workflow", "ref", "inputs"], "actions.dispatch")?;
@@ -5794,6 +5800,85 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn release_policy_status_is_read_only_and_has_a_fixed_target() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let mut env = TestEnv::new(repo);
+        env.stdin = envelope("actions.release_policy.status", json!({}));
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 0);
+        let reply: Value = serde_json::from_slice(&env.stdout).unwrap();
+        let status: Value = serde_json::from_str(reply["output"].as_str().unwrap()).unwrap();
+        assert_eq!(status["workflow"], "prepare-release.yml");
+        assert_eq!(status["repository"], "owner/repo");
+        assert_eq!(status["allowed"], false);
+        assert_eq!(
+            status["requirement"]["permission_stage"],
+            "instruction_or_approval"
+        );
+        assert_eq!(status["token"].as_str().unwrap().len(), 64);
+        assert!(!gwt_core::paths::gwt_config_path().exists());
+        assert!(
+            crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "actions.release_policy.status"
+            )
+        );
+        assert!(
+            !crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "actions.release_policy.add"
+            )
+        );
+        assert!(
+            !crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "actions.release_policy.rollback"
+            )
+        );
+        std::fs::create_dir_all(gwt_core::paths::gwt_home()).unwrap();
+        std::fs::write(
+            gwt_core::paths::gwt_config_path(),
+            "private_metadata = 'POLICY_SECRET_SENTINEL'\n",
+        )
+        .unwrap();
+        env.stdin = envelope("actions.release_policy.status", json!({}));
+        env.stdout.clear();
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 0);
+        assert!(!String::from_utf8_lossy(&env.stdout).contains("POLICY_SECRET_SENTINEL"));
+    }
+
+    #[test]
+    fn release_policy_contract_is_fixed_and_strict() {
+        ok("actions.release_policy.status", json!({}));
+        let request = json!({
+            "request_id": "b4ae91f1-98f3-4fa6-929c-8ce5e3510597",
+            "expected_token": "a".repeat(64),
+            "reason": "Enable the release workflow",
+            "approval_id": "recorded-approval"
+        });
+        ok("actions.release_policy.add", request.clone());
+        for (key, value) in [
+            ("repo", json!("another/repository")),
+            ("workflow", json!("other.yml")),
+            ("ref", json!("main")),
+            ("approved", json!(true)),
+            ("request_id", json!("../receipt")),
+            ("expected_token", json!("HEAD")),
+            ("reason", json!("")),
+        ] {
+            let mut invalid = request.clone();
+            invalid[key] = value;
+            err("actions.release_policy.add", invalid);
+        }
+        err(
+            "actions.release_policy.status",
+            json!({"repo":"another/repository"}),
+        );
+        let mut rollback = request;
+        rollback["added_by"] = json!("cbd15e96-bc2b-478c-a354-302baf307de4");
+        ok("actions.release_policy.rollback", rollback);
     }
 
     #[test]
