@@ -5,7 +5,35 @@ import { access, copyFile, mkdir, mkdtemp, readFile, realpath, symlink, writeFil
 import { homedir, tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import type { TestInfo } from "@playwright/test";
+import type { Page, TestInfo } from "@playwright/test";
+
+// Unknown activity is significant: only a definitely foreign project may be skipped.
+export function selectLatestOwnActivity(candidates: any[], projectKey: string): any | null {
+  for (let index = candidates.length - 1; index >= 0; index -= 1) {
+    const activity = candidates[index];
+    if (typeof activity?.project_key === "string" && /^[a-f0-9]{16}$/.test(activity.project_key) && activity.project_key !== projectKey) continue;
+    return activity ?? null;
+  }
+  return null;
+}
+
+export async function readLatestOwnActivity(page: Page, expectedProjectKey?: string) {
+  const { projectKey, candidates } = await page.evaluate(() => ({
+    projectKey: location.pathname.split("/")[2],
+    candidates: ((window as any).__gwtPlaywrightMessages ?? []).flatMap(({ payload }: any) => {
+      if (payload?.kind === "local_agent_activity") return [payload.activity ?? null];
+      if (payload?.projection && Object.hasOwn(payload.projection, "local_agent_activity"))
+        return [payload.projection.local_agent_activity ?? null];
+      return [];
+    }),
+  }));
+  const snapshot = selectLatestOwnActivity(candidates, projectKey);
+  if (!/^[a-f0-9]{16}$/.test(projectKey) || (expectedProjectKey !== undefined && projectKey !== expectedProjectKey)
+    || snapshot?.project_key !== projectKey || !/^\d+:\d+$/.test(snapshot?.host_id ?? "")
+    || !Number.isFinite(Date.parse(snapshot?.observed_at)) || !Array.isArray(snapshot?.agents) || !snapshot.agents.length)
+    throw new Error("Latest own project activity is unavailable or unknown");
+  return snapshot;
+}
 
 // Rust's bare-command search on Windows requires a PE executable for git/gh;
 // the provider itself uses the production-supported .cmd launch route.
@@ -425,6 +453,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
   await setup.beforeStart?.({ home, project, env, preferences });
 
   let child: ChildProcess | undefined;
+  let coldCleanupFailed = false, protectGuiOwner = false;
   let incarnation = 0;
   let url = "";
   async function launches(): Promise<ExactRelaunchInvocation[]> {
@@ -442,7 +471,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
   }
   async function stop() {
     const ownedPid = child?.pid;
-    if (child?.pid && child.exitCode === null && child.signalCode === null) {
+    if (!protectGuiOwner && child?.pid && child.exitCode === null && child.signalCode === null) {
       const current = child;
       current.kill("SIGTERM");
       const deadline = Date.now() + 8_000;
@@ -458,7 +487,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     const providerPaths = [join(bin, windows ? "codex.cjs" : "codex"), join(bin, windows ? "claude.cjs" : "claude")];
     const providerPids: number[] = [];
     const providerPreFallback: unknown[] = [];
-    for (const launch of await launches()) {
+    for (const launch of coldCleanupFailed ? [] : await launches()) {
       const command = processCommand(launch.pid);
       const privatePathMatch = providerPaths.some(path => command.includes(path));
       // Diagnostic only: inspection failure is UNKNOWN and never changes the
@@ -503,6 +532,196 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     }
     child = undefined;
   }
+  type ColdCensus = { project_key: string; host_id: string; observed_at: string;
+    agents: { window_id: string; session_id: string; runtime_incarnation: number }[] };
+  type ColdWitness = { session: string; childPid: number; childBirth: number; hostPid: number; hostBirth: number; incarnation: number; identity: string; window: string; cwd: string; providerPath: string };
+  async function coldRestart(census: ColdCensus) {
+    if (!["darwin", "linux"].includes(process.platform)) throw new Error("Cold owner observation unsupported on this platform");
+    const errors: unknown[] = [], witnesses: ColdWitness[] = [];
+    const ownedPid = child?.pid;
+    const providerPaths = [join(bin, "codex"), join(bin, "claude")];
+    const state = async (pid: number): Promise<{ birth: number; parent: number } | null> => {
+      if (process.platform === "linux") {
+        let raw: string;
+        try { raw = await readFile(`/proc/${pid}/stat`, "utf8"); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
+        const end = raw.lastIndexOf(")");
+        if (end < 0) throw new Error(`Cannot parse PID ${pid} stat`);
+        const fields = raw.slice(end + 1).trim().split(/\s+/);
+        const parent = Number(fields[1]), birth = Number(fields[19]);
+        if (!Number.isSafeInteger(parent) || !Number.isSafeInteger(birth) || birth <= 0) throw new Error(`Unknown PID ${pid} identity`);
+        return { parent, birth };
+      }
+      const result = spawnSync("ps", ["-p", String(pid), "-o", "lstart=", "-o", "ppid="], { encoding: "utf8", timeout: 5_000 });
+      if (result.error) throw result.error;
+      if (result.status === 1 && !result.stdout.trim() && !result.stderr.trim()) return null;
+      const match = result.status === 0 ? result.stdout.trim().match(/^(.*?)\s+(\d+)$/) : null;
+      const birth = match ? Math.floor(Date.parse(match[1]) / 1000) : NaN, parent = match ? Number(match[2]) : NaN;
+      if (!Number.isSafeInteger(birth) || birth <= 0 || !Number.isSafeInteger(parent)) throw new Error(`Unknown PID ${pid} identity`);
+      return { birth, parent };
+    };
+    const processCwd = async (pid: number) => {
+      if (process.platform === "linux") return realpath(`/proc/${pid}/cwd`);
+      const result = spawnSync("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], { encoding: "utf8", timeout: 5_000 });
+      if (result.error) throw result.error;
+      const paths = result.stdout.split("\n").filter(line => line.startsWith("n")).map(line => line.slice(1));
+      if (result.status !== 0 || paths.length !== 1 || !paths[0]) throw new Error(`Unknown PID ${pid} cwd`);
+      return realpath(paths[0]);
+    };
+    const privateChild = async (witness: ColdWitness) => {
+      const current = await state(witness.childPid);
+      if (!current || current.birth !== witness.childBirth) return false;
+      if (!processCommand(witness.childPid).includes(witness.providerPath))
+        throw new Error(`Owned recorder ${witness.childPid} path changed`);
+      return true;
+    };
+    let natural = false;
+    const qualifyCohort = async (capture: boolean): Promise<ColdWitness[]> => {
+      const qualified: ColdWitness[] = [];
+      if (!ownedPid || !census || !Array.isArray(census.agents) || !census.agents.length || !Number.isFinite(Date.parse(census.observed_at)))
+        throw new Error("Cold owner census unavailable");
+      const host = /^(\d+):(\d+)$/.exec(census.host_id || "");
+      if (!host || census.project_key !== hash) throw new Error("Cold owner host identity unavailable");
+      const hostPid = Number(host[1]), hostBirth = Number(host[2]);
+      if (!Number.isSafeInteger(hostPid) || hostPid <= 0 || !Number.isSafeInteger(hostBirth) || hostBirth <= 0)
+        throw new Error("Cold owner host identity invalid");
+      if (hostPid === ownedPid) {
+        protectGuiOwner = true;
+        throw new Error("Cold owner identity overlaps GUI; refusing to signal it");
+      }
+      const actualHost = await state(hostPid);
+      if (!actualHost || actualHost.birth !== hostBirth) throw new Error("Cold owner birth changed");
+      for (const launch of await launches()) {
+        const matches = census.agents.filter(agent => agent.session_id === launch.gwt_session_id);
+        const actualChild = await state(launch.pid);
+        if (!actualChild) {
+          if (matches.length) throw new Error("Current census recorder child is absent or unknown");
+          continue;
+        }
+        const command = processCommand(launch.pid);
+        const providerPath = providerPaths.find(path => command.includes(path));
+        if (!providerPath) throw new Error("Live recorded child lacks private recorder path");
+        if (matches.length !== 1 || !matches[0].window_id || !Number.isSafeInteger(matches[0].runtime_incarnation) || matches[0].runtime_incarnation <= 0)
+          throw new Error("Live recorded child lacks exact current census");
+        const session = launch.gwt_session_id;
+        if (!session || !/^[0-9a-f-]{36}$/i.test(session)) throw new Error("Invalid owned Session id");
+        const sidecar = JSON.parse(await readFile(join(home, ".gwt", "sessions", "runtime", String(hostPid), `${session}.json`), "utf8"));
+        if (sidecar.child_pid !== launch.pid || sidecar.child_started_at !== actualChild.birth || sidecar.host_started_at !== hostBirth
+          || sidecar.runtime_incarnation !== matches[0].runtime_incarnation || actualChild.parent !== hostPid)
+          throw new Error("Cold owner runtime identity mismatch");
+        if (Object.hasOwn(sidecar, "execution_identity")
+          && (!sidecar.execution_identity || sidecar.execution_identity.session_id !== session
+            || sidecar.execution_identity.execution_binding?.session_id !== session))
+          throw new Error("Cold owner execution identity mismatch");
+        const cwd = await processCwd(launch.pid), expectedCwd = await realpath(launch.cwd);
+        if (cwd !== expectedCwd || !(cwd === home || cwd.startsWith(home + "/"))) throw new Error("Cold owner child cwd mismatch");
+        if (qualified.some(witness => witness.session === session || witness.childPid === launch.pid))
+          throw new Error("Duplicate cold owner recorder identity");
+        const witness = { session, childPid: launch.pid, childBirth: actualChild.birth, hostPid, hostBirth,
+          incarnation: matches[0].runtime_incarnation, identity: JSON.stringify(sidecar.execution_identity ?? null),
+          window: matches[0].window_id, cwd, providerPath };
+        qualified.push(witness);
+        if (capture) witnesses.push(witness);
+      }
+      if (!qualified.length) throw new Error("Cold owner has no qualified live witness");
+      return qualified;
+    };
+    try {
+      await qualifyCohort(true);
+      const current = await qualifyCohort(false);
+      if (JSON.stringify(current) !== JSON.stringify(witnesses)) throw new Error("Cold owner cohort changed before GUI shutdown");
+    } catch (error) { errors.push(error); }
+
+    // Always attempt each cleanup independently; no observer failure may skip
+    // the GUI receipt or leave the handle assigned to this fixture.
+    try {
+      if (!protectGuiOwner && child?.pid && child.exitCode === null && child.signalCode === null) {
+        const current = child;
+        current.kill("SIGTERM");
+        const deadline = Date.now() + 8_000;
+        while (current.exitCode === null && current.signalCode === null && Date.now() < deadline) await delay(100);
+        if (current.exitCode === null && current.signalCode === null) {
+          current.kill("SIGKILL");
+          const forced = Date.now() + 8_000;
+          while (current.exitCode === null && current.signalCode === null && Date.now() < forced) await delay(100);
+        }
+        if (current.exitCode === null && current.signalCode === null) throw new Error(`Fixture gwt process ${current.pid} remained after shutdown`);
+      }
+    } catch (error) { errors.push(error); }
+    if (!errors.length) {
+      try {
+        const deadline = performance.now() + 30_000;
+        while (performance.now() < deadline) {
+          const observations = await Promise.all(witnesses.map(async witness => ({ host: await state(witness.hostPid), child: await state(witness.childPid), witness })));
+          if (performance.now() >= deadline) throw new Error("Cold owner natural reap not observed before deadline");
+          if (observations.every(({ host, child, witness }) => (!host || host.birth !== witness.hostBirth)
+            && (!child || child.birth !== witness.childBirth))) { natural = true; break; }
+          await delay(100);
+        }
+        if (!natural) throw new Error("Cold owner natural reap not observed before deadline");
+      } catch (error) { errors.push(error); }
+    }
+    const providerPreFallback: unknown[] = [];
+    for (const witness of witnesses) {
+      try {
+        const current = await state(witness.childPid);
+        const same = current?.birth === witness.childBirth;
+        providerPreFallback.push({ at: new Date().toISOString(), pid: witness.childPid, session_id: witness.session,
+          state: !current ? "absent" : same ? "observed" : "replaced", birth: current?.birth ?? null,
+          parent_pid: current?.parent ?? null, private_path_match: same ? await privateChild(witness) : false });
+      } catch (error) {
+        providerPreFallback.push({ at: new Date().toISOString(), pid: witness.childPid, state: "unknown" });
+        errors.push(error);
+      }
+    }
+    if (!natural) {
+      for (const witness of witnesses) {
+        try {
+          if (await privateChild(witness)) {
+            process.kill(witness.childPid, "SIGTERM");
+            const deadline = performance.now() + 5_000;
+            while (performance.now() < deadline && await privateChild(witness)) await delay(100);
+            if (await privateChild(witness)) throw new Error(`Owned recorder ${witness.childPid} remained after cleanup`);
+          }
+        } catch (error) { errors.push(error); }
+      }
+    }
+    try {
+      const actorEvents = (await readFile(join(home, "switch-actor.jsonl"), "utf8").catch(() => ""))
+        .split("\n").filter(Boolean).map(line => JSON.parse(line));
+      for (const event of actorEvents) {
+        if (!event.tree_child_pid) continue;
+        try {
+          const command = spawnSync("ps", ["-p", String(event.tree_child_pid), "-o", "command="], { encoding: "utf8" });
+          if (command.error) throw command.error;
+          if (command.stdout.includes("GWT_SWITCH_TREE_CHILD") && command.stdout.includes(home)) {
+            try { process.kill(event.tree_child_pid, "SIGTERM"); } catch { /* exited */ }
+          }
+        } catch (error) { errors.push(error); }
+      }
+    } catch (error) { errors.push(error); }
+    try {
+      if (ownedPid) {
+        let exited = false;
+        try {
+          exited = !processCommand(ownedPid);
+          if (!exited) errors.push(new Error(`Fixture gwt process ${ownedPid} remained after shutdown`));
+        } catch (error) { errors.push(error); }
+        try {
+          await testInfo.attach("fixture-process-cleanup", { body: JSON.stringify({ pid: ownedPid, exited,
+            provider_pre_fallback: providerPreFallback, cold_owner: { natural, witnesses: witnesses.map(({ identity: _identity, window: _window, cwd: _cwd, providerPath: _providerPath, ...witness }) => witness) } }), contentType: "application/json" });
+        } catch (error) { errors.push(error); }
+      } else errors.push(new Error("Cold GUI PID unavailable"));
+    } finally {
+      if (child && (child.exitCode !== null || child.signalCode !== null)) child = undefined;
+    }
+    if (errors.length) {
+      // A later ordinary finally must not signal an unqualified old child.
+      coldCleanupFailed = true;
+      throw new AggregateError(errors, "Cold owner restart or cleanup failed");
+    }
+    return start();
+  }
   async function start() {
     const urlFile = join(home, `url-${++incarnation}.txt`);
     const logFile = join(home, `gwt-${incarnation}.log`);
@@ -545,5 +764,5 @@ readline.createInterface({input:process.stdin}).on('line', line => {
   }
   await start();
   return { get url() { return url; }, get ownedPid() { return child?.pid; }, home, project, branch, argvLog, launches, stop,
-    async restart() { await stop(); return start(); } };
+    async restart(options?: { coldOwner: ColdCensus }) { if (options) return coldRestart(options.coldOwner); await stop(); return start(); } };
 }

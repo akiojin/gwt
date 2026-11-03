@@ -10,7 +10,7 @@ import { chmod, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { execFileSync, spawnSync } from "node:child_process";
 import { basename, dirname, join } from "node:path";
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
-import { startExactRelaunchFixture, writeFixtureNodeCommand, type ExactRelaunchInvocation } from "./_helpers/exact-relaunch";
+import { readLatestOwnActivity, startExactRelaunchFixture, writeFixtureNodeCommand, type ExactRelaunchInvocation } from "./_helpers/exact-relaunch";
 import { gotoLiveGwt, liveGwtProjectUrl, sendLiveGwtEvent } from "./_helpers/live-gwt";
 
 type AgentWindow = { id: string; session_id: string; status: string; agent_id: string };
@@ -741,7 +741,7 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       await expect(page.locator('.workspace-window[data-preset="settings"]')).toHaveCount(0);
       const oldPid = fixture.ownedPid;
       await snapshot("before-restart");
-      const restarted = await fixture.restart();
+      const restarted = await fixture.restart({ coldOwner: await readLatestOwnActivity(page) });
       expect(fixture.ownedPid).not.toBe(oldPid);
       await gotoLiveGwt(page, restarted, { enableTestBridge: true });
       await snapshot("after-restart");
@@ -963,7 +963,7 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
       await expect(rows.first()).toHaveAttribute("data-state", "running");
       await expect(main.locator(".works-active")).toHaveText("Active 5");
       await assertAggregates();
-      const restarted = await fixture.restart(); workspace = null; usage = null; activity = null;
+      const restarted = await fixture.restart({ coldOwner: await readLatestOwnActivity(page) }); workspace = null; usage = null; activity = null;
       await gotoLiveGwt(page, restarted, { enableTestBridge: true, suppressProjectSurfaces: true });
       await page.locator('.op-rail__surface[data-surface="works"]').click();
       await expect(rows).toHaveCount(5, { timeout: 90_000 });
@@ -1203,8 +1203,9 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
 
       // App restart: the checkout process stops with the agent window open and
       // the fresh process restores it with the same exact resume identity.
+      const coldOwner = await readLatestOwnActivity(page);
       await page.close();
-      await fixture.restart();
+      await fixture.restart({ coldOwner });
       restored = await browserContext.newPage();
       errors = capture(restored);
       await gotoLiveGwt(restored, fixture.url, { enableTestBridge: true });
