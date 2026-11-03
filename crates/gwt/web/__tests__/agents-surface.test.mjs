@@ -666,6 +666,7 @@ test("configured PM remains a selectable named member with lossless roster revis
 test("project app shares one tuning controller and routes role receipts without reconnect replay", () => {
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
   assert.equal((app.match(/= createMemberTuningModel\(routeProjectKey/g) || []).length, 1);
+  assert.match(app, /case "pm_status":\s*tuningController\.applyPmTuningStatus\(event\)/);
   assert.match(app, /case "pm_launch_profile_result":\s*tuningController\.applyPmTuningResult\(event\)/);
   assert.match(app, /tuningController\.applyRosterTuningSnapshot\(event\.roster, event\.request_id, \{ accepted \}\)/);
   assert.match(app, /tuningController\.applyRosterTuningError\(event\)/);
@@ -697,14 +698,15 @@ test("shared PM availability disables Agents edits and Retry until a fresh canon
   f.rosterModel.update(state => ({ ...state, members: state.members.map(member => member.member_id === "m1" ? { ...member, pm_project_key: "project" } : member) })); f.flush();
   c.editTuning("pm", "m1", { model: "draft" });
   c.applyTuningError({ project_key: "project", role: "pm", member_id: "m1", request_id: sent[0].request_id, message: "Refused" });
-  const panel = createPmSettingsPanel({ document: f.document, projectKey: "project", tuningController: c });
-  panel.applyStatus({ project_key: "project", available: false }); f.surface.sync();
+  const panel = createPmSettingsPanel({ document: f.document, projectKey: "project" });
+  const receiveStatus = status => { c.applyPmTuningStatus(status); panel.applyStatus(status); };
+  receiveStatus({ project_key: "project", available: false }); f.surface.sync();
   const input = f.surface.element.querySelector('[data-member-tuning-field="model"]');
   assert.equal(input.value, "draft"); assert.equal(input.disabled, true);
   assert.equal(f.surface.element.querySelector('[data-action="retry-tuning"]').disabled, true);
   c.editTuning("pm", "m1", { model: "unsafe" }); c.retryTuning("pm", "m1");
   assert.equal(sent.length, 1); assert.equal(c.model.read().targets["pm:m1"].draft.model, "draft");
-  panel.applyStatus({ project_key: "project", available: true, configured_member_id: "m1", profile_revision: "fresh", configured_agent_id: "codex", configured_model: "saved" }); f.surface.sync();
+  receiveStatus({ project_key: "project", available: true, configured_member_id: "m1", profile_revision: "fresh", configured_agent_id: "codex", configured_model: "saved" }); f.surface.sync();
   assert.equal(input.disabled, false); assert.equal(input.value, "draft");
 });
 

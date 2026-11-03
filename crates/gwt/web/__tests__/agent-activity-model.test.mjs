@@ -95,7 +95,8 @@ test("shared member tuning serializes each role and preserves drafts through con
     member_id: "m1", agent_id: "codex", model, reasoning, revision });
   const flush = () => { for (const callback of [...frames]) { frames.delete(callback); callback(); } };
   applyTuningSnapshot(saved("implementation", "core-1"));
-  applyTuningSnapshot(saved("pm", "pm-1"));
+  controller.applyPmTuningStatus({ project_key: "project", available: true, configured_member_id: "m1",
+    profile_revision: "pm-1", configured_agent_id: "codex", configured_model: null, configured_reasoning: null });
   editTuning("implementation", "m1", { model: "custom/model", reasoning: "high" });
   assert.deepEqual(sent[0].action, { kind: "set_tuning", member_id: "m1", model: "custom/model",
     reasoning: "high", expected_core_revision: "core-1" });

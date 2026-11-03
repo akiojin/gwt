@@ -899,7 +899,9 @@ test("PM settings receiver resolves only shared model updates", () => {
   const panelFile = 'crates/gwt/web/pm-settings-panel.js';
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
   const panel = readFileSync(new URL('../pm-settings-panel.js', import.meta.url), 'utf8');
-  const modules = new Map([[panelFile, panel]]);
+  const modelFile = 'crates/gwt/web/agent-activity-model.js';
+  const model = readFileSync(new URL('../agent-activity-model.js', import.meta.url), 'utf8');
+  const modules = new Map([[panelFile, panel], [modelFile, model]]);
   const receiverFindings = source => scanModule(source, appFile, { modules })
     .filter(finding => finding.root === 'receive' && /^\/pm_status(\/|$)/.test(finding.context));
   assert.deepEqual(receiverFindings(app), []);
@@ -913,6 +915,11 @@ test("PM settings receiver resolves only shared model updates", () => {
   assert.notEqual(directRender, panel, 'mutation must target the factory receiver');
   assert.ok(scanModule(directRender, panelFile, { rootName: 'applyPmSettingsReceiveEvent' })
     .some(finding => finding.kind.startsWith('dom-')));
+  const directTuningRender = model.replace('function applyPmTuningStatus(status) {',
+    'function applyPmTuningStatus(status) { element.textContent = status.kind;');
+  assert.notEqual(directTuningRender, model, 'mutation must target the actual shared PM data receiver');
+  assert.ok(scanModule(app, appFile, { modules: new Map([[panelFile, panel], [modelFile, directTuningRender]]) })
+    .some(finding => finding.root === 'receive' && finding.context === '/pm_status' && finding.kind === 'dom-write'));
 });
 
 test("Profile receivers resolve only shared model updates", () => {

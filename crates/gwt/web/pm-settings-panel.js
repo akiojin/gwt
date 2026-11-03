@@ -102,7 +102,7 @@ function agentLabel(state, agentId) {
   return match ? match.name : agentId;
 }
 
-export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, projectKey, tuningController, onOpenMember = () => {}, onNavigateProject = () => {}, onReloadProfile = null } = {}) {
+export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, projectKey, onOpenMember = () => {}, onNavigateProject = () => {}, onReloadProfile = null } = {}) {
   if (!document) throw new TypeError("createPmSettingsPanel requires a document");
   const dispatch = typeof send === "function" ? send : () => {};
   const ask = typeof confirm === "function"
@@ -385,13 +385,6 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, 
   }
 
   function applyPmSettingsReceiveEvent(status) {
-    if (status?.project_key && projectKey && status.project_key !== projectKey) { tuningController?.setPmMember(null); model.update(() => normalizeStatus(status)); return; }
-    if (status?.available === false || status?.configured_member_id) tuningController?.setPmMember(status?.available === false ? null : status.configured_member_id);
-    tuningController?.setPmProfileAvailable(status?.available !== false && !!status?.profile_revision && !!status?.configured_agent_id);
-    if (status?.available !== false && status?.configured_member_id && status?.profile_revision && status?.configured_agent_id) {
-      tuningController?.applyTuningSnapshot({ project_key: projectKey, role: "pm", member_id: status.configured_member_id,
-        revision: status.profile_revision, agent_options: status.agent_options, agent_id: status.configured_agent_id, model: status.configured_model, reasoning: status.configured_reasoning });
-    }
     model.update(previous => { const next = normalizeStatus(status); return { ...next, memberId: next.available ? next.memberId || previous.memberId : next.memberId }; });
   }
 

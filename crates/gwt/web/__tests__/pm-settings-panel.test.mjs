@@ -69,7 +69,7 @@ function fixture({ confirmAnswer = true, mounts = 1 } = {}) {
   };
   const tuningController = createMemberTuningModel("project", { onSave: event => sent.push(event), scheduleFrame: callback => { frames.add(callback); return () => frames.delete(callback); } });
   const panel = createPmSettingsPanel({
-    projectKey: "project", tuningController, onOpenMember: memberId => openedMembers.push(memberId), onReloadProfile: () => reloaded.push(true),
+    projectKey: "project", onOpenMember: memberId => openedMembers.push(memberId), onReloadProfile: () => reloaded.push(true),
     document,
     scheduleFrame(callback) { frames.add(callback); return () => frames.delete(callback); },
     send: (event) => sent.push(event),
@@ -87,7 +87,8 @@ function fixture({ confirmAnswer = true, mounts = 1 } = {}) {
     panel.mount(view);
     views.push(view);
   }
-  const applyStatus = panel.applyStatus.bind(panel);
+  const applyPanelStatus = panel.applyStatus.bind(panel);
+  const applyStatus = status => { tuningController.applyPmTuningStatus(status); applyPanelStatus(status); };
   // Existing interaction assertions observe a completed display frame.
   panel.applyStatus = status => { applyStatus(status); flush(); };
   return { document, sent, confirmed, panel, views, applyStatus, frames, flush, tuningController, openedMembers, reloaded };
@@ -711,4 +712,50 @@ test("PM Settings keeps operational controls and routes profile editing to Agent
   assert.equal(Boolean(document.querySelector('[data-member-tuning-field]')), false);
   assert.ok(document.querySelector('[data-role="pm-open-member"]'));
   for (const role of ['pm-running-as', 'pm-pending-chip', 'pm-auto-start', 'pm-pause-toggle', 'pm-loop-interval', 'pm-restart']) assert.ok(document.querySelector(`[data-role="${role}"]`));
+});
+
+test("PM tuning rejects missing project authority and incomplete own identity without overwriting its retained profile", () => {
+  const { panel, tuningController: c, sent } = fixture(); panel.applyStatus(RUNNING_STATUS);
+  const known = c.model.read().targets['pm:pm-member'].canonical;
+  const { project_key: _project, ...unqualified } = RUNNING_STATUS;
+  panel.applyStatus({ ...unqualified, profile_revision: 'unqualified-token', configured_model: 'unqualified-model' });
+  let target = c.model.read().targets['pm:pm-member'];
+  assert.equal(target.available, false, 'a route fallback cannot authorize an unqualified status');
+  assert.deepEqual(target.canonical, known);
+  panel.applyStatus(RUNNING_STATUS);
+  panel.applyStatus({ ...RUNNING_STATUS, configured_member_id: null, profile_revision: 'anonymous-token', configured_model: 'anonymous-model' });
+  target = c.model.read().targets['pm:pm-member'];
+  assert.equal(target.available, false, 'an absent configured UUID cannot reuse displayed identity');
+  assert.deepEqual(target.canonical, known);
+  c.editTuning('pm', 'pm-member', { model: 'must-not-send' }); assert.equal(sent.length, 0);
+});
+
+test("an explicit foreign PM status leaves a healthy own tuning target unchanged", () => {
+  const { panel, tuningController: c } = fixture(); panel.applyStatus(RUNNING_STATUS);
+  const known = c.model.read();
+  panel.applyStatus({ ...RUNNING_STATUS, project_key: 'foreign', configured_member_id: 'foreign-member', profile_revision: 'foreign-token', configured_model: 'foreign-model' });
+  assert.deepEqual(c.model.read(), known, 'foreign metadata neither hydrates nor revokes the current project target');
+});
+
+test("a late PM receipt after authority revocation cannot restore edits or replay a newer draft", () => {
+  const { panel, tuningController: c, sent, flush } = fixture(); panel.applyStatus(RUNNING_STATUS);
+  c.editTuning('pm', 'pm-member', { model: 'submitted' }); const request = sent[0];
+  c.editTuning('pm', 'pm-member', { model: 'newer draft' });
+  panel.applyStatus({ ...RUNNING_STATUS, profile_revision: null, configured_agent_id: null });
+  c.applyPmTuningResult({ project_key: 'project', member_id: 'pm-member', request_id: request.request_id, success: true,
+    profile_revision: 'receipt-token', profile: { agent_id: 'claude', model: 'submitted', reasoning: null } }); flush();
+  assert.equal(c.model.read().targets['pm:pm-member'].available, false, 'matching late result alone cannot restore authority');
+  assert.equal(c.model.read().targets['pm:pm-member'].draft.model, 'newer draft');
+  c.editTuning('pm', 'pm-member', { model: 'must-not-send' }); assert.equal(sent.length, 1);
+  panel.applyStatus({ ...RUNNING_STATUS, profile_revision: 'fresh-token', configured_model: 'submitted' }); flush();
+  assert.equal(c.model.read().targets['pm:pm-member'].available, true);
+  assert.equal(c.model.read().targets['pm:pm-member'].draft.model, 'newer draft');
+  assert.equal(sent.length, 1, 'fresh status restores reviewable editing without replaying the interrupted write');
+  c.editTuning('pm', 'pm-member', { model: 'reviewed draft' }); c.retryTuning('pm', 'pm-member');
+  const nextRequest = sent[1]; assert.ok(nextRequest, 'an explicit reviewed edit/retry can save after fresh status');
+  panel.applyStatus({ ...RUNNING_STATUS, profile_revision: null });
+  c.applyPmTuningResult({ project_key: 'project', member_id: 'pm-member', request_id: nextRequest.request_id, success: false,
+    profile_revision: 'failure-readback-token', profile: { agent_id: 'claude', model: 'submitted', reasoning: null }, message: 'Profile refused' });
+  assert.equal(c.model.read().targets['pm:pm-member'].available, false, 'failed canonical readback also cannot restore authority');
+  assert.equal(c.model.read().targets['pm:pm-member'].draft.model, 'reviewed draft');
 });

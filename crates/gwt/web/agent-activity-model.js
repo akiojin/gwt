@@ -300,7 +300,7 @@ export function createMemberTuningModel(projectKey, { onSave = () => {}, schedul
     return { agent_id, model: profile.model?.trim() || null, reasoning };
   };
   const equal = (left, right, role) => JSON.stringify(values(left, role)) === JSON.stringify(values(right, role));
-  const update = (key, reduce) => model.update(state => ({ targets: { ...state.targets, [key]: reduce(state.targets[key]) } }));
+  function setTarget(key, next) { model.update(state => ({ targets: { ...state.targets, [key]: next } })); }
 
   function sendNext() {
     for (const [key, target] of Object.entries(model.read().targets)) {
@@ -315,8 +315,8 @@ export function createMemberTuningModel(projectKey, { onSave = () => {}, schedul
         : { kind: "agent_roster", project_key: projectKey, request_id: requestId,
           action: { kind: "set_tuning", member_id: canonical.member_id, model: profile.model,
             reasoning: profile.reasoning, expected_core_revision: canonical.revision } };
-      update(key, current => ({ ...current, status: "saving", error: "", field: null,
-        pending: { request_id: requestId, profile, baseRevision: canonical.revision } }));
+      setTarget(key, { ...target, status: "saving", error: "", field: null,
+        pending: { request_id: requestId, profile, baseRevision: canonical.revision } });
       try { onSave(request); } catch (_error) {
         applyTuningError({ project_key: projectKey, role: canonical.role, member_id: canonical.member_id,
           request_id: requestId, message: "Profile could not be sent. Retry when connected." });
@@ -332,24 +332,26 @@ export function createMemberTuningModel(projectKey, { onSave = () => {}, schedul
     const previous = model.read().targets[key];
     // Correlated old receipts cannot update a target after its request ended.
     if (requestId && previous?.pending?.request_id !== requestId) return;
-    update(key, current => {
+    function nextSnapshot(current) {
       if (!current) return { canonical: snapshot, available: true, draft: values(snapshot), status: "saved", error: "",
         field: null, blocked: false, composing: false, pending: null };
       if (requestId && current.pending && current.canonical.revision !== current.pending.baseRevision && current.canonical.revision !== snapshot.revision) {
         return { ...current, pending: null, status: "error", blocked: true, error: "This profile changed elsewhere. Reload the current profile, review your draft and retry." };
       }
-      const next = { ...current, available: true, canonical: { ...current.canonical, ...snapshot } };
+      const next = { ...current, available: snapshot.role === "pm" ? current.available : true, canonical: { ...current.canonical, ...snapshot } };
       if (requestId && current.pending) {
         next.pending = null;
         if (!equal(snapshot, current.pending.profile, snapshot.role)) {
           return { ...next, status: "error", blocked: true,
             error: "This profile changed elsewhere. Review your draft and retry." };
         }
+        if (current.blocked) return { ...next, status: "error", blocked: true, error: current.error };
         next.status = current.composing ? "editing" : equal(current.draft, current.pending.profile, snapshot.role) ? "saved" : "queued";
         next.blocked = false; next.error = ""; next.field = null;
       } else if (current.status === "saved" && !equal(snapshot, current.canonical, snapshot.role)) next.draft = values(snapshot);
       return next;
-    });
+    }
+    setTarget(key, nextSnapshot(previous));
   }
 
   function editTuning(role, memberId, patch, { composing = false } = {}) {
@@ -357,8 +359,8 @@ export function createMemberTuningModel(projectKey, { onSave = () => {}, schedul
     if (!target || target.available === false || !patch || Object.keys(patch).some(field => !["agent_id", "model", "reasoning"].includes(field)
       || patch[field] !== null && typeof patch[field] !== "string")) return;
     if (role === "implementation" && patch.agent_id !== undefined && patch.agent_id !== target.canonical.agent_id) return;
-    update(key, current => ({ ...current, draft: { ...current.draft, ...patch }, composing,
-      status: composing ? "editing" : current.blocked ? "error" : current.pending ? "saving" : "queued" }));
+    setTarget(key, { ...target, draft: { ...target.draft, ...patch }, composing,
+      status: composing ? "editing" : target.blocked ? "error" : target.pending ? "saving" : "queued" });
     sendNext();
   }
 
@@ -366,24 +368,44 @@ export function createMemberTuningModel(projectKey, { onSave = () => {}, schedul
     if (event?.project_key !== projectKey) return;
     const key = keyFor(event.role, event.member_id), target = model.read().targets[key];
     if (!event.request_id || target?.pending?.request_id !== event.request_id) return;
-    update(key, current => ({ ...current, pending: null, status: "error", blocked: true,
-      error: event.message || "Profile could not be saved. Review your draft and retry.", field: event.field || null }));
+    setTarget(key, { ...target, pending: null, status: "error", blocked: true,
+      error: event.message || "Profile could not be saved. Review your draft and retry.", field: event.field || null });
   }
 
   function retryTuning(role, memberId) {
     const key = keyFor(role, memberId), target = model.read().targets[key];
     if (!target?.blocked || target.available === false || target.pending || target.composing) return;
-    update(key, current => ({ ...current, status: "queued", blocked: false, error: "", field: null }));
+    setTarget(key, { ...target, status: "queued", blocked: false, error: "", field: null });
     sendNext();
   }
 
   function setTuningAvailable(role, memberId, available) {
     const key = keyFor(role, memberId);
-    if (model.read().targets[key]) update(key, target => ({ ...target, available }));
+    const target = model.read().targets[key];
+    if (target) setTarget(key, { ...target, available, ...(role === "pm" && !available
+      ? { blocked: true, status: target.pending ? target.status : "error", error: target.error || "PM profile unavailable. Reload the current profile, review your draft and retry." } : {}) });
   }
 
   function setPmProfileAvailable(available) {
     if (pmMemberId) setTuningAvailable("pm", pmMemberId, available);
+  }
+
+  function applyPmTuningStatus(status) {
+    if (typeof status?.project_key === "string" && status.project_key && status.project_key !== projectKey) return;
+    if (status?.project_key !== projectKey || status.available !== true
+      || typeof status.configured_member_id !== "string" || !status.configured_member_id.trim()
+      || typeof status.profile_revision !== "string" || !status.profile_revision.trim()
+      || typeof status.configured_agent_id !== "string" || !status.configured_agent_id.trim()) {
+      for (const target of Object.values(model.read().targets)) {
+        if (target.canonical.role === "pm") setTuningAvailable("pm", target.canonical.member_id, false);
+      }
+      return;
+    }
+    setPmMember(status.configured_member_id);
+    applyTuningSnapshot({ project_key: projectKey, role: "pm", member_id: status.configured_member_id,
+      revision: status.profile_revision, agent_options: status.agent_options, agent_id: status.configured_agent_id,
+      model: status.configured_model, reasoning: status.configured_reasoning });
+    setTuningAvailable("pm", status.configured_member_id, true);
   }
 
   function applyRosterTuningSnapshot(roster, requestId, { accepted = null } = {}) {
@@ -450,7 +472,7 @@ export function createMemberTuningModel(projectKey, { onSave = () => {}, schedul
   }
 
   model.subscribeFrame(state => Object.values(state.targets).some(target => target.status === "queued"), sendNext);
-  return { model, applyTuningSnapshot, editTuning, applyTuningError, retryTuning, disconnectTuning, setPmMember, setTuningAvailable, setPmProfileAvailable, applyRosterTuningSnapshot, applyRosterTuningError, applyPmTuningResult };
+  return { model, applyTuningSnapshot, editTuning, applyTuningError, retryTuning, disconnectTuning, setPmMember, setTuningAvailable, setPmProfileAvailable, applyPmTuningStatus, applyRosterTuningSnapshot, applyRosterTuningError, applyPmTuningResult };
 }
 
 // Inputs are session-attributed measurements, never provider account totals.

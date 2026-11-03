@@ -4081,7 +4081,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       // The controller is created before Settings so pm_status may hydrate its
       // shared snapshot before the first Settings window is mounted.
       const { applyStatus: applyPmSettingsReceiveEvent, ...pmSettingsPanel } = createPmSettingsPanel({
-        document, send, projectKey: routeProjectKey, tuningController,
+        document, send, projectKey: routeProjectKey,
         onReloadProfile: () => requestAgentRoster(),
         onOpenMember: memberId => { openSurface("agents"); agentsSurface.selectMember(memberId); },
         onNavigateProject: projectKey => window.location.assign(projectUrlPath(projectKey)),
@@ -5246,6 +5246,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
             tuningController.applyPmTuningResult(event);
             break;
           case "pm_status":
+            tuningController.applyPmTuningStatus(event);
             // SPEC-3431 FR-026: the whole panel state arrives in one snapshot.
             applyPmSettingsReceiveEvent(event);
             pmLauncherModel.update(state => ({ ...state, paused: Boolean(event.paused) }));
