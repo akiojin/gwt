@@ -1,6 +1,23 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.148.2] - 2026-11-03
+
+### Bug Fixes
+
+- **ui:** Detect missing xterm beside attachment progress
+- **pm:** PM wake の通信失敗を有限再試行にする
+- **pm:** 保留中の wake の再試行回数を維持する
+- **terminal:** Preserve history scrolling and forced selection
+
+### Miscellaneous Tasks
+
+- **work:** Record issue 6691 delivery continuation
+
+### Testing
+
+- **terminal:** Use the native forced selection modifier
+
 ## [9.148.1] - 2026-11-03
 
 ### Bug Fixes
