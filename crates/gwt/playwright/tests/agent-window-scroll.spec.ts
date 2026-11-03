@@ -178,6 +178,8 @@ async function prepareClipboard(page: Page): Promise<void> {
 }
 
 async function expectDragCopiesRenderedRows(page: Page, info: TestInfo, phase: string, windowId = "agent-1", shift = false): Promise<void> {
+  const platform = await page.evaluate(() => (navigator as any).userAgentData?.platform || navigator.platform || "");
+  const modifier = /mac|iphone|ipad|ipod/i.test(platform) ? "Alt" : "Shift";
   const selection = await agentTile(page, windowId).locator(".xterm-screen").evaluate((screen, id) => {
     const rows = [...screen.querySelectorAll<HTMLElement>(".xterm-rows > div")];
     const start = rows[2].getBoundingClientRect();
@@ -191,7 +193,7 @@ async function expectDragCopiesRenderedRows(page: Page, info: TestInfo, phase: s
       text: rows.slice(2, 8).map(row => row.textContent!.trimEnd()).join("\n") };
   }, windowId);
   const inputsBefore = shift ? await terminalInputs(page, windowId) : [];
-  if (shift) await page.keyboard.down("Shift");
+  if (shift) await page.keyboard.down(modifier);
   await page.mouse.move(selection.x1, selection.y1);
   await page.mouse.down();
   await page.mouse.move(selection.x2, selection.y2, { steps: 12 });
@@ -218,13 +220,12 @@ async function expectDragCopiesRenderedRows(page: Page, info: TestInfo, phase: s
   const copy = page.getByRole("menuitem", { name: "Copy", exact: true });
   await expect(copy).toBeEnabled();
   await copy.click();
-  if (shift) await page.keyboard.up("Shift");
+  if (shift) await page.keyboard.up(modifier);
   await expect.poll(() => page.evaluate(async () => (await navigator.clipboard.readText()).replace(/\r\n/g, "\n")))
     .toBe(selection.text);
   await page.evaluate(() => navigator.clipboard.writeText("clipboard reset"));
   // Match the browser platform used by classifyTerminalCopyKeyEvent. macOS
   // intentionally leaves Ctrl-based keys on the PTY path and copies with Cmd+C.
-  const platform = await page.evaluate(() => (navigator as any).userAgentData?.platform || navigator.platform || "");
   const shortcut = /mac|iphone|ipad|ipod/i.test(platform) ? "Meta+c" : /win/i.test(platform) ? "Control+c" : "Control+Shift+c";
   await info.attach(`copy-shortcut-${phase}`, { body: JSON.stringify({ platform, shortcut }), contentType: "application/json" });
   const nativeCopiesBefore = await page.evaluate(() => (window as any).__nativeCopyEvents?.length || 0);
