@@ -45,9 +45,37 @@ test("Windows terminal mouse tracking lets xterm receive plain wheel events", ()
   fixture.dispose();
 });
 
+test("retained history takes wheel ownership while the application tracks the mouse", () => {
+  for (const windows of [true, false]) {
+    const fixture = mountFixture({
+      isWindowsHost: () => windows,
+      applicationScrollFallback: true,
+      terminalOptions: {
+        buffer: { active: { type: "normal", baseY: 180 } },
+        modes: { mouseTrackingMode: "any" },
+      },
+    });
+    const event = wheelEvent(fixture.window, { deltaY: -96 });
+
+    fixture.terminalRoot.dispatchEvent(event);
+
+    assert.equal(event.defaultPrevented, true);
+    assert.deepEqual(fixture.scrollCalls, [-3]);
+    assert.deepEqual(fixture.inputCalls, [], "history must not send PageUp or mouse input");
+    assert.equal(fixture.bubbledWheelCount, 0);
+    fixture.dispose();
+  }
+});
+
 test("Ctrl and Meta wheel bypass terminal override for canvas zoom routing", () => {
   for (const modifier of ["ctrlKey", "metaKey"]) {
-    const fixture = mountFixture({ isWindowsHost: () => true });
+    const fixture = mountFixture({
+      isWindowsHost: () => true,
+      terminalOptions: {
+        buffer: { active: { baseY: 180 } },
+        modes: { mouseTrackingMode: "any" },
+      },
+    });
     const event = wheelEvent(fixture.window, { deltaY: 96, [modifier]: true });
 
     fixture.terminalRoot.dispatchEvent(event);
@@ -262,6 +290,12 @@ test("app.js wires application wheel fallback only through agent window presets"
     /sendTerminalInput:\s*\(data\)\s*=>\s*\{[\s\S]*?send\(\{\s*kind:\s*"terminal_input",\s*id:\s*windowId,\s*data\s*\}\);[\s\S]*?\}/,
     "agent fullscreen wheel fallback must send PageUp/PageDown through terminal_input",
   );
+});
+
+test("terminal bindings explain forced selection and enable the macOS modifier", () => {
+  const appSource = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+  assert.match(appSource, /terminalContainer\.title\s*=\s*[\s\S]*?Shift\+drag[\s\S]*?Option\+drag/);
+  assert.match(appSource, /macOptionClickForcesSelection:\s*true/);
 });
 
 function mountFixture({
