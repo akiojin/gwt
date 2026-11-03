@@ -188,6 +188,115 @@ test.describe("terminal-grid responsiveness (#5117)", () => {
     });
   });
 
+  test("unfocused terminal renders real output while another window keeps focus", async ({ page }, info) => {
+    await withLiveGwtBackendLock(base!, info, async () => {
+      const errors: string[] = [];
+      const created: string[] = [];
+      const theme = info.project.name.includes("light") ? "light" : "dark";
+      page.on("pageerror", error => errors.push(error.message));
+      page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+      await gotoLiveGwt(page, base!, { enableTestBridge: true });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      try {
+        const id = await createShell(page, created);
+        const beforeSplit = new Set((await projectWindows(page)).map(window => window.id));
+        await page.locator("#split-view-button").click();
+        const right = page.getByRole("region", { name: "Right pane", exact: true });
+        const board = right.locator('.workspace-window[data-preset="board"]');
+        await expect(board).toBeVisible();
+        for (const window of await projectWindows(page)) if (!beforeSplit.has(window.id)) created.push(window.id);
+        const peerId = (await board.getAttribute("data-id"))!;
+        const target = page.locator(`.workspace-window[data-id="${id}"]`);
+        const peer = board.locator(".board-textarea");
+        await expect(target.locator(".xterm-rows")).toBeVisible();
+        await peer.focus();
+        await expect(peer).toBeFocused();
+        const suffix = `${Date.now()}`;
+        const marker = `GWT_AC13_${suffix}`;
+        await page.evaluate(({ id, peerId, marker }) => {
+          const target = document.querySelector(`.workspace-window[data-id="${id}"]`)!;
+          const rows = target.querySelector(".xterm-rows")!;
+          const peer = document.querySelector(`.workspace-window[data-id="${peerId}"] .board-textarea`)!;
+          const socket = [...((window as any).__gwtPlaywrightSockets as WebSocket[])].reverse()
+            .find(candidate => candidate.readyState === WebSocket.OPEN
+              && new URL(candidate.url).searchParams.has("repo_hash"));
+          if (!socket) throw new Error("no live project socket");
+          let receivedAt: number | undefined;
+          let received = "";
+          let focusEvents = 0;
+          let deadline: ReturnType<typeof setInterval> | undefined;
+          const state: any = { result: null };
+          const check = () => {
+            if (receivedAt === undefined || state.result) return;
+            const elapsedMs = performance.now() - receivedAt;
+            const rendered = rows.textContent!.includes(marker);
+            if (rendered || elapsedMs >= 1_000) state.result = {
+              elapsedMs, rendered, focusEvents, peerFocused: document.activeElement === peer,
+              targetFocused: target.contains(document.activeElement), documentHidden: document.hidden,
+              bufferMatched: window.__gwtTerminalTestApi.bufferText(id).includes(marker),
+              renderedText: rows.textContent,
+            };
+          };
+          const onMessage = (event: MessageEvent) => {
+            const payload = JSON.parse(String(event.data));
+            if (!["terminal_output", "terminal_snapshot"].includes(payload.kind)
+              || payload.id !== id || receivedAt !== undefined) return;
+            received += atob(payload.data_base64);
+            if (!received.includes(marker)) {
+              received = received.slice(-marker.length);
+              return;
+            }
+            receivedAt = performance.now();
+            deadline = setInterval(check, 100);
+            check();
+          };
+          const onFocus = () => { focusEvents += 1; };
+          const observer = new MutationObserver(check);
+          observer.observe(rows, { childList: true, characterData: true, subtree: true });
+          socket.addEventListener("message", onMessage);
+          target.addEventListener("focusin", onFocus);
+          state.restore = () => {
+            clearInterval(deadline);
+            observer.disconnect();
+            socket.removeEventListener("message", onMessage);
+            target.removeEventListener("focusin", onFocus);
+          };
+          (window as any).__gwtAc13PeerPaint = state;
+        }, { id, peerId, marker });
+        // Split the printf format and argument so echoed input cannot satisfy
+        // the marker. This is real PTY output, with native animation scheduling.
+        await sendLiveGwtEvent(page, { kind: "terminal_input", id,
+          data: `printf 'GWT_AC13_%s\\n' '${suffix}'\r` });
+        await page.waitForFunction(() => (window as any).__gwtAc13PeerPaint.result,
+          undefined, { polling: 100, timeout: 15_000 });
+        const observation = await page.evaluate(() => (window as any).__gwtAc13PeerPaint.result);
+        await info.attach("Unfocused real PTY receive to rendered rows", {
+          body: JSON.stringify({ theme, id, peerId, marker, observation }), contentType: "application/json",
+        });
+        expect(observation.bufferMatched, "actual output reached the canonical buffer").toBe(true);
+        expect(observation.rendered, "renderer rows advance without focusing the target").toBe(true);
+        expect(observation.elapsedMs, "receive to rendered rows within one second").toBeLessThanOrEqual(1_000);
+        expect(observation.documentHidden).toBe(false);
+        expect(observation.targetFocused).toBe(false);
+        expect(observation.peerFocused).toBe(true);
+        expect(observation.focusEvents).toBe(0);
+        await expect(target.locator(".xterm-rows")).toBeVisible();
+        await expect(peer).toBeFocused();
+        await info.attach("Two visible windows with peer focus", { body: await page.screenshot(), contentType: "image/png" });
+      } finally {
+        await page.evaluate(() => (window as any).__gwtAc13PeerPaint?.restore());
+        await page.locator('.op-rail__surface[data-surface="works"]').click();
+        if (await page.locator("#split-surfaces").getAttribute("data-split") === "true")
+          await page.locator("#split-view-button").click();
+        for (const id of created.reverse()) {
+          await sendLiveGwtEvent(page, { kind: "close_window", id });
+          await expect(page.locator(`.workspace-window[data-id="${id}"]`)).toHaveCount(0);
+        }
+      }
+      expect(errors, "console and page errors").toEqual([]);
+    });
+  });
+
   test("snapshot preserves split UTF-8 output through the live terminal pipeline", async ({ page }, info) => {
     await withLiveGwtBackendLock(base!, info, async () => {
       const errors: string[] = [];
