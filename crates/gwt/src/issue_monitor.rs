@@ -2998,6 +2998,8 @@ pub enum MonitorFailureKind {
     /// fleet at once, and an operator reading N unclassified rows cannot see
     /// that. On 2026-10-03 it held four rows whose messages were byte-identical.
     HookTrust,
+    /// The launcher never created an agent window before its deadline.
+    LaunchWindowTimeout,
     /// Nothing recognisable. Read `error_message`.
     Unclassified,
 }
@@ -3006,6 +3008,11 @@ impl MonitorFailureKind {
     /// Classify a durable failure message.
     #[must_use]
     pub fn classify(message: &str) -> Self {
+        if message.contains(WINDOWLESS_LAUNCH_TIMEOUT_MESSAGE)
+            || message.starts_with("Launch stalled: no window for ")
+        {
+            return Self::LaunchWindowTimeout;
+        }
         if message.contains("reclaim loop detected") {
             return Self::ReclaimLoop;
         }
@@ -3043,6 +3050,7 @@ impl MonitorFailureKind {
             Self::ReclaimLoop => "reclaim_loop",
             Self::LaunchProcessExit => "launch_process_exit",
             Self::HookTrust => "hook_trust",
+            Self::LaunchWindowTimeout => "launch_window_timeout",
             Self::Unclassified => "unclassified",
         }
     }
@@ -9649,6 +9657,29 @@ impl IssueMonitorState {
     /// own, so a gate reading the bare floor would keep the Issue out for
     /// good after another candidate was released.
     pub(crate) fn retry_ready_for_saved_profile(&self, issue_number: u64, now: &str) -> bool {
+        // Issue #6689: retry window creation one at a time. An already reserved
+        // delivery must not veto itself (or another restored reservation).
+        // Once a window exists, its implementation no longer holds this lane.
+        if self.autonomous_mode && self.is_launch_window_timeout_retry(issue_number) {
+            let reservations = self.pending_claim_issue_numbers();
+            let creating_window = |number: u64| {
+                self.is_launch_window_timeout_retry(number)
+                    && !self.launched_windows.contains_key(&number)
+                    && !self.pending_launch_deliveries.iter().any(|delivery| {
+                        delivery.issue_number == number && delivery.materialized_window_id.is_some()
+                    })
+                    && (self.active_launches.contains(&number) || reservations.contains(&number))
+            };
+            if !creating_window(issue_number)
+                && self
+                    .active_launches
+                    .iter()
+                    .chain(reservations.iter())
+                    .any(|number| creating_window(*number))
+            {
+                return false;
+            }
+        }
         if self.launch_auto {
             let holds = parse_rfc3339_utc(now).map_or_else(
                 || self.provider_quota_holds.clone(),
@@ -13233,6 +13264,18 @@ impl IssueMonitorState {
         for failed in &disk.failed_issues {
             let issue_number = failed.issue_number;
             if failed.message.trim().is_empty()
+                // Suppress only the exact automatically released failure.
+                // A lower disk watermark can also carry a concurrent terminal
+                // decision that supersedes an uncommitted local retry.
+                || (self.released_failures.get(&issue_number).is_some_and(|release| {
+                    release.release_version > disk.failure_release_version
+                        && release.retry_record.as_ref().is_some_and(|record| {
+                            record.last_failure_message.as_deref() == Some(failed.message.as_str())
+                        })
+                }) && !disk.autonomous_records.iter().any(|record| {
+                    record.issue_number == issue_number
+                        && record.phase == AutonomousPhase::NeedsHuman
+                }))
                 || (skip_migration_tombstones && self.is_migrated_failure_tombstone(failed))
                 || disk
                     .released_failures
@@ -18273,6 +18316,9 @@ impl IssueMonitorState {
             }
         }
         queue.last_seen_at = Some(now.to_string());
+        for number in issue_numbers {
+            self.recover_failed_launch_window_timeout(*number, now);
+        }
         self.apply_priority_order_to_queue();
     }
 
@@ -18548,8 +18594,12 @@ impl IssueMonitorState {
             return None;
         }
         self.reconcile_terminal_queue();
+        let pending_claims = self.pending_claim_issue_numbers();
         let position = self.queue.iter().position(|issue| {
             !self.has_monitor_pane_for_issue(*issue)
+                && (!(self.autonomous_mode && self.is_launch_window_timeout_retry(*issue))
+                    || (!pending_claims.contains(issue)
+                        && self.retry_ready_for_saved_profile(*issue, now)))
                 && !self.cancelled_claim_awaits_runtime(*issue)
                 && !self.open_pr_launch_held(*issue)
                 && self.launch_source_exclusion(*issue).is_none()
@@ -25208,6 +25258,92 @@ impl IssueMonitorState {
         );
     }
 
+    fn is_launch_window_timeout_retry(&self, issue_number: u64) -> bool {
+        self.autonomous_record(issue_number)
+            .and_then(|record| record.last_failure_message.as_deref())
+            .is_some_and(|message| {
+                MonitorFailureKind::classify(message) == MonitorFailureKind::LaunchWindowTimeout
+            })
+    }
+
+    /// Recover old terminal timeout rows through the same durable retry fence
+    /// as new failures. Queue membership alone never grants launch authority.
+    fn recover_failed_launch_window_timeout(&mut self, issue_number: u64, now: &str) {
+        if !self.autonomous_mode
+            || self.issue_is_closed(issue_number)
+            || self.merged_issues.contains(&issue_number)
+            || !self.terminal_queue_contains(issue_number)
+            || self.active_launches.contains(&issue_number)
+            || self.launched_windows.contains_key(&issue_number)
+            || self.process_held_issues.contains(&issue_number)
+            || self.has_monitor_pane_for_issue(issue_number)
+            || self.has_monitor_runtime_census(issue_number)
+            || self
+                .pending_launch_deliveries
+                .iter()
+                .any(|delivery| delivery.issue_number == issue_number)
+            || self
+                .autonomous_record(issue_number)
+                .is_some_and(|record| record.phase == AutonomousPhase::NeedsHuman)
+        {
+            return;
+        }
+        let Some(item) = self.inbox_item(issue_number) else {
+            return;
+        };
+        if item.issue.state != IssueMonitorIssueState::Open
+            || !self.allows_issue_labels(&item.issue)
+            || issue_monitor_candidate_exclusion(&item.issue, self.source_repository).is_some()
+        {
+            return;
+        }
+        let Some(message) = self
+            .failed_issues
+            .get(&issue_number)
+            .filter(|message| {
+                MonitorFailureKind::classify(message) == MonitorFailureKind::LaunchWindowTimeout
+            })
+            .cloned()
+        else {
+            return;
+        };
+        self.record_launch_window_timeout(issue_number, message, now);
+    }
+
+    fn record_launch_window_timeout(&mut self, issue_number: u64, message: String, now: &str) {
+        if self
+            .autonomous_record(issue_number)
+            .is_some_and(|record| record.phase == AutonomousPhase::NeedsHuman)
+        {
+            return;
+        }
+        let max = self.autonomous_tuning.max_attempts;
+        if self.attempt_count(issue_number).saturating_add(1) >= max {
+            let attempt = if self.attempt_count(issue_number) < max {
+                self.record_classified_attempt(
+                    issue_number,
+                    IssueMonitorFailureClass::Infrastructure,
+                )
+            } else {
+                self.attempt_count(issue_number)
+            };
+            self.revoke_launch_binding(issue_number);
+            self.require_fresh_launch_session(issue_number);
+            let record = self.autonomous_record_mut(issue_number);
+            record.last_failure_message = Some(message.clone());
+            record.retry_not_before = None;
+            self.escalate_to_needs_human(issue_number, NeedsHumanKind::UserChoiceRequired,
+                format!("Window creation attempts exhausted ({attempt}/{max}): {message}. After checking host load, retry with issue.monitor.requeue."));
+        } else {
+            self.record_classified_autonomous_failure(
+                issue_number,
+                message,
+                IssueMonitorFailureClass::Infrastructure,
+                now,
+            );
+        }
+    }
+
     /// `bound_window_failure` (Issue #4815): the caller proved the failure
     /// came from the Issue's bound implementation window, so it is never
     /// read as the review's.
@@ -25230,6 +25366,14 @@ impl IssueMonitorState {
         // below it: the stop named a window, so hand the binding to the window
         // that is still there instead of failing the Issue.
         if self.rebind_revoked_launch_to_a_surviving_window(issue_number, &message, now) {
+            return;
+        }
+        // A windowless launch has not entered an agent phase yet. It still
+        // owns a bounded infrastructure retry in unattended mode.
+        if self.autonomous_mode
+            && MonitorFailureKind::classify(&message) == MonitorFailureKind::LaunchWindowTimeout
+        {
+            self.record_launch_window_timeout(issue_number, message, now);
             return;
         }
         // A remote-tracking ref race between concurrent fetches is neither an
@@ -25604,6 +25748,11 @@ pub fn scan_issue_monitor_candidates_for_project_tab_with_provenance(
     let mut summary = scan_issue_monitor_candidates(monitor, issues, now);
     if let Some((observed_source, _)) = monitor.queue_label_observation.as_mut() {
         *observed_source = source;
+    }
+    if source == IssueMonitorCandidateSource::Live {
+        for issue in issues {
+            monitor.recover_failed_launch_window_timeout(issue.number, now);
+        }
     }
     if let Some(diagnosis) = drive_diagnosis {
         monitor.last_error = Some(diagnosis);
@@ -28035,6 +28184,220 @@ mod tests {
                 .error_message
                 .is_none());
         }
+    }
+
+    #[test]
+    fn issue_6689_window_timeout_retries_before_an_agent_phase_and_stops_at_cap() {
+        let now = "2026-07-02T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
+        scan_queued_candidates(&mut monitor, &[issue(42)], now);
+        monitor.autonomous_mode = true;
+        monitor.autonomous_tuning.max_attempts = 2;
+        monitor.record_launch_failed_at(42, WINDOWLESS_LAUNCH_TIMEOUT_MESSAGE, now);
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        assert_eq!(monitor.attempt_count(42), 1);
+        assert_eq!(monitor.autonomous_record(42).unwrap().non_agent_attempts, 1);
+        assert!(!monitor.retry_ready(42, "2026-07-02T00:00:59Z"));
+        assert!(monitor.retry_ready(42, "2026-07-02T00:01:00Z"));
+        assert_eq!(
+            MonitorFailureKind::classify(WINDOWLESS_LAUNCH_TIMEOUT_MESSAGE).slug(),
+            "launch_window_timeout"
+        );
+        monitor.take_autonomous_notices();
+        monitor.record_agent_issue_failed_at(
+            42,
+            WINDOWLESS_LAUNCH_TIMEOUT_MESSAGE,
+            "2026-07-02T00:03:00Z",
+        );
+        assert_eq!(monitor.attempt_count(42), 2);
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::NeedsHuman
+        );
+        assert!(!monitor.queue.contains(&42));
+        let notices = monitor.take_autonomous_notices();
+        assert_eq!(
+            notices
+                .iter()
+                .filter(|notice| notice.notification_transition
+                    == Some(MonitorNotificationTransition::NeedsHuman))
+                .count(),
+            1
+        );
+        monitor.record_launch_failed_at(
+            42,
+            WINDOWLESS_LAUNCH_TIMEOUT_MESSAGE,
+            "2026-07-02T00:04:00Z",
+        );
+        assert_eq!(monitor.attempt_count(42), 2);
+        assert!(monitor.take_autonomous_notices().is_empty());
+    }
+
+    #[test]
+    fn issue_6689_timeout_retry_claims_are_serial_until_the_window_exists() {
+        let now = "2026-07-02T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            max_active: 4,
+            ..Default::default()
+        });
+        scan_queued_candidates(&mut monitor, &[issue(42), issue(43)], now);
+        monitor.autonomous_mode = true;
+        monitor.set_gui_connected(true);
+        for number in [42, 43] {
+            monitor.record_classified_autonomous_failure(
+                number,
+                WINDOWLESS_LAUNCH_TIMEOUT_MESSAGE,
+                IssueMonitorFailureClass::Infrastructure,
+                now,
+            );
+        }
+        let ready = "2026-07-02T00:01:00Z";
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("host/session", ready, 4, |_| false),
+            1
+        );
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("host/session", ready, 4, |_| false),
+            0
+        );
+        // The compatibility launch path observes the same reservation.
+        assert!(monitor.next_launch_request(ready).is_none());
+        let (number, claim_id, effect_id) = monitor
+            .pending_effects
+            .iter()
+            .find_map(|effect| match &effect.payload {
+                IssueMonitorEffectPayload::AcquireClaim {
+                    issue_number,
+                    claim_id,
+                    ..
+                } => Some((*issue_number, claim_id.clone(), effect.effect_id.clone())),
+                _ => None,
+            })
+            .unwrap();
+        assert!(monitor.apply_confirmed_claim(number, claim_id, "host/session", &effect_id, ready));
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("host/session", ready, 4, |_| false),
+            0
+        );
+        monitor.complete_active_launch_at(number, "tab-1::agent-42", ready);
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("host/session", ready, 4, |_| false),
+            1
+        );
+    }
+
+    #[test]
+    fn issue_6689_live_scan_recovers_legacy_timeout_failures_once() {
+        let now = "2026-07-02T00:00:00Z";
+        let issues = (1..=46).map(issue).collect::<Vec<_>>();
+        let mut legacy = test_monitor(IssueMonitorConfig::default());
+        scan_queued_candidates(&mut legacy, &issues, now);
+        for candidate in &issues {
+            legacy.record_agent_issue_failed_at(
+                candidate.number,
+                WINDOWLESS_LAUNCH_TIMEOUT_MESSAGE,
+                now,
+            );
+        }
+        legacy.autonomous_mode = true;
+        let stale = legacy.prefs();
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), stale.clone());
+        scan_issue_monitor_candidates_with_provenance(
+            &mut restored,
+            &issues,
+            IssueMonitorCandidateSource::Cache,
+            Path::new("."),
+            now,
+        );
+        assert_eq!(restored.failure_surge().unwrap().failed, 46);
+        scan_issue_monitor_candidates_with_provenance(
+            &mut restored,
+            &issues,
+            IssueMonitorCandidateSource::Live,
+            Path::new("."),
+            now,
+        );
+        assert!(restored.failure_surge().is_none());
+        assert!(restored
+            .inbox
+            .iter()
+            .all(|item| item.state == MonitorInboxState::Queued));
+        restored.rebase_daemon_driver_prefs(&stale);
+        let mut cold = test_monitor_with_prefs(IssueMonitorConfig::default(), restored.prefs());
+        scan_issue_monitor_candidates_with_provenance(
+            &mut cold,
+            &issues,
+            IssueMonitorCandidateSource::Live,
+            Path::new("."),
+            now,
+        );
+        assert!(cold.failed_issues.is_empty());
+        assert!(cold
+            .inbox
+            .iter()
+            .all(|item| item.state == MonitorInboxState::Queued));
+        assert!(
+            issues
+                .iter()
+                .all(|candidate| cold.attempt_count(candidate.number) == 1),
+            "attempts after recovery: {:?}",
+            cold.autonomous_records
+                .iter()
+                .map(|(number, record)| (*number, record.attempts))
+                .collect::<Vec<_>>()
+        );
+
+        // The same old snapshot can commit a new terminal decision before the
+        // retry scan commits. Its lower watermark does not make that stale.
+        let mut terminal_writer = legacy;
+        terminal_writer.escalate_to_needs_human(
+            1,
+            NeedsHumanKind::UserChoiceRequired,
+            WINDOWLESS_LAUNCH_TIMEOUT_MESSAGE,
+        );
+        cold.rebase_daemon_driver_prefs(&terminal_writer.prefs());
+        assert_eq!(cold.failed_issues.len(), 1);
+        assert!(cold.failed_issues.contains_key(&1));
+        assert!(!cold.released_failures.contains_key(&1));
+        assert_eq!(
+            cold.autonomous_record(1).unwrap().phase,
+            AutonomousPhase::NeedsHuman
+        );
+        assert_eq!(
+            cold.inbox_item(1).unwrap().state,
+            MonitorInboxState::NeedsHuman
+        );
+        assert!(!cold.queue.contains(&1));
+    }
+
+    #[test]
+    fn issue_6689_queue_push_recovers_timeout_without_releasing_other_failures() {
+        let now = "2026-07-02T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
+        scan_queued_candidates(&mut monitor, &[issue(42), issue(43)], now);
+        monitor.record_agent_issue_failed_at(42, WINDOWLESS_LAUNCH_TIMEOUT_MESSAGE, now);
+        monitor.record_agent_issue_failed_at(43, "unrelated failure", now);
+        monitor.terminal_queue_push(&[42, 43], "test", now);
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::AgentFailed,
+            "manual mode retains its hold"
+        );
+        monitor.autonomous_mode = true;
+        monitor.terminal_queue_push(&[42, 43], "test", now);
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        assert_eq!(
+            monitor.inbox_item(43).unwrap().state,
+            MonitorInboxState::AgentFailed
+        );
+        assert_eq!(monitor.attempt_count(42), 1);
     }
 
     #[test]
