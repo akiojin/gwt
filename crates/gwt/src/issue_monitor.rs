@@ -13264,12 +13264,18 @@ impl IssueMonitorState {
         for failed in &disk.failed_issues {
             let issue_number = failed.issue_number;
             if failed.message.trim().is_empty()
-                // A writer that has not observed this release cannot report a
-                // subsequent failure. Keep its older snapshot from spending
-                // the retry budget again after recovery (Issue #6689).
-                || self.released_failures.get(&issue_number).is_some_and(|release| {
+                // Suppress only the exact automatically released failure.
+                // A lower disk watermark can also carry a concurrent terminal
+                // decision that supersedes an uncommitted local retry.
+                || (self.released_failures.get(&issue_number).is_some_and(|release| {
                     release.release_version > disk.failure_release_version
-                })
+                        && release.retry_record.as_ref().is_some_and(|record| {
+                            record.last_failure_message.as_deref() == Some(failed.message.as_str())
+                        })
+                }) && !disk.autonomous_records.iter().any(|record| {
+                    record.issue_number == issue_number
+                        && record.phase == AutonomousPhase::NeedsHuman
+                }))
                 || (skip_migration_tombstones && self.is_migrated_failure_tombstone(failed))
                 || disk
                     .released_failures
@@ -18591,8 +18597,9 @@ impl IssueMonitorState {
         let pending_claims = self.pending_claim_issue_numbers();
         let position = self.queue.iter().position(|issue| {
             !self.has_monitor_pane_for_issue(*issue)
-                && !pending_claims.contains(issue)
-                && self.retry_ready_for_saved_profile(*issue, now)
+                && (!(self.autonomous_mode && self.is_launch_window_timeout_retry(*issue))
+                    || (!pending_claims.contains(issue)
+                        && self.retry_ready_for_saved_profile(*issue, now)))
                 && !self.cancelled_claim_awaits_runtime(*issue)
                 && !self.open_pr_launch_held(*issue)
                 && self.launch_source_exclusion(*issue).is_none()
@@ -28343,6 +28350,28 @@ mod tests {
                 .map(|(number, record)| (*number, record.attempts))
                 .collect::<Vec<_>>()
         );
+
+        // The same old snapshot can commit a new terminal decision before the
+        // retry scan commits. Its lower watermark does not make that stale.
+        let mut terminal_writer = legacy;
+        terminal_writer.escalate_to_needs_human(
+            1,
+            NeedsHumanKind::UserChoiceRequired,
+            WINDOWLESS_LAUNCH_TIMEOUT_MESSAGE,
+        );
+        cold.rebase_daemon_driver_prefs(&terminal_writer.prefs());
+        assert_eq!(cold.failed_issues.len(), 1);
+        assert!(cold.failed_issues.contains_key(&1));
+        assert!(!cold.released_failures.contains_key(&1));
+        assert_eq!(
+            cold.autonomous_record(1).unwrap().phase,
+            AutonomousPhase::NeedsHuman
+        );
+        assert_eq!(
+            cold.inbox_item(1).unwrap().state,
+            MonitorInboxState::NeedsHuman
+        );
+        assert!(!cold.queue.contains(&1));
     }
 
     #[test]
