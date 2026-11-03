@@ -4763,6 +4763,121 @@ async fn issue_5524_wait_rejection_preserves_the_not_launched_reason() {
 
 #[cfg(test)]
 #[test]
+fn issue_5876_committed_wait_survives_a_stale_daemon_writer() {
+    let _prefs_budget = pin_prefs_hang_guard();
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let prefs_path = temp.path().join("issue-monitor.json");
+    let mut monitor = test_monitor(crate::IssueMonitorConfig::default());
+    monitor.complete_active_launch_at(42, "tab-1::agent-42", "2026-06-29T00:00:00Z");
+    monitor.set_autonomous_phase(42, crate::AutonomousPhase::Implementing);
+    monitor.record_autonomous_heartbeat(42, "2026-06-29T00:00:00Z");
+    assert!(monitor
+        .autonomous_record(42)
+        .unwrap()
+        .active_launch_id
+        .is_none());
+    crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed prefs");
+    let mut stale = monitor.clone();
+    let commit = |monitor: &mut crate::IssueMonitorState, control: IssueMonitorControl| {
+        assert!(matches!(
+            try_apply_accepted_issue_monitor_control_with_disk_migration(
+                &prefs_path,
+                monitor,
+                AcceptedIssueMonitorControl::new(control),
+            ),
+            IssueMonitorControlCommit::Committed { .. }
+        ));
+    };
+
+    commit(
+        &mut monitor,
+        IssueMonitorControl::WaitDeclared {
+            issue_number: 42,
+            reason: "verification".to_string(),
+            resume_condition: "slot available".to_string(),
+            at: "2026-06-29T00:10:00Z".to_string(),
+        },
+    );
+    let committed = crate::load_issue_monitor_prefs(&prefs_path).expect("wait ACK");
+    let waiting = monitor
+        .autonomous_wait(42)
+        .cloned()
+        .expect("wait committed");
+    stale.set_autonomous_phase(42, crate::AutonomousPhase::Reviewing);
+    stale.record_autonomous_heartbeat(42, "2026-06-29T00:15:00Z");
+    assert!(persist_daemon_issue_monitor_state(&prefs_path, &mut stale));
+    let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("stale writer commit");
+    assert_eq!(
+        persisted.last_control_receipt,
+        committed.last_control_receipt
+    );
+    assert_eq!(stale.autonomous_wait(42), Some(&waiting));
+    let restored = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), persisted);
+    assert_eq!(restored.autonomous_wait(42), Some(&waiting));
+    let record = restored.autonomous_record(42).unwrap();
+    assert_eq!(record.phase, crate::AutonomousPhase::Reviewing);
+    assert_eq!(
+        record.last_heartbeat.as_deref(),
+        Some("2026-06-29T00:15:00Z")
+    );
+    assert!(crate::issue_monitor::wait_declaration_in_force(
+        restored.autonomous_wait(42).unwrap(),
+        "2026-06-29T02:00:00Z",
+    ));
+
+    monitor = stale.clone();
+    commit(
+        &mut monitor,
+        IssueMonitorControl::WaitCleared {
+            issue_number: 42,
+            at: "2026-06-29T00:20:00Z".to_string(),
+        },
+    );
+    assert!(persist_daemon_issue_monitor_state(&prefs_path, &mut stale));
+    assert!(
+        stale.autonomous_wait(42).is_none(),
+        "clear must not resurrect"
+    );
+    assert_eq!(
+        stale
+            .autonomous_record(42)
+            .unwrap()
+            .last_heartbeat
+            .as_deref(),
+        Some("2026-06-29T00:20:00Z")
+    );
+
+    commit(
+        &mut monitor,
+        IssueMonitorControl::WaitDeclared {
+            issue_number: 42,
+            reason: "CI".to_string(),
+            resume_condition: "checks complete".to_string(),
+            at: "2026-06-29T00:25:00Z".to_string(),
+        },
+    );
+    stale = monitor.clone();
+    commit(
+        &mut monitor,
+        IssueMonitorControl::WaitInvalidated {
+            issue_number: 42,
+            by: "pm".to_string(),
+            reason: "checks complete".to_string(),
+            at: "2026-06-29T00:30:00Z".to_string(),
+        },
+    );
+    assert!(persist_daemon_issue_monitor_state(&prefs_path, &mut stale));
+    let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("invalidation persisted");
+    let restored = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), persisted);
+    assert_eq!(restored.autonomous_wait(42), monitor.autonomous_wait(42));
+    assert!(!crate::issue_monitor::wait_declaration_in_force(
+        restored.autonomous_wait(42).unwrap(),
+        "2026-06-29T00:31:00Z",
+    ));
+}
+
+#[cfg(test)]
+#[test]
 fn issue_5616_wait_control_persists_for_an_untracked_active_runtime() {
     let _prefs_budget = pin_prefs_hang_guard();
     let temp = tempfile::TempDir::new().expect("tempdir");
