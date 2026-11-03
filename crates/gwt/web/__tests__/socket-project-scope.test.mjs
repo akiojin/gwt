@@ -47,6 +47,7 @@ function fixture({ routeProjectKey = null } = {}) {
     resyncProfile: (ids) => context.resyncCalls.push(["profile", ...ids]),
     resyncProjectIndexSearch: (ids) => context.resyncCalls.push(["index", ...ids]),
     resyncSettings: () => context.resyncCalls.push(["settings"]),
+    hookDoctorResyncs: 0, resyncHookDoctor: () => { context.hookDoctorResyncs++; },
     applyPmWindowReceiveEvent: createPmWindowModel().applyPmWindowReceiveEvent,
     appState: { tabs: [], active_tab_id: null }, hubCatalog: null,
     routeProjectKey, routeProjectMissing: false, routeWebSocketUrl, projectUrlPath,
@@ -202,12 +203,15 @@ test("route-bound Project tab reconnects to the same Project only", () => {
   const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
   context.connectSocket();
   sockets[1].open();
+  assert.equal(context.hookDoctorResyncs, 1, "ordinary project connect recovers only Hook Doctor requests");
   sockets[1].close();
   assert.equal(context.closeResetCount, 1, "disconnected Project discards its close preview authority");
   context.connectSocket();
   assert.equal(context.attentionReportCount, 1, "fresh attention is reported for each opened Project connection");
   assert.equal(new URL(sockets.at(-1).url).searchParams.get("repo_hash"), projectA.project_key);
   sockets.at(-1).open();
+  assert.equal(context.hookDoctorResyncs, 2, "ordinary close/reopen recovers pending Hook Doctor reads");
+  assert.equal(context.resyncCalls.length, 0, "normal reconnect must not broadly resync every Settings surface");
   assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }, { kind: "get_system_settings" }], "reconnect re-requests only this client's full sync");
   assert.equal(context.attentionReportCount, 2);
 });

@@ -276,6 +276,47 @@ impl HookRepairPlan {
     }
 }
 
+/// Shared CLI/GUI Doctor collector. Only an explicit repair request writes
+/// managed configuration; trust registration and session adoption stay separate.
+pub fn read_hook_doctor(
+    input: &ManagedHookHealthInput,
+    repair: bool,
+    purpose: Option<HookDoctorPurpose>,
+) -> io::Result<Value> {
+    let managed_hook_bin = crate::managed_assets::managed_hook_bin()?;
+    let _hook_bin = gwt_skills::settings_local::ScopedHookBin::set(&managed_hook_bin);
+    let repair_plan = HookRepairPlan::for_worktree(&input.worktree_root);
+    let repair = if repair {
+        Some(repair_managed_hook_configs(&input.worktree_root)?)
+    } else {
+        None
+    };
+    let mut input = input.clone();
+    if purpose.is_some() && input.expected_hook_bin.is_none() {
+        input = input.with_expected_hook_bin(managed_hook_bin.clone());
+    }
+    let mut health = read_managed_hook_health(&input);
+    let codex_hook_audit = super::append_codex_trust_health_for_doctor(&input, &mut health);
+    let mut payload = serde_json::json!({
+        "codex_hook_audit": codex_hook_audit,
+        "configuration_audit": read_hook_configuration_audit(&input),
+        "managed_hook_bin": managed_hook_bin,
+        "repair_writer": repair.as_ref().map(|_| serde_json::json!({
+            "pid": std::process::id(),
+            "executable": std::env::current_exe().ok(),
+        })),
+        "repair": repair,
+        "repair_plan": repair_plan,
+        "repair_guarantee": "Regenerates managed hook configuration; trust registration and launch success require separate verification.",
+        "health": health,
+    });
+    if purpose == Some(HookDoctorPurpose::ManagedBrowser) {
+        payload["preflight"] = serde_json::to_value(read_managed_browser_preflight(&input))
+            .map_err(io::Error::other)?;
+    }
+    Ok(payload)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookDoctorPurpose {
     ManagedBrowser,

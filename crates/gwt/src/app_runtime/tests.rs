@@ -1194,6 +1194,78 @@ fn runtime_hook_coordination_event(session_id: &str) -> gwt::RuntimeHookEvent {
     }
 }
 
+#[test]
+fn hook_center_uses_connection_project_and_preserves_failed_repair() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let project_a = temp.path().join("a");
+    let project_b = temp.path().join("b");
+    for root in [&project_a, &project_b] {
+        fs::create_dir_all(root).unwrap();
+        init_repo(root);
+    }
+    let config = project_b.join(".claude/settings.local.json");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::write(&config, [0xff]).unwrap();
+    let original = fs::read(&config).unwrap();
+    let tabs = vec![
+        sample_project_tab("a", "A", project_a.clone(), ProjectKind::Git, &[]),
+        sample_project_tab("b", "B", project_b.clone(), ProjectKind::Git, &[]),
+    ];
+    let (mut runtime, events) = sample_runtime_with_events(temp.path(), tabs, Some("a"));
+    let context = runtime.project_context_for_root(&project_b).unwrap();
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    for (request_id, repair) in [(193501, false), (193502, true)] {
+        events.lock().unwrap().clear();
+        let request = serde_json::from_value(serde_json::json!({
+            "kind": "get_hook_doctor", "request_id": request_id, "repair": repair
+        }))
+        .expect("Hook Center request is supported");
+        let immediate =
+            runtime.handle_frontend_event_for_project(&context, "client-b".to_string(), request);
+        assert!(immediate.is_empty(), "Doctor runs off the UI event loop");
+        drain_queued_blocking_tasks(&tasks);
+        let recorded = events.lock().unwrap();
+        let reply = recorded.iter().find_map(|event| {
+            let UserEvent::Dispatch(dispatched) = recorded_project_payload(event) else {
+                return None;
+            };
+            dispatched.iter().find_map(|outbound| {
+                let wire = serde_json::to_value(&outbound.event).unwrap();
+                (wire["kind"] == "hook_doctor").then(|| {
+                    assert!(matches!(&outbound.target, DispatchTarget::Client(id) if id == "client-b"));
+                    wire
+                })
+            })
+        }).expect("correlated Doctor reply");
+        assert_eq!(reply["request_id"], request_id);
+        assert_eq!(reply["project_root"], project_b.to_string_lossy().as_ref());
+        if repair {
+            assert!(reply["report"].is_null());
+            assert!(reply["error"]
+                .as_str()
+                .is_some_and(|error| !error.is_empty()));
+        } else {
+            assert!(reply["error"].is_null());
+            assert_eq!(
+                reply["report"]["configuration_audit"]["asset_root"],
+                project_b.to_string_lossy().as_ref()
+            );
+            assert_eq!(
+                reply["report"]["configuration_audit"]["configs"][0]["state"],
+                "unreadable"
+            );
+            assert!(reply["report"]["repair"].is_null());
+        }
+        assert_eq!(fs::read(&config).unwrap(), original);
+        assert!(
+            !project_a.join(".claude").exists(),
+            "active project A is untouched"
+        );
+    }
+}
+
 pub(super) fn sample_runtime(
     temp_root: &Path,
     tabs: Vec<ProjectTabRuntime>,

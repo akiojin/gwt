@@ -1315,7 +1315,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         // every cleanup event emitted while it was away. Re-subscribe to the
         // operations it still shows as running.
         if (recoverSnapshots === true) resyncSocketSurfaces();
-        else if (socketProjectKey) send({ kind: "get_system_settings" });
+        else if (socketProjectKey) {
+          send({ kind: "get_system_settings" });
+          resyncHookDoctor();
+        }
         syncRunningBranchCleanups();
         requestVisiblePmReports(true);
         requestSupportedAgentRefresh();
@@ -4375,6 +4378,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // document-level <select> guard listeners, wired through this
       // factory.
       const {
+        applyHookDoctorEvent,
         applyGlobalUpdateSettings,
         applyIssueSettingsStatus,
         applyIssueMonitorProfiles,
@@ -4390,6 +4394,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         applySupportedAgentList,
         applySupportedAgentMaintenance,
         requestSupportedAgentRefresh,
+        resyncHookDoctor,
         resyncSettings,
         renderSettingsWindow,
         renderSettingsAgentList,
@@ -5335,6 +5340,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             break;
           case "update_settings":
             applyGlobalUpdateSettings(event);
+            break;
+          case "hook_doctor":
+            applyHookDoctorEvent(event);
             break;
           case "system_settings":
           case "system_settings_updated":

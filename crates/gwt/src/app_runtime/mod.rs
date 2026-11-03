@@ -10906,6 +10906,37 @@ impl AppRuntime {
         generation
     }
 
+    fn spawn_hook_doctor(
+        &self,
+        context: &ProjectContext,
+        client_id: ClientId,
+        request_id: u64,
+        repair: bool,
+    ) {
+        let project_root = context.project_root.clone();
+        let proxy = self.proxy.for_project(context.clone());
+        self.blocking_tasks.spawn(move || {
+            let mut input = gwt::cli::hook::health::ManagedHookHealthInput::new(&project_root);
+            // This is a project audit, not an observation of the GUI parent's
+            // agent Session or its runtime sidecar.
+            input.runtime_state_path = None;
+            let (report, error) =
+                match gwt::cli::hook::health::read_hook_doctor(&input, repair, None) {
+                    Ok(report) => (Some(report), None),
+                    Err(error) => (None, Some(error.to_string())),
+                };
+            proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::HookDoctor {
+                    project_root: project_root.to_string_lossy().into_owned(),
+                    request_id,
+                    report,
+                    error,
+                },
+            )]));
+        });
+    }
+
     fn spawn_agent_backend_connection_probe(
         &mut self,
         client_id: ClientId,
@@ -11249,6 +11280,15 @@ impl AppRuntime {
                     self.update_settings_event(None),
                 )]
             }
+            FrontendEvent::GetHookDoctor { request_id, .. } => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::HookDoctor {
+                    project_root: String::new(),
+                    request_id,
+                    report: None,
+                    error: Some("Open a project to audit managed hooks.".to_string()),
+                },
+            )],
             FrontendEvent::GetSystemSettings => self.system_settings_get_events(client_id),
             FrontendEvent::GetBoardAuthStatus => self.board_auth_status_events(client_id, None),
             FrontendEvent::BoardProviderSignIn { provider } => {
@@ -12433,6 +12473,10 @@ impl AppRuntime {
                 &client_id,
                 self.update_settings_event(Some(&context.project_root)),
             )],
+            FrontendEvent::GetHookDoctor { request_id, repair } => {
+                self.spawn_hook_doctor(context, client_id, request_id, repair);
+                Vec::new()
+            }
             FrontendEvent::GetSystemSettings => self.system_settings_get_events(client_id),
             FrontendEvent::GetBoardAuthStatus => self.board_auth_status_events(client_id, None),
             FrontendEvent::BoardProviderSignIn { provider } => {

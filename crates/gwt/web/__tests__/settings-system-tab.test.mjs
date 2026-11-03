@@ -18,6 +18,7 @@ import { createUiStateStore } from "../ui-state-store.js";
 import { createInteractionGuard } from "../interaction-guard.js";
 import { bindControlExplanations, setControlExplanation } from "../control-explanations.js";
 import { renderCustomAgentEnvEditor } from "../custom-agent-env-editor.js";
+import { renderHookCenterPanel, hookRepairUnavailableReason } from "../hook-center-panel.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
@@ -57,7 +58,7 @@ function loadFunctionWithDeps(name, deps) {
   )();
 }
 
-function createSettingsHarness({ scheduleFrame, onSend } = {}) {
+function createSettingsHarness({ scheduleFrame, onSend, activeProjectTab = () => ({ project_root: "/projects/A", title: "Project A" }) } = {}) {
   const { document, window } = parseHTML("<html><body><main></main></body></html>");
   const sent = [];
   const frames = new Set();
@@ -68,10 +69,10 @@ function createSettingsHarness({ scheduleFrame, onSend } = {}) {
     { member_id: "member-custom", name: "Custom member", agent_id: "fixture-cli", enabled: true },
   ] }, { scheduleFrame: frameScheduler });
   const factory = Function("document", "window", "createInteractionGuard", "createUiStateStore", "setControlExplanation", "bindControlExplanations",
-    "renderIndexSettingsPanel", "renderCustomAgentEnvEditor", `${settingsSource
+    "renderIndexSettingsPanel", "renderCustomAgentEnvEditor", "renderHookCenterPanel", "hookRepairUnavailableReason", `${settingsSource
       .replace(/^import .*;\r?\n/gm, "")
       .replace(/^export /gm, "")}\nreturn createSettingsSurface;`)(
-    document, window, createInteractionGuard, createUiStateStore, setControlExplanation, bindControlExplanations, () => {}, renderCustomAgentEnvEditor,
+    document, window, createInteractionGuard, createUiStateStore, setControlExplanation, bindControlExplanations, () => {}, renderCustomAgentEnvEditor, renderHookCenterPanel, hookRepairUnavailableReason,
   );
   const surface = factory({
     scheduleFrame: frameScheduler,
@@ -84,7 +85,7 @@ function createSettingsHarness({ scheduleFrame, onSend } = {}) {
       return node;
     },
     focusWindowLocally() {},
-    activeProjectTab: () => ({ project_root: "/projects/A", title: "Project A" }),
+    activeProjectTab,
     focusOrSpawnPreset() {}, renderUsagePanel() {},
     indexStatusByProjectRoot: new Map(), pmSettingsPanel: { mount() {} },
     mountIssues(_windowData, host) {
@@ -94,6 +95,146 @@ function createSettingsHarness({ scheduleFrame, onSend } = {}) {
   const body = document.querySelector("main");
   return { surface, body, document, window, sent, flush };
 }
+
+test("Hook Center is a project Settings tab that starts a read-only audit on selection", () => {
+  const { surface, body, sent } = createSettingsHarness();
+  surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
+  const tab = body.querySelector('[data-settings-tab="hooks"]');
+  assert.ok(tab, "Hook Center tab must be available in project Settings");
+  assert.equal(tab.textContent, "Hook Center");
+  assert.equal(body.querySelector('[data-action="repair-managed-hooks"]').disabled, true, "regeneration requires a successful audit");
+  assert.equal(sent.filter(message => message.kind === "get_hook_doctor").length, 0);
+  tab.click();
+  const requests = sent.filter(message => message.kind === "get_hook_doctor");
+  assert.equal(requests.length, 1);
+  assert.deepEqual(requests[0], { kind: "get_hook_doctor", request_id: 1, repair: false });
+});
+
+test("Hook Center correlates immutable replies and keeps repair explicit through errors and retry", () => {
+  const { surface, body, sent, flush } = createSettingsHarness();
+  surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
+  body.querySelector('[data-settings-tab="hooks"]').click();
+  flush();
+  const panel = body.querySelector('[data-settings-panel="hooks"]');
+  const requests = () => sent.filter(message => message.kind === "get_hook_doctor");
+  const initial = surface.hookDoctorModel.read();
+  for (const event of [
+    { project_root: "/projects/B", request_id: 1 },
+    { project_root: "/projects/A", request_id: 99 },
+  ]) surface.applyHookDoctorEvent({ kind: "hook_doctor", ...event, report: { health: { status: "ready" } }, error: null });
+  assert.equal(surface.hookDoctorModel.read(), initial, "foreign and stale replies are ignored");
+  assert.match(panel.textContent, /Loading hook audit/);
+  surface.applyHookDoctorEvent({ kind: "hook_doctor", project_root: "/projects/A", request_id: 1, report: null, error: "Audit unavailable" });
+  flush();
+  assert.equal(panel.querySelector('[role="alert"]').textContent, "Audit unavailable");
+  assert.equal(panel.querySelector('[data-action="repair-managed-hooks"]').disabled, true);
+  panel.querySelector('[data-action="refresh-hook-audit"]').click();
+  assert.deepEqual(requests().at(-1), { kind: "get_hook_doctor", request_id: 2, repair: false });
+  surface.applyHookDoctorEvent({ kind: "hook_doctor", project_root: "/projects/A", request_id: 1, report: { health: { status: "ready" } }, error: null });
+  const report = { health: { status: "needs_attention" }, repair: null, repair_plan: { automatic: ["regenerate_managed_provider_configs"] } };
+  surface.applyHookDoctorEvent({ kind: "hook_doctor", project_root: "/projects/A", request_id: 2, report, error: null });
+  report.health.status = "ready";
+  assert.equal(surface.hookDoctorModel.read()["/projects/A"].report.health.status, "needs_attention");
+  assert.equal(initial["/projects/A"].pending, true);
+  assert.ok(Object.isFrozen(surface.hookDoctorModel.read()["/projects/A"].report.health));
+  flush();
+  assert.match(panel.textContent, /Needs attention/);
+  const staleRepair = panel.querySelector('[data-action="repair-managed-hooks"]');
+  assert.equal(staleRepair.disabled, false, "a successful audit with no bad config permits regeneration");
+  panel.querySelector('[data-action="refresh-hook-audit"]').click();
+  surface.applyHookDoctorEvent({ kind: "hook_doctor", project_root: "/projects/A", request_id: 3,
+    report: { ...report, configuration_audit: { configs: [{ state: "unreadable", path: "/projects/A/.claude/settings.local.json" }] } }, error: null });
+  staleRepair.click();
+  assert.equal(requests().length, 3, "send rechecks the latest model while the enabled DOM awaits its frame");
+  flush();
+  assert.equal(panel.querySelector('[data-action="repair-managed-hooks"]').disabled, true);
+  assert.equal(panel.querySelector('[data-action="refresh-hook-audit"]').disabled, false);
+  assert.match(panel.textContent, /Fix the listed invalid or unreadable configuration, then refresh before regenerating\./);
+  panel.querySelector('[data-action="refresh-hook-audit"]').click();
+  surface.applyHookDoctorEvent({ kind: "hook_doctor", project_root: "/projects/A", request_id: 4, report, error: null });
+  flush();
+  const repair = panel.querySelector('[data-action="repair-managed-hooks"]');
+  assert.equal(repair.disabled, false, "a fresh successful audit re-enables regeneration");
+  repair.click();
+  repair.click();
+  assert.deepEqual(requests().at(-1), { kind: "get_hook_doctor", request_id: 5, repair: true });
+  assert.equal(requests().length, 5, "pending repair cannot be sent twice");
+  flush();
+  assert.equal(panel.querySelector('[data-action="repair-managed-hooks"]').disabled, true);
+  assert.match(panel.textContent, /Regenerating managed hook configuration/);
+  surface.applyHookDoctorEvent({ kind: "hook_doctor", project_root: "/projects/A", request_id: 5, report: { ...report, repair: { repaired: true } }, error: null });
+  flush();
+  assert.match(panel.textContent, /Managed configuration regenerated/);
+  assert.match(panel.textContent, /Trust registration and a new agent session require separate verification/);
+});
+
+test("Hook Center has no audit or repair authority without an active project", () => {
+  const { surface, body, sent, flush } = createSettingsHarness({ activeProjectTab: () => null });
+  surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
+  body.querySelector('[data-settings-tab="hooks"]').click();
+  flush();
+  const panel = body.querySelector('[data-settings-panel="hooks"]');
+  assert.match(panel.textContent, /Open a project to audit managed hooks/);
+  assert.ok([...panel.querySelectorAll("button")].every(button => button.disabled));
+  assert.equal(sent.filter(message => message.kind === "get_hook_doctor").length, 0);
+});
+
+test("Hook Center reconnect recovers pending reads independently of mounted views without replaying repairs", () => {
+  const { surface, body, document, sent, flush } = createSettingsHarness();
+  surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
+  const hooks = body.querySelector('[data-settings-tab="hooks"]');
+  const system = body.querySelector('[data-settings-tab="system"]');
+  const requests = () => sent.filter(message => message.kind === "get_hook_doctor");
+  const reply = (request_id, report) => surface.applyHookDoctorEvent({ kind: "hook_doctor", project_root: "/projects/A", request_id, report, error: null });
+  hooks.click();
+  system.click();
+  assert.equal(typeof surface.resyncHookDoctor, "function", "normal reconnect has a scoped Hook Doctor recovery entry point");
+  surface.resyncHookDoctor();
+  assert.deepEqual(requests(), [
+    { kind: "get_hook_doctor", request_id: 1, repair: false },
+    { kind: "get_hook_doctor", request_id: 2, repair: false },
+  ], "a lost pending audit is replaced even while its tab is hidden");
+  reply(1, { health: { status: "degraded" } });
+  assert.equal(surface.hookDoctorModel.read()["/projects/A"].pending, true);
+  hooks.click();
+  assert.equal(requests().length, 2, "reopening waits for the new read instead of becoming stuck on the old request");
+  reply(2, { health: { status: "ready" }, repair: null });
+  flush();
+  const panel = body.querySelector('[data-settings-panel="hooks"]');
+  panel.querySelector('[data-action="repair-managed-hooks"]').click();
+  system.click();
+  surface.resyncSettings();
+  assert.deepEqual(requests().slice(-2), [
+    { kind: "get_hook_doctor", request_id: 3, repair: true },
+    { kind: "get_hook_doctor", request_id: 4, repair: false },
+  ]);
+  reply(3, { repair: { repaired: true } });
+  assert.equal(surface.hookDoctorModel.read()["/projects/A"].pending, true, "stale repair success is ignored");
+  reply(4, { health: { status: "ready" }, repair: null });
+  flush();
+  assert.equal(surface.hookDoctorModel.read()["/projects/A"].pending, false);
+  assert.match(panel.textContent, /No repair requested/);
+  hooks.click();
+  assert.equal(requests().at(-1).request_id, 5);
+  body.remove();
+  surface.resyncHookDoctor();
+  assert.deepEqual(requests().at(-1), { kind: "get_hook_doctor", request_id: 6, repair: false },
+    "ordinary reconnect recovers pending reads after Settings closes");
+  surface.resyncSettings();
+  assert.deepEqual(requests().at(-1), { kind: "get_hook_doctor", request_id: 7, repair: false },
+    "forced reconnect also recovers pending reads without a mounted Settings view");
+  const reopened = document.createElement("main");
+  document.body.appendChild(reopened);
+  surface.renderSettingsWindow(reopened, { id: "settings-reopened", title: "Settings" });
+  reopened.querySelector('[data-settings-tab="hooks"]').click();
+  assert.equal(requests().length, 7, "reopened view waits for the replacement request");
+  reply(5, { health: { status: "degraded" } });
+  reply(6, { health: { status: "degraded" } });
+  assert.equal(surface.hookDoctorModel.read()["/projects/A"].pending, true);
+  reply(7, { health: { status: "ready" }, repair: null });
+  flush();
+  assert.equal(reopened.querySelector('[data-settings-panel="hooks"]').dataset.hookAuditStatus, "loaded");
+});
 
 test("Custom Agent replies commit immutable snapshots shared by all mounts and registration catalogs", () => {
   const frames = new Set();
