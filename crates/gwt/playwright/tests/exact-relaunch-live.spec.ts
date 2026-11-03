@@ -10,7 +10,7 @@ import { chmod, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { basename, dirname, join } from "node:path";
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
-import { startExactRelaunchFixture, type ExactRelaunchInvocation } from "./_helpers/exact-relaunch";
+import { startExactRelaunchFixture, writeFixtureNodeCommand, type ExactRelaunchInvocation } from "./_helpers/exact-relaunch";
 import { gotoLiveGwt, liveGwtProjectUrl, sendLiveGwtEvent } from "./_helpers/live-gwt";
 
 type AgentWindow = { id: string; session_id: string; status: string; agent_id: string };
@@ -1172,5 +1172,129 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
         await fixture.stop();
       }
     }
+  });
+
+  test("live file drop attaches once to the original owned Session and hides its receipt", async ({ page }, info) => {
+    test.setTimeout(180_000);
+    const fixture = await startExactRelaunchFixture(info, {
+      async prepare({ bin }) {
+        // Retain the generated recorder's version preflight, argv log and
+        // authenticated SessionStart; change only its private stdin reader.
+        const script = join(bin, process.platform === "win32" ? "codex.cjs" : "codex");
+        const provider = await readFile(script, "utf8");
+        const reader = "readline.createInterface({input:process.stdin}).on('line', line => {";
+        const offset = provider.indexOf(reader);
+        expect(offset).toBeGreaterThan(0);
+        await writeFixtureNodeCommand(bin, "codex", provider.slice(0, offset) + `
+if (!process.stdin.isTTY || typeof process.stdin.setRawMode !== 'function') throw new Error('raw PTY unavailable');
+process.stdin.setRawMode(true);
+const rawPath = path.join(process.env.HOME, 'attachment-raw.bin');
+fs.writeFileSync(rawPath, Buffer.alloc(0));
+process.stdin.on('data', bytes => fs.appendFileSync(rawPath, bytes));
+fs.writeFileSync(path.join(process.env.HOME, 'attachment-raw-ready.json'), JSON.stringify({pid:process.pid, session:process.env.GWT_SESSION_ID, raw:process.stdin.isRaw}));
+`);
+      },
+    });
+    const errors = capture(page);
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    const sent: any[] = [], received: any[] = [];
+    page.on("websocket", socket => {
+      socket.on("framesent", ({ payload }) => { try { sent.push(JSON.parse(String(payload))); } catch { /* unrelated frame */ } });
+      socket.on("framereceived", ({ payload }) => { try { received.push(JSON.parse(String(payload))); } catch { /* unrelated frame */ } });
+    });
+    await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
+    const surface = page.locator(".works-surface:not(.works-surface--preview)");
+    const rawPath = join(fixture.home, "attachment-raw.bin");
+    const readyPath = join(fixture.home, "attachment-raw-ready.json");
+    const file = { name: "owned-drop-4777.txt", type: "text/plain", content: "owned attachment proof 4777\n" };
+    try {
+      await page.setViewportSize({ width: 400, height: 1000 });
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+      await launchCodex(page, fixture.branch);
+      await expect.poll(async () => (await fixture.launches()).length, { timeout: 90_000 }).toBe(1);
+      const launch = (await fixture.launches())[0];
+      const session = launch.gwt_session_id!;
+      expect(session).toBeTruthy();
+      await expect.poll(async () => JSON.parse(await readFile(readyPath, "utf8").catch(() => "{}")), { timeout: 30_000 })
+        .toMatchObject({ pid: launch.pid, session, raw: true });
+      const window = await liveCodexWindow(page, session);
+      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      const row = surface.locator(`.work-row[data-window-id="${window.id}"]`);
+      await expect(row).toBeVisible();
+      await row.getByRole("button", { name: "Open terminal" }).click();
+      await expect(surface.locator(".works-full")).toBeVisible();
+      const snapshot = await page.evaluate(({ id, session }) => {
+        const messages = (window as any).__gwtPlaywrightMessages ?? [];
+        return messages.map((entry: any) => entry.payload.kind === "local_agent_activity" ? entry.payload.activity : entry.payload.projection?.local_agent_activity)
+          .filter((value: any) => value?.project_key === location.pathname.split("/")[2]).at(-1);
+      }, { id: window.id, session });
+      const targetAgent = snapshot?.agents?.find((entry: any) => entry.window_id === window.id && entry.session_id === session);
+      expect(snapshot?.host_id).toBeTruthy();
+      expect(targetAgent?.runtime_incarnation).toBeGreaterThan(0);
+      const expectedTarget = { project_key: snapshot.project_key, session_id: session, host_id: snapshot.host_id,
+        runtime_incarnation: targetAgent.runtime_incarnation };
+      const beforeRaw = await readFile(rawPath);
+      const uploadResponse = page.waitForResponse(response => response.request().method() === "POST"
+        && new URL(response.url()).pathname === "/internal/attachments/upload");
+      const progress = surface.locator(".works-full .attachment-progress");
+      const attachedVisible = expect(progress.filter({ hasText: "Attached" })).toBeVisible({ timeout: 30_000 }).then(() => null, error => error);
+      await surface.locator(".works-full-header").evaluate((element, file) => {
+        const transfer = new DataTransfer();
+        transfer.items.add(new File([file.content], file.name, { type: file.type }));
+        for (const type of ["dragover", "drop"]) element.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: transfer }));
+      }, file);
+      const response = await uploadResponse;
+      expect(response.ok()).toBe(true);
+      const upload = await response.json();
+      expect(upload.upload_id).toBeTruthy();
+      await expect.poll(() => sent.filter(event => event.kind === "attach_files"), { timeout: 30_000 }).toHaveLength(1);
+      const operation = sent.find(event => event.kind === "attach_files");
+      expect(operation).toMatchObject({ id: window.id, expected_target: expectedTarget,
+        files: [{ source: "uploaded", upload_id: upload.upload_id, filename: file.name, size: Buffer.byteLength(file.content) }] });
+      expect(operation.operation_id).toBeTruthy();
+      await expect.poll(() => received.filter(event => event.kind === "attachment_progress"
+        && event.operation_id === operation.operation_id && event.phase === "attached"), { timeout: 30_000 }).toHaveLength(1);
+      const attached = received.find(event => event.kind === "attachment_progress" && event.operation_id === operation.operation_id && event.phase === "attached");
+      expect(attached).toMatchObject({ id: window.id, expected_target: expectedTarget });
+      for (const event of received.filter(event => event.kind === "attachment_progress" && event.operation_id === operation.operation_id)) {
+        expect(event).toMatchObject({ id: window.id, expected_target: expectedTarget });
+      }
+      const visibilityError = await attachedVisible;
+      if (visibilityError) throw visibilityError;
+      await expect(progress).toBeHidden({ timeout: 3_000 });
+      await expect.poll(async () => (await readFile(rawPath)).subarray(beforeRaw.length).toString("utf8"), { timeout: 30_000 })
+        .toMatch(/^File: "\.gwt\/drop-files\/[a-zA-Z0-9._-]+-owned-drop-4777\.txt"$/);
+      const afterRaw = await readFile(rawPath);
+      expect(afterRaw.subarray(0, beforeRaw.length)).toEqual(beforeRaw);
+      const body = afterRaw.subarray(beforeRaw.length).toString("utf8");
+      const match = /^File: "(\.gwt\/drop-files\/[a-zA-Z0-9._-]+-owned-drop-4777\.txt)"$/.exec(body);
+      expect(match, "one complete UTF-8 file prompt and no automatic CR/LF").not.toBeNull();
+      expect(await readFile(join(launch.cwd, match![1]), "utf8")).toBe(file.content);
+      expect(afterRaw.subarray(beforeRaw.length)).toEqual(Buffer.from(`File: "${match![1]}"`, "utf8"));
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await page.locator('.op-rail__surface[data-surface="agents"]').click();
+      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      expect((await liveCodexWindow(page, session)).id).toBe(window.id);
+      await page.reload();
+      expect((await liveCodexWindow(page, session)).id).toBe(window.id);
+      await page.waitForFunction(({ id, expected }) => {
+        const messages = (window as any).__gwtPlaywrightMessages ?? [];
+        const latest = messages.map((entry: any) => entry.payload.kind === "local_agent_activity" ? entry.payload.activity : entry.payload.projection?.local_agent_activity)
+          .filter((value: any) => value?.project_key === expected.project_key).at(-1);
+        return latest?.host_id === expected.host_id && latest.agents?.some((agent: any) => agent.window_id === id
+          && agent.session_id === expected.session_id && agent.runtime_incarnation === expected.runtime_incarnation);
+      }, { id: window.id, expected: expectedTarget });
+      expect(await fixture.launches()).toEqual([launch]);
+      expect(sent.filter(event => event.kind === "attach_files")).toHaveLength(1);
+      expect(await readFile(rawPath)).toEqual(afterRaw);
+      expect(errors, "live attachment console and page errors").toEqual([]);
+      await info.attach("live-attachment-proof", { body: JSON.stringify({ theme, session, pid: launch.pid,
+        operation_id: operation.operation_id, expected_target: expectedTarget, upload_id: upload.upload_id,
+        staged_path: match![1], raw_bytes: afterRaw.length - beforeRaw.length }), contentType: "application/json" });
+    } finally {
+      try { await page.goto("about:blank"); }
+      finally { await fixture.stop(); }
+    }
+    expect(errors, "live attachment cleanup errors").toEqual([]);
   });
 });
