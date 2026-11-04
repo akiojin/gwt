@@ -8093,6 +8093,10 @@ mod tests {
     fn pm_request_tasks_operations_parse_only_project_local_typed_requests() {
         for selector in [
             json!({"kind":"summary"}),
+            json!({"kind":"pending"}),
+            json!({"kind":"tasks","limit":100}),
+            json!({"kind":"pending","limit":1,"after":"source-1","expected_revision":2}),
+            json!({"kind":"tasks","after":"task-1","expected_revision":2}),
             json!({"kind":"source","id":"source-1"}),
             json!({"kind":"task","id":"task-1"}),
             json!({"kind":"receipt","operation_id":"operation-1"}),
@@ -8119,6 +8123,13 @@ mod tests {
         for selector in [
             json!({"kind":"source","id":" "}),
             json!({"kind":"summary","id":"unexpected"}),
+            json!({"kind":"pending","limit":0}),
+            json!({"kind":"tasks","limit":101}),
+            json!({"kind":"pending","limit":-1}),
+            json!({"kind":"tasks","after":"task-1"}),
+            json!({"kind":"pending","after":" ","expected_revision":2}),
+            json!({"kind":"tasks","expected_revision":"2"}),
+            json!({"kind":"pending","actor":"forged"}),
         ] {
             assert!(matches!(
                 err("pm.request_tasks.read", json!({"selector":selector})),
