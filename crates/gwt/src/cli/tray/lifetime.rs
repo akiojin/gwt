@@ -1,9 +1,16 @@
 //! Lifetime of a transient `--no-tray` front door (Issue #5219).
 use std::time::{Duration, Instant};
-use sysinfo::{Pid, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System};
+#[cfg(not(windows))]
+use sysinfo::ProcessStatus;
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 pub const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const RECONNECT_GRACE: Duration = Duration::from_secs(5);
+
+#[cfg(all(test, windows))]
+thread_local! {
+    static REFRESH_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// Capture before bootstrap so an orphaned launch cannot adopt its new parent.
 pub struct ParentProcess(Result<Option<(Pid, u64)>, sysinfo::Error>);
@@ -42,23 +49,36 @@ impl ParentProcess {
         if std::os::unix::process::parent_id() != pid.as_u32() {
             return false;
         }
-        // A fresh snapshot also detects PID reuse, rather than retaining the
-        // old process metadata in a long-lived System cache.
-        let Ok(mut system) = System::new() else {
-            return true;
-        };
-        refresh(&mut system, pid);
-        system.process(pid).is_some_and(|process| {
-            process.start_time() == started
-                && !matches!(
-                    process.status(),
-                    ProcessStatus::Dead | ProcessStatus::Zombie
-                )
-        })
+        #[cfg(windows)]
+        {
+            // Native probes read fresh handles without a machine-wide snapshot.
+            // Only definite death or a different incarnation ends this owner.
+            crate::process::host_process_liveness(pid.as_u32()) != Some(false)
+                && crate::process::host_process_start_time(pid.as_u32())
+                    .is_none_or(|current| current == started)
+        }
+        #[cfg(not(windows))]
+        {
+            // A fresh snapshot also detects PID reuse, rather than retaining the
+            // old process metadata in a long-lived System cache.
+            let Ok(mut system) = System::new() else {
+                return true;
+            };
+            refresh(&mut system, pid);
+            system.process(pid).is_some_and(|process| {
+                process.start_time() == started
+                    && !matches!(
+                        process.status(),
+                        ProcessStatus::Dead | ProcessStatus::Zombie
+                    )
+            })
+        }
     }
 }
 
 fn refresh(system: &mut System, pid: Pid) {
+    #[cfg(all(test, windows))]
+    REFRESH_COUNT.with(|count| count.set(count.get() + 1));
     system.refresh_processes_specifics(
         ProcessesToUpdate::Some(&[pid]),
         true,
@@ -108,6 +128,22 @@ mod tests {
     fn missing_parent_is_terminal_and_live_parent_is_detected() {
         assert!(!ParentProcess(Ok(None)).is_alive());
         assert!(ParentProcess(Err(sysinfo::Error::Unsupported)).is_alive());
-        assert!(ParentProcess::capture().is_alive());
+        let parent = ParentProcess::capture();
+        #[cfg(windows)]
+        let refreshes_before_poll = REFRESH_COUNT.get();
+        assert!(parent.is_alive());
+        #[cfg(windows)]
+        {
+            let pid = Pid::from_u32(std::process::id());
+            let started = crate::process::host_process_start_time(pid.as_u32()).unwrap();
+            assert!(ParentProcess(Ok(Some((pid, started)))).is_alive());
+            assert!(!ParentProcess(Ok(Some((pid, started - 1)))).is_alive());
+            assert!(!ParentProcess(Ok(Some((Pid::from_u32(u32::MAX), started)))).is_alive());
+            assert_eq!(
+                REFRESH_COUNT.get(),
+                refreshes_before_poll,
+                "Windows parent polling must avoid full process snapshots"
+            );
+        }
     }
 }

@@ -1,8 +1,11 @@
 import { expect, test, type Page } from "@playwright/test";
-import { spawn } from "node:child_process";
-import { readFile, readdir, writeFile } from "node:fs/promises";
+import { execFile, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
+import { cpus } from "node:os";
+import { promisify } from "node:util";
 import { clearLiveLaunchWizard, gotoLiveGwt, sendLiveGwtEvent, withLiveGwtBackendLock } from "./_helpers/live-gwt";
 
 type Thread = { id: number; name: string; created_file_time: string; kernel_seconds: number; user_seconds: number };
@@ -26,6 +29,12 @@ type IdleReadiness = {
   latest_state_save_utc: string | null; latest_completion_utc: string | null; latest_progress_utc: string | null;
   index_path: string; format: number | null; projection_version: string | null; source_list_present: boolean;
   matched_worktree_groups: number; expected_worktree_groups: number; missing_worktree_roots: string[]; diagnostics: string[];
+  startup_intake: { primary_worktree_root: string; snapshot: string | null; sources: number;
+    index_committed_at: string; committed_after_gui_start: boolean } | null;
+};
+type FullWorkProjection = {
+  received_at: string; work_ids: Set<string>;
+  rows: Array<{ id: string; root: string | null; session_ids: string[]; hook_health_status: string | null }>;
 };
 const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
 const checkout = process.env.GWT_PLAYWRIGHT_PROJECT_ROOT;
@@ -37,12 +46,18 @@ const label = process.env.GWT_IDLE_CPU_LABEL ?? "after";
 const functionalOnly = process.env.GWT_IDLE_FUNCTIONAL_ONLY === "1";
 const assertCpuBudget = process.env.GWT_IDLE_ASSERT_BUDGET === "1";
 const measurementScope = functionalOnly ? "functional (includes startup)" : "steady idle";
-const paneCount = 12;
+const paneCount = Number(process.env.GWT_IDLE_PANE_COUNT ?? "12");
+if (!Number.isInteger(paneCount) || paneCount < 1 || paneCount > 12) throw new Error("Invalid idle pane count");
+const daemonPid = Number(process.env.GWT_IDLE_DAEMON_PID ?? "0");
+const maxDaemonCores = Number(process.env.GWT_IDLE_MAX_DAEMON_CORES ?? "0");
+const nativeProfileSeconds = Number(process.env.GWT_IDLE_PROFILE_SECONDS ?? "0");
+const logicalProcessors = cpus().length;
 const historyLines = 600;
 const paddingBytes = 80;
 const agentId = "idle-cpu-workload";
 const readyPeriodMs = 120000 / 11;
-const intakeProjectionVersion = "source-context-v10-legacy-log-metadata-cache";
+const readyRequestsPerMinute = paneCount * 60_000 / readyPeriodMs;
+const intakeProjectionVersion = "source-context-v11-source-relative-event-containers";
 const idleReadinessTimeoutMs = 1_800_000;
 test.use({ viewport: { width: 1720, height: 1080 }, headless: false });
 
@@ -51,12 +66,15 @@ test.describe("Issue #5658 idle GUI CPU", () => {
     "requires the owned Windows checkout and fresh HOME from issue-5658-browser-check.ps1");
   test.setTimeout(requestedMs + 2_700_000);
 
-  test("twelve launched Agent PTYs stay quiet under authenticated Ready polling", async ({ page }, info) => {
+  test(`${paneCount} launched Agent PTYs stay quiet under authenticated Ready polling`, async ({ page }, info) => {
     await withLiveGwtBackendLock(base!, info, async () => {
       expect(["before", "after"]).toContain(label);
       expect(requestedMs).toBeGreaterThanOrEqual(1000);
       expect(requestedMs).toBeLessThanOrEqual(1_800_000);
       expect(functionalOnly && assertCpuBudget, "functional startup verification cannot assert idle CPU acceptance").toBe(false);
+      expect(functionalOnly && maxDaemonCores > 0, "functional startup verification cannot assert daemon idle CPU acceptance").toBe(false);
+      if (maxDaemonCores > 0) expect(daemonPid, "daemon CPU acceptance requires an owned daemon").toBeGreaterThan(0);
+      if (paneCount === 5) expect(process.env.GWT_IDLE_FIXTURE_PROJECT, "startup intake requires the primary fixture project").toBeTruthy();
       const theme = info.project.name.includes("light") ? "light" : "dark";
       const sampleMs = theme === "dark" ? requestedMs : Math.min(requestedMs, 30_000);
       const errors: string[] = [];
@@ -70,7 +88,11 @@ test.describe("Issue #5658 idle GUI CPU", () => {
       let socketOrdinal = 0;
       const messageKinds = new Map<number, { channel: string; counts: Record<string, number> }>();
       const workspaceFrames = new Map<number, unknown>();
+      let fullWorkProjection: FullWorkProjection | undefined;
       const snapshots: Snapshot[] = [];
+      const daemonSnapshots: Snapshot[] = [];
+      let daemonCores: number | undefined;
+      let primaryFailed = false;
       const trafficSnapshots: Array<Record<string, { raw_chunks: number; raw_bytes: number }>> = [];
       const attachJson = async (name: string, value: unknown) => {
         const path = info.outputPath(`${label}-${theme}-${name}.json`);
@@ -102,6 +124,18 @@ test.describe("Issue #5658 idle GUI CPU", () => {
           try {
             const event = JSON.parse(String(payload));
             counts[event.kind] = (counts[event.kind] ?? 0) + 1;
+            if (event.kind === "active_work_projection" && event.projection) {
+              // Retain the latest full result independently of the browser's
+              // bounded message ring. Cache-only membership patches cannot
+              // prove that the background hook-health aggregation completed.
+              fullWorkProjection = { received_at: new Date().toISOString(),
+                work_ids: new Set((event.projection.works ?? []).map((work: any) => String(work.id))),
+                rows: (event.projection.active_works ?? []).map((work: any) => ({ id: work.id,
+                  root: work.worktree_path ? resolve(work.worktree_path).toLowerCase() : null,
+                  session_ids: [...(work.agents ?? []), ...(work.works ?? []).flatMap((child: any) => child.agents ?? [])]
+                    .map((agent: any) => agent.session_id),
+                  hook_health_status: work.managed_hook_health?.status ?? null })) };
+            }
             if (event.kind === "workspace_state") {
               workspaceFrames.set(connection, { channel, at_utc: new Date().toISOString(),
                 tabs: event.workspace?.tabs?.map((tab: any) => ({ project_key: tab.project_key,
@@ -185,7 +219,7 @@ test.describe("Issue #5658 idle GUI CPU", () => {
               // Custom command PTYs do not assert provider hook Ready.
               && ["starting", "running", "idle"].includes(pane.status))
             .map((pane: any) => pane.id + "/" + pane.session_id).sort() ?? [], agentId),
-          { timeout: 30_000, message: "same twelve live Sessions belong to the current fixture workspace" }).toEqual(expected);
+          { timeout: 30_000, message: "same live Sessions belong to the current fixture workspace" }).toEqual(expected);
           agents.push(...savedFleet.agents);
           created.push(...agents.map(agent => agent.id));
           const previous = await readReceipts(agents);
@@ -194,10 +228,10 @@ test.describe("Issue #5658 idle GUI CPU", () => {
           { timeout: 30_000, message: "every reused Agent authenticates another pane.read with its own capability" }).toBe(true);
           reusedFleet = true;
         } else for (let index = 0; index < paneCount; index += 1) {
-          if (!functionalOnly && index === paneCount - 1) {
+          if (paneCount === 12 && !functionalOnly && index === paneCount - 1) {
             // The prior Agent has completed seed/read readiness. Cross the
             // production 30s ingest-request throttle so the final normal
-            // Launch queues a pass that includes all twelve worktrees.
+            // Launch queues a pass that includes every workload worktree.
             await page.waitForTimeout(31_000);
           }
           const agent = await launchAgent(page, theme, index, created);
@@ -216,18 +250,18 @@ test.describe("Issue #5658 idle GUI CPU", () => {
           await expect.poll(async () => (await readReceipts([agent]))[0].events.filter(event => event.kind === "read" && event.ok).length,
             { timeout: 40_000, message: "each launched Agent authenticates its own pane.read" }).toBeGreaterThan(0);
         }
-        expect(new Set(agents.map(agent => agent.session_id)).size, "twelve distinct launch-issued Sessions").toBe(paneCount);
+        expect(new Set(agents.map(agent => agent.session_id)).size, "distinct launch-issued Sessions").toBe(paneCount);
         await expect(page.locator(".workspace-window")).toHaveCount(paneCount);
         await probeInput("BEFORE");
         if (!reusedFleet) {
           const startAt = Date.now() + 1000;
           for (const [index, id] of created.entries()) {
             await sendLiveGwtEvent(page, { kind: "terminal_input", id,
-              data: JSON.stringify({ kind: "start", at: startAt, index }) + "\r" });
+              data: JSON.stringify({ kind: "start", at: startAt, index, pane_count: paneCount }) + "\r" });
           }
         }
         await expect.poll(async () => (await readReceipts(agents)).filter(receipt => receipt.events.some(event => event.kind === "started")).length,
-          { timeout: 30_000, message: "all twelve Agent periodic timers have actually started" }).toBe(paneCount);
+          { timeout: 30_000, message: "all Agent periodic timers have actually started" }).toBe(paneCount);
         const identities = await readReceipts(agents);
         const latestLaunch = identities.map(receipt => receipt.started_at)
           .reduce((latest, started) => Date.parse(started) > Date.parse(latest) ? started : latest);
@@ -239,19 +273,74 @@ test.describe("Issue #5658 idle GUI CPU", () => {
             idleReadiness = await readIdleReadiness(identities.map(receipt => receipt.cwd), latestLaunch);
             return idleReadiness.ready;
           }, { timeout: idleReadinessTimeoutMs, intervals: [1000, 2000],
-            message: "committed Work event intake covers all twelve newly materialized Agent worktrees" }).toBe(true);
+            message: paneCount === 5 ? "committed startup intake covers the primary fixture project"
+              : "committed Work event intake covers all newly materialized Agent worktrees" }).toBe(true);
         } finally { await attachJson("idle-readiness", idleReadiness); }
-        // No user input or PTY producers run during sampling. The twelve
+        if (paneCount === 5) {
+          // The intake index commits before the full Work view finishes its
+          // cold audits. Freeze its Work frontier once, then wait for that
+          // frontier and the current fleet in one fully prepared backend view.
+          const workIds: string[] = functionalOnly ? [] : JSON.parse(await readFile(
+            join(process.env.GWT_IDLE_PROJECT_STATE!, "works.json"), "utf8")).work_items.map((work: any) => work.id);
+          const sourceCapturedAt = new Date().toISOString();
+          let projectionReadiness: Record<string, unknown> | undefined;
+          try {
+            await expect.poll(() => {
+              const current = fullWorkProjection;
+              const missingWorkIds = workIds.filter(id => !current?.work_ids.has(id));
+              const matches = identities.flatMap(identity => {
+                const row = current?.rows.find(row => row.root === resolve(identity.cwd).toLowerCase()
+                  && row.session_ids.includes(identity.session_id) && row.hook_health_status !== null);
+                return row ? [{ work_id: row.id, session_id: identity.session_id,
+                  worktree_root: identity.cwd, hook_health_status: row.hook_health_status }] : [];
+              });
+              const ready = current !== undefined && Date.parse(current.received_at) >= Date.parse(latestLaunch)
+                && missingWorkIds.length === 0 && matches.length === paneCount;
+              projectionReadiness = { ready, source: "full active_work_projection after hook-health aggregation",
+                source_captured_at: sourceCapturedAt, expected_work_id_count: workIds.length,
+                frontier_required: !functionalOnly, observed_work_id_count: current?.work_ids.size ?? 0,
+                missing_work_id_count: missingWorkIds.length, missing_work_ids: missingWorkIds.slice(0, 10),
+                active_work_rows: current?.rows.length ?? 0,
+                received_at: current?.received_at ?? null, expected_session_count: paneCount,
+                matched_session_count: matches.length, matches };
+              return ready;
+            }, { timeout: idleReadinessTimeoutMs, intervals: [1000, 2000],
+              message: "full Work projection includes the committed Work frontier and five audited current Sessions" }).toBe(true);
+          } finally { await attachJson("work-projection-readiness", projectionReadiness); }
+        }
+        // No user input or PTY producers run during sampling. The launched
         // Agents continue their authenticated, phase-spread pane.read calls.
-        await sampleCpu(sampleMs, snapshot => {
-          snapshots.push(snapshot);
-          if (snapshot.phase === "start") {
-            console.log(`${label}/${theme}: ${measurementScope}; sampling owned GUI ${targetPid} for ${sampleMs / 1000}s from ${snapshot.timestamp_utc}`);
+        if (daemonPid) {
+          const prefs = JSON.parse(await readFile(join(process.env.GWT_IDLE_PROJECT_STATE!, "issue-monitor.json"), "utf8"));
+          expect(prefs.enabled, "measured daemon keeps Issue Monitor OFF").toBe(false);
+        }
+        if (theme === "dark" && nativeProfileSeconds > 0) {
+          const targets = [{ name: "native-profile", pid: targetPid,
+            binary: process.env.GWT_IDLE_GWT_BINARY ?? resolve(checkout!, "target", buildProfile, "gwt.exe") },
+          ...(daemonPid ? [{ name: "native-daemon-profile", pid: daemonPid,
+            binary: process.env.GWT_IDLE_GWTD_BINARY ?? resolve(checkout!, "target", buildProfile, "gwtd.exe") }] : [])];
+          for (const target of targets) {
+            const path = info.outputPath(`${target.name}.json`);
+            await promisify(execFile)("pwsh", ["-NoProfile", "-NonInteractive", "-File",
+              resolve(checkout!, "scripts/diagnostics/issue-6743-sampling.ps1"), "-TargetProcessId", String(target.pid),
+              "-ExpectedBinary", target.binary, "-Seconds", String(nativeProfileSeconds), "-OutputFile", path],
+            { windowsHide: true, timeout: (nativeProfileSeconds + 60) * 1000 });
+            await info.attach(target.name, { path, contentType: "application/json" });
           }
-          trafficSnapshots.push(Object.fromEntries(created.map(id => [id, {
-            raw_chunks: traffic.get(id)?.raw_chunks ?? 0, raw_bytes: traffic.get(id)?.raw_bytes ?? 0,
-          }])));
-        });
+        }
+        const sampling = new AbortController();
+        try {
+          await Promise.all([sampleCpu(targetPid, sampleMs, snapshot => {
+            snapshots.push(snapshot);
+            if (snapshot.phase === "start") {
+              console.log(`${label}/${theme}: ${measurementScope}; sampling owned GUI ${targetPid} for ${sampleMs / 1000}s from ${snapshot.timestamp_utc}`);
+            }
+            trafficSnapshots.push(Object.fromEntries(created.map(id => [id, {
+              raw_chunks: traffic.get(id)?.raw_chunks ?? 0, raw_bytes: traffic.get(id)?.raw_bytes ?? 0,
+            }])));
+          }, sampling.signal), ...(daemonPid ? [sampleCpu(daemonPid, sampleMs,
+            snapshot => daemonSnapshots.push(snapshot), sampling.signal)] : [])]);
+        } finally { sampling.abort(); }
         const [start, end] = snapshots;
         const elapsed = end.elapsed_seconds - start.elapsed_seconds;
         const cpuSeconds = end.process_cpu_seconds - start.process_cpu_seconds;
@@ -267,6 +356,25 @@ test.describe("Issue #5658 idle GUI CPU", () => {
         expect(end.process_started_at).toBe(start.process_started_at);
         expect(end.binary_sha256).toBe(start.binary_sha256);
         expect(elapsed).toBeGreaterThanOrEqual(sampleMs / 1000);
+        if (daemonPid) {
+          const [daemonStart, daemonEnd] = daemonSnapshots;
+          expect(daemonStart.process_id).toBe(daemonPid);
+          expect(daemonEnd.process_id).toBe(daemonPid);
+          expect(daemonEnd.process_started_at).toBe(daemonStart.process_started_at);
+          expect(Date.parse(daemonStart.process_started_at)).toBe(Date.parse(process.env.GWT_IDLE_DAEMON_STARTED_AT!));
+          expect(daemonEnd.binary_sha256).toBe(daemonStart.binary_sha256);
+          const daemonElapsed = daemonEnd.elapsed_seconds - daemonStart.elapsed_seconds;
+          const daemonCpuSeconds = daemonEnd.process_cpu_seconds - daemonStart.process_cpu_seconds;
+          daemonCores = daemonCpuSeconds / daemonElapsed;
+          expect(daemonElapsed).toBeGreaterThanOrEqual(sampleMs / 1000);
+          await attachJson("daemon-cpu", { label, theme, measurement_scope: measurementScope, build_profile: buildProfile,
+            daemon_pid: daemonPid, issue_monitor_enabled: false, requested_sample_ms: sampleMs,
+            elapsed_seconds: daemonElapsed, process_cpu_seconds: daemonCpuSeconds, average_cores: daemonCores,
+            cpu_percent: daemonCores * 100, machine_cpu_percent: daemonCores * 100 / logicalProcessors,
+            logical_processors: logicalProcessors, native_snapshots: daemonSnapshots,
+            budget: { asserted: maxDaemonCores > 0, max_average_cores: maxDaemonCores } });
+          console.log(`${label}/${theme}: daemon ${daemonCpuSeconds.toFixed(6)} CPU s / ${daemonElapsed.toFixed(3)} s = ${daemonCores.toFixed(6)} cores`);
+        }
         const rawDeltas = created.map(id => ({ id,
           raw_bytes: trafficSnapshots[1][id].raw_bytes - trafficSnapshots[0][id].raw_bytes,
           raw_chunks: trafficSnapshots[1][id].raw_chunks - trafficSnapshots[0][id].raw_chunks,
@@ -287,13 +395,15 @@ test.describe("Issue #5658 idle GUI CPU", () => {
         const attempts = ipc.reduce((sum, receipt) => sum + receipt.attempt_count, 0);
         await attachJson("agent-ipc-receipts", receipts);
         await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-        const screenshot = info.outputPath(`${label}-${theme}-twelve-idle-agents.png`);
+        const screenshot = info.outputPath(`${label}-${theme}-${paneCount}-idle-agents.png`);
         await page.screenshot({ path: screenshot });
-        await info.attach("twelve-idle-agents", { path: screenshot, contentType: "image/png" });
+        await info.attach("idle-agents", { path: screenshot, contentType: "image/png" });
         const maxCores = Number(process.env.GWT_IDLE_MAX_CORES ?? "0.2");
         await attachJson("idle-cpu", {
           label, theme, measurement_scope: measurementScope, build_profile: buildProfile, gui_pid: targetPid, requested_sample_ms: sampleMs,
           elapsed_seconds: elapsed, process_cpu_seconds: cpuSeconds, average_cores: averageCores,
+          cpu_percent: averageCores * 100, machine_cpu_percent: averageCores * 100 / logicalProcessors,
+          logical_processors: logicalProcessors,
           native_memory: { scope: "owned native gwt process only; excludes external Chromium and provider processes",
             start_working_set_bytes: start.working_set_bytes, end_working_set_bytes: end.working_set_bytes,
             start_private_memory_bytes: start.private_memory_bytes, end_private_memory_bytes: end.private_memory_bytes,
@@ -302,7 +412,7 @@ test.describe("Issue #5658 idle GUI CPU", () => {
           workload: { kind: "regularly launched custom command Agent PTYs", panes: paneCount, history_lines_per_pane: historyLines,
             padding_bytes_per_line: paddingBytes, ansi_color: true, idle_input_bytes: 0,
             fixture_clone_sha: process.env.GWT_IDLE_FIXTURE_SHA, provider_sha256: process.env.GWT_IDLE_PROVIDER_SHA,
-            ready_requests_per_minute: 66, ready_period_per_agent_ms: readyPeriodMs,
+            ready_requests_per_minute: readyRequestsPerMinute, ready_period_per_agent_ms: readyPeriodMs,
             reused_across_themes: reusedFleet, ipc_attempt_count: attempts,
             offered_ready_requests_per_minute: attempts * 60 / elapsed,
             ipc_success_count: successes, observed_ready_requests_per_minute: successes * 60 / elapsed, agents: ipc },
@@ -326,15 +436,17 @@ test.describe("Issue #5658 idle GUI CPU", () => {
         }
         // Each Agent can straddle one sample boundary. Long observations must
         // sustain the fixed rate; short smoke runs still prove launch/auth above.
-        expect(successes, "phase-spread Ready throughput across twelve Agents")
-          .toBeGreaterThanOrEqual(Math.max(0, Math.floor(66 * elapsed / 60) - paneCount));
+        expect(successes, "phase-spread Ready throughput across launched Agents")
+          .toBeGreaterThanOrEqual(Math.max(0, Math.floor(readyRequestsPerMinute * elapsed / 60) - paneCount));
         expect(errors, "console and page errors").toEqual([]);
+        if (maxDaemonCores > 0) expect(daemonCores, "whole owned Monitor OFF daemon idle CPU budget").toBeLessThanOrEqual(maxDaemonCores);
         if (assertCpuBudget) expect(averageCores, "whole owned GUI idle CPU budget").toBeLessThanOrEqual(maxCores);
-        if (theme === "dark") await writeFile(fleetPath, JSON.stringify({ gui_pid: targetPid,
+        if (theme === "dark" && paneCount !== 5) await writeFile(fleetPath, JSON.stringify({ gui_pid: targetPid,
           gui_started_at: process.env.GWT_PLAYWRIGHT_GUI_STARTED_AT,
           fixture_clone_sha: process.env.GWT_IDLE_FIXTURE_SHA, provider_sha256: process.env.GWT_IDLE_PROVIDER_SHA, agents }));
         verified = true;
       } catch (error) {
+        primaryFailed = true;
         await attachJson("failure-state", {
           error: String(error), markers: Object.fromEntries(markers), socket_events: socketEvents,
           message_kinds: Object.fromEntries(messageKinds), workspace_frames: Object.fromEntries(workspaceFrames),
@@ -344,7 +456,7 @@ test.describe("Issue #5658 idle GUI CPU", () => {
               windows: tab.workspace?.windows?.map((pane: any) => ({ id: pane.id, agent_id: pane.agent_id,
                 session_id: pane.session_id, status: pane.status })) })) ?? null };
           }).catch(String),
-          queue_samples: queueSamples, native_snapshots: snapshots,
+          queue_samples: queueSamples, native_snapshots: snapshots, daemon_snapshots: daemonSnapshots,
           traffic: Object.fromEntries(traffic), input_latency: latency, agents,
           receipts: await readReceipts(agents).catch(() => []),
           visible: await page.evaluate(ids => Object.fromEntries(ids.map(id =>
@@ -352,12 +464,24 @@ test.describe("Issue #5658 idle GUI CPU", () => {
         });
         throw error;
       } finally {
-        await attachJson("errors", errors);
-        // A successful dark run keeps exactly this owned fleet for light.
+        const cleanupFailures: string[] = [];
+        await attachJson("errors", errors).catch(error => { cleanupFailures.push(String(error)); });
+        // The legacy twelve-pane dark run keeps its verified fleet for light.
         // The wrapper always owns final GUI/daemon/process-tree cleanup.
-        for (const id of (theme === "dark" && verified ? [] : created.reverse())) {
-          await sendLiveGwtEvent(page, { kind: "close_window", id });
-          if (verified) await expect(page.locator(`.workspace-window[data-id="${id}"]`)).toHaveCount(0);
+        for (const id of (theme === "dark" && verified && paneCount !== 5 ? [] : [...created].reverse())) {
+          try {
+            await sendLiveGwtEvent(page, { kind: "close_window", id });
+            await page.waitForFunction(id => {
+              const workspace = (window as any).__gwt5658Workspace;
+              return workspace?.tabs.every((tab: any) =>
+                tab.workspace.windows.every((pane: any) => pane.id !== id));
+            }, id, { timeout: 30_000 });
+            await expect(page.locator(`.workspace-window[data-id="${id}"]`)).toHaveCount(0, { timeout: 30_000 });
+          } catch (error) { cleanupFailures.push(`${id}: ${String(error)}`); }
+        }
+        if (cleanupFailures.length) {
+          await attachJson("cleanup-errors", cleanupFailures).catch(error => console.warn(`cleanup evidence: ${String(error)}`));
+          if (!primaryFailed) throw new Error(`Owned fleet cleanup failed: ${cleanupFailures.join("; ")}`);
         }
       }
     });
@@ -367,20 +491,21 @@ test.describe("Issue #5658 idle GUI CPU", () => {
 async function readIdleReadiness(worktreeRoots: string[], latestLaunch: string, requested = true): Promise<IdleReadiness> {
   const observation: IdleReadiness = {
     requested, ready: false, checked_at: new Date().toISOString(), timeout_ms: requested ? idleReadinessTimeoutMs : 0, latest_launch_utc: latestLaunch,
-    readiness_basis: requested ? "committed intake index covering twelve newly materialized worktrees in the fresh single-branch fixture"
+    readiness_basis: requested ? paneCount === 5
+      ? "committed startup intake for the primary fixture project after GUI startup; launched-worktree coverage is diagnostic and is not scheduled by current Launch"
+      : "committed intake index covering newly materialized worktrees in the fresh single-branch fixture"
       : "not requested for functional startup verification",
     perf_diagnostics: { lossy: true, used_for_readiness: false,
       limitation: "SelfBudgetGovernor may omit phase/route records; their absence, timing, and subsequent progress do not gate readiness" },
     latest_state_save_utc: null, latest_completion_utc: null, latest_progress_utc: null,
     index_path: join(process.env.GWT_IDLE_PROJECT_STATE!, "work-events-intake", "index.json"),
     format: null, projection_version: null, source_list_present: false,
-    matched_worktree_groups: 0, expected_worktree_groups: worktreeRoots.length, missing_worktree_roots: [...worktreeRoots], diagnostics: [],
+    matched_worktree_groups: 0, expected_worktree_groups: worktreeRoots.length, missing_worktree_roots: [...worktreeRoots], diagnostics: [], startup_intake: null,
   };
   try {
-    // These twelve worktrees did not exist before normal Launch in this fresh
-    // fixture. The index is written last, after intake and its group snapshots,
-    // so their committed snapshots prove the cold pass included all twelve.
-    // Later incremental polls remain part of the measured workload.
+    // The index is the intake commit point, written after group snapshots.
+    // Current Launch does not schedule another intake; five-pane acceptance
+    // requires completed startup work and records later worktrees diagnostically.
     const index = JSON.parse(await readFile(observation.index_path, "utf8"));
     observation.format = index.format ?? null;
     observation.projection_version = index.projection_version ?? null;
@@ -391,6 +516,16 @@ async function readIdleReadiness(worktreeRoots: string[], latestLaunch: string, 
       .map(([key]) => resolve(key.slice("worktree:".length)).toLowerCase()));
     observation.missing_worktree_roots = worktreeRoots.filter(root => !groups.has(resolve(root).toLowerCase()));
     observation.matched_worktree_groups = worktreeRoots.length - observation.missing_worktree_roots.length;
+    if (paneCount === 5) {
+      const primary = resolve(process.env.GWT_IDLE_FIXTURE_PROJECT!);
+      const group = Object.entries(index.groups ?? {}).find(([key]) => key.startsWith("worktree:")
+        && resolve(key.slice("worktree:".length)).toLowerCase() === primary.toLowerCase())?.[1] as
+        { snapshot?: string | null; sources?: number } | undefined;
+      const committedAt = (await stat(observation.index_path)).mtime;
+      observation.startup_intake = { primary_worktree_root: primary, snapshot: group?.snapshot ?? null,
+        sources: group?.sources ?? 0, index_committed_at: committedAt.toISOString(),
+        committed_after_gui_start: committedAt.getTime() >= Date.parse(process.env.GWT_PLAYWRIGHT_GUI_STARTED_AT!) };
+    }
   } catch (error) { observation.diagnostics.push(`committed index: ${String(error)}`); }
   try {
     const directory = join(process.env.GWT_PLAYWRIGHT_CHECK_HOME!, ".gwt", "logs", "perf");
@@ -410,7 +545,9 @@ async function readIdleReadiness(worktreeRoots: string[], latestLaunch: string, 
   } catch (error) { observation.diagnostics.push(`ingest completion: ${String(error)}`); }
   observation.ready = requested && observation.format === 2
     && observation.projection_version === intakeProjectionVersion && observation.source_list_present
-    && observation.matched_worktree_groups === worktreeRoots.length;
+    && (paneCount === 5 ? observation.startup_intake?.snapshot != null
+      && observation.startup_intake.sources > 0 && observation.startup_intake.committed_after_gui_start
+      : observation.matched_worktree_groups === worktreeRoots.length);
   return observation;
 }
 
@@ -473,15 +610,18 @@ async function launchAgent(page: Page, theme: string, index: number, before: str
     // Normal Launch binds a fixed-tool member; provider registration alone
     // does not make this disposable command tool available in the roster.
     const rosterRequest = async (action: unknown, expectedRevision: number | null = null) => {
-      const after = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
-      await sendLiveGwtEvent(page, { kind: "agent_roster", action, expected_revision: expectedRevision });
-      const roster = await page.waitForFunction(after => {
+      const requestId = randomUUID();
+      await sendLiveGwtEvent(page, { kind: "agent_roster", action, expected_revision: expectedRevision, request_id: requestId });
+      // Ordinary frontend reads can overlap this request. Only its correlated
+      // reply supplies the committed revision for the next member mutation.
+      const reply = await page.waitForFunction(requestId => {
         const message = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) =>
-          entry.sequence > after && entry.payload.kind === "agent_roster");
-        return message?.payload.roster || null;
-      }, after, { timeout: 30_000 }).then(handle => handle.jsonValue());
-      expect(roster.error, "disposable workload member preparation").toBeFalsy();
-      return roster;
+          entry.payload.request_id === requestId && ["agent_roster", "agent_roster_error"].includes(entry.payload.kind));
+        return message?.payload || null;
+      }, requestId, { timeout: 30_000 }).then(handle => handle.jsonValue());
+      expect(reply.kind, reply.message ?? "disposable workload roster reply").toBe("agent_roster");
+      expect(reply.roster.error, "disposable workload member preparation").toBeFalsy();
+      return reply.roster;
     };
     let roster = await rosterRequest({ kind: "read" });
     const available = () => roster.members.filter((member: any) =>
@@ -489,7 +629,7 @@ async function launchAgent(page: Page, theme: string, index: number, before: str
     for (let added = 0; available() < paneCount && added < paneCount; added += 1) {
       roster = await rosterRequest({ kind: "add", agent_id: agentId }, roster.revision);
     }
-    expect(available(), "twelve normally allocated command-tool members").toBe(paneCount);
+    expect(available(), "normally allocated command-tool members").toBe(paneCount);
   }
   // Current Add Agent route: a regular Launch Wizard without a legacy Work
   // surface or an extra owner window. Launch materializes each new worktree.
@@ -522,13 +662,13 @@ async function launchAgent(page: Page, theme: string, index: number, before: str
   return agent;
 }
 
-async function sampleCpu(duration: number, onSnapshot: (snapshot: Snapshot) => void): Promise<void> {
+async function sampleCpu(pid: number, duration: number, onSnapshot: (snapshot: Snapshot) => void, signal: AbortSignal): Promise<void> {
   await new Promise<void>((resolveSample, reject) => {
     const env = { ...process.env };
     for (const key of Object.keys(env)) if (key.startsWith("GWT_") && !key.startsWith("GWT_PLAYWRIGHT_")) delete env[key];
     const child = spawn("pwsh", ["-NoProfile", "-NonInteractive", "-File",
-      resolve(checkout!, "scripts/diagnostics/issue-5658-cpu.ps1"), "-TargetProcessId", String(targetPid),
-      "-SampleMilliseconds", String(duration)], { env, windowsHide: true });
+      resolve(checkout!, "scripts/diagnostics/issue-5658-cpu.ps1"), "-TargetProcessId", String(pid),
+      "-SampleMilliseconds", String(duration)], { env, windowsHide: true, signal });
     let pending = "";
     let stderr = "";
     let count = 0;

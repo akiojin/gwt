@@ -19,6 +19,7 @@ static RUNTIME_CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedRuntime>>> = OnceLoc
 #[cfg(test)]
 thread_local! {
     static RUNTIME_PATH_STAMP_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PROJECT_CENSUS_CAPTURES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn cached_runtime_entry(
@@ -376,7 +377,14 @@ pub struct ProjectSessionCensus {
 }
 
 impl ProjectSessionCensus {
+    #[cfg(test)]
+    pub(crate) fn captures_for_test() -> usize {
+        PROJECT_CENSUS_CAPTURES.with(std::cell::Cell::get)
+    }
+
     pub fn capture(sessions_dir: &Path) -> Self {
+        #[cfg(test)]
+        PROJECT_CENSUS_CAPTURES.with(|count| count.set(count.get().wrapping_add(1)));
         let mut inventory = SessionInventory::default();
         let mut snapshot = None;
         let candidates = read_candidates_scope_with_snapshot(

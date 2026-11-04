@@ -44,6 +44,11 @@ const TICK_SECS: u64 = 30;
 /// this often (or immediately on a forced refresh).
 const CONSUMPTION_CACHE_SECS: i64 = 300;
 
+#[cfg(test)]
+thread_local! {
+    static CONFIRMED_IDENTITY_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Called when the account rows meaningfully change, alongside the client broadcast.
 ///
 /// Issue #3616: the quota classifier lives in `AppRuntime`, which only the tao
@@ -565,6 +570,8 @@ fn collect_sessions_with_clock(
         }
     }
     let confirmed_identity = |session: &gwt_agent::Session| {
+        #[cfg(test)]
+        CONFIRMED_IDENTITY_CALLS.with(|calls| calls.set(calls.get() + 1));
         let project = dunce::canonicalize(
             session
                 .project_state_root
@@ -582,10 +589,12 @@ fn collect_sessions_with_clock(
         // The resident PM has no roster member. Its canonical project-owned
         // container is the stable identity retained across restored Sessions.
         let worktree = dunce::canonicalize(&session.worktree_path).ok()?;
+        if !gwt::pm_registry::is_canonical_pm_worktree(&worktree) {
+            return None;
+        }
         let expected = gwt::pm_registry::pm_worktree_path_for_repo_path(&project);
-        (gwt::pm_registry::is_canonical_pm_worktree(&worktree)
-            && dunce::canonicalize(expected).ok().as_ref() == Some(&worktree))
-        .then_some((ConversationOwner::ProjectManager(worktree), project))
+        (dunce::canonicalize(expected).ok().as_ref() == Some(&worktree))
+            .then_some((ConversationOwner::ProjectManager(worktree), project))
     };
     let mut registered_pms = HashMap::<PathBuf, Option<String>>::new();
     for (session, provider, agent_sid) in references {
@@ -594,6 +603,7 @@ fn collect_sessions_with_clock(
             .expect("every conversation reference has an owner");
         let identity = conversation_owners
             .first()
+            .filter(|_| conversation_owners.len() > 1)
             .and_then(|owner| confirmed_identity(owner));
         let same_identity = identity.as_ref().is_some_and(|identity| {
             conversation_owners
@@ -767,6 +777,7 @@ mod tests {
             claude_account_enabled: false,
         };
         let mut cache = UsageCache::default();
+        let identity_calls_before = CONFIRMED_IDENTITY_CALLS.get();
         let rows = collect_sessions_with_clock(&config, &mut cache, || {
             // This append occurs after observation ends and belongs to the next poll.
             for (provider, _, path) in &paths {
@@ -779,6 +790,11 @@ mod tests {
             }
             observed
         });
+        assert_eq!(
+            CONFIRMED_IDENTITY_CALLS.get() - identity_calls_before,
+            0,
+            "singleton conversation owners need no identity comparison"
+        );
         assert_eq!(rows.len(), 2);
         for row in rows {
             let telemetry = row.telemetry.unwrap();
