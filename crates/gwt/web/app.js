@@ -2991,11 +2991,13 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           window,
           isApplicationScrollFallbackEnabled: () =>
             isAgentWindowPreset(workspaceWindowById(windowId)?.preset),
-          sendTerminalInput: (data) => {
+          sendTerminalInput: (data, { focus = true } = {}) => {
             if (readOnly || terminalMap.get(windowId)?.isReady !== true) {
               return;
             }
-            terminal.focus();
+            if (focus) {
+              terminal.focus();
+            }
             send({ kind: "terminal_input", id: windowId, data });
           },
         });
