@@ -184,6 +184,20 @@ test("attention keeps error=sticky / done=8s / needs_input=14s and per-window de
   assert.match(body, /onActivate:\s*\(\)\s*=>\s*frameWindow\(notice\.windowId\)/, "jump-to window preserved");
 });
 
+test("authoritative snapshots prune attention before rendering, independently of mounted windows (Issue #6659)", () => {
+  const body = functionBody(appSource, "renderAppState");
+  const prune = body.match(/for \(const windowId of windowRuntimeStateMap\.keys\(\)\) \{([\s\S]*?)\n {12}\}/)?.[1];
+  assert.ok(prune, "all observed runtime windows must participate in snapshot cleanup");
+  assert.match(body, /const currentWindowIds = allProjectWindowIdSet\(\)/);
+  assert.match(prune, /if \(currentWindowIds\.has\(windowId\)\) continue/);
+  assert.match(prune, /agentAttentionToaster\.forgetWindow\(windowId\)/);
+  assert.match(prune, /alertsToasts\.dismiss\(`attention-\$\{windowId\}`\)/);
+  assert.match(prune, /windowRuntimeStateMap\.delete\(windowId\)/);
+  assert.doesNotMatch(prune, /windowMap|notificationCenter/);
+  assert.ok(body.indexOf(prune) < body.indexOf("if (incomingRuntimeStatus)"), "Hub catalog removal also prunes attention");
+  assert.ok(body.indexOf(prune) < body.indexOf("applyStatus(window.id"));
+});
+
 test("board mention keeps its 8s alert and records history at the pushAlertToast seam", () => {
   // Controller side (board-logs-surface.js) is untouched: still fires the
   // same singleton 8s notice through the injected pushAlertToast seam.
