@@ -322,6 +322,105 @@ fn lazy_issue_client_defers_resolution_until_first_issue_call() {
 }
 
 #[test]
+fn diagnostic_workflow_id_requires_the_durable_request_route() {
+    use axum::http::{Method, StatusCode, Uri};
+    use gwt_github::client::http::{HttpIssueClient, ReqwestTransport};
+    let _lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+    fs::create_dir_all(gwt_core::paths::gwt_home()).unwrap();
+    fs::write(
+        gwt_core::paths::gwt_config_path(),
+        "[allowed_workflows]\n\"akiojin/gwt\"=[\"windows-diagnostic.yml\"]\n\"other/project\"=[\"windows-diagnostic.yml\"]\n",
+    )
+    .unwrap();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let captured = requests.clone();
+    let app = axum::Router::new().fallback(move |method: Method, uri: Uri| {
+        captured.fetch_add(1, Ordering::SeqCst);
+        async move {
+            match (method.as_str(), uri.path()) {
+                ("GET", "/repos/akiojin/gwt/actions/workflows/42") => (
+                    StatusCode::OK,
+                    r#"{"path":".github/workflows/windows-diagnostic.yml"}"#,
+                ),
+                (
+                    "GET",
+                    "/repos/other/project/contents/.github/workflows/windows-diagnostic.yml",
+                ) => (
+                    StatusCode::OK,
+                    "name: Other workflow\non: workflow_dispatch\n",
+                ),
+                (
+                    "POST",
+                    "/repos/other/project/actions/workflows/windows-diagnostic.yml/dispatches",
+                ) => (StatusCode::NO_CONTENT, ""),
+                _ => (StatusCode::NOT_FOUND, ""),
+            }
+        }
+    });
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let listener = runtime
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    runtime.spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let repo = tempfile::tempdir().unwrap();
+    let factory: Arc<IssueClientFactory> = Arc::new(move |owner, repo| {
+        HttpIssueClient::with_transport(
+            ReqwestTransport::new().unwrap(),
+            "fixture".into(),
+            owner,
+            repo,
+        )
+        .with_test_endpoints(base.clone(), format!("{base}/graphql"), true)
+    });
+    let mut env = DefaultCliEnv::new_with_client_factory(
+        "akiojin",
+        "gwt",
+        repo.path().to_path_buf(),
+        factory.clone(),
+    );
+    let error = env
+        .dispatch_actions(crate::cli::ActionsDispatchCall {
+            workflow: "42".into(),
+            git_ref: "develop".into(),
+            inputs: Default::default(),
+        })
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("actions.diagnostic.request"),
+        "{error}"
+    );
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
+    fs::create_dir_all(repo.path().join(".github/workflows")).unwrap();
+    fs::write(
+        repo.path().join(".github/workflows/windows-diagnostic.yml"),
+        "name: Other workflow\non: workflow_dispatch\n",
+    )
+    .unwrap();
+    let mut other = DefaultCliEnv::new_with_client_factory(
+        "other",
+        "project",
+        repo.path().to_path_buf(),
+        factory,
+    );
+    assert_eq!(
+        other
+            .dispatch_actions(crate::cli::ActionsDispatchCall {
+                workflow: "windows-diagnostic.yml".into(),
+                git_ref: "develop".into(),
+                inputs: Default::default()
+            })
+            .unwrap(),
+        "workflow dispatch requested"
+    );
+    assert_eq!(requests.load(Ordering::SeqCst), 3);
+}
+
+#[test]
 fn dispatch_default_denial_does_not_initialize_github_client() {
     let home = tempfile::tempdir().unwrap();
     let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());

@@ -98,6 +98,188 @@ fn workflow(name: &str) -> Value {
         .unwrap_or_else(|| panic!("{WORKFLOWS}/{name} must exist"))
 }
 
+#[test]
+fn windows_diagnostic_is_a_fixed_private_output_workflow() {
+    use sha2::{Digest, Sha256};
+    let doc = workflow("windows-diagnostic.yml");
+    let inputs = triggers(&doc)["workflow_dispatch"]["inputs"]
+        .as_mapping()
+        .expect("fixed diagnostic inputs");
+    let mut names: Vec<_> = inputs.keys().map(|key| key.as_str().unwrap()).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        [
+            "expected_profile_digest",
+            "expected_workflow_commit",
+            "request_id"
+        ]
+    );
+    assert_eq!(doc["permissions"]["contents"].as_str(), Some("read"));
+    assert_eq!(
+        doc["concurrency"]["cancel-in-progress"].as_bool(),
+        Some(false)
+    );
+    let job = &doc["jobs"]["diagnostic"];
+    assert_eq!(job["runs-on"].as_str(), Some("windows-latest"));
+    assert_eq!(job["timeout-minutes"].as_u64(), Some(110));
+    let steps = job["steps"].as_sequence().expect("diagnostic steps");
+    let first_step = steps[0]["run"]
+        .as_str()
+        .expect("byte-preserving checkout setup");
+    assert!(first_step.contains("git config --global core.autocrlf false"));
+    assert!(first_step.contains("git config --global core.eol lf"));
+    let checkouts: Vec<_> = steps
+        .iter()
+        .filter(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("actions/checkout@"))
+        })
+        .collect();
+    assert_eq!(checkouts.len(), 2);
+    assert_eq!(
+        checkouts[0]["with"]["ref"].as_str(),
+        Some("${{ github.sha }}")
+    );
+    assert_eq!(
+        checkouts[1]["with"]["ref"].as_str(),
+        Some("f351dc97c6a3ef805ecac75987dd43246b268c22")
+    );
+    for checkout in checkouts {
+        assert_eq!(
+            checkout["with"]["persist-credentials"].as_bool(),
+            Some(false)
+        );
+    }
+    let attributes = gwt_core::process::hidden_command("git")
+        .current_dir(repo_root())
+        .args([
+            "-c",
+            "core.autocrlf=true",
+            "check-attr",
+            "text",
+            "eol",
+            "--",
+            ".github/workflows/windows-diagnostic.yml",
+            ".github/diagnostics/windows/4777-restore-f351-v1/profile.json",
+            ".github/diagnostics/windows/4777-restore-f351-v1/diagnostic.patch",
+            ".github/diagnostics/windows/4777-restore-f351-v1/run.ps1",
+        ])
+        .output()
+        .expect("read fixed-asset checkout attributes");
+    assert!(attributes.status.success());
+    let attributes = String::from_utf8(attributes.stdout).unwrap();
+    assert_eq!(
+        attributes
+            .lines()
+            .filter(|line| line.ends_with(": text: set"))
+            .count(),
+        4
+    );
+    assert_eq!(
+        attributes
+            .lines()
+            .filter(|line| line.ends_with(": eol: lf"))
+            .count(),
+        4
+    );
+    let upload = steps
+        .iter()
+        .find(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("actions/upload-artifact@"))
+        })
+        .expect("safe result upload");
+    assert_eq!(
+        upload["with"]["path"].as_str(),
+        Some("${{ runner.temp }}/gwt-diagnostic-result/result.json")
+    );
+    let root = repo_root().join(".github/diagnostics/windows/4777-restore-f351-v1");
+    let profile: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("profile.json")).unwrap()).unwrap();
+    assert_eq!(
+        profile["source_commit"],
+        "f351dc97c6a3ef805ecac75987dd43246b268c22"
+    );
+    assert_eq!(
+        profile["source_tree"],
+        "0feeb960e85a754d0470c07fbb896f9151028602"
+    );
+    assert_eq!(profile["retry"], 0);
+    assert_eq!(profile["providers_concurrent"], true);
+    let patch = fs::read(root.join("diagnostic.patch")).unwrap();
+    assert_eq!(patch.len(), 7535);
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&patch)),
+        "8cf3285aa97e628d0d52bd95924bec5ce71461302e3ada5de4daa5e39cd3fc98"
+    );
+    let script = fs::read_to_string(root.join("run.ps1")).unwrap();
+    let publisher =
+        fs::read_to_string(repo_root().join("crates/gwt/src/cli/actions/diagnostic.rs")).unwrap();
+    let publisher: String = publisher.split_whitespace().collect();
+    for required in [
+        "SetFileAttributesW(PCWSTR(from.as_ptr()),FILE_ATTRIBUTE_NORMAL)",
+        "MOVEFILE_WRITE_THROUGH|MOVEFILE_REPLACE_EXISTING",
+    ] {
+        assert!(
+            publisher.contains(required),
+            "missing private Windows publisher contract: {required}"
+        );
+    }
+    let ci = fs::read_to_string(repo_root().join(WORKFLOWS).join(TEST_WORKFLOW)).unwrap();
+    assert!(ci.contains("node scripts/ci-windows-tests.mjs run-runtime gwt test ci_contracts ci_concurrency_contract_test::windows_diagnostic_selftest_keeps_secret_sentinels_private -- --exact --test-threads=1"), "the controlled Win32 launcher SelfTest must execute in required Windows CI");
+    for required in [
+        "CREATE_SUSPENDED",
+        "PROC_THREAD_ATTRIBUTE_HANDLE_LIST",
+        "AssignProcessToJobObject",
+        "TerminateJobObject",
+        "ActiveProcesses",
+        "EnvironmentBlock",
+        "observation_started",
+        "NoStartVerified",
+        "SelfTest",
+    ] {
+        assert!(script.contains(required), "missing {required}");
+    }
+    for forbidden in [
+        "Get-Process",
+        "Stop-Process",
+        "taskkill",
+        "Get-ChildItem Env:",
+        "Write-Host $",
+        "Get-Content $raw",
+        "::error::$",
+    ] {
+        assert!(
+            !script.contains(forbidden),
+            "unsafe diagnostic surface: {forbidden}"
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_diagnostic_selftest_keeps_secret_sentinels_private() {
+    let output = std::process::Command::new("pwsh")
+        .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-File"])
+        .arg(repo_root().join(".github/diagnostics/windows/4777-restore-f351-v1/run.ps1"))
+        .arg("-SelfTest")
+        .env(
+            "GWT_DIAGNOSTIC_SECRET_SENTINEL",
+            "private-diagnostic-sentinel",
+        )
+        .output()
+        .expect("Windows PowerShell diagnostic SelfTest");
+    assert!(output.status.success(), "diagnostic SelfTest failed");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        "Windows diagnostic SelfTest PASS"
+    );
+    assert!(output.stderr.is_empty(), "diagnostic SelfTest wrote stderr");
+}
+
 /// The `on:` block. YAML 1.1 parsers resolve the bare key `on` to `true`, so
 /// both spellings are accepted.
 fn triggers(doc: &Value) -> &Value {

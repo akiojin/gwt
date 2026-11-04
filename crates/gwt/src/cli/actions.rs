@@ -4,13 +4,17 @@ use gwt_github::SpecOpsError;
 
 use crate::cli::{CliEnv, CliParseError};
 
+pub(crate) mod diagnostic;
 pub(crate) mod release_policy;
+pub use diagnostic::DiagnosticCommand;
 pub use release_policy::ReleasePolicyContext;
 
 /// SPEC-1942 command model for `actions.*` JSON operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionsCommand {
+    Diagnostic(DiagnosticCommand),
     ReleasePolicyStatus,
+    DiagnosticPolicyStatus,
     /// Issue #4249: submit an explicitly permitted workflow dispatch.
     Dispatch {
         call: ActionsDispatchCall,
@@ -251,8 +255,15 @@ pub(super) fn run<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let code = match cmd {
+        ActionsCommand::Diagnostic(command) => diagnostic::run(env, command, out)?,
         ActionsCommand::ReleasePolicyStatus => {
             let status = release_policy::status(env).map_err(super::io_as_api_error)?;
+            out.push_str(&serde_json::to_string(&status).map_err(super::serde_as_api_error)?);
+            out.push('\n');
+            0
+        }
+        ActionsCommand::DiagnosticPolicyStatus => {
+            let status = release_policy::diagnostic_status(env).map_err(super::io_as_api_error)?;
             out.push_str(&serde_json::to_string(&status).map_err(super::serde_as_api_error)?);
             out.push('\n');
             0
