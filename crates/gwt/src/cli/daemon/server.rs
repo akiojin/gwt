@@ -4160,7 +4160,10 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                 rejected = Some(IssueMonitorControlCommit::WaitNotLaunched);
                 return Ok(());
             }
-            if applied == Some(None) && !issue_monitor_control_is_authorizing(&accepted.control) {
+            if applied == Some(None)
+                && matches!(&accepted.control, IssueMonitorControl::ConfigSet { .. })
+                && !issue_monitor_control_is_authorizing(&accepted.control)
+            {
                 // An unapplied routine setting is a rejected request, not
                 // ambiguous effect authority. Keep the control lane usable.
                 rejected = Some(IssueMonitorControlCommit::Rejected);
@@ -4490,6 +4493,41 @@ mod profiles_patch_contract_tests {
 #[cfg(test)]
 mod max_active_mode_contract_tests {
     use super::*;
+
+    #[test]
+    fn typed_failure_authority_exhaustion_is_terminal_and_unreceipted() {
+        let _prefs_budget = pin_prefs_hang_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("issue-monitor.json");
+        let prefs = crate::IssueMonitorPrefs {
+            effect_authority_epoch: u64::MAX,
+            launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                issue_number: 6732,
+                window_id: "tab-1::agent".to_string(),
+            }],
+            ..Default::default()
+        };
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        let before = fs::read(&path).unwrap();
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let before_monitor = monitor.clone();
+        let outcome = try_apply_accepted_issue_monitor_control_with_disk_migration(
+            &path,
+            &mut monitor,
+            AcceptedIssueMonitorControl::new(IssueMonitorControl::AgentFailed {
+                issue_number: Some(6732),
+                window_id: "tab-1::agent".to_string(),
+                message: "active writer".to_string(),
+                failure: Some(crate::IssueMonitorFailure::ResumeWriterConflict {
+                    holder_window_id: None,
+                }),
+                source: None,
+            }),
+        );
+        assert_eq!(outcome, IssueMonitorControlCommit::TerminalFailure);
+        assert_eq!(monitor, before_monitor);
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
 
     #[test]
     fn roster_config_set_returns_from_manual_to_auto_without_blocking_control_lane() {
