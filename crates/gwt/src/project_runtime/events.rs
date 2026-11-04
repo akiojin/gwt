@@ -367,6 +367,10 @@ pub enum OwnerEvent {
         incarnation: u64,
         data: Vec<u8>,
         seq: u64,
+        /// Previous output published by this exact pane incarnation, not seq - 1.
+        /// Older owners omit the witness, requiring conservative snapshot repair.
+        #[serde(default)]
+        previous_seq: Option<u64>,
         screen: String,
         screen_ansi: Vec<u8>,
         screen_seq: u64,

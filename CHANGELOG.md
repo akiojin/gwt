@@ -1,6 +1,201 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.148.3] - 2026-11-03
+
+### Bug Fixes
+
+- **verify:** Restore gwtd in the verified cargo target
+- **verify:** Retain restoration targets after command failures
+- **issue-monitor:** Recover window creation timeouts with bounded retries
+- **issue-monitor:** Preserve concurrent failures and legacy launch order
+- **issue-monitor:** Reconcile delivered failure states
+
+### Miscellaneous Tasks
+
+- **work:** Link Issue #6689 to PR #6712
+
+### Testing
+
+- **issue-monitor:** Keep queue fixtures under the isolated test home
+- **issue-monitor:** Isolate fixture homes from compiler temp
+- **issue-monitor:** Qualify Windows fixture path
+
+## [9.148.2] - 2026-11-03
+
+### Bug Fixes
+
+- **ui:** Detect missing xterm beside attachment progress
+- **pm:** PM wake の通信失敗を有限再試行にする
+- **pm:** 保留中の wake の再試行回数を維持する
+- **terminal:** Preserve history scrolling and forced selection
+
+### Miscellaneous Tasks
+
+- **work:** Record issue 6691 delivery continuation
+
+### Testing
+
+- **terminal:** Use the native forced selection modifier
+
+## [9.148.1] - 2026-11-03
+
+### Bug Fixes
+
+- **runtime:** Preserve interleaved pane output delivery
+- **ui:** Reclaim selected work terminal after kanban remount
+- **runtime:** Reuse private HTTP connections across caller runtimes
+
+### Miscellaneous Tasks
+
+- **work:** Record backend merge delivery
+- **work:** Record UI candidate verification handoff
+
+### Performance
+
+- **ui:** Preserve terminal hosts and unchanged sparklines
+
+### Testing
+
+- **perf:** Trace native pane input verification
+
+## [9.148.0] - 2026-11-03
+
+### Bug Fixes
+
+- **terminal:** Keep Unicode in xterm ignored strings
+- **hooks:** Resolve nested current worktree paths
+- **process-tree:** Preserve uncertain census with sysinfo 0.40
+- **test:** Coverage fixture の起動状態と ACK を同期
+- **test:** Authenticated scan の待ち予算を明示
+- **runtime:** Observe readiness, census and successor fixture completion
+- **runtime:** Retain failed monitor delivery state
+- **runtime:** Refine agent diagnostic after reader drain
+- **runtime:** Reject unproved manual cancellation cleanup
+- **runtime:** Retain accepting owner for delivery replay
+- **pm:** Preserve Reports input, replay and rendering contracts
+- **ci:** E5実モデルCIでCPU版torchを導入する
+- **spec:** Reject embedded markers and restore orphan repair
+- **monitor:** 許可ラベル失効後の未所有配信を起動前に止める
+- **deps:** Pulldown-cmarkを0.13.6へ更新
+- **build:** 完了済みWorkを保持してBlocked技能を終了する
+- **hooks:** 過去の台帳破損による現Sessionの誤拒否を防ぐ
+- **verify:** Slot取得取消時のlockを明示解放
+- **verify:** 後継世代テストのディスク前提を隔離
+- **verify:** 状態取得probeのlockを明示解放
+- **monitor:** 未読込候補の許可ラベル検査を保持
+- **build:** 圧縮後のDone Workを保持してBlocked技能を終了する
+- **hooks:** Expose Codex discovery and trust audits
+- **monitor:** Refresh plain issue cache before launch checks
+- **verify:** Align Windows managed browser checks
+- **runtime:** Isolate private HTTP connections across caller runtimes
+- **hooks:** Keep historical ledger corruption outside current windows
+- **perf:** Reuse unchanged graphs and scan PR inventory
+- **pm:** Bound deferred wake retries and diagnostic log storage
+- **logging:** Simplify bounded writer result handling
+- **logging:** Preserve records across retention recovery
+- **logging:** Preserve history at recovery boundaries
+- **update:** Allow verified per-user MSI updates without elevation
+- **feedback:** Enforce process checks on busy receipts
+- **hooks:** 監査のコマンド同定と既存テスト名を修復
+- **index:** 未claimのbroker host lockを明示解放
+- **monitor:** Preserve committed waits across stale writers
+- **ui:** Render terminal updates in hidden browser documents
+- **ui:** 非表示中の共有状態描画をタイマーから切り離す
+- **hooks:** Hook CenterをPlaywright配信へ登録
+- **hooks:** 修復要求の接続と監査結果を保護
+- **spec:** Multipart孤立artifactの退役と再試行を修復する
+
+### Documentation
+
+- **perf:** Keep issue reference in paragraph
+
+### Features
+
+- **pm:** Reportsの概要・詳細と変更時投稿を共通機能化する
+- **hooks:** Report managed repair plans
+- **hooks:** Managed hook の設定監査情報を公開
+- **hooks:** SettingsにHook Centerを追加
+- **pm:** リリース workflow の限定許可設定を追加する
+
+### Miscellaneous Tasks
+
+- **work:** Issue 6637 の PR 関連付けを保存
+- **pm:** 改行バイト比較のlint警告を解消する
+- **work:** Record Reports review follow-up PR
+- **work:** Reconcile goal impact delivery evidence
+- **work:** Record goal impact reconciliation PR
+- **work:** Issue #4838 の配送監査を記録
+- **work:** Issue #5876の継続配信記録を保存
+- **work:** Issue #5876の再開と配信証跡を保存
+- **work:** Issue #5876の信頼性実測と配信記録を保存
+- **work:** Issue #1935 LC配送の現Session記録を保存する
+- **work:** PR参照履歴を記録
+- **work:** Record terminal rendering acceptance
+- **work:** Record finite rendering delivery recovery
+- **work:** 同一scan共有sliceのPR記録を精算する
+- **work:** Preserve issue 5390 delivery receipts
+- **work:** Preserve issue 5390 recovery handoff
+- **work:** Preserve issue 5390 RPC technical wait
+- **work:** Preserve issue 5390 PR delivery preparation
+- **work:** Preserve issue 5390 headed gate diagnostics
+- **work:** Preserve issue 5390 performance priority ruling
+- **work:** Preserve ledger repair and GUI recovery handoff
+- **work:** Preserve shared GUI recovery preconditions
+- **work:** Preserve independent performance fixes and verification prerequisites
+- **work:** Retain final performance handoff receipt
+- **work:** Record backend delivery verification
+- **work:** Record merged rendering acceptance
+- **work:** 有限修復のPR配送記録を保存
+- **work:** Record merged T-2ap delivery
+- **work:** PR #6685 の配送参照を保存
+- **work:** Record PM operational verification handoff
+- **work:** PM 操作の受け入れ照合と未達事項を記録する
+- **work:** Issue #4249 の PR 配送記録を保存する
+- **work:** モバイル接続の実装境界と資格管理を記録する
+- **work:** 設計PRの参照を記録する
+- **work:** Record mobile probe PR handoff
+
+### Performance
+
+- **monitor:** Skip execution census without owners
+- **ui:** Avoid forced terminal layout on telemetry updates
+
+### Testing
+
+- **browser:** Audit the managed source around isolation cases
+- **runtime:** Await the Grok holder's committed readiness
+- **pm:** Windowsのrollback検証をロック済みhandleで行う
+- **spec:** Anchor lint fixture homes to the validated sandbox
+- **hooks:** Trust fixtureのGit maintenanceを隔離する
+- **monitor:** Pin durable budget in successor fixtures
+- **feedback:** Distinguish public marker collisions from source data
+- **monitor:** Align scan fixtures and failure diagnostics
+- **runtime:** Drive activated fixture recovery through owner
+- **hooks:** Cover managed health display states
+- **hooks:** Tighten metadata and retirement assertions
+- **runtime:** 既存 lease で Activated fixture の準備を保護する
+- **runtime:** Isolate shutdown retry fixture home
+- **runtime:** Isolate natural exit fixture home
+- **pm:** Assert the deferred wake lock budget
+- **pm:** Observe provider output before releasing exit
+- **ui:** Verify unfocused terminal rendering with peer focus
+- **ui:** Make unfocused output probe portable
+- **ui:** Wait for the initial workspace catalog
+- **monitor:** Pin replay outcome control budget
+- **pm:** リリース許可テストの環境変数を共有 lock で保護する
+- **verify:** Cover root lock cleanup on cancelled slot grants
+- **runtime:** Order provider diagnostics before exit readiness
+- **verify:** Isolate successor fixture from host disk admission
+
+### Ci
+
+- **macos:** Prepare socket tests before runtime budget
+
+### Revert
+
+- **build:** Compacted Doneの証拠設計までLC配送を分離する
+
 ## [9.147.0] - 2026-11-01
 
 ### Bug Fixes

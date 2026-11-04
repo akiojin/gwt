@@ -4788,11 +4788,19 @@ fn timed_pm_prefs_stage<T>(
     let remaining_budget_ms = gwt_core::operation_deadline::current()
         .map(|deadline| deadline.saturating_duration_since(started).as_millis() as u64);
     let result = action();
-    tracing::info!(
-        target: "gwt.pm.refresh", stage,
-        duration_ms = started.elapsed().as_secs_f64() * 1000.0,
-        ?remaining_budget_ms, success = result.is_ok(), "PM refresh stage"
-    );
+    if result.is_err() {
+        tracing::warn!(
+            target: "gwt.pm.refresh", stage,
+            duration_ms = started.elapsed().as_secs_f64() * 1000.0,
+            ?remaining_budget_ms, success = false, "PM refresh stage"
+        );
+    } else {
+        tracing::debug!(
+            target: "gwt.pm.refresh", stage,
+            duration_ms = started.elapsed().as_secs_f64() * 1000.0,
+            ?remaining_budget_ms, success = true, "PM refresh stage"
+        );
+    }
     result
 }
 

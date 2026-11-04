@@ -885,6 +885,7 @@ pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
             | "issue.spec.audit"
             | "issue.monitor.status"
             | "update.settings.status"
+            | "actions.release_policy.status"
             | "issue.monitor.profiles"
             | "issue.monitor.tiers"
             | "pr.current"
@@ -1293,6 +1294,19 @@ fn is_read_only_gwtd_tokens(tokens: &[&str]) -> bool {
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn release_policy_json_status_is_read_only() {
+        assert!(is_read_only_json_envelope_operation(
+            "actions.release_policy.status"
+        ));
+        assert!(!is_read_only_json_envelope_operation(
+            "actions.release_policy.add"
+        ));
+        assert!(!is_read_only_json_envelope_operation(
+            "actions.release_policy.rollback"
+        ));
+    }
 
     // Issue #3265: the `.gwt/` bookkeeping allowance resolves the redirect
     // word the hook sees, which is *before* the shell expands it. Anything

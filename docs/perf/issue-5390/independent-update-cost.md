@@ -1,10 +1,11 @@
 # Issue #5390: unchanged graph updates and PR inventory reads
 
-Delivery scope: the current PR ships the backend inventory correction. The UI
-changes described below remain a follow-up under Issue #5390; they are preserved
-at commit `0df66c0e18be4622519b8d194b23771eb4520f84` and are absent from this
-PR's frontend diff. Its original source and UI-only measurement files remain
-available in that commit, with a saved forward patch for later integration.
+The backend inventory correction shipped in PR #6677. The UI changes below
+are restored from the preserved `0df66c0e18be4622519b8d194b23771eb4520f84`
+forward patch as a separate candidate under Issue #5390. Current results and
+the remaining launch prerequisite are recorded in
+[the UI continuation](ui-resume-20261103.md). The historical source, raw results
+and UI-only measurement files remain available in the original commit.
 
 ## Scope and preserved evidence
 

@@ -1,32 +1,32 @@
-//! Non-blocking, daily-rolling JSONL writer backed by `tracing_appender`.
+//! Non-blocking, size-bounded daily JSONL writer.
 //!
-//! **File naming:** `tracing_appender::rolling::daily` does not maintain
-//! a bare active file. Every event is written to
-//! `{log_dir}/gwt.log.YYYY-MM-DD` where the date is the current local
+//! **File naming:** no bare active file is maintained. Every event is written to
+//! `{log_dir}/gwt.log.YYYY-MM-DD` where the date is the current UTC
 //! day. The Logs tab and housekeeping code must therefore reference the
 //! dated filename directly. Use `current_log_file()` to compute it.
 
-use std::path::{Path, PathBuf};
+use std::{
+    fs::{File, OpenOptions},
+    io::{self, Read, Seek, SeekFrom, Write},
+    path::{Path, PathBuf},
+};
 
 use chrono::Utc;
-use tracing_appender::{
-    non_blocking::{NonBlocking, WorkerGuard},
-    rolling,
-};
+use fs2::FileExt;
+use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
 
 /// Basename prefix used for the rolling log files. The full name is
 /// `gwt.log.YYYY-MM-DD` (no bare `gwt.log` file exists at any point).
 pub const LOG_FILE_BASENAME: &str = "gwt.log";
 
+/// Hard ceiling for canonical log files in each machine/project log directory.
+const MAX_LOG_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
 /// Return the path of today's active log file
 /// (`{log_dir}/gwt.log.YYYY-MM-DD`, UTC date).
 ///
-/// **Timezone policy**: `tracing_appender::rolling::daily` rolls files by
-/// UTC date (verified empirically and documented in upstream). If we
-/// use local time here, consumers near the day boundary end up looking
-/// at a filename that does not exist yet (or a stale one) because the
-/// writer is one day off. Always use UTC to stay in sync with the
-/// writer.
+/// The writer and consumers both use UTC so they always choose the same
+/// daily filename, including near a local midnight boundary.
 pub fn current_log_file(log_dir: &Path) -> PathBuf {
     let today = Utc::now().date_naive();
     log_dir.join(format!("{LOG_FILE_BASENAME}.{today}"))
@@ -38,35 +38,157 @@ pub fn log_file_for_date(log_dir: &Path, date: chrono::NaiveDate) -> PathBuf {
     log_dir.join(format!("{LOG_FILE_BASENAME}.{date}"))
 }
 
-/// Create a daily-rolling, non-blocking writer targeting `log_dir/gwt.log`.
+/// Create a daily, non-blocking writer with a 2 GiB ceiling per log directory.
+/// Old daily files are deleted first; reaching the ceiling within the active
+/// day resets that file before writing the next complete record.
 ///
 /// The returned `WorkerGuard` must be kept alive (for example in a
 /// `LoggingHandles` held by `main`) until the process exits, otherwise
 /// the background writer thread shuts down and events are dropped.
 ///
 /// **File confidentiality (reviewer comment B7):** on Unix the log
-/// directory is created with mode `0700` and the rolling writer
-/// inherits the user's umask, but we additionally tighten any existing
-/// `gwt.log.YYYY-MM-DD` files to `0600` so that other local users on
+/// directory is tightened to mode `0700` and new files use `0600`.
+/// We additionally tighten any existing `gwt.log.YYYY-MM-DD` files so that other local users on
 /// shared hosts cannot read structured logs that may contain tokens or
-/// internal paths. Failures to set permissions are non-fatal — they
-/// are logged via `tracing::warn!` (once the subscriber is up) and the
-/// writer still starts.
+/// internal paths. Failures to tighten existing permissions are non-fatal.
 pub fn build(log_dir: &Path) -> std::io::Result<(NonBlocking, WorkerGuard)> {
     std::fs::create_dir_all(log_dir)?;
     tighten_log_dir_permissions(log_dir);
 
-    // `tracing_appender 0.2.4` rotates `rolling::daily` files on UTC
-    // boundaries and names files with the UTC date. Keep the helper
-    // contract aligned with that behavior so tests, housekeeping, and
-    // the Logs watcher all point at the same file.
-    let file_appender = rolling::RollingFileAppender::builder()
-        .rotation(rolling::Rotation::DAILY)
-        .filename_prefix(LOG_FILE_BASENAME)
-        .build(log_dir)
-        .map_err(std::io::Error::other)?;
+    let file_appender = BoundedDailyWriter::new(log_dir, MAX_LOG_BYTES)?;
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
     Ok((non_blocking, guard))
+}
+
+struct BoundedDailyWriter {
+    log_dir: PathBuf,
+    lock: File,
+    max_bytes: u64,
+    partial_record: Vec<u8>,
+    discarding_record: bool,
+}
+
+impl BoundedDailyWriter {
+    fn new(log_dir: &Path, max_bytes: u64) -> io::Result<Self> {
+        std::fs::create_dir_all(log_dir)?;
+        let writer = Self {
+            log_dir: log_dir.to_path_buf(),
+            lock: open_log_file(&log_dir.join(".gwt-log-size.lock"))?,
+            max_bytes,
+            partial_record: Vec::new(),
+            discarding_record: false,
+        };
+        // Apply the ceiling to logs left by previous versions before accepting
+        // any new events, including an already oversized active daily file.
+        writer.write_record(&[])?;
+        Ok(writer)
+    }
+
+    fn write_record(&self, record: &[u8]) -> io::Result<()> {
+        // Do not use NamedFileLock or tracing here: logging about this lock
+        // would recursively enter the subscriber. All cooperating GUI/gwtd
+        // writers use the same stable lock and reopen the current file per
+        // record, so a peer's truncation never leaves a stale file handle.
+        self.lock.lock_exclusive()?;
+        let result = (|| {
+            let path = current_log_file(&self.log_dir);
+            let mut file = open_log_file(&path)?;
+            let recovery_newline = u64::from(!record.is_empty() && needs_tail_newline(&mut file)?);
+            super::housekeep::enforce_size_limit(
+                &self.log_dir,
+                &path,
+                &file,
+                self.max_bytes,
+                // If an otherwise valid record needs the whole budget, making
+                // room resets the old partial tail, so no recovery byte remains.
+                (record.len() as u64 + recovery_newline).min(self.max_bytes),
+            )?;
+            let repair_tail = !record.is_empty() && needs_tail_newline(&mut file)?;
+            file.seek(SeekFrom::End(0))?;
+            if repair_tail {
+                file.write_all(b"\n")?;
+            }
+            file.write_all(record)
+        })();
+        let unlock = FileExt::unlock(&self.lock);
+        result.and(unlock)
+    }
+}
+
+fn needs_tail_newline(file: &mut File) -> io::Result<bool> {
+    if file.metadata()?.len() == 0 {
+        return Ok(false);
+    }
+    file.seek(SeekFrom::End(-1))?;
+    let mut last = [0];
+    file.read_exact(&mut last)?;
+    Ok(last[0] != b'\n')
+}
+
+impl Write for BoundedDailyWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        // RoutedJson normally submits one complete JSONL record. Buffer other
+        // callers' formatting chunks until a newline so size rotation cannot
+        // expose a partial JSON record or interleave it with another writer.
+        for chunk in bytes.split_inclusive(|byte| *byte == b'\n') {
+            let complete = chunk.ends_with(b"\n");
+            if self.discarding_record {
+                self.discarding_record = !complete;
+                continue;
+            }
+            if (self.partial_record.len() as u64).saturating_add(chunk.len() as u64)
+                > self.max_bytes
+            {
+                self.partial_record.clear();
+                self.discarding_record = !complete;
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "log record exceeds the log directory size limit",
+                ));
+            }
+            if self.partial_record.is_empty() && complete {
+                self.write_record(chunk)?;
+            } else {
+                self.partial_record.extend_from_slice(chunk);
+                if complete {
+                    let record = std::mem::take(&mut self.partial_record);
+                    self.write_record(&record)?;
+                }
+            }
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        // Completed records are unbuffered; never persist an incomplete tail.
+        Ok(())
+    }
+}
+
+fn open_log_file(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    // LockFileEx needs read access and set_len needs write-data access on
+    // Windows. Append by seeking under the shared lock rather than opening
+    // append-only, which does not grant permission to reset the file.
+    options.create(true).read(true).write(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(windows::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT.0);
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "log destination is not a regular file",
+        ));
+    }
+    Ok(file)
 }
 
 #[cfg(unix)]
@@ -77,10 +199,8 @@ fn tighten_log_dir_permissions(log_dir: &Path) {
         perms.set_mode(0o700);
         let _ = std::fs::set_permissions(log_dir, perms);
     }
-    // Also tighten any existing rolling files left behind by previous
-    // runs (the rolling writer creates new files inheriting the umask
-    // which is typically 0022 → 0644, so we explicitly downgrade them
-    // here on each startup).
+    // Also tighten files left by older versions whose rolling writer
+    // inherited a permissive umask.
     if let Ok(read_dir) = std::fs::read_dir(log_dir) {
         for entry in read_dir.flatten() {
             let path = entry.path();
@@ -281,7 +401,112 @@ impl tracing::field::Visit for ScopeField {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use super::*;
+
+    #[test]
+    fn bounded_writers_share_the_limit_and_keep_complete_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut first = BoundedDailyWriter::new(dir.path(), 32).unwrap();
+        let mut second = BoundedDailyWriter::new(dir.path(), 32).unwrap();
+        for value in 0..6 {
+            let writer = if value % 2 == 0 {
+                &mut first
+            } else {
+                &mut second
+            };
+            writer
+                .write_all(format!("{{\"n\":{value}}}\n").as_bytes())
+                .unwrap();
+        }
+
+        let path = current_log_file(dir.path());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{\"n\":4}\n{\"n\":5}\n"
+        );
+        first.write_all(b"{\"n\":").unwrap();
+        second.write_all(b"{\"n\":7}\n").unwrap();
+        first.write_all(b"6}\n").unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(contents, "{\"n\":4}\n{\"n\":5}\n{\"n\":7}\n{\"n\":6}\n");
+        assert!(std::fs::metadata(&path).unwrap().len() <= 32);
+        for line in contents.lines() {
+            serde_json::from_str::<serde_json::Value>(line).unwrap();
+        }
+        assert!(first
+            .write_all(b"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n")
+            .is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
+        first.write_all(b"{\"n\":8}\n").unwrap();
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "{\"n\":8}\n");
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let workers = [first, second]
+            .into_iter()
+            .enumerate()
+            .map(|(id, mut writer)| {
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    for value in 0..50 {
+                        barrier.wait();
+                        writer
+                            .write_all(format!("{{\"writer\":{id},\"n\":{value}}}\n").as_bytes())
+                            .unwrap();
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        let contents = std::fs::read_to_string(current_log_file(dir.path())).unwrap();
+        assert!(contents.len() <= 32);
+        assert!(!contents.is_empty());
+        for line in contents.lines() {
+            let value: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(value["n"], 49);
+        }
+    }
+
+    #[test]
+    fn bounded_writers_repair_shared_partial_tails_within_the_size_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut first = BoundedDailyWriter::new(dir.path(), 64).unwrap();
+        let mut second = BoundedDailyWriter::new(dir.path(), 64).unwrap();
+        let path = current_log_file(dir.path());
+        std::fs::write(&path, b"{\"broken\":").unwrap();
+        first.write_all(b"{\"n\":1}\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{\"broken\":\n{\"n\":1}\n"
+        );
+        std::fs::write(&path, b"partial").unwrap();
+        second.write_all(b"{\"n\":2}\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "partial\n{\"n\":2}\n"
+        );
+
+        let mut limited = BoundedDailyWriter::new(dir.path(), 16).unwrap();
+        std::fs::write(&path, b"partialx").unwrap();
+        limited.write_all(b"{\"n\":3}\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"n\":3}\n");
+        std::fs::write(&path, b"partial").unwrap();
+        limited.write_all(b"{\"n\":\"1234567\"}\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{\"n\":\"1234567\"}\n"
+        );
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 16);
+
+        std::fs::write(&path, [b'x'; 16]).unwrap();
+        let mut restarted = BoundedDailyWriter::new(dir.path(), 16).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), [b'x'; 16]);
+        restarted.write_all(b"{\"n\":4}\n").unwrap();
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "{\"n\":4}\n");
+    }
 
     #[test]
     fn build_creates_log_dir_when_missing() {

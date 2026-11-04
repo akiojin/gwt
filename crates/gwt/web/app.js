@@ -1811,6 +1811,18 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
             if (appState.active_tab_id !== null && nextAppState.active_tab_id !== appState.active_tab_id) splitSurfaces?.close();
             worksSurface?.prepareWorkspaceReconciliation(nextAppState);
             appState = nextAppState;
+            // Runtime snapshots observe unmounted windows too. Reconcile
+            // attention against the full catalog, never DOM membership.
+            const currentWindowIds = allProjectWindowIdSet();
+            for (const windowId of windowRuntimeStateMap.keys()) {
+              if (currentWindowIds.has(windowId)) continue;
+              agentAttentionToaster.forgetWindow(windowId);
+              alertsToasts.dismiss(`attention-${windowId}`);
+              windowRuntimeStateMap.delete(windowId);
+              windowRuntimeStateSinceMap.delete(windowId);
+              detailMap.delete(windowId);
+              renderedRuntimeStatusKeys.delete(windowId);
+            }
             // Rebind before rendering can emit requests for the new project.
             connectSocket();
             if (incomingRuntimeStatus) {
@@ -3009,6 +3021,8 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         options = {},
       ) {
         const readOnly = options.readOnly === true;
+        terminalContainer.title =
+          "Scroll to review history. Hold Shift+drag to select text (Option+drag on macOS).";
         const copyCleanup = installTerminalCopyHandlers(windowId, terminalContainer, terminal);
         const imagePasteCleanup = readOnly
           ? noopCleanup
@@ -3227,6 +3241,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           fontSize: 14,
           lineHeight: isBlinkBrowser() ? 1.35 : 1.3,
           scrollback: 5000,
+          macOptionClickForcesSelection: true,
           // SPEC-3671 FR-008.
           disableStdin: options.readOnly === true,
         });
@@ -4796,10 +4811,6 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
                     detailMap.delete(windowId);
                     windowRuntimeStateMap.delete(windowId);
                     windowRuntimeStateSinceMap.delete(windowId);
-                    agentAttentionToaster.forgetWindow(windowId);
-                    // SPEC #3206: dismiss this window's attention toast from the shared
-                    // alerts stack so a sticky error toast never orphans a gone window.
-                    alertsToasts.dismiss(`attention-${windowId}`);
                     renderedWindowElementKeys.delete(windowId);
                     renderedRuntimeStatusKeys.delete(windowId);
                     renderedAgentKanbanBodyKeys.delete(windowId);
@@ -5842,7 +5853,8 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       });
       agentsSurface.element.hidden = true;
       document.querySelector(".surface-area").appendChild(agentsSurface.element);
-      worksTelemetryModel.subscribeFrame(state => state, () => worksSurface.sync());
+      // Telemetry updates keep the current native terminal host.
+      worksTelemetryModel.subscribeFrame(state => state, () => worksSurface.sync(false));
       splitSurfaces = createSplitSurfaces({
         document,
 

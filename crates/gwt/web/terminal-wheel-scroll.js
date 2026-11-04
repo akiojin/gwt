@@ -32,12 +32,12 @@ export function wheelDeltaToScrollLines(
   return Math.sign(rawLines) * Math.max(1, Math.ceil(Math.abs(rawLines)));
 }
 
-function shouldOverrideTerminalWheel(event, { window, isWindowsHost: hostCheck } = {}) {
+function shouldOverrideTerminalWheel(event, { terminal, window, isWindowsHost: hostCheck } = {}) {
   if (!event || event.ctrlKey || event.metaKey) {
     return false;
   }
   const check = typeof hostCheck === "function" ? hostCheck : () => isWindowsHost(window);
-  return check();
+  return (hasNormalScrollback(terminal) && isTerminalMouseTrackingActive(terminal)) || check();
 }
 
 export function isTerminalMouseTrackingActive(terminal) {
@@ -110,10 +110,11 @@ export function createTerminalWheelScrollController({
 
     if (
       !shouldOverrideTerminalWheel(event, {
+        terminal,
         window,
         isWindowsHost: hostCheck,
       }) ||
-      isTerminalMouseTrackingActive(terminal)
+      (isTerminalMouseTrackingActive(terminal) && !hasNormalScrollback(terminal))
     ) {
       return;
     }
@@ -123,6 +124,8 @@ export function createTerminalWheelScrollController({
       return;
     }
 
+    // Retained history belongs to the terminal viewport, even when an agent
+    // tracks the mouse. Fullscreen buffers without history still reach xterm.
     event.preventDefault();
     event.stopPropagation();
     terminal.scrollLines(lines);

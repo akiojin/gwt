@@ -391,6 +391,22 @@ in `~/.gwt/config.toml`:
 "akiojin/gwt" = ["prepare-release.yml"]
 ```
 
+For the release workflow, the registered PM can configure this permission through
+`actions.release_policy.status` and `actions.release_policy.add`. Read the status
+first, then submit a UUID `request_id`, its current `expected_token`, a short
+`reason`, and an exact scoped `instruction_id` or native `approval_id`. This adds
+only `prepare-release.yml` for the current repository and retains existing
+configuration. The verified checkout CLI can use the PM's existing Host bridge
+before the installed app is updated; replacement credentials are not needed.
+Read `pm.capabilities` when a runtime does not recognize these operations.
+
+Repeating a completed request returns its receipt without applying it again.
+For an unknown outcome, read the status and preserve the request; do not resend.
+`actions.release_policy.rollback` also requires a fresh request and scoped
+authority, plus `added_by` naming the successful add request. It removes only
+permission added by that request while its recorded post-state remains current.
+These operations configure permission; workflow submission remains separate.
+
 ```bash
 gwtd <<'JSON'
 {"schema_version":1,"operation":"actions.dispatch","params":{"workflow":"prepare-release.yml","ref":"develop","inputs":{"bump":"auto"}}}
@@ -549,6 +565,9 @@ In terminal windows, drag to select text and release the mouse button to copy.
 On Windows, `Ctrl+C` copies the current terminal selection and clears it; if no
 selection exists, `Ctrl+C` stays mapped to the running terminal process. On
 Linux, `Ctrl+Shift+C` also copies the current terminal selection.
+The mouse wheel scrolls retained history even when an agent tracks the mouse.
+Use `Shift+drag` to select text in mouse-tracking applications (`Option+drag` on
+macOS); the terminal's hover hint also shows these modifiers.
 
 ## Issue surface and Issue Monitor
 
@@ -2017,8 +2036,10 @@ JSON
   duplicated markers. After confirming that an old orphan artifact has been
   superseded, pass its comment ID in `archive_comments` to the repair operation
   (for example, `{"number":1784,"archive_comments":[12345]}`). This preserves
-  the comment text and retires only its outer markers; indexed comments are
-  refused. Run `issue.spec.lint` again to confirm index health.
+  the comment text and retires only its outer markers, including `part=N/M`
+  markers from complete or incomplete orphan groups. Indexed comments are
+  refused. Retrying the same IDs skips comments already archived.
+  Run `issue.spec.lint` again to confirm index health.
 
 ```bash
 gwtd <<'JSON'
@@ -2041,6 +2062,12 @@ JSON
 Open the Logs surface and select **Project** for that project’s events, or
 **Global** for startup and diagnostics without a project. Background events
 remain with their originating project when you switch projects.
+
+Diagnostic logs keep seven days of history by default, with a 2 GiB total
+limit for `gwt.log.YYYY-MM-DD` files in each log directory. Other files,
+including `ui-trace-*.jsonl`, are outside this limit. Oldest dated files are
+removed first. If the current day alone reaches the limit, it restarts with
+the next complete log entry.
 
 - App logs:
   `~/.gwt/projects/<repo-hash>/logs/gwt.log.YYYY-MM-DD`

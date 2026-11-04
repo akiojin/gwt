@@ -1,6 +1,7 @@
 import { expect, test, type Page, type Locator } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 import { join } from "node:path";
+import { readFileSync } from "node:fs";
 
 // #4499: real Chromium and checkout assets, deterministic protocol projections.
 // This suite proves the queue UI contract, not a real agent launch.
@@ -44,6 +45,42 @@ const column = (page: Page, phase: string) => page.locator(`[data-queue-column="
 const row = (page: Page, number: number) => page.locator(`.knowledge-row[data-issue-number="${number}"]`);
 const messages = (page: Page) => page.evaluate(() => (window as any).__queueMessages.filter((message: any) =>
   ["issue_monitor_queue_push", "issue_monitor_queue_remove", "issue_monitor_queue_move", "set_issue_monitor_auto_refill"].includes(message.kind)));
+
+test("Issue #6690 delivered open parent waits without an Agent failed badge", async ({ page }, info) => {
+  const projectionPath = process.env.GWT_PLAYWRIGHT_ISSUE_6690_PROJECTION;
+  test.skip(!projectionPath, "Requires the normalized projection emitted by the Issue #6690 Rust regression test");
+  const body = readFileSync(projectionPath!, "utf8");
+  const projection = JSON.parse(body);
+  await info.attach("normalized-rust-monitor-projection", { body, contentType: "application/json" });
+  // The Rust regression proves normalization. This browser check consumes its
+  // actual output and proves only the existing UI's rendering of that output.
+  const delivered = projection.inbox.find((item: any) => item.issue_number === 42);
+  const failed = projection.inbox.find((item: any) => item.issue_number === 43);
+  expect(delivered).toMatchObject({ state: "queued", recoverable_merged: true });
+  expect(delivered.completion_reason).toMatch(/^delivered_by_pr_/);
+  expect(delivered.error_message ?? null).toBeNull();
+  expect(failed).toMatchObject({ state: "agent_failed", recoverable_merged: false });
+  expect(projection.queue).toContain(42);
+  await page.evaluate(projection => {
+    const fixture = window as any;
+    fixture.__queueActivity([]);
+    fixture.__queueSetEntries(projection.inbox.map((item: any) => ({
+      number: item.issue_number, state: "open", labels: [], related_work_refs: [],
+      title: item.issue_number === 42 ? "Open parent with a delivered slice" : "Undelivered failure",
+    })));
+    fixture.__queueConfirm(projection.queue, projection.gui_status || {});
+    fixture.__queueInbox(projection.inbox.map((item: any) => ({ ...item, issue: { number: item.issue_number } })));
+  }, projection);
+  const parent = column(page, "queued").locator('[data-issue-number="42"]');
+  await expect(parent).toBeVisible();
+  await expect(parent.locator(".knowledge-row-badge")).toHaveText("Queued");
+  await expect(parent).not.toContainText(/Agent failed|Agent error|Needs human/);
+  await expect(column(page, "done").locator('[data-issue-number="42"]')).toHaveCount(0);
+  await parent.locator(".knowledge-row-select").click();
+  await page.locator('.knowledge-detail-pane [data-issue-detail-view="output"]').click();
+  await expect(page.locator(".knowledge-detail-pane .issue-preview-empty")).toHaveText("Waiting in queue. No agent has started.");
+  await expect(column(page, "backlog").locator('[data-issue-number="43"] .knowledge-row-badge')).toHaveText("Agent failed");
+});
 
 test("AC34 local agent census separates five live agents from eighteen recorded Works", async ({ page }) => {
   await page.evaluate(() => {
@@ -806,6 +843,14 @@ test("Issue #4862 failed launches with no window show their reason outside Activ
   await expect(row(page, 43).locator('[data-key="reason"]')).toContainText("autonomous launch attempts exhausted (3/3)");
   await expect(column(page, "backlog").locator('[data-issue-number="43"]')).toBeVisible();
   await expect(column(page, "active").locator('[data-issue-number="43"]')).toHaveCount(0);
+  // Issue #6689: a recovered timeout is queued even while its backoff reason
+  // remains observable; the previous Agent failed badge must disappear.
+  await confirm(page, [43]);
+  await page.evaluate(() => (window as any).__queueInbox([{ issue: { number: 43 }, state: "queued",
+    error_message: "Launch timed out: no window was created within 120s" }]));
+  await expect(column(page, "queued").locator('[data-issue-number="43"]')).toBeVisible();
+  await expect(row(page, 43).locator(".knowledge-row-badge")).toHaveText("Queued");
+  await expect(row(page, 43)).not.toContainText("Agent failed");
   await page.evaluate(() => (window as any).__queueInbox([{ issue: { number: 43 }, state: "needs_human",
     error_message: "autonomous launch attempts exhausted (3/3) with an unchanging failure: successor work-43-next is duplicated; use workspace.close" }]));
   await expect(column(page, "backlog").locator('[data-issue-number="43"]')).toBeVisible();

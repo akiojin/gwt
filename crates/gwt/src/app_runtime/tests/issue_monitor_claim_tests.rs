@@ -9024,6 +9024,7 @@ fn app_runtime_issue_monitor_auto_launch_uses_last_settings_runtime_target() {
     run_git(&repo, &["push", "origin", "develop"]);
 
     run_git(&fixture.worktree, &["merge", "--ff-only", "develop"]);
+    eprintln!("last-settings-runtime phase: worktree_ready");
     let mut previous = gwt_agent::Session::load(
         &fixture
             .sessions_dir
@@ -9067,7 +9068,9 @@ fn app_runtime_issue_monitor_auto_launch_uses_last_settings_runtime_target() {
             capture_path.to_str().unwrap(),
         )],
     );
+    eprintln!("last-settings-runtime phase: owner_start");
     let owner = start_monitor_relaunch_owner(&mut fixture, false);
+    eprintln!("last-settings-runtime phase: owner_ready");
     let runtime = &mut fixture.runtime;
     let profiles = runtime.issue_monitor_previous_profiles(&runtime.tabs[0].project_root);
     let repo_profile = profiles.repo_local().expect("repo-local last settings");
@@ -9083,11 +9086,13 @@ fn app_runtime_issue_monitor_auto_launch_uses_last_settings_runtime_target() {
         3165,
         LinkedIssueKind::Spec,
     );
+    eprintln!("last-settings-runtime phase: prepare");
     events.extend(commit_issue_monitor_preparations(
         runtime,
         &tasks,
         &fixture.recorded_events,
     ));
+    eprintln!("last-settings-runtime phase: prepared");
     let window_id = runtime
         .runtimes
         .keys()
@@ -9126,20 +9131,24 @@ fn app_runtime_issue_monitor_auto_launch_uses_last_settings_runtime_target() {
     });
     let screen =
         gwt_core::process_console::redact_line(&pane.pane.lock().unwrap().screen().contents());
+    eprintln!("last-settings-runtime phase: close");
     let close = owner_fixture_block_on(owner.command(
         gwt::project_runtime::events::OwnerCommand::Close {
             id: pane.id.clone(),
             incarnation: pane.incarnation,
         },
     ));
+    eprintln!("last-settings-runtime phase: closed");
     runtime.runtimes.remove(&window_id);
     runtime.test_project_owners.remove(&repo);
+    eprintln!("last-settings-runtime phase: shutdown");
     owner_fixture_block_on(
         Arc::try_unwrap(owner)
             .ok()
             .expect("drained last-settings owner")
             .shutdown(),
     );
+    eprintln!("last-settings-runtime phase: stopped");
     let captured = captured
         .unwrap_or_else(|error| panic!("{error}; close={close:?}; provider screen={screen}"));
     close.unwrap();

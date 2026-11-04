@@ -120,6 +120,9 @@ fn validate(intent: &OperationIntent) -> io::Result<()> {
         "update.settings.set" => {
             let _: UpdateInput = decode(&intent.params)?;
         }
+        "actions.release_policy.add" | "actions.release_policy.rollback" => {
+            super::actions::release_policy::validate(intent)?;
+        }
         "pr.auto_merge.enable" => {
             let p: AutoMergeInput = decode(&intent.params)?;
             if p.number == 0
@@ -284,11 +287,17 @@ fn request_with(
         "update.settings.set" => "This preference affects automatic updates for the entire app.",
         "board.config.set" | "discussion.create" => "Board synchronization can publish this project's Board entries to its repository Discussion.",
         "repository.required_checks.update" => "This changes required check contexts on the selected develop/main branch.",
+        "actions.release_policy.add" | "actions.release_policy.rollback" => "This changes only prepare-release.yml permission for the current repository. It does not dispatch a workflow. Rollback requires the original successful add receipt and unchanged post-state.",
         "pr.auto_merge.enable" => "Enables GitHub auto-merge for this reviewed external fork head. It can merge immediately when GitHub's gates pass. Remembered approval remains fixed to this PR and reviewed SHA.",
         _ => "The existing operation's ownership and safety checks still apply.",
     };
     let approval_scope = if intent.operation == "pr.auto_merge.enable" {
         "Permission applies only to this PR number and reviewed head SHA, including remembered approval. A changed head requires another review and authorization."
+    } else if matches!(
+        intent.operation.as_str(),
+        "actions.release_policy.add" | "actions.release_policy.rollback"
+    ) {
+        "Permission remains bound to these exact request, token and reason parameters, including remembered approval. A changed request requires fresh authorization."
     } else {
         "After approval, you can optionally allow future parameters for this same operation in this repository."
     };
@@ -553,6 +562,12 @@ fn execute<E: CliEnv>(
     authorization: &Authorization,
 ) -> io::Result<Value> {
     validate(intent)?;
+    if matches!(
+        intent.operation.as_str(),
+        "actions.release_policy.add" | "actions.release_policy.rollback"
+    ) {
+        return super::actions::release_policy::execute(env, repo, intent, authorization);
+    }
     // Read-only preflight precedes one-off consumption. No request may select
     // another repository; production env verifies the project's origin identity.
     let coordinates = if intent.operation == "update.settings.set" {

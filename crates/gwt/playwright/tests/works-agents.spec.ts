@@ -512,6 +512,71 @@ test.describe("Works and Agents approved baseline", () => {
     await page.screenshot({ path: info.outputPath("works-measured-zero.png") });
   });
 
+  test("telemetry updates retain native host focus and unchanged SVG children", async ({ page }, info) => {
+    await page.evaluate(() => (window as any).__worksAgentsFixture.usage());
+    const metric = works(page).locator('[data-metric="today-input"]');
+    await expect(metric).toHaveText("0");
+    await expect(works(page).locator(".works-fleet svg")).toHaveAttribute("data-known-count", "30");
+    await workRow(page, "agent-one").focus(); await page.keyboard.press("Enter");
+    const input = full(page).locator(".xterm-helper-textarea"); await input.focus();
+    await full(page).locator(".works-terminal-host").evaluate(host => {
+      const root = host.firstElementChild, terminal = host.querySelector(".xterm");
+      const input = host.querySelector(".xterm-helper-textarea");
+      const surface = host.closest(".works-surface")!;
+      const svgs = [...surface.querySelectorAll(".works-fleet svg, .work-spark")];
+      const observation = { host, root, terminal, input, svgs, removedHosts: 0, svgMutations: 0,
+        observers: [] as MutationObserver[] };
+      const native = new MutationObserver(records => {
+        for (const record of records) if ([...record.removedNodes].includes(root!)) observation.removedHosts++;
+      });
+      native.observe(host, { childList: true }); observation.observers.push(native);
+      for (const svg of svgs) {
+        const observer = new MutationObserver(records => {
+          for (const record of records) observation.svgMutations += record.addedNodes.length + record.removedNodes.length;
+        });
+        observer.observe(svg, { childList: true, subtree: true }); observation.observers.push(observer);
+      }
+      (window as any).__telemetryObservation = observation;
+    });
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Performance.enable");
+    const before = await cdp.send("Performance.getMetrics");
+    for (let tick = 1; tick <= 20; tick++) {
+      const previous = await metric.textContent();
+      await page.evaluate(tick => (window as any).__worksAgentsFixture.usage("measured", tick), tick);
+      await expect(metric).not.toHaveText(previous!);
+    }
+    const observation = await full(page).locator(".works-terminal-host").evaluate(host => {
+      const state = (window as any).__telemetryObservation;
+      state.observers.forEach((observer: MutationObserver) => observer.disconnect());
+      return { sameHost: host === state.host, sameRoot: host.firstElementChild === state.root,
+        sameTerminal: host.querySelector(".xterm") === state.terminal,
+        sameSvgs: state.svgs.every((svg: Element) => svg.isConnected),
+        focused: document.activeElement === state.input, removedHosts: state.removedHosts, svgMutations: state.svgMutations };
+    });
+    expect(observation).toEqual({ sameHost: true, sameRoot: true, sameTerminal: true, sameSvgs: true,
+      focused: true, removedHosts: 0, svgMutations: 0 });
+    await info.attach("renderer-telemetry-observation", { contentType: "application/json",
+      body: JSON.stringify({ scope: "Chromium renderer metrics only; excludes native GUI CPU/RSS", updates: 20,
+        observation, before, after: await cdp.send("Performance.getMetrics") }) });
+    await cdp.detach();
+    await page.evaluate(() => (window as any).__worksAgentsFixture.attachmentProgress());
+    await expect(full(page).locator(".attachment-progress")).toContainText("Staging");
+    await page.evaluate(() => (window as any).__worksAgentsFixture.remountInKanban());
+    await expect(page.locator('.agent-kanban-root[data-board-id="telemetry-kanban"]')).toBeAttached();
+    await page.evaluate(() => (window as any).__worksAgentsFixture.usage("measured", 21));
+    await expect.poll(() => full(page).locator(".works-terminal-host").evaluate(host => {
+      const state = (window as any).__telemetryObservation;
+      return host.firstElementChild === state.root && host.querySelector(".xterm") === state.terminal
+        && !!host.querySelector(".attachment-progress");
+    })).toBe(true);
+    await full(page).locator(".xterm-helper-textarea").press("k");
+    await expect.poll(async () => (await sent(page)).some(message =>
+      message.kind === "terminal_input" && message.id === "agent-one" && message.data === "k")).toBe(true);
+    await full(page).getByRole("button", { name: "Back to Works" }).click();
+    await page.screenshot({ path: info.outputPath("works-telemetry-preserved.png") });
+  });
+
   test("saved Works output lines preserve raw text, readonly mirrors and native controls", async ({ page }, info) => {
     // Keep each source line short enough for the narrow split terminal grid;
     // the preview intentionally preserves parsed visual wraps, not source rows.
@@ -1127,6 +1192,15 @@ async function installWorksAgentsBackend(page: Page) {
       },
       workspaceTitle(title: string) { windows.find(data => data.id === "agent-one").dynamic_title = title; socket.emit(workspace()); },
       workspaceStatus(status: string) { windows.find(data => data.id === "agent-one").status = status; socket.emit(workspace()); },
+      attachmentProgress() { socket.emit({ kind: "attachment_progress", id: "agent-one",
+        operation_id: "telemetry-attachment", phase: "staging", filename: "fixture.txt", bytes_done: 8, bytes_total: 16 }); },
+      remountInKanban() {
+        windows.push(baseWindow("telemetry-kanban", { preset: "agent_kanban", title: "Telemetry Kanban" }));
+        windows.find(data => data.id === "agent-one").placement = {
+          kind: "agent_kanban", board_id: "telemetry-kanban", lane_id: "active", order: 0, collapsed: false,
+        };
+        socket.emit(workspace());
+      },
       reorderMembers(ids: string[]) { members.splice(0, members.length, ...ids.map(id => members.find(member => member.agent_member_id === id))); revision++; socket.emit(rosterSnapshot()); },
       currentIdentity() { return { windows: windows.filter(data => data.session_id).map(({ id, session_id, status }) => ({ id, session_id, status })), agents, assignments: members.map(member => ({ member_id: member.agent_member_id, assignment: member.assignment })) }; },
       deferSchedule() { deferredSchedule = true; },
@@ -1146,7 +1220,7 @@ async function installWorksAgentsBackend(page: Page) {
       status(id: string, status: string) { const data = windows.find(data => data.id === id); if (data) data.status = status; socket.emit({ kind: "terminal_status", id, status }); },
       retire(id: string, immediate: boolean) { agents = agents.filter(agent => agent.window_id !== id); const event = activity(); if (immediate) window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: event })); else socket.emit(event); },
       error(message: string) { socket.emit({ kind: "agent_roster_error", project_key: projectKey, message }); },
-      usage(quality = "measured") {
+      usage(quality = "measured", inputTokens = 0) {
         const measured = quality === "measured", value = measured ? 0 : null;
         socket.emit({ kind: "provider_usage", accounts: [], consumption: [], sessions: agents.map(agent => ({
           session_id: agent.session_id, provider_session_id: `provider-${agent.session_id}`,
@@ -1156,7 +1230,7 @@ async function installWorksAgentsBackend(page: Page) {
           context_limit_tokens: null, context_left_pct: null, limit_reached: false, eligible: true,
           state: quality === "unavailable" ? { kind: "unavailable", reason: "Fixture transcript cannot be read" } : { kind: "ok" },
           telemetry: quality === "unavailable" ? null : { source: "fixture-reported", quality,
-            observed_at: "2026-10-25T00:00:00Z", today_tokens: value, today_input_tokens: value,
+            observed_at: "2026-10-25T00:00:00Z", today_tokens: measured ? inputTokens : null, today_input_tokens: measured ? inputTokens : null,
             today_cache_read_tokens: value, today_cache_creation_tokens: value, today_output_tokens: value,
             minute_buckets: Array.from({ length: 30 }, (_, index) => ({
               started_at: new Date(1792884600000 + index * 60000).toISOString(), tokens: value,

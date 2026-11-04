@@ -425,16 +425,26 @@ fn format_actions_help() -> String {
         "  actions.rerun                           Re-run a failed run or a single failed job",
         "  actions.cancel                          Request cancellation of a queued or in-progress run",
         "  actions.queued                          List queued runs without jobs, with elapsed age_seconds",
+        "  actions.release_policy.status           Read current release permission, CAS token and recovery",
+        "  actions.release_policy.add              Allow prepare-release.yml for this repository only",
+        "  actions.release_policy.rollback         Undo a successful add with unchanged post-state",
         "",
         "Key params:",
         "  run_id, job_id",
         "  failed_only  actions.rerun with run_id: re-run only the failed jobs",
+        "  request_id (UUID), expected_token, reason   release policy mutations",
+        "  instruction_id | approval_id              Exact scoped human authority, registered PM only",
+        "  added_by                                  rollback: the original successful add request_id",
         "",
         "Notes:",
         "  actions.rerun refuses a run_id/job_id the current repository does not own.",
         "  actions.cancel refuses completed runs and a run_id the current repository does not own.",
         "  actions.queued takes no params.",
         "  Prefer job_id so one flaky check does not re-run every job in the run.",
+        "  Release policy uses stdin JSON only and preserves other workflow permissions.",
+        "  Read status first; a verified checkout CLI uses the existing PM Host bridge.",
+        "  Changed Host/Session/generation or stale token refuses before settings persistence.",
+        "  UNKNOWN: inspect status without resending. Existing QA scopes cannot be expanded.",
         "",
     ]
     .join("\n")
@@ -1196,6 +1206,29 @@ mod tests {
             "all unresolved",
             "plain text",
             "JSON array",
+        ] {
+            assert!(help.contains(expected), "missing {expected}: {help}");
+        }
+    }
+
+    #[test]
+    fn release_policy_actions_help_documents_fixed_scope_and_recovery() {
+        let help = family_help("actions").unwrap();
+        for expected in [
+            "actions.release_policy.status",
+            "actions.release_policy.add",
+            "actions.release_policy.rollback",
+            "prepare-release.yml",
+            "request_id",
+            "expected_token",
+            "added_by",
+            "instruction_id",
+            "approval_id",
+            "registered PM",
+            "stdin JSON",
+            "UNKNOWN",
+            "without resending",
+            "Host bridge",
         ] {
             assert!(help.contains(expected), "missing {expected}: {help}");
         }

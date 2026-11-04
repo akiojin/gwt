@@ -249,6 +249,21 @@ fn owner_output_coalescing_order(
             && id == previous_id
             && incarnation == previous_incarnation =>
         {
+            // A matching queue entry always discards one of these two observations.
+            // Global sequence distance is not a count of discarded output chunks.
+            tracing::debug!(
+                target: "gwt.terminal.delivery",
+                stage = "gui_output_coalesced",
+                process_id = std::process::id(),
+                project_key = context.project_key.as_str(),
+                connection_id = *connection_id,
+                pane_id = id.as_str(),
+                incarnation = *incarnation,
+                discarded_count = 1u64,
+                discarded_seq = (*seq).min(*previous_seq),
+                retained_seq = (*seq).max(*previous_seq),
+                "GUI output inbox coalesced one observation"
+            );
             Some(seq.cmp(previous_seq))
         }
         _ => None,
@@ -14086,6 +14101,15 @@ impl AppRuntime {
         if !changed {
             return Vec::new();
         }
+        tracing::debug!(
+            target: "gwt.terminal.delivery",
+            stage = "owner_connection",
+            process_id = std::process::id(),
+            project_key = context.project_key.as_str(),
+            connection_id,
+            state = ?health.state,
+            "project owner connection changed"
+        );
         let mut events = vec![
             OutboundEvent::project(
                 context.project_key.clone(),
@@ -14412,15 +14436,17 @@ impl AppRuntime {
         };
         match event {
             OwnerEvent::Output {
-                id,
+                id: owner_pane_id,
                 incarnation,
                 data,
                 seq,
+                previous_seq,
                 screen,
                 screen_ansi,
                 screen_seq,
             } => {
-                let Some(id) = self.window_id_for_owner_pane(context, identity, &id, incarnation)
+                let Some(id) =
+                    self.window_id_for_owner_pane(context, identity, &owner_pane_id, incarnation)
                 else {
                     return Vec::new();
                 };
@@ -14428,7 +14454,31 @@ impl AppRuntime {
                 if seq <= runtime.output_seq {
                     return Vec::new();
                 }
-                let gap = seq != runtime.output_seq.saturating_add(1);
+                // Positions are process-wide, so another pane may legitimately
+                // occupy every numerical position between these two outputs.
+                let gap = previous_seq != Some(runtime.output_seq);
+                if gap {
+                    tracing::debug!(
+                        target: "gwt.terminal.delivery",
+                        stage = "output_gap",
+                        process_id = std::process::id(),
+                        project_key = context.project_key.as_str(),
+                        connection_id,
+                        pane_id = owner_pane_id.as_str(),
+                        window_id = id.as_str(),
+                        incarnation,
+                        accepted_seq = runtime.output_seq,
+                        previous_seq = ?previous_seq,
+                        seq,
+                        screen_seq,
+                        repair = if screen_seq.max(runtime.screen_seq) < seq {
+                            "request_snapshot"
+                        } else {
+                            "inline_snapshot"
+                        },
+                        "owner output predecessor requires snapshot repair"
+                    );
+                }
                 // Coalescing may omit deltas, but the owner carries its full
                 // parsed screen with every output event. Never forward a
                 // surviving delta across a gap as though it were contiguous.

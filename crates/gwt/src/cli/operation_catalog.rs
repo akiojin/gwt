@@ -50,6 +50,18 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "actions.release_policy.add",
+        aliases: &[],
+    },
+    Operation {
+        name: "actions.release_policy.rollback",
+        aliases: &[],
+    },
+    Operation {
+        name: "actions.release_policy.status",
+        aliases: &[],
+    },
+    Operation {
         name: "actions.rerun",
         aliases: &[],
     },

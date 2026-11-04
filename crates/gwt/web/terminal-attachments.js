@@ -641,14 +641,15 @@ export function createTerminalAttachments({
           return false;
         });
 
-        terminalRoot.addEventListener("mousedown", handleMouseDown);
+        // xterm stops forced-selection mousedown from bubbling in mouse mode.
+        terminalRoot.addEventListener("mousedown", handleMouseDown, true);
         window.addEventListener("mousemove", handleMouseMove, true);
         window.addEventListener("mouseup", handleMouseUp, true);
         window.addEventListener("blur", handleWindowBlur);
 
         return () => {
           terminal.attachCustomKeyEventHandler(() => true);
-          terminalRoot.removeEventListener("mousedown", handleMouseDown);
+          terminalRoot.removeEventListener("mousedown", handleMouseDown, true);
           window.removeEventListener("mousemove", handleMouseMove, true);
           window.removeEventListener("mouseup", handleMouseUp, true);
           window.removeEventListener("blur", handleWindowBlur);

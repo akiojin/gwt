@@ -11527,27 +11527,31 @@ pub(super) fn attach_live_pm_pane(runtime: &mut AppRuntime, window_id: &str) -> 
     state.project_owner_connection_id = 1;
     state.project_owner_identity = Some(identity);
     let readiness_snapshot = owner_fixture_block_on(async {
+        let mut last_error = None;
         // test-hygiene: allow-wall-clock-deadline The native provider's real output establishes readiness; this only bounds an OS/IPC hang.
         tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
             loop {
-                let snapshot = owner
+                match owner
                     .command(OwnerCommand::Snapshot {
                         id: owner_id.clone(),
                         incarnation,
                     })
                     .await
-                    .expect("actual native PM snapshot");
-                if snapshot["screen"]
-                    .as_str()
-                    .is_some_and(|screen| screen.contains("GWT_PM_FIXTURE_READY"))
                 {
-                    break snapshot;
+                    Ok(snapshot) if snapshot["screen"].as_str()
+                        .is_some_and(|screen| screen.contains("GWT_PM_FIXTURE_READY")) => {
+                        break snapshot;
+                    }
+                    Err(error) => last_error = Some(error),
+                    _ => {}
                 }
-                tokio::task::yield_now().await;
+                // Each private call uses a fresh connection. Busy-polling can
+                // exhaust Windows ephemeral ports before the provider starts.
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
         })
         .await
-        .expect("actual native PM provider must finish startup")
+        .unwrap_or_else(|error| panic!("actual native PM provider must finish startup: {error}; last snapshot error: {last_error:?}"))
     });
     // The sample GUI cache starts in temp/sessions; the physical owner uses
     // the real isolated HOME namespace, including this Host's runtime PID.

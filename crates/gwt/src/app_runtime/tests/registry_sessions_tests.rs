@@ -1896,6 +1896,7 @@ fn issue_monitor_agent_failure_is_persisted_to_the_window_owner_project() {
             42,
             7,
             "agent failed",
+            true,
         );
 
     let prefs_a_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo_a);
@@ -1936,6 +1937,12 @@ fn issue_monitor_agent_failure_is_persisted_to_the_window_owner_project() {
         },
     ))
     .unwrap();
+    assert!(
+        snapshot["screen"]
+            .as_str()
+            .is_some_and(|screen| screen.contains("agent failed")),
+        "the provider diagnostic must be parsed before releasing its exit gate"
+    );
     runtime.install_remote_owner_projection(
         &context,
         "project-b::monitor-agent",
