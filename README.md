@@ -1014,6 +1014,20 @@ missing milestone information. Monitor observations include their source and
 scan time; unavailable or incomplete observations do not prove full coverage.
 Reported milestone health and confidence remain unverified until supporting
 evidence is connected.
+
+The registered PM can inspect saved request tracking with `pm.request_tasks.read`.
+Omitting `selector` returns counts; `{"selector":{"kind":"pending"}}` lists
+unclassified source IDs, and `{"selector":{"kind":"tasks","limit":50}}` lists
+all task IDs, including completed and cancelled tasks. Pages contain only IDs,
+use exact lexical ordering, and accept a limit of 1–100 (default 50). If
+`next_after` is non-null, pass it as `after` together with the returned revision
+as `expected_revision`. A revision conflict requires restarting without `after`;
+an unreadable store is an error, while an uninitialized store reports `absent`.
+Use `source`, `task`, or `receipt` selectors with the corresponding `id` or
+`operation_id` to read one detail. These operations require the current project's
+registered PM and grant no Issue, Monitor, CI or approval authority. Automatic
+intake and the Tasks UI are not connected by this read API.
+
 `policy.dependency_observations` retains every supplied Monitor inbox row, including
 repeated Issues, with its state and canonical dependency blockers, cycle flag and bundle
 references. Absent typed status stays null with `dependency_status` named as missing.

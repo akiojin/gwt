@@ -922,6 +922,19 @@ harness の空き枠が不明な場合は、自身の補助枠が空いている
 診断を返します。Monitor の観測には取得元とスキャン時刻が付き、取得不能・不完全な
 観測から全件の確認済みとは判断しません。記入済みの health / confidence も、裏付け
 証拠が接続されるまでは検証済みとして扱いません。
+
+登録済み PM は `pm.request_tasks.read` で保存済みの依頼追跡状態を参照できます。
+`selector` の省略時は件数を返し、`{"selector":{"kind":"pending"}}` は未分類の
+source ID、`{"selector":{"kind":"tasks","limit":50}}` は完了・取消を含む全 Task ID
+を返します。ページは ID のみを原 ID の辞書順で返し、件数は 1〜100（既定 50）です。
+`next_after` が null でなければ、その値を `after`、返却 revision を
+`expected_revision` に指定して続きを取得します。revision が競合したら `after`
+なしで読み直してください。ストアの読取不能はエラー、未初期化は `absent` です。
+原文・Task 詳細・操作履歴は `source` / `task` / `receipt` selector に対応する
+`id` / `operation_id` を指定して 1 件ずつ取得します。対象 project の登録済み PM
+だけが使用でき、Issue・Monitor・CI・承認の権限は付与しません。この参照 API に
+自動受付や Tasks UI は接続されていません。
+
 `policy.dependency_observations` は供給された Monitor inbox の全行を、同じ Issue の
 重複も含めて保持し、状態と正本の blocker・cycle・bundle 参照を返します。
 型付き診断がなければ null とし、`dependency_status` を不足情報として示します。
