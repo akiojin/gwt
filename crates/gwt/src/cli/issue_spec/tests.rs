@@ -9,6 +9,28 @@ use crate::cli::env::TestEnv;
 
 use super::*;
 
+#[test]
+fn committed_unverified_receipt_does_not_claim_final_confirmation() {
+    let mut receipt = gwt_github::WriteReceipt {
+        bytes: 9,
+        parts: 0,
+        sha256: "content-hash".into(),
+        location: "body".into(),
+        comment_ids: vec![],
+        largest_part_bytes: 9,
+        verification_error: Some("final fetch failed".into()),
+    };
+    let output = render_write_receipt("tasks", &receipt);
+    assert!(output.contains("outcome: committed_unverified"), "{output}");
+    assert!(output.contains("write committed"), "{output}");
+    assert!(output.contains("final fetch failed"), "{output}");
+    assert!(!output.contains("readback verified"), "{output}");
+    receipt.verification_error = None;
+    let output = render_write_receipt("tasks", &receipt);
+    assert!(output.contains("readback verified"), "{output}");
+    assert!(!output.contains("committed_unverified"), "{output}");
+}
+
 fn sample_structured_input() -> StructuredSpecInput {
     StructuredSpecInput {
         background: Some(TextBlock::Paragraphs(vec![

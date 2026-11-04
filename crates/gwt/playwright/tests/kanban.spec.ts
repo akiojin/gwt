@@ -437,7 +437,7 @@ test.describe("Issue Bridge load recovery", () => {
     if (!liveBase) await installEmbeddedRoutes(page);
     await installIssueBridgeBackend(page, { includeRelatedWork: true, theme });
     // With browser-check, every asset is served by the fresh checkout process.
-    await page.goto(liveBase ? new URL("p/0123456789abcdef", liveBase).href : APP_URL);
+    await page.goto(liveBase ? new URL("/p/0123456789abcdef", liveBase).href : APP_URL);
     await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(5);
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
     const loads = () => page.evaluate(() => window.__knowledgeLoadMessages
@@ -462,6 +462,51 @@ test.describe("Issue Bridge load recovery", () => {
     {
       await page.locator('.op-rail__surface[data-surface="settings"]').click();
       await expect(page.locator(".surface-knowledge")).toBeHidden();
+      const local = await page.evaluate(async work => {
+        const surface = document.querySelector(".surface-knowledge");
+        const active = document.activeElement;
+        const raf = window.requestAnimationFrame;
+        let focusEvents = 0;
+        const onFocus = () => { focusEvents++; };
+        document.addEventListener("focusin", onFocus);
+        window.requestAnimationFrame = () => 0;
+        const started = performance.now();
+        try {
+          return await new Promise<any>(resolve => {
+            const current = () => ({
+              title: surface.querySelector(".knowledge-related-work-title")?.textContent,
+              status: surface.querySelector(".knowledge-related-status")?.textContent,
+            });
+            const finish = () => {
+              clearTimeout(timer);
+              observer.disconnect();
+              resolve({ ...current(), elapsedMs: performance.now() - started, focusEvents,
+                retainedFocus: document.activeElement === active, targetUnfocused: !surface.contains(active),
+                hidden: surface.getClientRects().length === 0 });
+            };
+            const check = () => { if (current().title === "Hidden snapshot" && current().status === "idle") finish(); };
+            const observer = new MutationObserver(check);
+            const timer = setTimeout(finish, 1000);
+            observer.observe(surface, { childList: true, subtree: true, characterData: true });
+            window.__issueBridgeFixtureSocket.emit({ kind: "active_work_projection",
+              projection: { active_works: [{ ...work, title: "Hidden snapshot", status_category: "idle" }] } });
+            check();
+          });
+        } finally {
+          window.requestAnimationFrame = raf;
+          document.removeEventListener("focusin", onFocus);
+        }
+      }, work);
+      await testInfo.attach("inactive-related-work.json", {
+        body: JSON.stringify(local, null, 2), contentType: "application/json",
+      });
+      expect(local.title).toBe("Hidden snapshot");
+      expect(local.status).toBe("idle");
+      expect(local.elapsedMs).toBeLessThanOrEqual(1000);
+      expect(local.hidden).toBe(true);
+      expect(local.targetUnfocused).toBe(true);
+      expect(local.focusEvents).toBe(0);
+      expect(local.retainedFocus).toBe(true);
       const beforeHidden = await loads();
       await page.evaluate(() => {
         for (let agent = 0; agent < 8; agent++) {

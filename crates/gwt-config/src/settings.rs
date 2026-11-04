@@ -59,7 +59,33 @@ fn settings_write_guard(path: &Path) -> Result<SettingsWriteGuard> {
     })
 }
 
-/// Internal configuration bytes for the bounded release-policy executor.
+/// Fixed workflows supported by the bounded policy writer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkflowPolicyTarget {
+    Release,
+    WindowsDiagnostic,
+}
+
+impl WorkflowPolicyTarget {
+    pub const fn filename(self) -> &'static str {
+        match self {
+            Self::Release => "prepare-release.yml",
+            Self::WindowsDiagnostic => "windows-diagnostic.yml",
+        }
+    }
+
+    fn validate_repository(self, repository: &str) -> Result<()> {
+        validate_release_repository(repository)?;
+        if self == Self::WindowsDiagnostic && repository != "akiojin/gwt" {
+            return Err(ConfigError::ValidationError {
+                reason: "Windows diagnostic workflow policy requires akiojin/gwt".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Internal configuration bytes for the bounded workflow-policy executors.
 /// Never serialize `content` into a user-facing diagnostic or audit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReleasePolicySnapshot {
@@ -469,8 +495,17 @@ impl Settings {
 
     /// Read the fixed workflow's policy without creating directories or locks.
     pub fn release_policy_snapshot(path: &Path, repository: &str) -> Result<ReleasePolicySnapshot> {
+        Self::workflow_policy_snapshot(path, repository, WorkflowPolicyTarget::Release)
+    }
+
+    /// Read one typed fixed workflow's policy without creating directories or locks.
+    pub fn workflow_policy_snapshot(
+        path: &Path,
+        repository: &str,
+        target: WorkflowPolicyTarget,
+    ) -> Result<ReleasePolicySnapshot> {
         assert_test_path(path);
-        validate_release_repository(repository)?;
+        target.validate_repository(repository)?;
         let content = match std::fs::read_to_string(path) {
             Ok(content) => content,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -482,7 +517,7 @@ impl Settings {
         let allowed = settings
             .allowed_workflows
             .get(repository)
-            .is_some_and(|names| names.iter().any(|name| name == "prepare-release.yml"));
+            .is_some_and(|names| names.iter().any(|name| name == target.filename()));
         Ok(ReleasePolicySnapshot { content, allowed })
     }
 
@@ -499,9 +534,31 @@ impl Settings {
     where
         F: FnOnce(&ReleasePolicySnapshot, &ReleasePolicySnapshot) -> Result<T>,
     {
-        validate_release_repository(repository)?;
+        Self::with_locked_workflow_policy(
+            path,
+            repository,
+            WorkflowPolicyTarget::Release,
+            allow,
+            before_write,
+        )
+    }
+
+    /// Update one fixed workflow through the shared Settings lock and writer.
+    /// The callback runs under that lock before any configuration effect,
+    /// including when the requested policy is already present.
+    pub fn with_locked_workflow_policy<F, T>(
+        path: &Path,
+        repository: &str,
+        target: WorkflowPolicyTarget,
+        allow: bool,
+        before_write: F,
+    ) -> Result<(T, ReleasePolicySnapshot)>
+    where
+        F: FnOnce(&ReleasePolicySnapshot, &ReleasePolicySnapshot) -> Result<T>,
+    {
+        target.validate_repository(repository)?;
         let guard = settings_write_guard(path)?;
-        let before = Self::release_policy_snapshot(&guard.target, repository)?;
+        let before = Self::workflow_policy_snapshot(&guard.target, repository, target)?;
         let mut after = before.clone();
         if before.allowed != allow {
             let mut document =
@@ -529,9 +586,9 @@ impl Settings {
                     reason: "repository workflow policy must be an array".into(),
                 })?;
             if allow {
-                workflows.push("prepare-release.yml");
+                workflows.push(target.filename());
             } else {
-                workflows.retain(|name| name.as_str() != Some("prepare-release.yml"));
+                workflows.retain(|name| name.as_str() != Some(target.filename()));
             }
             after = ReleasePolicySnapshot {
                 content: document.to_string(),

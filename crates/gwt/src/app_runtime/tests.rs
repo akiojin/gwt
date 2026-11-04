@@ -10694,7 +10694,7 @@ fn pin_live_pm_fixture_agents(runtime: &AppRuntime, root: &Path) {
     ));
     for agent in ["claude", "codex"] {
         #[cfg(not(windows))]
-        fs::write(bin.join(agent), "#!/bin/sh\ncase \"$*\" in *--version*) printf '1.2.3\\n'; exit 0;; *'features list'*) exit 0;; esac\nstty -echo -icanon -isig; printf 'GWT_PM_FIXTURE_READY\\n'; exec cat >/dev/null\n")
+        fs::write(bin.join(agent), "#!/bin/sh\ncase \"$*\" in *--version*) printf '1.2.3\\n'; exit 0;; *'features list'*) exit 0;; esac\nstty -echo -icanon -isig\nif [ -n \"$GWT_TEST_PM_HOOK_RUNNER\" ]; then exec \"$GWT_TEST_PM_HOOK_RUNNER\" --exact app_runtime::tests::native_pm_hook_runner --ignored --nocapture --test-threads=1; fi\nprintf 'GWT_PM_FIXTURE_READY\\n'; exec cat >/dev/null\n")
             .expect("actual live PM provider fixture");
         #[cfg(windows)]
         fs::write(bin.join(format!("{agent}.cmd")), concat!(
@@ -10708,6 +10708,7 @@ fn pin_live_pm_fixture_agents(runtime: &AppRuntime, root: &Path) {
             "shift\r\n",
             "goto probe\r\n",
             ":launch\r\n",
+            "if defined GWT_TEST_PM_HOOK_RUNNER (\"%GWT_TEST_PM_HOOK_RUNNER%\" --exact app_runtime::tests::native_pm_hook_runner --ignored --nocapture --test-threads=1& exit /b)\r\n",
             "powershell -NoProfile -Command \"[Console]::TreatControlCAsInput = $true; [Console]::WriteLine('GWT_PM_FIXTURE_READY'); while ($true) { [void][Console]::ReadKey($true) }\"\r\n",
         ))
             .expect("actual live PM provider fixture");
@@ -10718,6 +10719,208 @@ fn pin_live_pm_fixture_agents(runtime: &AppRuntime, root: &Path) {
     settings
         .save(&gwt_core::paths::gwt_config_path())
         .expect("canonical actual PM provider settings");
+}
+
+/// Opt-in native provider for the physical PM completion regression. CI unit
+/// tests do not provide CARGO_BIN_EXE_gwtd; call the checkout's real hook front
+/// door from the provider process instead of requiring an installed binary.
+#[test]
+#[ignore = "invoked only as the native PM fixture provider"]
+fn native_pm_hook_runner() {
+    use std::io::Read;
+    let Some(result_path) = std::env::var_os("GWT_TEST_PM_HOOK_RESULT") else {
+        return;
+    };
+    // Match the real gwtd front door's PM runtime -> checkout resolution.
+    let worktree =
+        gwt::cli::CliEnv::repo_path(&gwt::cli::DefaultCliEnv::new_for_hooks()).to_path_buf();
+    assert!(gwt::pm_registry::is_canonical_pm_worktree(&worktree));
+    let runtime_path = PathBuf::from(std::env::var_os("GWT_SESSION_RUNTIME_PATH").unwrap());
+    println!("GWT_PM_FIXTURE_READY");
+    std::io::stdout().flush().unwrap();
+    let mut command = Vec::new();
+    for byte in std::io::stdin().lock().bytes() {
+        let byte = byte.unwrap();
+        if !matches!(byte, b'\r' | b'\n') {
+            command.push(byte);
+            continue;
+        }
+        if command == b"GWT_PM_FIXTURE_COMPLETE_AUTOMATIC" {
+            let runtime = gwt_agent::SessionRuntimeState::load(&runtime_path).unwrap();
+            let child = runtime.child_pid.unwrap();
+            assert!(
+                child == std::process::id()
+                    || gwt::process::is_descendant_of(std::process::id(), child).unwrap()
+            );
+            let mut env = gwt::cli::TestEnv::new(worktree.clone());
+            env.stdin =
+                serde_json::json!({"prompt":gwt::pm_registry::PM_PERIODIC_WAKE_INSTRUCTION})
+                    .to_string();
+            gwt::cli::hook::run_daemon_hook(&mut env, "event", &["UserPromptSubmit".into()])
+                .unwrap();
+            for _ in 0..16 {
+                env.stdin = "{}".into();
+                env.stdout.clear();
+                assert_eq!(
+                    gwt::cli::hook::run_daemon_hook(&mut env, "event", &["Stop".into()]).unwrap(),
+                    0
+                );
+                if !serde_json::from_slice::<serde_json::Value>(&env.stdout)
+                    .is_ok_and(|output| output["decision"] == "block")
+                {
+                    break;
+                }
+            }
+            gwt_github::cache::write_atomic(
+                Path::new(&result_path),
+                &fs::read(&runtime_path).unwrap(),
+            )
+            .unwrap();
+        } else if gwt::pm_registry::parse_protected_pm_delivery_prompt(&String::from_utf8_lossy(
+            &command,
+        ))
+        .is_some()
+        {
+            let input =
+                serde_json::json!({"prompt": String::from_utf8_lossy(&command)}).to_string();
+            gwt::cli::hook::pm_loop_stop_check::handle_delivery_acknowledgement(&worktree, &input);
+            gwt_github::cache::write_atomic(
+                &PathBuf::from(&result_path).with_extension("wake"),
+                &command,
+            )
+            .unwrap();
+        }
+        command.clear();
+    }
+}
+
+fn native_pm_fixture_result(path: &Path) -> Vec<u8> {
+    owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Wait for native provider observation; PM interval assertions inject their explicit clock.
+        tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+            loop {
+                if let Ok(bytes) = fs::read(path) {
+                    break bytes;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("actual native PM provider observation")
+    })
+}
+
+fn assert_native_pm_received_periodic_wake(repo: &Path, result_path: &Path) {
+    let received = native_pm_fixture_result(&result_path.with_extension("wake"));
+    assert!(
+        String::from_utf8_lossy(&received).contains(gwt::pm_registry::PM_PERIODIC_WAKE_INSTRUCTION)
+    );
+    let receipts = gwt::pm_registry::load_pm_delivery_receipts(
+        &gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(repo),
+    )
+    .unwrap();
+    let receipt = receipts.last().expect("physical wake delivery receipt");
+    assert_eq!(
+        receipt.status,
+        gwt::pm_registry::PmDeliveryReceiptStatus::Verified
+    );
+    assert_eq!(receipt.target_session_id, registered_pm_session_id(repo));
+}
+
+#[test]
+fn issue_6722_periodic_wake_delivers_with_monitor_off_and_no_queue() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let home =
+        gwt_core::paths::normalize_windows_child_process_path(&temp.path().canonicalize().unwrap());
+    let _home = ScopedGwtHome::set(&home);
+    let _native_home = ScopedEnvVar::set("HOME", &home);
+    let _native_userprofile = ScopedEnvVar::set("USERPROFILE", &home);
+    let result = temp.path().join("pm-hook-result.json");
+    let _runner = ScopedEnvVar::set(
+        "GWT_TEST_PM_HOOK_RUNNER",
+        gwt_core::paths::normalize_windows_child_process_path(&std::env::current_exe().unwrap()),
+    );
+    let _result = ScopedEnvVar::set("GWT_TEST_PM_HOOK_RESULT", &result);
+    let (repo, mut runtime, window_id) = pm_wake_fixture(&temp);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(&prefs_path, &gwt::IssueMonitorPrefs::default()).unwrap();
+    let _pane = attach_live_pm_pane(&mut runtime, &window_id);
+    runtime.pm_periodic_wake_events_at(&repo, "2026-11-04T01:00:00Z");
+    drain_pm_wake_delivery_tasks(&mut runtime);
+    assert_native_pm_received_periodic_wake(&repo, &result);
+    assert!(runtime
+        .pm_periodic_wake_decision_at(&repo, "2026-11-04T01:00:59Z")
+        .is_none());
+}
+
+#[test]
+fn issue_6722_periodic_wake_delivers_after_automatic_turn_and_interval() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let home =
+        gwt_core::paths::normalize_windows_child_process_path(&temp.path().canonicalize().unwrap());
+    let _home = ScopedGwtHome::set(&home);
+    let _native_home = ScopedEnvVar::set("HOME", &home);
+    let _native_userprofile = ScopedEnvVar::set("USERPROFILE", &home);
+    let result = temp.path().join("pm-hook-result.json");
+    let _runner = ScopedEnvVar::set(
+        "GWT_TEST_PM_HOOK_RUNNER",
+        gwt_core::paths::normalize_windows_child_process_path(&std::env::current_exe().unwrap()),
+    );
+    let _result = ScopedEnvVar::set("GWT_TEST_PM_HOOK_RESULT", &result);
+    let (repo, mut runtime, window_id) = pm_wake_fixture(&temp);
+    let _pane = attach_live_pm_pane(&mut runtime, &window_id);
+    let pm = owner_runtime_probe(&runtime, &window_id);
+    assert!(
+        pm.session.as_ref().unwrap().execution_binding.is_none(),
+        "the resident PM has no execution grant"
+    );
+    pm.pty
+        .write_machine_input(b"GWT_PM_FIXTURE_COMPLETE_AUTOMATIC\r")
+        .unwrap();
+    let observed: gwt_agent::SessionRuntimeState =
+        serde_json::from_slice(&native_pm_fixture_result(&result)).unwrap();
+    let owner = project_owner_fixture(&mut runtime, &window_id);
+    let snapshot = owner_fixture_block_on(owner.command(
+        gwt::project_runtime::events::OwnerCommand::Snapshot {
+            id: owner.pane_id(&window_id),
+            incarnation: observed.runtime_incarnation.unwrap(),
+        },
+    ))
+    .unwrap();
+    assert_eq!(observed.status, gwt_agent::AgentStatus::Idle);
+    assert_eq!(observed.source_event.as_deref(), Some("Stop"));
+    assert!(
+        observed
+            .last_completed_hook_event_at
+            .is_some_and(|at| at >= observed.updated_at),
+        "the native unbound PM Stop must publish completion: {observed:?}; native screen: {}",
+        snapshot["screen"]
+    );
+    assert!(!gwt::project_runtime::pm_delivery::pm_wake_runtime_is_busy(
+        &gwt_agent::runtime_state_path(&runtime.sessions_dir, &pm.session.as_ref().unwrap().id),
+        observed.runtime_incarnation.unwrap(),
+    ));
+    let context = runtime.test_context();
+    runtime.install_remote_owner_projection(
+        &context,
+        &window_id,
+        owner.client(),
+        serde_json::from_value(snapshot).unwrap(),
+        pm.session.clone(),
+    );
+    let now = Utc::now();
+    assert!(runtime
+        .pm_periodic_wake_decision_at(&repo, &now.to_rfc3339())
+        .is_none());
+    runtime.pm_periodic_wake_events_at(&repo, &(now + chrono::Duration::seconds(61)).to_rfc3339());
+    drain_pm_wake_delivery_tasks(&mut runtime);
+    assert_native_pm_received_periodic_wake(&repo, &result);
 }
 
 fn assert_pm_ensure_spawns_from_default_branch(default_branch: &str, cached_default: bool) {

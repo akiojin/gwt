@@ -1,10 +1,157 @@
 import { expect, test } from "@playwright/test";
+import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { startExactRelaunchFixture } from "./_helpers/exact-relaunch";
 import {
   gotoLiveGwt,
   withLiveGwtBackendLock,
 } from "./_helpers/live-gwt";
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
+
+// Issue #6725: this runs two actual checkout GUI processes over the same
+// isolated HOME. Only the saved history and local landed ref are fixtures;
+// restore admission, source retirement, and notifications are not injected.
+test.describe("retired automatic restore sources", () => {
+  test("twelve landed windows stay diagnostic and are not retried on the next startup", async ({ page }, info) => {
+    test.skip(process.env.GWT_PLAYWRIGHT_RETIRED_RESTORE !== "1",
+      "requires freshly built checkout binaries and an isolated saved-session fixture");
+    test.setTimeout(180_000);
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    const sources = Array.from({ length: 12 }, (_, index) => `landed-restore-${index}`);
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    await page.addInitScript(theme => {
+      try { localStorage.setItem("gwt:ui:theme", theme); } catch { /* about:blank during cleanup */ }
+      (window as any).__gwtAgentErrorToasts = [];
+      // Observe transient toasts too: checking only the final DOM could miss
+      // an error that disappeared while the twelve restores were settling.
+      new MutationObserver(() => {
+        for (const title of document.querySelectorAll(".toast-alerts__title")) {
+          if (title.textContent === "Agent error")
+            (window as any).__gwtAgentErrorToasts.push(title.textContent);
+        }
+      }).observe(document, { childList: true, subtree: true, characterData: true });
+    }, theme);
+    let logDirectories: string[] = [];
+    const fixture = await startExactRelaunchFixture(info, {
+      async beforeStart({ home, project, env, preferences }) {
+        env.RUST_LOG = "info,gwt.restore.admission=debug";
+        execFileSync("git", ["update-ref", "refs/remotes/origin/develop", "HEAD"], { cwd: project, env });
+        const sessions = join(home, ".gwt/sessions");
+        await mkdir(sessions, { recursive: true });
+        const timestamp = new Date().toISOString();
+        const hash = dirname(preferences).split(/[\\/]/).at(-1)!;
+        for (const id of sources) {
+          await writeFile(join(sessions, `${id}.toml`), [
+            `id = ${JSON.stringify(id)}`, `worktree_path = ${JSON.stringify(project)}`,
+            `project_state_root = ${JSON.stringify(project)}`, `repo_hash = ${JSON.stringify(hash)}`,
+            'branch = "main"', 'agent_id = { type = "Codex" }',
+            `agent_session_id = ${JSON.stringify(randomUUID())}`, 'status = "Idle"',
+            'session_mode = "Resume"', 'restore_window_on_startup = true', 'schema_version = 5',
+            `created_at = ${JSON.stringify(timestamp)}`, `updated_at = ${JSON.stringify(timestamp)}`,
+            `last_activity_at = ${JSON.stringify(timestamp)}`, 'last_hook_event = "Stop"',
+            `last_hook_event_at = ${JSON.stringify(timestamp)}`, `last_completed_stop_at = ${JSON.stringify(timestamp)}`,
+            'display_name = "Codex"', "",
+          ].join("\n"));
+        }
+        await writeFile(join(dirname(preferences), "workspace.json"), JSON.stringify({
+          windows: sources.map((id, index) => ({ id: `diagnostic-${index}`, title: `Saved Agent ${index}`,
+            preset: "codex", status: "stopped", z_index: index + 1, agent_id: "codex", session_id: id,
+            // A meaningful diagnostic is retained, unlike an empty landed pane.
+            dynamic_title_detail: `Retained history for ${id}` })),
+          next_z_index: sources.length + 1,
+        }));
+        logDirectories = [join(home, ".gwt/logs"), join(dirname(preferences), "logs")];
+      },
+    });
+    async function logs(directory: string): Promise<any[]> {
+      const rows: any[] = [];
+      for (const entry of await readdir(directory, { withFileTypes: true }).catch(() => [])) {
+        const path = join(directory, entry.name);
+        if (entry.isDirectory()) rows.push(...await logs(path));
+        else if (/\.log(?:\.|$)|\.jsonl$/.test(entry.name)) {
+          for (const line of (await readFile(path, "utf8")).split("\n")) {
+            try { rows.push(JSON.parse(line)); } catch { /* An in-flight final line is retried. */ }
+          }
+        }
+      }
+      return rows;
+    }
+    const admissionRows = async () => (await Promise.all(logDirectories.map(logs))).flat()
+      .filter(row => row.target === "gwt.restore.admission");
+    const summaries = (rows: any[]) => rows.filter(row =>
+      row.fields?.message === "session restore admission summary" && row.fields.scope === "startup restore");
+    const landedRows = (rows: any[]) => rows.filter(row =>
+      row.fields?.message === "session restore refused" && row.fields.reason === "landed_worktree");
+    try {
+      let summaryCount = 0;
+      for (const generation of [1, 2]) {
+        await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+        await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+        await expect.poll(async () => summaries(await admissionRows()).length,
+          { timeout: 60_000, message: `startup ${generation} restore drain settles` }).toBe(summaryCount + 1);
+        const rows = await admissionRows();
+        summaryCount = summaries(rows).length;
+        if (generation === 1) {
+          expect(landedRows(rows)).toHaveLength(sources.length);
+          expect(new Set(landedRows(rows).map(row => row.fields.session_id))).toEqual(new Set(sources));
+        } else {
+          expect(landedRows(rows), "the second process must not retry the retired sources").toHaveLength(sources.length);
+          expect(summaries(rows).at(-1).fields.reasons).toContain("window_not_open=12");
+        }
+        for (const id of sources) {
+          const saved = await readFile(join(fixture.home, ".gwt/sessions", `${id}.toml`), "utf8");
+          expect(saved).toMatch(/^restore_window_on_startup\s*=\s*false$/m);
+          expect(saved).toMatch(/^status\s*=\s*"Stopped"$/m);
+        }
+        await page.locator("#op-notifications-button").click();
+        const drawer = page.locator("#notification-center");
+        await expect(drawer).toBeVisible();
+        const skipped = drawer.locator(".notification-center__item")
+          .filter({ hasText: "Automatic restore skipped: landed_worktree" });
+        await expect(skipped).toHaveCount(generation === 1 ? sources.length : 0);
+        if (generation === 1) {
+          expect(await skipped.evaluateAll(nodes => nodes.map(node => (node as HTMLElement).dataset.level)))
+            .toEqual(sources.map(() => "info"));
+        }
+        await expect(drawer.locator('.notification-center__item[data-level="error"]')).toHaveCount(0);
+        await expect(page.locator("#wizard-modal")).toBeHidden();
+        const observations = await page.evaluate(() => ({
+          agentErrorToasts: (window as any).__gwtAgentErrorToasts,
+          errors: ((window as any).__gwtPlaywrightMessages ?? []).filter((entry: any) =>
+            entry.payload.kind === "terminal_status" && entry.payload.status === "error"),
+          windows: (((window as any).__gwtPlaywrightMessages ?? [])
+            .findLast((entry: any) => entry.payload.kind === "workspace_state")?.payload.workspace.tabs ?? [])
+            .flatMap((tab: any) => tab.workspace.windows),
+        }));
+        expect(observations.agentErrorToasts, "Agent error toast count").toEqual([]);
+        expect(observations.errors, "refusals must not become terminal errors").toEqual([]);
+        expect(observations.windows.filter((window: any) => sources.includes(window.session_id)))
+          .toHaveLength(sources.length);
+        expect(observations.windows.some((window: any) => window.status === "error")).toBe(false);
+        expect(await fixture.launches(), "landed history never spawns a provider").toEqual([]);
+        expect(errors, "console and page errors").toEqual([]);
+        await info.attach(`retired-restore-${generation}-${theme}`, {
+          body: await page.screenshot({ fullPage: true }), contentType: "image/png",
+        });
+        await info.attach(`retired-restore-evidence-${generation}-${theme}`, {
+          body: JSON.stringify({ generation, sources, admission: rows, observations, errors }),
+          contentType: "application/json",
+        });
+        // Stop reconnects before terminating only this helper's recorded PID.
+        await page.goto("about:blank");
+        if (generation === 1) await fixture.restart();
+      }
+    } finally {
+      try { await page.close(); } finally { await fixture.stop(); }
+    }
+    expect(errors, "console and page errors including owned cleanup").toEqual([]);
+  });
+});
 
 // Issue #4153: receive-contract coverage for the configuration diagnostic.
 // Rust process fixtures prove detection, fallback, and attempt preservation.

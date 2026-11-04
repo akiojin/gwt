@@ -102,6 +102,7 @@ reqwest.workspace = true
 sha2.workspace = true
 ring = "0.17"
 hex.workspace = true
+zip.workspace = true
 notify.workspace = true
 notify-debouncer-mini.workspace = true
 pulldown-cmark.workspace = true
