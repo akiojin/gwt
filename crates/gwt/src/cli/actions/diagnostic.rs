@@ -373,7 +373,7 @@ fn load(root: &Path, id: &str) -> io::Result<Option<Receipt>> {
 
 fn response(state: &str, reason: &str) -> Value {
     json!({"schema_version":1,"state":state,"reason_enum":reason,
-        "diagnostic_only":true,"ready_evidence":false,"uncertainty":state.contains("Unknown"),
+        "diagnostic_only":true,"ready_evidence":false,"uncertainty":state.contains("Unknown") || state == "CleanupUnobserved",
         "requirement":{"registered_pm":true,"host_proof":"fresh_same_issuer_session_generation","repository":REPOSITORY,"workflow":WORKFLOW,"profile_id":PROFILE_ID,"profile_digest":digest(PROFILE_BYTES),"source_observations":1,"request_posts":1},
         "current_observation":{},
         "recovery":{"operation":"actions.diagnostic.observe","authority":"pm.capabilities; use the current registered repository PM and canonical Host context","workflow_allowlist":{"status_operation":"actions.diagnostic.policy.status","add_operation":"actions.diagnostic.policy.add","owner_action":"Read diagnostic policy status, then use its current token and exact scoped instruction_id or native approval_id with a fresh request_id. This permits only akiojin/gwt/windows-diagnostic.yml; workflow submission remains separate."},"unknown":"preserve the request and inspect its exact run; never resend or reset the source budget"}})
@@ -1570,5 +1570,9 @@ mod tests {
         assert!(!result.to_string().contains("private-provider-sentinel"));
         assert!(env.diagnostic_dispatches.is_empty());
         assert_eq!(json!(result["diagnostic_only"]), true);
+        assert_eq!(
+            response("CleanupUnobserved", "Observed")["uncertainty"],
+            true
+        );
     }
 }
