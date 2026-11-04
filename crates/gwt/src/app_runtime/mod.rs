@@ -15573,19 +15573,11 @@ impl AppRuntime {
                         restore_feedback.as_ref().is_some_and(|feedback| {
                             feedback.origin == startup::RestoreOrigin::Automatic
                         }) && pure_owner_refusal
-                            && (matches!(
-                                refusal_reason,
-                                startup::RestoreRefusal::TerminalWork(_)
-                                    | startup::RestoreRefusal::ClosedWorkDiagnostic
-                                    | startup::RestoreRefusal::CompletedWork
-                                    | startup::RestoreRefusal::LandedWorktree
-                                    | startup::RestoreRefusal::EmptyLandedWorktree
-                                    | startup::RestoreRefusal::MonitorHold("launch_revoked")
-                            ) || restore_refusal.as_ref().is_some_and(|refusal| {
+                            && restore_refusal.as_ref().is_some_and(|refusal| {
                                 gwt::project_runtime::installation::is_expected_restore_exclusion(
                                     &refusal.code,
                                 )
-                            }));
+                            });
                     if expected_automatic_refusal {
                         let refusal = restore_refusal.as_ref().expect("owner refusal");
                         notification.push(OutboundEvent::project(

@@ -1968,6 +1968,16 @@ fn startup_restore_removes_empty_unlinked_landed_windows_but_keeps_diagnostics()
         durable_empty.restore_window_on_startup,
     );
     assert!(windows.iter().all(|window| window.id != "empty"));
+    assert!(
+        !gwt_core::error_ledger::list_since(None)
+            .unwrap()
+            .iter()
+            .any(|row| {
+                row.kind == gwt_core::error_ledger::ErrorKind::LaunchFailure
+                    && row.target.session_id.as_deref() == Some("session-empty")
+            }),
+        "an empty landed restore exclusion must not publish a host launch failure"
+    );
     assert_eq!(
         windows
             .iter()

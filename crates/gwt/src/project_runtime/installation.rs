@@ -87,9 +87,17 @@ pub fn is_expected_restore_exclusion(code: &str) -> bool {
     matches!(
         code,
         "closed_work_diagnostic_retained"
+            | "completed_work_retained"
             | "execution_blocked"
             | "landed_worktree"
+            | "empty_landed_worktree"
+            | "settled_execution"
+            | "closed_issue"
+            | "closed_issue_bookkeeping_warning"
+            | "revoked_launch"
+            | "lost_ownership"
             | "monitor_stopped"
+            | "launch_revoked"
             | "unregistered_pm"
     )
 }
