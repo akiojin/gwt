@@ -199,17 +199,38 @@ impl TaskStore {
         }
     }
 
-    /// `None` means no store has been created; it is not evidence of zero work.
+    /// `None` means neither a snapshot nor initialization evidence exists.
+    /// A partial store requires recovery, never automatic reinitialization.
     pub fn read(&self) -> Result<Option<Snapshot>, TaskError> {
+        let initialized = match std::fs::read(self.path.with_extension("initialized")) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(TaskError::Unreadable(error.to_string())),
+        };
         let bytes = match std::fs::read(&self.path) {
             Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return if initialized.is_none() {
+                    Ok(None)
+                } else {
+                    Err(TaskError::Unreadable(
+                        "initialized snapshot missing; restore the original snapshot before retrying"
+                            .into(),
+                    ))
+                };
+            }
             Err(error) => return Err(TaskError::Unreadable(error.to_string())),
         };
         let snapshot: Snapshot = serde_json::from_slice(&bytes)
             .map_err(|error| TaskError::Unreadable(error.to_string()))?;
         if snapshot.project_key != self.project_key {
             return Err(TaskError::ForeignProject);
+        }
+        if initialized.as_deref() != Some(self.project_key.as_bytes()) {
+            return Err(TaskError::Unreadable(
+                "initialization evidence missing or invalid; restore the original store before retrying"
+                    .into(),
+            ));
         }
         if snapshot.schema_version != 1
             || snapshot.revision != snapshot.receipts.len() as u64
@@ -314,7 +335,9 @@ impl TaskStore {
             "pm.request_tasks",
         )
         .map_err(|error| TaskError::PersistenceUnconfirmed(error.to_string()))?;
-        let mut state = self.read()?.unwrap_or_else(|| Snapshot {
+        let existing = self.read()?;
+        let initialize = existing.is_none();
+        let mut state = existing.unwrap_or_else(|| Snapshot {
             schema_version: 1,
             project_key: self.project_key.clone(),
             revision: 0,
@@ -371,6 +394,15 @@ impl TaskStore {
         // Re-publish even on exact replay, under the same stable lock, before ACK.
         let bytes = serde_json::to_vec(&state)
             .map_err(|error| TaskError::PersistenceUnconfirmed(error.to_string()))?;
+        if initialize {
+            // Persist evidence before the first snapshot can become visible.
+            // An interrupted first publication must remain unavailable too.
+            gwt_config::atomic::write_atomic(
+                &self.path.with_extension("initialized"),
+                &self.project_key,
+            )
+            .map_err(|error| TaskError::PersistenceUnconfirmed(error.to_string()))?;
+        }
         publish(&self.path, &bytes).map_err(TaskError::PersistenceUnconfirmed)?;
         let saved = std::fs::read(&self.path)
             .map_err(|error| TaskError::PersistenceUnconfirmed(error.to_string()))?;
@@ -1043,6 +1075,67 @@ mod tests {
             foreign_store.read(),
             Err(TaskError::ForeignProject)
         ));
+    }
+
+    #[test]
+    fn initialized_snapshot_loss_cannot_reset_task_or_receipt_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        assert!(matches!(
+            apply(
+                &store,
+                "invalid-first",
+                0,
+                json!({"kind":"reopen","task_id":"missing"})
+            ),
+            Err(TaskError::MissingTask)
+        ));
+        assert!(store.read().unwrap().is_none());
+        seed(&store);
+        let before = std::fs::read(&store.path).unwrap();
+        let receipt = store.read().unwrap().unwrap().receipts[0].clone();
+        std::fs::remove_file(&store.path).unwrap();
+        assert!(matches!(store.read(), Err(TaskError::Unreadable(_))));
+        assert!(matches!(
+            apply(&store, "capture", 0, source()),
+            Err(TaskError::Unreadable(_))
+        ));
+        assert!(!store.path.exists(), "replay must not recreate lost state");
+
+        // Restoring the original snapshot permits exact replay without reset.
+        std::fs::write(&store.path, &before).unwrap();
+        assert_eq!(apply(&store, "capture", 0, source()).unwrap(), receipt);
+        assert_eq!(std::fs::read(&store.path).unwrap(), before);
+        std::fs::remove_file(store.path.with_extension("initialized")).unwrap();
+        assert!(matches!(store.read(), Err(TaskError::Unreadable(_))));
+        assert!(matches!(
+            apply(&store, "capture", 0, source()),
+            Err(TaskError::Unreadable(_))
+        ));
+        assert_eq!(std::fs::read(&store.path).unwrap(), before);
+    }
+
+    #[test]
+    fn interrupted_first_publication_is_unavailable_instead_of_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        let request = Request {
+            operation_id: "capture".into(),
+            expected_revision: 0,
+            reason: "authenticated human turn".into(),
+            action: serde_json::from_value(source()).unwrap(),
+        };
+        let failed = store.apply_with(&actor(ActorKind::Intake), &request, |_, _| {
+            assert!(matches!(store.read(), Err(TaskError::Unreadable(_))));
+            Err("first snapshot publication failed".into())
+        });
+        assert!(matches!(failed, Err(TaskError::PersistenceUnconfirmed(_))));
+        assert!(matches!(store.read(), Err(TaskError::Unreadable(_))));
+        assert!(matches!(
+            store.apply(&actor(ActorKind::Intake), &request),
+            Err(TaskError::Unreadable(_))
+        ));
+        assert!(!store.path.exists());
     }
 
     #[test]
