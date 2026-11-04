@@ -328,6 +328,150 @@ fn restore_closed_diagnostic_keeps_placeholder_without_spawning() {
 }
 
 #[test]
+fn automatic_restore_retires_finished_sources_and_keeps_real_errors() {
+    for (code, failure_kind) in [
+        ("closed_work_diagnostic_retained", None),
+        ("launch_revoked", None),
+        ("closed_work_diagnostic_retained", Some("cleanup")),
+        ("closed_work_diagnostic_retained", Some("source_unreadable")),
+    ] {
+        let actual_failure = failure_kind.is_some();
+        let temp = tempdir().unwrap();
+        let _gwt_home = ScopedGwtHome::set(temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        init_repo_with_initial_commit(&repo);
+        let mut tab = restore_fixture_tab(
+            "tab-quiet",
+            &repo,
+            &[("agent-quiet".into(), "session-quiet".into())],
+        );
+        if actual_failure {
+            tab.workspace.set_dynamic_title_with_detail(
+                "agent-quiet",
+                None,
+                Some("Retained earlier diagnostic".into()),
+            );
+        }
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-quiet"));
+        runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        save_restore_fixture_session(
+            &runtime.sessions_dir,
+            "session-quiet",
+            &repo,
+            Some("native-quiet"),
+            Some(6725),
+        );
+        if code == "closed_work_diagnostic_retained" {
+            gwt::save_issue_monitor_prefs(
+                &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+                &gwt::IssueMonitorPrefs {
+                    merged_issues: vec![6725],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let path = runtime.sessions_dir.join("session-quiet.toml");
+            let mut source = gwt_agent::Session::load(&path).unwrap();
+            source.status = gwt_agent::AgentStatus::Interrupted;
+            source.save(&runtime.sessions_dir).unwrap();
+        } else {
+            use gwt::cli::execution_state::*;
+            materialize_at_launch(
+                &repo,
+                ExecutionOwnerKind::Issue,
+                6725,
+                "session-quiet",
+                "$gwt-execute #6725",
+                false,
+            )
+            .unwrap();
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Issue,
+                number: 6725,
+            };
+            ensure_generation_ledger(&repo, owner, LegacyActiveDisposition::Live).unwrap();
+            release_revoked_launch_generation(&repo, owner, "operator stopped the launch").unwrap();
+        }
+        save_workspace_state(
+            &workspace_state_path(&repo),
+            runtime.tabs[0].workspace.persisted(),
+        )
+        .unwrap();
+        let owner = owner_fixture_block_on(production_owner_fixture(&repo));
+        let (spawner, tasks) = BlockingTaskSpawner::queued();
+        runtime.blocking_tasks = spawner;
+        runtime.queue_startup_auto_resume_sessions(&HashSet::new());
+        runtime.startup_auto_resume_ready_events();
+        drain_queued_blocking_tasks(&tasks);
+        let mut completion = take_remote_owner_launch_completion(match &runtime.proxy {
+            AppEventProxy::Stub(events) => events,
+            _ => panic!("recorded restore completion"),
+        });
+        // Consumer-contract faults after an actual authenticated refusal:
+        // typed source I/O failure, or failure of the following cleanup RPC.
+        if failure_kind == Some("source_unreadable") {
+            let refusal = completion.restore_refusal.as_mut().expect("owner refusal");
+            refusal.code = "source_unreadable".into();
+            refusal.message = "I/O failure".into();
+            completion.result = Err(refusal.message.clone());
+        } else if actual_failure {
+            completion.result = Err(format!(
+                "{}; exact owner cleanup remains pending: I/O failure",
+                completion
+                    .result
+                    .as_ref()
+                    .err()
+                    .expect("actual owner refusal")
+            ));
+        }
+        let events = runtime.handle_remote_owner_launch_complete(completion);
+        let windows = &runtime.tabs[0].workspace.persisted().windows;
+        assert_eq!(windows.len(), 1, "retain diagnostic placeholder: {code}");
+        assert_eq!(
+            windows[0].status,
+            if actual_failure {
+                WindowProcessStatus::Error
+            } else {
+                WindowProcessStatus::Stopped
+            },
+            "an expected refusal is not a runtime error: {code}; {events:?}"
+        );
+        assert_eq!(
+            events.iter().any(|event| matches!(&event.event,
+            BackendEvent::IssueMonitorToast { level, message, .. }
+                if level == "info" && message.contains(code))),
+            !actual_failure,
+            "keep refusal reason in Notifications: {code}; {events:?}"
+        );
+        if actual_failure {
+            assert!(events.iter().any(|event| matches!(&event.event,
+                BackendEvent::IssueMonitorToast { level, message, .. }
+                    if level == "error" && message.contains("I/O failure"))));
+        }
+        let source =
+            gwt_agent::Session::load(&runtime.sessions_dir.join("session-quiet.toml")).unwrap();
+        assert!(!source.restore_window_on_startup, "do not retry {code}");
+        assert!(runtime.runtimes.is_empty());
+        owner_fixture_block_on(owner.shutdown());
+
+        // Reload the persisted layout and Session, as a second startup does.
+        let mut tab = restore_fixture_tab("tab-quiet", &repo, &[]);
+        tab.workspace = WindowRegistry::from_persisted(
+            load_workspace_state(&workspace_state_path(&repo)).unwrap(),
+        );
+        let mut restarted = sample_runtime(temp.path(), vec![tab], Some("tab-quiet"));
+        restarted.sessions_dir = runtime.sessions_dir.clone();
+        restarted.queue_startup_auto_resume_sessions(&HashSet::new());
+        assert!(
+            restarted.pending_startup_auto_resume_sessions.is_empty(),
+            "no second attempt: {code}"
+        );
+        assert_eq!(restarted.tabs[0].workspace.persisted().windows.len(), 1);
+    }
+}
+
+#[test]
 fn restore_pending_worktree_reservation_ends_when_window_closes() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
