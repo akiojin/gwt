@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
+import * as terminalOutput from "../terminal-output-buffer.js";
 
 import {
   DEFAULT_MAX_CHARS_PER_FLUSH,
@@ -66,6 +68,102 @@ function cursorScheduler() {
     },
   };
 }
+
+function hiddenTasks(t) {
+  const tasks = manualScheduler();
+  let closed = 0;
+  for (const [key, value] of Object.entries({
+    document: { hidden: true },
+    MessageChannel: class {
+      port1 = { onmessage: null, close: () => { closed += 1; } };
+      port2 = { close: () => { closed += 1; },
+        postMessage: () => tasks.schedule(() => this.port1.onmessage?.()) };
+    },
+    requestAnimationFrame: () => assert.fail("hidden work must not wait for an animation frame"),
+    cancelAnimationFrame: () => {},
+  })) {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, key);
+    Object.defineProperty(globalThis, key, { configurable: true, value });
+    t.after(() => {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else delete globalThis[key];
+    });
+  }
+  // Native background timers may be clamped; do not advance them in this test.
+  t.mock.method(globalThis, "setTimeout", () => 1);
+  t.mock.method(globalThis, "clearTimeout", () => {});
+  return { tasks, closed: () => closed };
+}
+
+test("hidden output batches advance by tasks while preserving order and window budgets", (t) => {
+  const { tasks, closed } = hiddenTasks(t);
+  const writes = [];
+  const batcher = createTerminalOutputBatcher({ maxWindowsPerFlush: 1,
+    write: (id, text) => writes.push([id, text]) });
+  batcher.enqueue("first", "a");
+  batcher.enqueue("first", "b");
+  batcher.enqueue("second", "c");
+  assert.deepEqual(writes, []);
+  assert.equal(tasks.pendingCount(), 1);
+  tasks.runOnce();
+  assert.deepEqual(writes, [["first", "ab"]]);
+  assert.equal(tasks.pendingCount(), 1);
+  tasks.runOnce();
+  assert.deepEqual(writes, [["first", "ab"], ["second", "c"]]);
+  assert.equal(closed(), 4, "both ports close after each one-shot task");
+});
+
+test("vendored xterm coalesces hidden redraws and cancels disposed work without frames", (t) => {
+  const { tasks } = hiddenTasks(t);
+  const source = readFileSync(new URL("../vendor/xterm/xterm.mjs", import.meta.url), "utf8");
+  const start = source.indexOf("Ws=class{") + 3;
+  const end = source.indexOf(",zs={}", start);
+  assert.ok(start > 3 && end > start, "pinned xterm RenderDebouncer is present");
+  const Debouncer = new Function("gwtScheduleTerminalTask", `return (${source.slice(start, end)});`)(
+    callback => terminalOutput.scheduleTerminalTask(callback));
+  const draws = [], callbacks = [];
+  const debouncer = new Debouncer((first, last) => draws.push([first, last]), { window: globalThis });
+  debouncer.refresh(0, 1, 4);
+  debouncer.refresh(1, 3, 4);
+  const handle = debouncer.addRefreshCallback(() => callbacks.push("done"));
+  assert.notEqual(handle, undefined, "xterm decorations use the handle to deduplicate callbacks");
+  assert.deepEqual(draws, []);
+  assert.equal(tasks.pendingCount(), 1);
+  tasks.runOnce();
+  assert.deepEqual(draws, [[0, 3]]);
+  assert.deepEqual(callbacks, ["done"]);
+  debouncer.refresh(0, 1, 4);
+  debouncer.dispose();
+  tasks.runAll();
+  assert.deepEqual(draws, [[0, 3]], "disposed terminal must not redraw");
+});
+
+test("vendored xterm parser starts and yields hidden tasks at its existing budget", (t) => {
+  const { tasks } = hiddenTasks(t);
+  const source = readFileSync(new URL("../vendor/xterm/xterm.mjs", import.meta.url), "utf8");
+  const start = source.indexOf("In=class extends Ie{") + 3;
+  const end = source.indexOf(",Nn=class", start);
+  assert.ok(start > 3 && end > start, "pinned xterm WriteBuffer is present");
+  let clock = 1;
+  const Parser = new Function("Ie", "et", "performance", "gwtScheduleTerminalTask",
+    `return (${source.slice(start, end)});`)(
+    class { _register(value) { return value; } }, class { event() {} fire() {} },
+    { now: () => clock }, callback => terminalOutput.scheduleTerminalTask(callback));
+  const parsed = [], done = [];
+  const parser = new Parser(text => { parsed.push(text); clock += 13; });
+  parser.write("a", () => done.push("a"));
+  parser.write("b", () => done.push("b"));
+  assert.deepEqual(parsed, []);
+  assert.equal(tasks.pendingCount(), 1);
+  tasks.runOnce();
+  assert.deepEqual(parsed, ["a"]);
+  assert.deepEqual(done, ["a"]);
+  assert.equal(tasks.pendingCount(), 1, "12ms budget yields to another task");
+  tasks.runOnce();
+  assert.deepEqual(parsed, ["a", "b"]);
+  assert.deepEqual(done, ["a", "b"]);
+  assert.equal(tasks.pendingCount(), 0);
+});
 
 test("default output scheduler drains without animation frames and ignores the losing callback", (t) => {
   const frames = new Map(), timers = new Map(), writes = [];

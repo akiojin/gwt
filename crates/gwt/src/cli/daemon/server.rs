@@ -4863,6 +4863,121 @@ async fn issue_5524_wait_rejection_preserves_the_not_launched_reason() {
 
 #[cfg(test)]
 #[test]
+fn issue_5876_committed_wait_survives_a_stale_daemon_writer() {
+    let _prefs_budget = pin_prefs_hang_guard();
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let prefs_path = temp.path().join("issue-monitor.json");
+    let mut monitor = test_monitor(crate::IssueMonitorConfig::default());
+    monitor.complete_active_launch_at(42, "tab-1::agent-42", "2026-06-29T00:00:00Z");
+    monitor.set_autonomous_phase(42, crate::AutonomousPhase::Implementing);
+    monitor.record_autonomous_heartbeat(42, "2026-06-29T00:00:00Z");
+    assert!(monitor
+        .autonomous_record(42)
+        .unwrap()
+        .active_launch_id
+        .is_none());
+    crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed prefs");
+    let mut stale = monitor.clone();
+    let commit = |monitor: &mut crate::IssueMonitorState, control: IssueMonitorControl| {
+        assert!(matches!(
+            try_apply_accepted_issue_monitor_control_with_disk_migration(
+                &prefs_path,
+                monitor,
+                &mut AcceptedIssueMonitorControl::new(control),
+            ),
+            IssueMonitorControlCommit::Committed { .. }
+        ));
+    };
+
+    commit(
+        &mut monitor,
+        IssueMonitorControl::WaitDeclared {
+            issue_number: 42,
+            reason: "verification".to_string(),
+            resume_condition: "slot available".to_string(),
+            at: "2026-06-29T00:10:00Z".to_string(),
+        },
+    );
+    let committed = crate::load_issue_monitor_prefs(&prefs_path).expect("wait ACK");
+    let waiting = monitor
+        .autonomous_wait(42)
+        .cloned()
+        .expect("wait committed");
+    stale.set_autonomous_phase(42, crate::AutonomousPhase::Reviewing);
+    stale.record_autonomous_heartbeat(42, "2026-06-29T00:15:00Z");
+    assert!(persist_daemon_issue_monitor_state(&prefs_path, &mut stale));
+    let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("stale writer commit");
+    assert_eq!(
+        persisted.last_control_receipt,
+        committed.last_control_receipt
+    );
+    assert_eq!(stale.autonomous_wait(42), Some(&waiting));
+    let restored = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), persisted);
+    assert_eq!(restored.autonomous_wait(42), Some(&waiting));
+    let record = restored.autonomous_record(42).unwrap();
+    assert_eq!(record.phase, crate::AutonomousPhase::Reviewing);
+    assert_eq!(
+        record.last_heartbeat.as_deref(),
+        Some("2026-06-29T00:15:00Z")
+    );
+    assert!(crate::issue_monitor::wait_declaration_in_force(
+        restored.autonomous_wait(42).unwrap(),
+        "2026-06-29T02:00:00Z",
+    ));
+
+    monitor = stale.clone();
+    commit(
+        &mut monitor,
+        IssueMonitorControl::WaitCleared {
+            issue_number: 42,
+            at: "2026-06-29T00:20:00Z".to_string(),
+        },
+    );
+    assert!(persist_daemon_issue_monitor_state(&prefs_path, &mut stale));
+    assert!(
+        stale.autonomous_wait(42).is_none(),
+        "clear must not resurrect"
+    );
+    assert_eq!(
+        stale
+            .autonomous_record(42)
+            .unwrap()
+            .last_heartbeat
+            .as_deref(),
+        Some("2026-06-29T00:20:00Z")
+    );
+
+    commit(
+        &mut monitor,
+        IssueMonitorControl::WaitDeclared {
+            issue_number: 42,
+            reason: "CI".to_string(),
+            resume_condition: "checks complete".to_string(),
+            at: "2026-06-29T00:25:00Z".to_string(),
+        },
+    );
+    stale = monitor.clone();
+    commit(
+        &mut monitor,
+        IssueMonitorControl::WaitInvalidated {
+            issue_number: 42,
+            by: "pm".to_string(),
+            reason: "checks complete".to_string(),
+            at: "2026-06-29T00:30:00Z".to_string(),
+        },
+    );
+    assert!(persist_daemon_issue_monitor_state(&prefs_path, &mut stale));
+    let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("invalidation persisted");
+    let restored = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), persisted);
+    assert_eq!(restored.autonomous_wait(42), monitor.autonomous_wait(42));
+    assert!(!crate::issue_monitor::wait_declaration_in_force(
+        restored.autonomous_wait(42).unwrap(),
+        "2026-06-29T00:31:00Z",
+    ));
+}
+
+#[cfg(test)]
+#[test]
 fn issue_5616_wait_control_persists_for_an_untracked_active_runtime() {
     let _prefs_budget = pin_prefs_hang_guard();
     let temp = tempfile::TempDir::new().expect("tempdir");
@@ -7217,16 +7332,16 @@ fn scan_issue_monitor_once_blocking(
     )?;
     monitor.set_source_repository(Some((&owner, &repo)));
     timing.next("candidate-load");
-    let mut loaded = crate::issue_monitor_worker::run_scan_stage(
-        IssueMonitorScanStage::CandidateLoad,
-        || {
-            crate::issue_monitor_worker::load_open_issue_monitor_candidates_for_repo_path_with_provenance(
+    let mut open_pr_inventory = None;
+    let mut loaded =
+        crate::issue_monitor_worker::run_scan_stage(IssueMonitorScanStage::CandidateLoad, || {
+            crate::issue_monitor_worker::load_open_issue_monitor_candidates_for_repo_path_observing(
                 &scope.project_root,
                 &owner,
                 &repo,
+                |result| open_pr_inventory = Some(result.clone()),
             )
-        },
-    )?;
+        })?;
     let mut degradations = Vec::new();
     // Issue #3933 AC-2: a failed live issue list used to discard the whole pass,
     // which left free agent slots idle for as long as GitHub was unreachable.
@@ -7472,14 +7587,17 @@ fn scan_issue_monitor_once_blocking(
     // is on; default OFF keeps the SPEC #3165 flow unchanged.
     timing.next("autonomous-progress");
     if loaded.authorizes_remote_effects() {
-        for degradation in crate::issue_monitor_worker::try_advance_autonomous_in_flight(
-            &mut monitor,
-            &loaded.issues,
-            &format!("{owner}/{repo}"),
-            &scope.project_root,
-            daemon_run_secret(),
-            &now,
-        )? {
+        for degradation in
+            crate::issue_monitor_worker::try_advance_autonomous_in_flight_with_inventory(
+                &mut monitor,
+                &loaded.issues,
+                &format!("{owner}/{repo}"),
+                &scope.project_root,
+                daemon_run_secret(),
+                &now,
+                open_pr_inventory.as_ref(),
+            )?
+        {
             push_scan_degradation(&mut degradations, &scope.project_root, degradation);
         }
         // Issue #3970 AC-1: a confirmed delivery retires its work branch. The
@@ -10107,6 +10225,14 @@ if [ "$GWT_FAKE_GH_MODE" = "open_pr_inventory" ]; then
   if [ -n "$GWT_FAKE_GH_CALL_LOG" ]; then
     printf '%s\n' "$*" >> "$GWT_FAKE_GH_CALL_LOG"
   fi
+  case "$*" in
+    *"/pulls?state=open"*)
+      if [ "$GWT_FAKE_GH_OPEN_PR_FAILURE" = "1" ]; then
+        printf '%s\n' 'fixture inventory unavailable' >&2
+        exit 1
+      fi
+      ;;
+  esac
   # The REST list is paged: only the first page carries rows, like GitHub
   # (a fixture larger than per_page would otherwise page forever).
   case "$*" in
@@ -10194,7 +10320,7 @@ if [ "$GWT_FAKE_GH_MODE" = "issue_list_fail" ]; then
   exit 0
 fi
 if [ "$GWT_FAKE_GH_MODE" = "branch_protection_fail" ]; then
-  printf '%s\n' '[{"number":43,"title":"Live issue","body":"## Acceptance Criteria\n- [ ] AC-1: verified by tests","labels":[{"name":"auto-improve"},{"name":"auto-merge"}],"state":"OPEN","url":"https://example.test/issues/43"}]'
+  printf '%s\n' '[{"number":43,"title":"Live issue","body":"## Acceptance Criteria\n- [ ] AC-1: verified by tests","labels":[{"name":"auto-improve"},{"name":"auto-merge"}],"state":"OPEN","url":"https://example.test/issues/43","updatedAt":"2026-08-15T00:00:00Z"}]'
   exit 0
 fi
 if [ "$GWT_FAKE_GH_MODE" = "claim_probe_fail" ] || [ "$GWT_FAKE_GH_MODE" = "claim_probe_rate_limited" ]; then
@@ -16737,6 +16863,15 @@ exit 0
     /// stage in the same pass.
     #[test]
     fn daemon_scan_reads_open_prs_once_for_a_150_issue_in_flight_queue() {
+        assert_open_pr_inventory_reads_per_scan(false);
+    }
+
+    #[test]
+    fn daemon_scan_reuses_failed_open_pr_inventory_but_retries_next_scan() {
+        assert_open_pr_inventory_reads_per_scan(true);
+    }
+
+    fn assert_open_pr_inventory_reads_per_scan(failed: bool) {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -16748,6 +16883,10 @@ exit 0
         let _path = prepend_fake_gh_to_path(&fake_gh);
         let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
         let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "open_pr_inventory");
+        let _failure = ScopedEnvVar::set(
+            "GWT_FAKE_GH_OPEN_PR_FAILURE",
+            if failed { "1" } else { "0" },
+        );
         let call_log = temp.path().join("gh-calls.log");
         let _call_log = ScopedEnvVar::set("GWT_FAKE_GH_CALL_LOG", &call_log);
 
@@ -16833,50 +16972,54 @@ exit 0
         // `issue_monitor_worker::tests::a_readback_is_cut_at_its_own_budget_not_the_whole_scan_window`,
         // `issue_monitor_worker::tests::the_readback_fan_out_stops_while_the_launch_stage_still_has_budget`
         // and `issue_monitor_worker::tests::proposal_return_deadline_expiry_is_stage_typed`.
-        let scanned = super::scan_issue_monitor_once_blocking(scope, monitor, true)
-            .expect("a queue-scale readback must not abort the scan");
+        for scan in 1..=if failed { 2 } else { 1 } {
+            let scanned = super::scan_issue_monitor_once_blocking(scope.clone(), monitor, true)
+                .expect("a queue-scale readback must not abort the scan");
 
-        let calls = fs::read_to_string(&call_log).expect("gh call log");
-        let open_pr_reads = calls
-            .lines()
-            .filter(|line| line.starts_with("api repos/{owner}/{repo}/pulls?state=open"))
-            .count();
-        assert!(
-            !calls
+            let calls = fs::read_to_string(&call_log).expect("gh call log");
+            let open_pr_reads = calls
                 .lines()
-                .any(|line| line.starts_with("pr list") || line.starts_with("issue list")),
-            "SPEC #4093 AC-3: the scan's list readbacks are REST, never GraphQL:\n{calls}"
-        );
-        assert_eq!(
-            open_pr_reads, 1,
-            "one open-PR inventory per scan, not one per candidate:\n{calls}"
-        );
-        assert!(
-            !calls.lines().any(|line| line.contains("--head")),
-            "no per-branch open-PR readback may remain:\n{calls}"
-        );
-        assert!(
-            scanned.pending_effects().iter().any(|effect| matches!(
-                effect.payload,
-                crate::IssueMonitorEffectPayload::AcquireClaim { .. }
-            )),
-            "the launch stage must still run with a 150-issue in-flight set: {:?}",
-            scanned.pending_effects()
-        );
-        assert!(
-            in_flight.iter().all(|number| {
-                scanned
-                    .autonomous_record(*number)
-                    .map(|record| record.phase)
-                    == Some(crate::AutonomousPhase::Implementing)
-            }),
-            "no open PR keeps every candidate Implementing"
-        );
-        let last_error = scanned.status_view().last_error.unwrap_or_default();
-        assert!(
-            !last_error.contains("open-pr-readback"),
-            "a clean inventory is not a degraded readback: {last_error}"
-        );
+                .filter(|line| line.starts_with("api repos/{owner}/{repo}/pulls?state=open"))
+                .count();
+            assert!(
+                !calls
+                    .lines()
+                    .any(|line| line.starts_with("pr list") || line.starts_with("issue list")),
+                "SPEC #4093 AC-3: the scan's list readbacks are REST, never GraphQL:\n{calls}"
+            );
+            assert_eq!(
+                open_pr_reads, scan,
+                "one open-PR inventory per scan, not one per candidate:\n{calls}"
+            );
+            assert!(
+                !calls.lines().any(|line| line.contains("--head")),
+                "no per-branch open-PR readback may remain:\n{calls}"
+            );
+            assert!(
+                scanned.pending_effects().iter().any(|effect| matches!(
+                    effect.payload,
+                    crate::IssueMonitorEffectPayload::AcquireClaim { .. }
+                )),
+                "the launch stage must still run with a 150-issue in-flight set: {:?}",
+                scanned.pending_effects()
+            );
+            assert!(
+                in_flight.iter().all(|number| {
+                    scanned
+                        .autonomous_record(*number)
+                        .map(|record| record.phase)
+                        == Some(crate::AutonomousPhase::Implementing)
+                }),
+                "no open PR keeps every candidate Implementing"
+            );
+            let last_error = scanned.status_view().last_error.unwrap_or_default();
+            assert_eq!(
+                last_error.contains("open-pr-readback"),
+                failed,
+                "only a failed inventory degrades readback: {last_error}"
+            );
+            monitor = scanned;
+        }
     }
 
     /// Issue #3933 AC-2: a branch-protection failure no longer discards the scan.

@@ -1020,6 +1020,12 @@ pub enum FrontendEvent {
     },
     /// Read app-wide update preference and the requesting project's drain.
     GetUpdateSettings,
+    /// Audit the authenticated connection's project; repair is explicit.
+    GetHookDoctor {
+        request_id: u64,
+        #[serde(default)]
+        repair: bool,
+    },
     /// GUI-only app-wide update preference shared by projects and the Hub.
     SetAutoApplyUpdates {
         enabled: bool,
@@ -3015,6 +3021,13 @@ pub enum BackendEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// Correlated Hook Center result, never a trust or session-upgrade grant.
+    HookDoctor {
+        project_root: String,
+        request_id: u64,
+        report: Option<serde_json::Value>,
+        error: Option<String>,
+    },
     /// SPEC-1933 US-4: response to [`FrontendEvent::GetSystemSettings`].
     /// Carries the raw global `[ai].language` value from `~/.gwt/config.toml`
     /// (`auto` / `en` / `ja`). The frontend mirrors this value into the
@@ -3780,6 +3793,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
+        "hook_doctor",
+        BackendEventDeliveryClass::Streamed,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
         "system_settings",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
@@ -3975,6 +3993,7 @@ impl BackendEvent {
             BackendEvent::MigrationDone { .. } => "migration_done",
             BackendEvent::MigrationError { .. } => "migration_error",
             BackendEvent::UpdateSettings { .. } => "update_settings",
+            BackendEvent::HookDoctor { .. } => "hook_doctor",
             BackendEvent::UpdateRestartImpact { .. } => "update_restart_impact",
             BackendEvent::SystemSettings { .. } => "system_settings",
             BackendEvent::BoardAuthStatus { .. } => "board_auth_status",
@@ -4749,6 +4768,28 @@ mod tests {
         assert_eq!(
             policy.backpressure,
             BackendEventBackpressurePolicy::FailOpenError
+        );
+    }
+
+    #[test]
+    fn hook_center_request_defaults_to_read_only() {
+        let event = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+            "kind": "get_hook_doctor", "request_id": 1935
+        }))
+        .expect("Hook Center accepts a project-scoped audit request");
+        assert!(matches!(
+            event,
+            FrontendEvent::GetHookDoctor {
+                request_id: 1935,
+                repair: false
+            }
+        ));
+        assert!(
+            serde_json::from_value::<FrontendEvent>(serde_json::json!({
+                "kind": "get_hook_doctor", "repair": true
+            }))
+            .is_err(),
+            "a correlated request ID is required even for repair"
         );
     }
 

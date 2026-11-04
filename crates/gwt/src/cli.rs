@@ -652,23 +652,10 @@ pub(crate) fn run_collect<E: CliEnv>(
             expected_hook_bin,
             repair,
         }) => {
-            // Browser-check must use the same default as launch/self-heal;
-            // choosing a separate bare name invalidates shared-root trust.
-            let managed_hook_bin =
-                crate::managed_assets::managed_hook_bin().map_err(io_as_api_error)?;
-            let _hook_bin = gwt_skills::settings_local::ScopedHookBin::set(&managed_hook_bin);
             let worktree = if purpose == Some(hook::health::HookDoctorPurpose::ManagedBrowser) {
                 gwt_core::paths::resolve_current_worktree_root(env.repo_path())
             } else {
                 env.repo_path().to_path_buf()
-            };
-            let repair = if repair {
-                Some(
-                    hook::health::repair_managed_hook_configs(&worktree)
-                        .map_err(io_as_api_error)?,
-                )
-            } else {
-                None
             };
             let mut input = hook::health::ManagedHookHealthInput::new(&worktree);
             if let Some(path) = runtime_state_path {
@@ -680,26 +667,8 @@ pub(crate) fn run_collect<E: CliEnv>(
             if let Some(bin) = expected_hook_bin {
                 input = input.with_expected_hook_bin(bin);
             }
-            if purpose.is_some() && input.expected_hook_bin.is_none() {
-                input = input.with_expected_hook_bin(managed_hook_bin.clone());
-            }
-            let mut health = hook::health::read_managed_hook_health(&input);
-            hook::append_codex_trust_health_for_doctor(&input, &mut health);
-            let mut payload = serde_json::json!({
-                "managed_hook_bin": managed_hook_bin,
-                "repair_writer": repair.as_ref().map(|_| serde_json::json!({
-                    "pid": std::process::id(),
-                    "executable": std::env::current_exe().ok(),
-                })),
-                "repair": repair,
-                "repair_guarantee": "Regenerates managed hook configuration; trust registration and launch success require separate verification.",
-                "health": health,
-            });
-            if purpose == Some(hook::health::HookDoctorPurpose::ManagedBrowser) {
-                payload["preflight"] =
-                    serde_json::to_value(hook::health::read_managed_browser_preflight(&input))
-                        .map_err(serde_as_api_error)?;
-            }
+            let payload =
+                hook::health::read_hook_doctor(&input, repair, purpose).map_err(io_as_api_error)?;
             out.push_str(&serde_json::to_string_pretty(&payload).map_err(serde_as_api_error)?);
             out.push('\n');
             0

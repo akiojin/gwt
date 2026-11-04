@@ -914,6 +914,73 @@ fn managed_hook_health_view_from_health(
     }
 }
 
+#[cfg(test)]
+mod managed_hook_health_tests {
+    use super::managed_hook_health_view_from_health;
+
+    #[test]
+    fn managed_hook_health_view_preserves_six_states_and_pending_metadata() {
+        use gwt::cli::hook::health::{ManagedHookHealth, ManagedHookHealthStatus, PendingHookGoal};
+
+        let mut health = ManagedHookHealth {
+            status: ManagedHookHealthStatus::Ready,
+            last_event: None,
+            last_event_at: None,
+            pending_discussion: None,
+            pending_goal: None,
+            slow_handlers: Vec::new(),
+            issues: Vec::new(),
+            external_skill_conflicts: Default::default(),
+        };
+        let view = managed_hook_health_view_from_health(health.clone());
+        assert!(view.last_event.is_none());
+        assert!(view.last_event_at.is_none());
+        assert!(view.pending_discussion.is_none());
+        assert!(view.pending_goal.is_none());
+
+        health.last_event = Some("PreToolUse".to_string());
+        health.last_event_at = Some("2026-11-03T00:00:00Z".to_string());
+        health.pending_discussion = Some(gwt_agent::PendingDiscussionResume {
+            proposal_label: "Proposal A".to_string(),
+            proposal_title: "Managed Hooks".to_string(),
+            next_question: Some("Choose a repair path".to_string()),
+        });
+        health.pending_goal = Some(PendingHookGoal {
+            proposal_label: "Proposal A".to_string(),
+            proposal_title: "Managed Hooks".to_string(),
+            condition: "Verify managed hooks".to_string(),
+        });
+        for (status, expected) in [
+            (ManagedHookHealthStatus::Ready, "ready"),
+            (ManagedHookHealthStatus::NeedsAttention, "needs_attention"),
+            (ManagedHookHealthStatus::SelfHealed, "self_healed"),
+            (ManagedHookHealthStatus::Degraded, "degraded"),
+            (ManagedHookHealthStatus::Inactive, "inactive"),
+            (
+                ManagedHookHealthStatus::WaitingForFirstHookEvent,
+                "waiting_for_first_hook_event",
+            ),
+        ] {
+            health.status = status;
+            let view = managed_hook_health_view_from_health(health.clone());
+            assert_eq!(view.status, expected);
+            assert_eq!(view.last_event, health.last_event);
+            assert_eq!(view.last_event_at, health.last_event_at);
+            let discussion = view.pending_discussion.expect("pending discussion");
+            assert_eq!(discussion.proposal_label, "Proposal A");
+            assert_eq!(discussion.proposal_title, "Managed Hooks");
+            assert_eq!(
+                discussion.next_question.as_deref(),
+                Some("Choose a repair path")
+            );
+            let goal = view.pending_goal.expect("pending goal");
+            assert_eq!(goal.proposal_label, "Proposal A");
+            assert_eq!(goal.proposal_title, "Managed Hooks");
+            assert_eq!(goal.condition, "Verify managed hooks");
+        }
+    }
+}
+
 fn workspace_agent_summary_work_id(
     project_root: &Path,
     agent: &gwt_core::workspace_projection::WorkspaceAgentSummary,

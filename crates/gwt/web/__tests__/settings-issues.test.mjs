@@ -6,6 +6,7 @@ import { bindControlExplanations, setControlExplanation } from "../control-expla
 import { createUiStateStore } from "../ui-state-store.js";
 import { createInteractionGuard } from "../interaction-guard.js";
 import { renderCustomAgentEnvEditor } from "../custom-agent-env-editor.js";
+import { renderHookCenterPanel, hookRepairUnavailableReason } from "../hook-center-panel.js";
 
 const source = readFileSync(new URL("../settings-surface.js", import.meta.url), "utf8");
 const candidateChoices = {
@@ -415,8 +416,8 @@ test("Candidates follow the shared roster and retain dirty or focused controls",
     return () => { if (active) { active = false; activeTuning--; unsubscribe(); } };
   };
   const factory = Function("document", "window", "createInteractionGuard", "createUiStateStore", "setControlExplanation", "bindControlExplanations",
-    "renderIndexSettingsPanel", "renderCustomAgentEnvEditor", `${source.replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, "")}\nreturn createSettingsSurface;`)(
-    document, window, createInteractionGuard, createUiStateStore, setControlExplanation, () => {}, () => {}, renderCustomAgentEnvEditor);
+    "renderIndexSettingsPanel", "renderCustomAgentEnvEditor", "renderHookCenterPanel", "hookRepairUnavailableReason", `${source.replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, "")}\nreturn createSettingsSurface;`)(
+    document, window, createInteractionGuard, createUiStateStore, setControlExplanation, () => {}, () => {}, renderCustomAgentEnvEditor, renderHookCenterPanel, hookRepairUnavailableReason);
   const surface = factory({ send: message => sent.push(message), rosterModel, tuningController: { model: tuningModel },
     scheduleFrame: fn => { frames.add(fn); return () => frames.delete(fn); },
     createNode(tag, className, text) { const node = document.createElement(tag); if (className) node.className = className; if (text) node.textContent = text; return node; },

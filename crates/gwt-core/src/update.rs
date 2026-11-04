@@ -23,6 +23,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+#[cfg(target_os = "windows")]
+mod windows_msi;
+
 pub fn is_ci() -> bool {
     std::env::var("CI")
         .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
@@ -551,13 +554,35 @@ pub fn install_requires_elevation() -> bool {
         .is_some_and(|root| !dir_writable(&root))
 }
 
-/// Whether this payload needs administrator permissions at its actual target.
-/// Package installers always elevate. DMG updates swap the complete bundle,
-/// so both its parent and any existing bundle must be writable.
+/// Whether unattended apply must fall back to the manual update action.
 pub fn prepared_payload_requires_elevation(payload: &PreparedPayload, target_exe: &Path) -> bool {
-    match payload {
+    prepared_payload_automatic_apply_refusal(payload, target_exe).is_some()
+}
+
+/// The concrete reason a staged payload cannot be applied unattended.
+/// Unknown MSI metadata or installation scope fails closed, just like a target
+/// that requires administrator permissions. Manual apply remains available.
+pub fn prepared_payload_automatic_apply_refusal(
+    payload: &PreparedPayload,
+    target_exe: &Path,
+) -> Option<String> {
+    let requires_elevation = match payload {
         PreparedPayload::Installer {
-            kind: InstallerKind::MacPkg | InstallerKind::WindowsMsi,
+            kind: InstallerKind::WindowsMsi,
+            path,
+        } => {
+            #[cfg(target_os = "windows")]
+            return windows_msi::automatic_apply_refusal(path, target_exe).err();
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = path;
+                return Some(
+                    "Windows MSI installation scope cannot be verified on this platform".into(),
+                );
+            }
+        }
+        PreparedPayload::Installer {
+            kind: InstallerKind::MacPkg,
             ..
         } => true,
         PreparedPayload::Installer {
@@ -568,7 +593,8 @@ pub fn prepared_payload_requires_elevation(payload: &PreparedPayload, target_exe
         PreparedPayload::PortableBinary { .. } => {
             install_root_for(target_exe).is_none_or(|root| !dir_writable(&root))
         }
-    }
+    };
+    requires_elevation.then(|| "Administrator privileges required".into())
 }
 
 fn macos_bundle_requires_elevation(bundle: &Path) -> bool {
@@ -1932,18 +1958,19 @@ pub fn internal_run_installer_with_executor(
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         let restart = UpdateManager::read_restart_args_file_config(args_file)?;
-        if !restart.allow_elevation
-            && prepared_payload_requires_elevation(
-                &PreparedPayload::Installer {
-                    path: installer.to_path_buf(),
-                    kind: installer_kind,
-                },
-                target_exe,
-            )
-        {
-            return Err(
-                "Automatic update requires elevated permissions; apply it manually.".to_string(),
-            );
+        let automatic_refusal = prepared_payload_automatic_apply_refusal(
+            &PreparedPayload::Installer {
+                path: installer.to_path_buf(),
+                kind: installer_kind,
+            },
+            target_exe,
+        );
+        if !restart.allow_elevation {
+            if let Some(reason) = &automatic_refusal {
+                return Err(format!(
+                    "Automatic update requires elevated permissions or a verified per-user installation: {reason}; apply it manually."
+                ));
+            }
         }
         let restart_exe = match installer_kind {
             InstallerKind::MacDmg => {
@@ -1977,7 +2004,14 @@ pub fn internal_run_installer_with_executor(
             InstallerKind::WindowsMsi => {
                 #[cfg(target_os = "windows")]
                 {
-                    run_windows_msi_with_uac(installer, executor)?;
+                    // Recheck after the parent exits. Automatic apply must never
+                    // opt into UAC or the explicit legacy migration path.
+                    run_windows_msi_with_eligibility(
+                        installer,
+                        restart.allow_elevation,
+                        automatic_refusal.map_or(Ok(()), Err),
+                        executor,
+                    )?;
                     resolve_windows_restart_executable(target_exe)
                 }
                 #[cfg(not(target_os = "windows"))]
@@ -2801,6 +2835,38 @@ fn windows_msi_argument_list(installer: &Path) -> Vec<String> {
         "/passive".to_string(),
         "GWT_ALLOW_LEGACY_MIGRATION=1".to_string(),
     ]
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn run_windows_msi_with_eligibility(
+    installer: &Path,
+    allow_elevation: bool,
+    eligibility: Result<(), String>,
+    executor: &dyn ProcessExecutor,
+) -> Result<(), String> {
+    if let Err(reason) = eligibility {
+        return if allow_elevation {
+            run_windows_msi_with_uac(installer, executor)
+        } else {
+            Err(format!("{reason}; update stays staged for manual apply."))
+        };
+    }
+    let output = executor
+        .run(
+            ProcessRequest::new("msiexec.exe")
+                .arg("/i")
+                .arg(installer)
+                .args(["/quiet", "/norestart"])
+                .hide_window(true)
+                .mode(ExecutionMode::Status),
+        )
+        .map_err(|err| format!("Failed to run msiexec: {err}"))?;
+    // ERROR_SUCCESS_REBOOT_REQUIRED is a completed install. /norestart
+    // suppresses an OS reboot; the existing GWT restart/version check settles it.
+    if !output.success && output.code != Some(3010) {
+        return Err(format!("msiexec exited with {}", output.status_display));
+    }
+    Ok(())
 }
 
 #[cfg(any(test, target_os = "windows"))]
@@ -4007,6 +4073,66 @@ mod tests {
 
         let err = run_windows_msi_with_uac(Path::new("C:/temp/gwt.msi"), &mock).unwrap_err();
         assert_eq!(err, "msiexec exited with exit status: 1603");
+    }
+
+    #[test]
+    fn automatic_windows_msi_uses_normal_permissions_without_migration() {
+        let mock = MockProcessExecutor::new();
+        mock.push_program_response("msiexec.exe", ProcessOutput::succeeded());
+        run_windows_msi_with_eligibility(Path::new("staged/gwt.msi"), false, Ok(()), &mock)
+            .unwrap();
+        let requests = mock.requests_for("msiexec.exe");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].args_lossy(),
+            ["/i", "staged/gwt.msi", "/quiet", "/norestart"]
+        );
+        assert!(mock.requests_for("powershell").is_empty());
+    }
+
+    #[test]
+    fn automatic_windows_msi_refuses_unknown_scope_without_starting_installer() {
+        let mock = MockProcessExecutor::new();
+        let err = run_windows_msi_with_eligibility(
+            Path::new("staged/gwt.msi"),
+            false,
+            Err("Windows MSI installation scope could not be verified".into()),
+            &mock,
+        )
+        .unwrap_err();
+        assert!(err.contains("scope could not be verified"));
+        assert_eq!(mock.request_count(), 0);
+    }
+
+    #[test]
+    fn automatic_windows_msi_preserves_success_requiring_reboot_and_reports_failure() {
+        let installer = Path::new("staged/gwt.msi");
+        let mock = MockProcessExecutor::new();
+        mock.push_program_response("msiexec.exe", ProcessOutput::failed(3010));
+        run_windows_msi_with_eligibility(installer, false, Ok(()), &mock).unwrap();
+        mock.push_program_response("msiexec.exe", ProcessOutput::failed(1603));
+        assert!(
+            run_windows_msi_with_eligibility(installer, false, Ok(()), &mock)
+                .unwrap_err()
+                .contains("1603")
+        );
+    }
+
+    #[test]
+    fn manual_windows_msi_retains_explicit_legacy_migration() {
+        let mock = MockProcessExecutor::new();
+        mock.push_program_response("powershell", ProcessOutput::succeeded());
+        run_windows_msi_with_eligibility(
+            Path::new("staged/gwt.msi"),
+            true,
+            Err("Legacy Program Files installation requires manual migration".into()),
+            &mock,
+        )
+        .unwrap();
+        let requests = mock.requests_for("powershell");
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].args_lossy()[2].contains("-Verb RunAs"));
+        assert!(requests[0].args_lossy()[2].contains("GWT_ALLOW_LEGACY_MIGRATION=1"));
     }
 
     #[test]
