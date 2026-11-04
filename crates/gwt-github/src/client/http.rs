@@ -1099,6 +1099,19 @@ impl<T: HttpTransport> HttpIssueClient<T> {
         {
             return Err(diagnostic_invalid());
         }
+        let workflow = self.diagnostic_json_get(&format!(
+            "/repos/{}/{}/actions/workflows/windows-diagnostic.yml",
+            self.owner, self.repo
+        ))?;
+        let workflow_id = workflow["id"]
+            .as_u64()
+            .filter(|id| *id > 0)
+            .ok_or_else(diagnostic_invalid)?;
+        if workflow["path"] != ".github/workflows/windows-diagnostic.yml"
+            || run["workflow_id"].as_u64() != Some(workflow_id)
+        {
+            return Err(diagnostic_invalid());
+        }
         let page = self.diagnostic_json_get(&format!("{prefix}/artifacts?per_page=100"))?;
         let artifacts = page["artifacts"]
             .as_array()

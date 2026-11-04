@@ -2196,9 +2196,16 @@ fn enqueue_diagnostic_run(transport: &FakeTransport, path: &str) -> serde_json::
     let mut run = diagnostic_run_metadata();
     run["path"] = serde_json::json!(path);
     transport.enqueue(ok_body(&run.to_string()));
+    enqueue_diagnostic_workflow(transport);
     transport.enqueue(ok_body(&diagnostic_artifacts().to_string()));
     enqueue_diagnostic_assets(transport);
     run
+}
+
+fn enqueue_diagnostic_workflow(transport: &FakeTransport) {
+    transport.enqueue(ok_body(
+        r#"{"id":7,"path":".github/workflows/windows-diagnostic.yml"}"#,
+    ));
 }
 
 fn enqueue_diagnostic_assets(transport: &FakeTransport) {
@@ -2218,6 +2225,7 @@ fn diagnostic_run_snapshot_hashes_assets_at_the_actual_run_head() {
     for path in [
         ".github/workflows/windows-diagnostic.yml",
         ".github/workflows/windows-diagnostic.yml@refs/heads/develop",
+        ".github/workflows/windows-diagnostic.yml@refs/heads/fix@canary",
     ] {
         let transport = FakeTransport::new();
         let run = enqueue_diagnostic_run(&transport, path);
@@ -2232,7 +2240,7 @@ fn diagnostic_run_snapshot_hashes_assets_at_the_actual_run_head() {
         ] {
             assert_eq!(snapshot[key], hex::encode(Sha256::digest(body.as_bytes())));
         }
-        assert!(client.transport().recorded()[2..]
+        assert!(client.transport().recorded()[3..]
             .iter()
             .all(|request| request
                 .url
@@ -2244,6 +2252,7 @@ fn diagnostic_run_snapshot_hashes_assets_at_the_actual_run_head() {
 fn diagnostic_artifact_binds_a_fresh_run_and_drops_credentials_on_the_signed_download() {
     let transport = FakeTransport::new();
     transport.enqueue(ok_body(&diagnostic_run_metadata().to_string()));
+    enqueue_diagnostic_workflow(&transport);
     transport.enqueue(ok_body(&diagnostic_artifacts().to_string()));
     let signed = "https://productionresultssa19.blob.core.windows.net/actions-results/fixed.zip?sig=secret-input-value";
     transport.enqueue(HttpResponse {
@@ -2262,17 +2271,17 @@ fn diagnostic_artifact_binds_a_fresh_run_and_drops_credentials_on_the_signed_dow
         vec![0x50, 0x4b, 0xff, 0x00]
     );
     let requests = client.transport().recorded();
-    assert_eq!(requests.len(), 4);
+    assert_eq!(requests.len(), 5);
     assert_eq!(
-        requests[2].url,
+        requests[3].url,
         "https://api.github.com/repos/octo/gwt/actions/artifacts/99/zip"
     );
-    assert_eq!(requests[3].url, signed);
-    assert!(requests[2]
+    assert_eq!(requests[4].url, signed);
+    assert!(requests[3]
         .headers
         .iter()
         .any(|(key, _)| key == "Authorization"));
-    assert!(!requests[3]
+    assert!(!requests[4]
         .headers
         .iter()
         .any(|(key, value)| key.eq_ignore_ascii_case("authorization")
@@ -2284,7 +2293,7 @@ fn diagnostic_artifact_binds_a_fresh_run_and_drops_credentials_on_the_signed_dow
 
 #[test]
 fn diagnostic_run_snapshot_refuses_foreign_identity_and_incomplete_artifact_lists() {
-    for case in ["repository", "workflow", "artifacts"] {
+    for case in ["repository", "workflow", "workflow_id", "artifacts"] {
         let transport = FakeTransport::new();
         let mut run = diagnostic_run_metadata();
         let mut artifacts = diagnostic_artifacts();
@@ -2292,15 +2301,22 @@ fn diagnostic_run_snapshot_refuses_foreign_identity_and_incomplete_artifact_list
             run["repository"]["full_name"] = serde_json::json!("secret-input-value/foreign");
         } else if case == "workflow" {
             run["path"] = serde_json::json!(".github/workflows/foreign.yml@refs/heads/develop");
+        } else if case == "workflow_id" {
+            run["workflow_id"] = serde_json::json!(8);
+            run["path"] = serde_json::json!(
+                ".github/workflows/windows-diagnostic.yml@canary.yml@refs/heads/develop"
+            );
         } else {
             artifacts["total_count"] = serde_json::json!(101);
         }
         transport.enqueue(ok_body(&run.to_string()));
+        enqueue_diagnostic_workflow(&transport);
         transport.enqueue(ok_body(&artifacts.to_string()));
+        enqueue_diagnostic_assets(&transport);
         let client = client_with(transport);
         let error = client.diagnostic_run_snapshot(42).unwrap_err();
         assert!(!format!("{error:?} {error}").contains("secret-input-value"));
-        assert!(client.transport().recorded().len() <= 2);
+        assert!(client.transport().recorded().len() <= 3);
     }
 }
 
@@ -2309,6 +2325,7 @@ fn diagnostic_artifact_refuses_untrusted_downloads_and_invalid_membership() {
     for case in ["host", "private", "redirect", "size", "foreign", "expired"] {
         let transport = FakeTransport::new();
         transport.enqueue(ok_body(&diagnostic_run_metadata().to_string()));
+        enqueue_diagnostic_workflow(&transport);
         let mut artifacts = diagnostic_artifacts();
         if case == "size" {
             artifacts["artifacts"][0]["size_in_bytes"] = serde_json::json!(1024 * 1024 + 1);
@@ -2342,10 +2359,10 @@ fn diagnostic_artifact_refuses_untrusted_downloads_and_invalid_membership() {
         assert_eq!(
             client.transport().recorded().len(),
             match case {
-                "foreign" => 2,
-                "size" | "expired" => 2,
-                "host" | "private" => 3,
-                _ => 4,
+                "foreign" => 3,
+                "size" | "expired" => 3,
+                "host" | "private" => 4,
+                _ => 5,
             }
         );
     }

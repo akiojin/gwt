@@ -113,7 +113,15 @@ fn windows_diagnostic_is_a_fixed_private_output_workflow() {
         ),
         Some("phase=entry; native_stage=0; win32=0; child_exit=unobserved".to_string())
     );
+    assert_eq!(
+        diagnostic_selftest_failure(
+            br#"{"phase":"cleanup_fixture_cleanup_false_assert","native_stage":0,"win32":0,"child_exit":null}"#
+        ),
+        Some("phase=cleanup_fixture_cleanup_false_assert; native_stage=0; win32=0; child_exit=unobserved".to_string())
+    );
     for rejected in [
+        br#"{"phase":"cleanup_fixture_private_assert","native_stage":0,"win32":0,"child_exit":null}"#.as_slice(),
+        br#"{"phase":"cleanup_fixture_setup_private","native_stage":0,"win32":0,"child_exit":null}"#,
         br#"{"phase":"private-secret-sentinel","native_stage":0,"win32":0,"child_exit":null}"#.as_slice(),
         br#"{"phase":"C:\\private\\sentinel","native_stage":0,"win32":0,"child_exit":null}"#,
         br#"{"phase":"entry","native_stage":0,"win32":0,"child_exit":null,"message":"private-secret-sentinel"}"#,
@@ -268,6 +276,9 @@ fn windows_diagnostic_is_a_fixed_private_output_workflow() {
         "Marshal.GetLastWin32Error()",
         "NativeStage",
         "Win32Error",
+        "CleanupObserved",
+        "Test-LaunchFailureCleanup",
+        "launch_unobserved",
     ] {
         assert!(script.contains(required), "missing {required}");
     }
@@ -294,21 +305,45 @@ fn diagnostic_selftest_failure(stderr: &[u8]) -> Option<String> {
         return None;
     }
     let phase = object.get("phase")?.as_str()?;
-    if !matches!(
-        phase,
-        "entry"
-            | "launcher"
-            | "environment"
-            | "probe_spawn"
-            | "probe_wait"
-            | "probe_projection"
-            | "failure_projection"
-            | "timeout_spawn"
-            | "partial_provider"
-            | "cleanup_fixture"
-            | "no_start"
-            | "final_cleanup"
-    ) {
+    let fixture_phase = phase
+        .strip_prefix("cleanup_fixture_")
+        .is_some_and(|fixture| {
+            matches!(
+                fixture,
+                "bootstrap" | "init" | "add" | "commit" | "head" | "tree" | "inputs"
+            ) || fixture.rsplit_once('_').is_some_and(|(scenario, step)| {
+                matches!(
+                    scenario,
+                    "setup"
+                        | "compile"
+                        | "contracts"
+                        | "providers"
+                        | "cleanup_false"
+                        | "cleanup_throw"
+                        | "dispose_throw"
+                        | "restore_failure"
+                        | "launch_unobserved"
+                        | "deadline_cancel"
+                ) && matches!(step, "prepare" | "restore" | "assert" | "receipt")
+            })
+        });
+    if !fixture_phase
+        && !matches!(
+            phase,
+            "entry"
+                | "launcher"
+                | "environment"
+                | "probe_spawn"
+                | "probe_wait"
+                | "probe_projection"
+                | "failure_projection"
+                | "timeout_spawn"
+                | "partial_provider"
+                | "cleanup_fixture"
+                | "no_start"
+                | "final_cleanup"
+        )
+    {
         return None;
     }
     let stage = object.get("native_stage")?.as_u64()?;

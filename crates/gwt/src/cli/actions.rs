@@ -606,9 +606,26 @@ pub(super) fn rerun_actions_via_gh(
                 return Err(unavailable());
             }
         }
-        let filename = run["path"]
+        let workflow_id = run["workflow_id"]
+            .as_u64()
+            .filter(|id| *id > 0)
+            .ok_or_else(unavailable)?;
+        let endpoint = format!("/repos/{slug}/actions/workflows/{workflow_id}");
+        let (ok, payload, _) = gh_api(
+            repo_path,
+            &["api", endpoint.as_str()],
+            format!("gh api {endpoint}"),
+        )?;
+        if !ok {
+            return Err(unavailable());
+        }
+        let workflow: serde_json::Value =
+            serde_json::from_str(&payload).map_err(|_| unavailable())?;
+        if workflow["id"].as_u64() != Some(workflow_id) {
+            return Err(unavailable());
+        }
+        let filename = workflow["path"]
             .as_str()
-            .and_then(|path| path.split('@').next())
             .and_then(|path| path.strip_prefix(".github/workflows/"))
             .filter(|name| is_workflow_filename(name))
             .ok_or_else(unavailable)?;

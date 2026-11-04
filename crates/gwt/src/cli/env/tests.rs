@@ -174,10 +174,14 @@ match args.as_slice() {
         if api == "api" && (endpoint.starts_with("/repos/akiojin/gwt/actions/") || endpoint.starts_with("/repos/other/project/actions/")) =>
     {
         let body = match endpoint.as_str() {
-            "/repos/akiojin/gwt/actions/runs/90" => r#"{"id":90,"repository":{"full_name":"akiojin/gwt"},"path":".github/workflows/test.yml"}"#,
+            "/repos/akiojin/gwt/actions/runs/90" => r#"{"id":90,"repository":{"full_name":"akiojin/gwt"},"workflow_id":10,"path":".github/workflows/test.yml"}"#,
             "/repos/akiojin/gwt/actions/jobs/91" => r#"{"id":91,"run_id":90,"run_url":"https://api.github.com/repos/akiojin/gwt/actions/runs/90"}"#,
-            "/repos/akiojin/gwt/actions/runs/92" => r#"{"id":92,"repository":{"full_name":"akiojin/gwt"},"path":".github/workflows/windows-diagnostic.yml"}"#,
-            "/repos/akiojin/gwt/actions/runs/94" => r#"{"id":94,"repository":{"full_name":"akiojin/gwt"},"path":".github/workflows/windows-diagnostic.yml@refs/heads/develop"}"#,
+            "/repos/akiojin/gwt/actions/runs/92" => r#"{"id":92,"repository":{"full_name":"akiojin/gwt"},"workflow_id":11,"path":".github/workflows/windows-diagnostic.yml"}"#,
+            "/repos/akiojin/gwt/actions/runs/94" => r#"{"id":94,"repository":{"full_name":"akiojin/gwt"},"workflow_id":11,"path":".github/workflows/windows-diagnostic.yml@refs/heads/develop"}"#,
+            "/repos/akiojin/gwt/actions/runs/106" => r#"{"id":106,"repository":{"full_name":"akiojin/gwt"},"workflow_id":12,"path":".github/workflows/windows-diagnostic.yml@canary.yml@refs/heads/fix@canary"}"#,
+            "/repos/akiojin/gwt/actions/workflows/10" => r#"{"id":10,"path":".github/workflows/test.yml"}"#,
+            "/repos/akiojin/gwt/actions/workflows/11" => r#"{"id":11,"path":".github/workflows/windows-diagnostic.yml"}"#,
+            "/repos/akiojin/gwt/actions/workflows/12" => r#"{"id":12,"path":".github/workflows/windows-diagnostic.yml@canary.yml"}"#,
             "/repos/akiojin/gwt/actions/jobs/93" => r#"{"id":93,"run_id":94,"run_url":"https://api.github.com/repos/akiojin/gwt/actions/runs/94"}"#,
             "/repos/akiojin/gwt/actions/jobs/95" => r#"{"id":95,"run_id":0,"run_url":"https://api.github.com/repos/akiojin/gwt/actions/runs/90"}"#,
             "/repos/akiojin/gwt/actions/jobs/96" => r#"{"id":96,"run_id":98,"run_url":"https://api.github.com/repos/akiojin/gwt/actions/runs/98"}"#,
@@ -199,6 +203,7 @@ match args.as_slice() {
             && method_flag == "--method"
             && method == "POST"
             && (endpoint == "/repos/akiojin/gwt/actions/runs/90/rerun-failed-jobs"
+                || endpoint == "/repos/akiojin/gwt/actions/runs/106/rerun"
                 || endpoint == "/repos/akiojin/gwt/actions/jobs/91/rerun"
                 || endpoint == "/repos/other/project/actions/runs/90/rerun"
                 || endpoint == "/repos/other/project/actions/jobs/91/rerun") =>
@@ -2629,6 +2634,13 @@ fn default_cli_env_routes_gh_backed_methods_and_internal_dispatch() {
             .rerun_actions(crate::cli::ActionsRerunTarget::Job { job_id: 91 })
             .expect("rerun job")
             .contains("job 91"));
+        assert!(env
+            .rerun_actions(crate::cli::ActionsRerunTarget::Run {
+                run_id: 106,
+                failed_only: false,
+            })
+            .expect("a distinct workflow containing @ remains rerunnable")
+            .contains("run 106"));
         let refused = env
             .rerun_actions(crate::cli::ActionsRerunTarget::Run {
                 run_id: 777,

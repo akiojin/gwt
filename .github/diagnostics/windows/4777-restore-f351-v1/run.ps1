@@ -110,7 +110,7 @@ public sealed class OwnedJob : IDisposable {
     // wrapper's environment. Only explicit stdout/stderr/NUL handles are passed.
     public OwnedJob(string executable,string[] arguments,string directory,IDictionary<string,string> environment,string rawPath) {
         IntPtr output = IntPtr.Zero, input = IntPtr.Zero, attributes = IntPtr.Zero, handles = IntPtr.Zero, block = IntPtr.Zero;
-        ProcessInfo info = new ProcessInfo(); bool initialized = false;
+        ProcessInfo info = new ProcessInfo(); bool initialized = false, assigned = false;
         try {
             job = CreateJobObjectW(IntPtr.Zero,null); if (job == IntPtr.Zero) throw Unavailable(1);
             var limits = new ExtendedLimits(); limits.Basic.Flags = 0x2000; // KILL_ON_JOB_CLOSE; no breakaway.
@@ -133,13 +133,24 @@ public sealed class OwnedJob : IDisposable {
             var command=new StringBuilder(Quote(executable)+" "+String.Join(" ",arguments.Select(Quote)));
             if (!CreateProcessW(executable,command,IntPtr.Zero,IntPtr.Zero,true,CREATE_SUSPENDED|CREATE_UNICODE_ENVIRONMENT|EXTENDED_STARTUPINFO_PRESENT|CREATE_NO_WINDOW,block,directory,ref startup,out info)) throw Unavailable(7);
             process=info.Process;
-            if (!AssignProcessToJobObject(job,process)) { var failure=Unavailable(8); TerminateProcess(process,1); WaitForSingleObject(process,5000); throw failure; }
-            if (ResumeThread(info.Thread)==0xffffffff) { var failure=Unavailable(9); TerminateJobObject(job,1); throw failure; }
+            if (!AssignProcessToJobObject(job,process)) throw Unavailable(8);
+            assigned=true;
+            if (ResumeThread(info.Thread)==0xffffffff) throw Unavailable(9);
         } catch (Exception error) {
             var failure=Unavailable();
             if (error.Data["NativeStage"] is int && error.Data["Win32Error"] is uint) {
                 failure.Data["NativeStage"]=error.Data["NativeStage"]; failure.Data["Win32Error"]=error.Data["Win32Error"];
             }
+            // Failed construction never reaches the caller's retained jobs.
+            // Observe its exact suspended process or assigned job before closing.
+            bool cleanupObserved=true;
+            if (process!=IntPtr.Zero) {
+                try {
+                    if (assigned) cleanupObserved=Cleanup(5000);
+                    else { TerminateProcess(process,1); cleanupObserved=WaitForSingleObject(process,5000)==0; }
+                } catch { cleanupObserved=false; }
+            }
+            failure.Data["CleanupObserved"]=cleanupObserved;
             Dispose(); throw failure;
         }
         finally {
@@ -275,8 +286,17 @@ function Test-FixedSourceInputs([object]$Profile, [string]$Head, [string]$Tree, 
     return $Head -ceq $Profile.source_commit -and $Tree -ceq $Profile.source_tree -and $Before.Length -eq $Profile.before.bytes -and (Get-BytesHash $Before) -ceq $Profile.before.sha256 -and $Lock.Length -eq $Profile.source_lock.bytes -and (Get-BytesHash $Lock) -ceq $Profile.source_lock.sha256 -and $Patch.Length -eq $Profile.patch.bytes -and (Get-BytesHash $Patch) -ceq $Profile.patch.sha256
 }
 
-function Complete-DiagnosticCleanup([object]$Result, [object[]]$Jobs, [string]$Target, [byte[]]$Original, [bool]$Modified, [string]$Git, [string]$Source, [object]$Profile, [string]$Private) {
-    $clean=$true
+function Test-LaunchFailureCleanup([Management.Automation.ErrorRecord]$Failure) {
+    $exception=$Failure.Exception
+    for ($depth=0; $depth -lt 4 -and $null -ne $exception; $depth++) {
+        if ($exception.Data['CleanupObserved'] -is [bool] -and -not $exception.Data['CleanupObserved']) { return $false }
+        $exception=$exception.InnerException
+    }
+    return $true
+}
+
+function Complete-DiagnosticCleanup([object]$Result, [object[]]$Jobs, [string]$Target, [byte[]]$Original, [bool]$Modified, [string]$Git, [string]$Source, [object]$Profile, [string]$Private, [bool]$LaunchCleanupObserved=$true) {
+    $clean=$LaunchCleanupObserved
     $phaseBeforeRestore=$result.phase
     $cleanupWatch=[Diagnostics.Stopwatch]::StartNew()
     foreach ($owned in $jobs) {
@@ -358,6 +378,7 @@ function Test-NoStartBoundaries([string]$Root) {
 function Test-CleanupRestoreFixtures([string]$Root, [object]$NativeJob) {
     # A private repository exercises the production index/bytes/mtime restore.
     # Fault objects replace only the native API result, never the cleanup logic.
+    $script:SelfTestPhase='cleanup_fixture_bootstrap'
     $source=Join-Path $Root 'cleanup-fixture'
     $hooks=Join-Path $source 'empty-hooks'
     [void][IO.Directory]::CreateDirectory($hooks)
@@ -368,17 +389,24 @@ function Test-CleanupRestoreFixtures([string]$Root, [object]$NativeJob) {
     $target=Join-Path $source 'fixture.rs'
     [IO.File]::WriteAllBytes($target,$original)
     [IO.File]::WriteAllBytes((Join-Path $source 'Cargo.lock'),$lock)
+    $script:SelfTestPhase='cleanup_fixture_init'
     [void](Read-StaticCommand $git @('init','--quiet',('--template='+$hooks)) $source (Join-Path $Root 'fixture-init.raw'))
+    $script:SelfTestPhase='cleanup_fixture_add'
     [void](Read-StaticCommand $git @('add','--','fixture.rs','Cargo.lock') $source (Join-Path $Root 'fixture-add.raw'))
+    $script:SelfTestPhase='cleanup_fixture_commit'
     [void](Read-StaticCommand $git @('-c',('core.hooksPath='+$hooks),'-c','commit.gpgsign=false','-c','user.name=DiagnosticFixture','-c','user.email=fixture@example.invalid','commit','-qm','fixture') $source (Join-Path $Root 'fixture-commit.raw'))
+    $script:SelfTestPhase='cleanup_fixture_head'
     $head=Read-StaticCommand $git @('rev-parse','HEAD') $source (Join-Path $Root 'fixture-head.raw')
+    $script:SelfTestPhase='cleanup_fixture_tree'
     $tree=Read-StaticCommand $git @('rev-parse','HEAD^{tree}') $source (Join-Path $Root 'fixture-tree.raw')
+    $script:SelfTestPhase='cleanup_fixture_inputs'
     $definition=@{source_commit=$head;source_tree=$tree;target_path='fixture.rs';before=@{bytes=$original.Length;sha256=(Get-BytesHash $original)};source_lock=@{bytes=$lock.Length;sha256=(Get-BytesHash $lock)};patch=@{bytes=$overlay.Length;sha256=(Get-BytesHash $overlay)}}
     if (-not (Test-FixedSourceInputs $definition $head $tree $original $lock $overlay)) { throw 'legal source fixture rejected' }
     $wrongBefore=[byte[]]$original.Clone(); $wrongBefore[0]=$wrongBefore[0] -bxor 1
     if (Test-FixedSourceInputs $definition $head $tree $wrongBefore $lock $overlay) { throw 'same-length before mismatch accepted' }
     $sentinel='private-cleanup-sentinel'
-    foreach ($scenario in @('setup','compile','contracts','providers','cleanup_false','cleanup_throw','dispose_throw','restore_failure','deadline_cancel')) {
+    foreach ($scenario in @('setup','compile','contracts','providers','cleanup_false','cleanup_throw','dispose_throw','restore_failure','launch_unobserved','deadline_cancel')) {
+        $script:SelfTestPhase='cleanup_fixture_'+$scenario+'_prepare'
         if ([IO.Directory]::Exists($target)) { [IO.Directory]::Delete($target) }
         [IO.File]::WriteAllBytes($target,$overlay)
         $old=[DateTime]::new(2020,1,1,0,0,0,[DateTimeKind]::Utc)
@@ -387,9 +415,16 @@ function Test-CleanupRestoreFixtures([string]$Root, [object]$NativeJob) {
         $phase=if ($scenario -in @('setup','compile','contracts','providers')) {$scenario} else {'providers'}
         $result=@{phase=$phase;reason='WrapperTimeout';cleanup='Unobserved';no_start_verified=$false;observation_started=($phase -ne 'setup');restore=@{before_bytes=$original.Length;before_sha256=(Get-BytesHash $original);after_bytes=$null;after_sha256=$null}}
         $jobs=@()
+        $launchCleanupObserved=$true
+        if ($scenario -eq 'launch_unobserved') {
+            $failure=[InvalidOperationException]::new($sentinel)
+            $failure.Data['CleanupObserved']=$false
+            try { throw [InvalidOperationException]::new($sentinel,$failure) }
+            catch { $launchCleanupObserved=Test-LaunchFailureCleanup $_ }
+        }
         if ($scenario -in @('setup','compile','contracts','providers')) {
             try { throw [InvalidOperationException]::new($sentinel) }
-            catch { Set-DiagnosticFailure $result }
+            catch { Set-DiagnosticFailure $result; $launchCleanupObserved=Test-LaunchFailureCleanup $_ }
         }
         if ($scenario -in @('cleanup_false','cleanup_throw','dispose_throw')) {
             $fault=[pscustomobject]@{Mode=$scenario}
@@ -402,8 +437,10 @@ function Test-CleanupRestoreFixtures([string]$Root, [object]$NativeJob) {
             [void][IO.Directory]::CreateDirectory($target)
         }
         if ($scenario -eq 'deadline_cancel' -and $null -ne $NativeJob) { $jobs=@($NativeJob) }
-        Complete-DiagnosticCleanup $result $jobs $target $original $true $git $source $definition $Root
-        $failed=$scenario -in @('cleanup_false','cleanup_throw','dispose_throw','restore_failure')
+        $script:SelfTestPhase='cleanup_fixture_'+$scenario+'_restore'
+        Complete-DiagnosticCleanup $result $jobs $target $original $true $git $source $definition $Root $launchCleanupObserved
+        $script:SelfTestPhase='cleanup_fixture_'+$scenario+'_assert'
+        $failed=$scenario -in @('cleanup_false','cleanup_throw','dispose_throw','restore_failure','launch_unobserved')
         if ($failed) {
             if ($result.cleanup -ne 'Unobserved' -or $result.reason -ne 'CleanupUnobserved') { throw 'cleanup fault became success' }
         } else {
@@ -414,6 +451,7 @@ function Test-CleanupRestoreFixtures([string]$Root, [object]$NativeJob) {
         if ($scenario -ne 'restore_failure') {
             if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($target)) -cne [Convert]::ToBase64String($original) -or [IO.File]::GetLastWriteTimeUtc($target) -le $old -or $result.restore.after_sha256 -cne $definition.before.sha256) { throw 'original bytes or fresh mtime were not restored' }
         } elseif ($null -ne $result.restore.after_sha256) { throw 'failed restore invented a measurement' }
+        $script:SelfTestPhase='cleanup_fixture_'+$scenario+'_receipt'
         $receipt=Join-Path $Root ('synthetic-cleanup-'+$scenario+'.json')
         Write-DurableJson $receipt $result
         $safe=[IO.File]::ReadAllText($receipt)
@@ -432,6 +470,7 @@ function Get-SelfTestFailure([Management.Automation.ErrorRecord]$Failure) {
             'cleanup_fixture','no_start','final_cleanup') } { $_ }
         default { 'entry' }
     }
+    if ($script:SelfTestPhase -cmatch '^cleanup_fixture_(?:bootstrap|init|add|commit|head|tree|inputs|(?:setup|compile|contracts|providers|cleanup_false|cleanup_throw|dispose_throw|restore_failure|launch_unobserved|deadline_cancel)_(?:prepare|restore|assert|receipt))$') { $phase=$script:SelfTestPhase }
     $stage=0; [uint32]$win32=0; $exit=$null
     $exception=$Failure.Exception
     for ($depth=0; $depth -lt 4 -and $null -ne $exception; $depth++) {
@@ -481,6 +520,7 @@ function Test-Wrapper {
         $finishedJob=$job
         # An infinite controlled child makes the deadline branch independent of
         # runner scheduling. The same retained job must drain after termination.
+        $script:SelfTestChildExit=$null
         $script:SelfTestPhase='timeout_spawn'
         $job=[GwtFixedDiagnostic.OwnedJob]::new([Environment]::ProcessPath,@('-NoLogo','-NoProfile','-NonInteractive','-Command','while ($true) { Start-Sleep -Seconds 1 }'),$root,$environment,(Join-Path $root 'deadline.raw'))
         try {
@@ -518,6 +558,7 @@ function Invoke-Diagnostic {
     [void][IO.Directory]::CreateDirectory($private)
     $jobs = [Collections.Generic.List[object]]::new()
     $original = $null; $target = $null; $modified = $false; $git=$null; $source=$null
+    $launchCleanupObserved=$true
     $result = [ordered]@{
         schema_version=1; request_id=$null; profile_id='windows-4777-restore-f351-v1';
         profile_digest=(Get-BytesHash $profileBytes); repository='akiojin/gwt';
@@ -627,8 +668,9 @@ function Invoke-Diagnostic {
         # Exception strings, arbitrary paths and raw stdout never enter public
         # output. A missing measurement stays null; no false/default proves NoStart.
         Set-DiagnosticFailure $result
+        $launchCleanupObserved=Test-LaunchFailureCleanup $_
     } finally {
-        Complete-DiagnosticCleanup $result $jobs $target $original $modified $git $source $profile $private
+        Complete-DiagnosticCleanup $result $jobs $target $original $modified $git $source $profile $private $launchCleanupObserved
         Write-DurableJson (Join-Path $resultDirectory 'result.json') $result
         # Raw scratch remains runner-local until its ephemeral disposal. Never
         # upload it, copy it to another host, or print it to diagnose this job.
