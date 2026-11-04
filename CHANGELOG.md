@@ -1,6 +1,39 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.149.0] - 2026-11-04
+
+### Bug Fixes
+
+- **ui:** Preserve pending renders across hidden transitions
+- **pm:** 依頼タスクstate消失時の再初期化を防ぐ
+- **spec:** Distinguish committed but unverified section edits
+- **ui:** Advance queued terminal work after hidden transitions
+- **runtime:** Retire expected automatic restore refusals
+- **index:** Reclaim orphan artifacts and bound generation retention
+- **index:** Honor refresh deadlines during GC scans
+
+### Documentation
+
+- **perf:** Record bounded coverage timeout investigation
+
+### Features
+
+- **pm:** Add durable request task domain
+- **pm:** Expose protected request task operations
+
+### Miscellaneous Tasks
+
+- **work:** Record hidden transition delivery context
+- **work:** Record request task foundation PR
+- **work:** 依頼タスク保存修正のPR関連付けを記録
+- **work:** Associate request task API PR
+- **work:** Replay pull request synchronization after outage
+
+### Performance
+
+- **issue-monitor:** Release raw PR bodies between timeline pages
+
 ## [9.148.4] - 2026-11-04
 
 ### Bug Fixes
