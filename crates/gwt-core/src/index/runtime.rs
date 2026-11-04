@@ -349,6 +349,7 @@ where
             &mut candidates,
         )?;
 
+        crate::operation_deadline::ensure_remaining("file-index GC candidate sort")?;
         candidates.sort_by(|left, right| {
             left.components()
                 .count()
@@ -361,6 +362,10 @@ where
         let retirement_root = v2_root.join(GC_RETIRED_DIR);
         let mut retired = Vec::new();
         for candidate in candidates {
+            if crate::operation_deadline::ensure_remaining("file-index GC retirement").is_err() {
+                report.retry_pending.push(candidate);
+                break;
+            }
             if !candidate.exists() || gc_paths_intersect(&candidate, &protected) {
                 continue;
             }
@@ -493,9 +498,9 @@ fn collect_gc_pin_roots(
     candidates: &mut Vec<PathBuf>,
 ) -> Result<()> {
     let leases_root = v2_root.join(GC_LEASES_DIR);
-    let mut entries = fs::read_dir(&leases_root)?.collect::<io::Result<Vec<_>>>()?;
-    entries.sort_by_key(|entry| entry.file_name());
-    for entry in entries {
+    for entry in fs::read_dir(&leases_root)? {
+        crate::operation_deadline::ensure_remaining("file-index GC pin scan")?;
+        let entry = entry?;
         if entry.file_name() == GC_LOCK_FILE || !entry.file_type()?.is_dir() {
             continue;
         }
@@ -560,9 +565,9 @@ fn collect_worktree_roots(
         .iter()
         .map(String::as_str)
         .collect::<HashSet<_>>();
-    let mut entries = fs::read_dir(&worktrees_root)?.collect::<io::Result<Vec<_>>>()?;
-    entries.sort_by_key(|entry| entry.file_name());
-    for entry in entries {
+    for entry in fs::read_dir(&worktrees_root)? {
+        crate::operation_deadline::ensure_remaining("file-index GC worktree scan")?;
+        let entry = entry?;
         if !entry.file_type()?.is_dir() {
             continue;
         }
@@ -637,6 +642,7 @@ fn collect_head_file_closure(
     head_path: &Path,
     protected: &mut HashSet<PathBuf>,
 ) -> Result<()> {
+    crate::operation_deadline::ensure_remaining("file-index GC head scan")?;
     if !head_path.is_file() {
         return Ok(());
     }
@@ -652,6 +658,7 @@ fn collect_head_file_closure(
         view_ids.push(previous);
     }
     for view_id in view_ids {
+        crate::operation_deadline::ensure_remaining("file-index GC view scan")?;
         let view_dir = v2_root
             .join("worktrees")
             .join(expected_worktree_hash)
@@ -707,6 +714,7 @@ fn collect_expired_gc_artifacts(
     let retired = root.join(GC_RETIRED_DIR);
     if retired.is_dir() {
         for entry in fs::read_dir(retired)? {
+            crate::operation_deadline::ensure_remaining("file-index GC retired scan")?;
             let entry = entry?;
             if entry.file_type()?.is_dir() {
                 candidates.push(entry.path());
@@ -716,6 +724,7 @@ fn collect_expired_gc_artifacts(
     let worktrees = root.join("worktrees");
     if worktrees.is_dir() {
         for entry in fs::read_dir(worktrees)? {
+            crate::operation_deadline::ensure_remaining("file-index GC container scan")?;
             let entry = entry?;
             if entry.file_type()?.is_dir() {
                 for container in ["overlays", "views"] {
@@ -740,12 +749,13 @@ fn collect_gc_artifact_container(
     completed_artifacts: bool,
     candidates: &mut Vec<PathBuf>,
 ) -> Result<()> {
+    crate::operation_deadline::ensure_remaining("file-index GC artifact scan")?;
     if !root.is_dir() {
         return Ok(());
     }
-    let mut entries = fs::read_dir(root)?.collect::<io::Result<Vec<_>>>()?;
-    entries.sort_by_key(|entry| entry.file_name());
-    for entry in entries {
+    for entry in fs::read_dir(root)? {
+        crate::operation_deadline::ensure_remaining("file-index GC artifact scan")?;
+        let entry = entry?;
         if !entry.file_type()?.is_dir() {
             continue;
         }
@@ -1383,6 +1393,40 @@ mod tests {
     #[test]
     fn gc_recognizes_the_platform_lock_contention_error() {
         assert!(is_gc_lock_contended(&fs2::lock_contended_error()));
+    }
+
+    #[test]
+    fn gc_scan_stops_at_the_operation_deadline_without_selecting_artifacts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let artifact = tmp.path().join("obsolete");
+        fs::create_dir(&artifact).unwrap();
+        fs::write(artifact.join("descriptor.json"), "{}").unwrap();
+        let _clock =
+            crate::operation_deadline::ScopedOperationClock::set(std::time::Instant::now());
+        let deadline = crate::operation_deadline::ScopedOperationDeadline::enter(
+            crate::operation_deadline::now(),
+        );
+        let mut candidates = vec![];
+        assert!(collect_gc_artifact_container(
+            tmp.path(),
+            0,
+            Duration::from_secs(3600),
+            true,
+            &mut candidates,
+        )
+        .is_err());
+        assert!(candidates.is_empty());
+        assert!(artifact.is_dir());
+        drop(deadline);
+        collect_gc_artifact_container(
+            tmp.path(),
+            0,
+            Duration::from_secs(3600),
+            true,
+            &mut candidates,
+        )
+        .unwrap();
+        assert_eq!(candidates, vec![artifact]);
     }
 
     #[derive(Default, Clone)]

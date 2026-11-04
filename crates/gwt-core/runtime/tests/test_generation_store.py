@@ -446,7 +446,14 @@ class GenerationStoreTests(unittest.TestCase):
         unknown = generations_root / "operator-notes"
         unknown.mkdir()
 
-        result = self._build(project)
+        real_gc = runner._gc_abandoned_generations
+
+        def collect_under_lock(gen_root, keep):
+            self.assertFalse(_exclusive_lock_available(self._db_path() / runner.LOCK_FILENAME))
+            return real_gc(gen_root, keep)
+
+        with mock.patch.object(runner, "_gc_abandoned_generations", side_effect=collect_under_lock):
+            result = self._build(project)
         self.assertTrue(result.get("ok"), result)
 
         self.assertFalse(
