@@ -2392,6 +2392,8 @@ fn app_runtime_frontend_ready_snapshot_makes_progress_during_continuous_output()
         completion
     };
     probe.pane.lock().unwrap().process_bytes(b"HISTORY\r\n");
+    runtime.request_owner_snapshot(&window_id, Some("client-1".into()));
+    drain_owner_snapshot_completions(&mut runtime);
     let mut displayed = Vec::new();
 
     for cycle in 0..3 {
@@ -2411,8 +2413,8 @@ fn app_runtime_frontend_ready_snapshot_makes_progress_during_continuous_output()
         };
         let expected_screen = screen.clone();
         let expected_ansi = screen_ansi.clone();
-        // A newer visible projection overtakes every snapshot response, but
-        // its delta cannot cross the missing predecessor to reach the client.
+        // The first delta is contiguous with the restored baseline. Output
+        // keeps overtaking every subsequent snapshot capture as well.
         runtime.handle_project_owner_event(
             &context,
             1,
@@ -2428,16 +2430,26 @@ fn app_runtime_frontend_ready_snapshot_makes_progress_during_continuous_output()
                 screen_seq: seq,
             },
         );
+        let events = runtime.handle_project_owner_snapshot(*completion);
+        assert!(
+            events.iter().any(|event| {
+                matches!(event.event, BackendEvent::TerminalSnapshot { .. })
+                    && event.target == DispatchTarget::Project(context.project_key.clone())
+            }),
+            "existing clients receive withheld output through the snapshot"
+        );
         displayed.extend(
-            runtime
-                .handle_project_owner_snapshot(*completion)
+            events
                 .into_iter()
                 .filter(|event| matches!(event.event, BackendEvent::TerminalSnapshot { .. }))
                 .filter(|event| event.target == DispatchTarget::Client("client-1".into()))
                 .filter_map(|event| event.terminal_stream_seq),
         );
         let projection = &runtime.runtimes[&window_id];
-        assert_eq!(projection.output_seq, captured_seq);
+        assert_eq!(
+            projection.output_seq, captured_seq,
+            "pending repair holds raw output"
+        );
         assert_eq!(projection.screen_seq, seq);
         assert_eq!(projection.screen, expected_screen);
         assert_eq!(projection.screen_ansi, expected_ansi);
@@ -2450,13 +2462,14 @@ fn app_runtime_frontend_ready_snapshot_makes_progress_during_continuous_output()
     );
     assert!(displayed.windows(2).all(|pair| pair[0] < pair[1]));
 
-    // Catch up, then let a contiguous delta reach the frontend before the next
-    // snapshot completion. That older snapshot must never rewind the stream.
+    // Catch up and resume raw output. A duplicate older snapshot completion
+    // must still never rewind the stream after that delta was forwarded.
     drain_owner_snapshot_completions(&mut runtime);
     let forwarded_seq = runtime.runtimes[&window_id].output_seq;
     runtime.request_owner_snapshot(&window_id, Some("client-1".into()));
     drain_queued_blocking_tasks(&tasks);
     let completion = take_completion();
+    runtime.handle_project_owner_snapshot(*completion.clone());
     let (seq, screen, screen_ansi) = {
         let mut pane = probe.pane.lock().unwrap();
         pane.process_bytes(b"FORWARDED\r\n");

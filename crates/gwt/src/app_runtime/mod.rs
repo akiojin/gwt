@@ -14488,9 +14488,11 @@ impl AppRuntime {
                     runtime.screen_ansi = screen_ansi;
                     runtime.screen_seq = screen_seq;
                 }
-                // A conflated output's visible grid cannot restore scrollback.
-                // Never forward a surviving delta across a predecessor gap.
-                if gap {
+                // A visible grid cannot restore scrollback. Hold raw output
+                // during repair too, so contiguous output cannot overtake every
+                // pending snapshot. All clients need the withheld output, so
+                // coalesce a broadcast target with any private restore target.
+                if gap || runtime.pending_snapshot.is_some() {
                     self.pending_runtime_outputs.remove(&id);
                     return self.request_owner_snapshot(&id, None);
                 }
