@@ -101,6 +101,30 @@ fn workflow(name: &str) -> Value {
 #[test]
 fn windows_diagnostic_is_a_fixed_private_output_workflow() {
     use sha2::{Digest, Sha256};
+    assert_eq!(
+        diagnostic_selftest_failure(
+            br#"{"phase":"probe_wait","native_stage":7,"win32":5,"child_exit":-1}"#
+        ),
+        Some("phase=probe_wait; native_stage=7; win32=5; child_exit=-1".to_string())
+    );
+    assert_eq!(
+        diagnostic_selftest_failure(
+            br#"{"phase":"entry","native_stage":0,"win32":0,"child_exit":null}"#
+        ),
+        Some("phase=entry; native_stage=0; win32=0; child_exit=unobserved".to_string())
+    );
+    for rejected in [
+        br#"{"phase":"private-secret-sentinel","native_stage":0,"win32":0,"child_exit":null}"#.as_slice(),
+        br#"{"phase":"C:\\private\\sentinel","native_stage":0,"win32":0,"child_exit":null}"#,
+        br#"{"phase":"entry","native_stage":0,"win32":0,"child_exit":null,"message":"private-secret-sentinel"}"#,
+        br#"{"phase":"entry","native_stage":10,"win32":0,"child_exit":null}"#,
+        br#"{"phase":"entry","native_stage":0,"win32":4294967296,"child_exit":null}"#,
+        br#"{"phase":"entry","native_stage":0,"win32":0,"child_exit":2147483648}"#,
+        br#"{"phase":"entry","native_stage":0,"win32":0,"child_exit":1.5}"#,
+        b"private-secret-sentinel\nC:\\private\\sentinel",
+    ] {
+        assert_eq!(diagnostic_selftest_failure(rejected), None);
+    }
     let doc = workflow("windows-diagnostic.yml");
     let inputs = triggers(&doc)["workflow_dispatch"]["inputs"]
         .as_mapping()
@@ -240,6 +264,10 @@ fn windows_diagnostic_is_a_fixed_private_output_workflow() {
         "observation_started",
         "NoStartVerified",
         "SelfTest",
+        "Get-SelfTestFailure",
+        "Marshal.GetLastWin32Error()",
+        "NativeStage",
+        "Win32Error",
     ] {
         assert!(script.contains(required), "missing {required}");
     }
@@ -259,10 +287,50 @@ fn windows_diagnostic_is_a_fixed_private_output_workflow() {
     }
 }
 
+fn diagnostic_selftest_failure(stderr: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(stderr).ok()?;
+    let object = value.as_object()?;
+    if object.len() != 4 {
+        return None;
+    }
+    let phase = object.get("phase")?.as_str()?;
+    if !matches!(
+        phase,
+        "entry"
+            | "launcher"
+            | "environment"
+            | "probe_spawn"
+            | "probe_wait"
+            | "probe_projection"
+            | "failure_projection"
+            | "timeout_spawn"
+            | "partial_provider"
+            | "cleanup_fixture"
+            | "no_start"
+            | "final_cleanup"
+    ) {
+        return None;
+    }
+    let stage = object.get("native_stage")?.as_u64()?;
+    if stage > 9 {
+        return None;
+    }
+    let win32 = u32::try_from(object.get("win32")?.as_u64()?).ok()?;
+    let exit = object.get("child_exit")?;
+    let exit = if exit.is_null() {
+        "unobserved".to_string()
+    } else {
+        i32::try_from(exit.as_i64()?).ok()?.to_string()
+    };
+    Some(format!(
+        "phase={phase}; native_stage={stage}; win32={win32}; child_exit={exit}"
+    ))
+}
+
 #[cfg(windows)]
 #[test]
 fn windows_diagnostic_selftest_keeps_secret_sentinels_private() {
-    let output = std::process::Command::new("pwsh")
+    let output = gwt_core::process::hidden_command("pwsh")
         .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-File"])
         .arg(repo_root().join(".github/diagnostics/windows/4777-restore-f351-v1/run.ps1"))
         .arg("-SelfTest")
@@ -272,10 +340,15 @@ fn windows_diagnostic_selftest_keeps_secret_sentinels_private() {
         )
         .output()
         .expect("Windows PowerShell diagnostic SelfTest");
-    assert!(output.status.success(), "diagnostic SelfTest failed");
-    assert_eq!(
-        String::from_utf8(output.stdout).unwrap().trim(),
-        "Windows diagnostic SelfTest PASS"
+    assert!(
+        output.status.success(),
+        "diagnostic SelfTest failed ({})",
+        diagnostic_selftest_failure(&output.stderr).unwrap_or_else(|| "unobserved".to_string())
+    );
+    assert!(
+        std::str::from_utf8(&output.stdout)
+            .is_ok_and(|stdout| stdout.trim() == "Windows diagnostic SelfTest PASS"),
+        "diagnostic SelfTest returned an invalid success marker"
     );
     assert!(output.stderr.is_empty(), "diagnostic SelfTest wrote stderr");
 }

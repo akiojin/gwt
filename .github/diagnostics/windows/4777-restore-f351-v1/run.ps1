@@ -4,6 +4,7 @@ param([switch]$SelfTest)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+if ($SelfTest) { $script:SelfTestPhase='entry'; $script:SelfTestChildExit=$null }
 
 function Get-BytesHash([byte[]]$Bytes) {
     $algorithm = [Security.Cryptography.SHA256]::Create()
@@ -91,6 +92,10 @@ public sealed class OwnedJob : IDisposable {
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr CreateFileW(string name,uint access,uint share,ref Security attributes,uint creation,uint flags,IntPtr template);
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool CreateProcessW(string application,StringBuilder command,IntPtr processAttributes,IntPtr threadAttributes,bool inherit,uint flags,IntPtr environment,string directory,ref StartupEx startup,out ProcessInfo info);
     static Exception Unavailable() { return new InvalidOperationException("owned diagnostic process unavailable"); }
+    static Exception Unavailable(int stage) {
+        uint error=unchecked((uint)Marshal.GetLastWin32Error());
+        var failure=Unavailable(); failure.Data["NativeStage"]=stage; failure.Data["Win32Error"]=error; return failure;
+    }
     static string Quote(string value) {
         var result = new StringBuilder("\""); int slashes = 0;
         foreach (char c in value) {
@@ -107,29 +112,36 @@ public sealed class OwnedJob : IDisposable {
         IntPtr output = IntPtr.Zero, input = IntPtr.Zero, attributes = IntPtr.Zero, handles = IntPtr.Zero, block = IntPtr.Zero;
         ProcessInfo info = new ProcessInfo(); bool initialized = false;
         try {
-            job = CreateJobObjectW(IntPtr.Zero,null); if (job == IntPtr.Zero) throw Unavailable();
+            job = CreateJobObjectW(IntPtr.Zero,null); if (job == IntPtr.Zero) throw Unavailable(1);
             var limits = new ExtendedLimits(); limits.Basic.Flags = 0x2000; // KILL_ON_JOB_CLOSE; no breakaway.
-            if (!SetInformationJobObject(job,9,ref limits,(uint)Marshal.SizeOf(limits))) throw Unavailable();
+            if (!SetInformationJobObject(job,9,ref limits,(uint)Marshal.SizeOf(limits))) throw Unavailable(2);
             var security = new Security { Length=Marshal.SizeOf(typeof(Security)),Inherit=true };
             output = CreateFileW(rawPath,0x40000000,1,ref security,2,0x80,IntPtr.Zero);
+            if (output == new IntPtr(-1)) throw Unavailable(3);
             input = CreateFileW("NUL",0x80000000,1|2,ref security,3,0x80,IntPtr.Zero);
-            if (output == new IntPtr(-1) || input == new IntPtr(-1)) throw Unavailable();
+            if (input == new IntPtr(-1)) throw Unavailable(4);
             IntPtr size = IntPtr.Zero; InitializeProcThreadAttributeList(IntPtr.Zero,1,0,ref size);
             attributes = Marshal.AllocHGlobal(size);
-            if (!InitializeProcThreadAttributeList(attributes,1,0,ref size)) throw Unavailable();
+            if (!InitializeProcThreadAttributeList(attributes,1,0,ref size)) throw Unavailable(5);
             initialized = true; handles = Marshal.AllocHGlobal(IntPtr.Size*2);
             Marshal.WriteIntPtr(handles,0,input); Marshal.WriteIntPtr(handles,IntPtr.Size,output);
-            if (!UpdateProcThreadAttribute(attributes,0,new IntPtr(PROC_THREAD_ATTRIBUTE_HANDLE_LIST),handles,new IntPtr(IntPtr.Size*2),IntPtr.Zero,IntPtr.Zero)) throw Unavailable();
+            if (!UpdateProcThreadAttribute(attributes,0,new IntPtr(PROC_THREAD_ATTRIBUTE_HANDLE_LIST),handles,new IntPtr(IntPtr.Size*2),IntPtr.Zero,IntPtr.Zero)) throw Unavailable(6);
             var startup = new StartupEx(); startup.Startup.Size=Marshal.SizeOf(startup);
             startup.Startup.Flags=0x100; startup.Startup.Input=input; startup.Startup.Output=output; startup.Startup.Error=output; startup.Attributes=attributes;
             string text = String.Join("\0",environment.OrderBy(p=>p.Key,StringComparer.OrdinalIgnoreCase).Select(p=>p.Key+"="+p.Value))+"\0\0";
             block=Marshal.StringToHGlobalUni(text);
             var command=new StringBuilder(Quote(executable)+" "+String.Join(" ",arguments.Select(Quote)));
-            if (!CreateProcessW(executable,command,IntPtr.Zero,IntPtr.Zero,true,CREATE_SUSPENDED|CREATE_UNICODE_ENVIRONMENT|EXTENDED_STARTUPINFO_PRESENT|CREATE_NO_WINDOW,block,directory,ref startup,out info)) throw Unavailable();
+            if (!CreateProcessW(executable,command,IntPtr.Zero,IntPtr.Zero,true,CREATE_SUSPENDED|CREATE_UNICODE_ENVIRONMENT|EXTENDED_STARTUPINFO_PRESENT|CREATE_NO_WINDOW,block,directory,ref startup,out info)) throw Unavailable(7);
             process=info.Process;
-            if (!AssignProcessToJobObject(job,process)) { TerminateProcess(process,1); WaitForSingleObject(process,5000); throw Unavailable(); }
-            if (ResumeThread(info.Thread)==0xffffffff) { TerminateJobObject(job,1); throw Unavailable(); }
-        } catch { Dispose(); throw Unavailable(); }
+            if (!AssignProcessToJobObject(job,process)) { var failure=Unavailable(8); TerminateProcess(process,1); WaitForSingleObject(process,5000); throw failure; }
+            if (ResumeThread(info.Thread)==0xffffffff) { var failure=Unavailable(9); TerminateJobObject(job,1); throw failure; }
+        } catch (Exception error) {
+            var failure=Unavailable();
+            if (error.Data["NativeStage"] is int && error.Data["Win32Error"] is uint) {
+                failure.Data["NativeStage"]=error.Data["NativeStage"]; failure.Data["Win32Error"]=error.Data["Win32Error"];
+            }
+            Dispose(); throw failure;
+        }
         finally {
             if (info.Thread!=IntPtr.Zero) CloseHandle(info.Thread);
             if (output!=IntPtr.Zero && output!=new IntPtr(-1)) CloseHandle(output);
@@ -411,19 +423,48 @@ function Test-CleanupRestoreFixtures([string]$Root, [object]$NativeJob) {
     }
 }
 
+function Get-SelfTestFailure([Management.Automation.ErrorRecord]$Failure) {
+    # SelfTest alone exposes a closed phase and numbers. Never project exception
+    # messages, stacks, raw child output, paths or arbitrary Exception.Data.
+    $phase=switch ($script:SelfTestPhase) {
+        { $_ -in @('entry','launcher','environment','probe_spawn','probe_wait',
+            'probe_projection','failure_projection','timeout_spawn','partial_provider',
+            'cleanup_fixture','no_start','final_cleanup') } { $_ }
+        default { 'entry' }
+    }
+    $stage=0; [uint32]$win32=0; $exit=$null
+    $exception=$Failure.Exception
+    for ($depth=0; $depth -lt 4 -and $null -ne $exception; $depth++) {
+        $nativeStage=$exception.Data['NativeStage']; $nativeError=$exception.Data['Win32Error']
+        if ($nativeStage -is [int] -and $nativeStage -ge 1 -and $nativeStage -le 9 -and $nativeError -is [uint32]) {
+            $stage=$nativeStage; $win32=$nativeError; break
+        }
+        $exception=$exception.InnerException
+    }
+    if ($script:SelfTestChildExit -is [int]) { $exit=$script:SelfTestChildExit }
+    return [ordered]@{phase=$phase;native_stage=$stage;win32=$win32;child_exit=$exit}
+}
+
 function Test-Wrapper {
     $root = Join-Path ([IO.Path]::GetTempPath()) ('gwt-diagnostic-selftest-'+[Guid]::NewGuid().ToString())
     [void][IO.Directory]::CreateDirectory($root)
     $job = $null
     try {
+        $script:SelfTestPhase='launcher'
         Initialize-OwnedLauncher
+        $script:SelfTestPhase='environment'
         $environment = New-ChildEnvironment $root
         if ($environment.ContainsKey('GWT_DIAGNOSTIC_SECRET_SENTINEL') -or $environment.ContainsKey('GITHUB_TOKEN') -or $environment.ContainsKey('ACTIONS_RUNTIME_TOKEN')) { throw 'unsafe environment' }
         $command = Join-Path $env:SystemRoot 'System32/cmd.exe'
+        $script:SelfTestPhase='probe_spawn'
         $job = [GwtFixedDiagnostic.OwnedJob]::new($command,@('/d','/c','if defined GWT_DIAGNOSTIC_SECRET_SENTINEL (exit 13) else (echo private-diagnostic-sentinel & echo test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; & exit 0)'),$root,$environment,(Join-Path $root 'private.raw'))
-        if (-not (Wait-OwnedJobs @($job) 1) -or $job.ExitCode -ne 0 -or -not $job.Cleanup()) { throw 'owned process failed' }
+        $script:SelfTestPhase='probe_wait'
+        if (-not (Wait-OwnedJobs @($job) 1)) { throw 'owned process failed' }
+        $script:SelfTestChildExit=$job.ExitCode
+        if ($job.ExitCode -ne 0 -or -not $job.Cleanup()) { throw 'owned process failed' }
         # Public output is constructed from a closed projection; neither raw
         # diagnostics nor arbitrary exceptions are serialized into the receipt.
+        $script:SelfTestPhase='probe_projection'
         $sentinel = 'private-diagnostic-sentinel'
         $raw=[IO.File]::ReadAllText((Join-Path $root 'private.raw'))
         if (-not $raw.Contains($sentinel)) { throw 'raw sentinel fixture missing' }
@@ -433,13 +474,16 @@ function Test-Wrapper {
         $safe=[IO.File]::ReadAllText((Join-Path $root 'result.json'))
         if (@($cases | Where-Object { $_.outcome -eq 'pass' }).Count -ne 2) { throw 'case projection failed' }
         if ($safe.Contains($sentinel) -or $safe.Contains($root)) { throw 'unsafe result' }
+        $script:SelfTestPhase='failure_projection'
         $failed=@(Get-CaseOutcomes 'claude' ($sentinel+"`n    windows_startup_restored_provider_tree_closes_through_public_gui`ntest result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out;`n") ([int]101))
         if ($failed[0].outcome -ne 'pass' -or $failed[1].outcome -ne 'fail') { throw 'failure projection failed' }
         $finishedJob=$job
         # An infinite controlled child makes the deadline branch independent of
         # runner scheduling. The same retained job must drain after termination.
+        $script:SelfTestPhase='timeout_spawn'
         $job=[GwtFixedDiagnostic.OwnedJob]::new([Environment]::ProcessPath,@('-NoLogo','-NoProfile','-NonInteractive','-Command','while ($true) { Start-Sleep -Seconds 1 }'),$root,$environment,(Join-Path $root 'deadline.raw'))
         try {
+            $script:SelfTestPhase='partial_provider'
             if (Wait-OwnedJobs @($job) 0) { throw 'deadline branch did not run' }
             $partial=@{reason='WrapperTimeout';observation_started=$true;no_start_verified=$false;cases=@()}
             foreach ($provider in @('codex','claude')) {
@@ -450,8 +494,11 @@ function Test-Wrapper {
             if (@($partial.cases | Where-Object { $_.provider -eq 'claude' -and $_.outcome -eq 'unknown' -and $null -eq $_.exit_code }).Count -ne 2 -or $partial.reason -ne 'WrapperTimeout' -or $partial.no_start_verified) { throw 'partial timeout boundary changed' }
             if (($partial | ConvertTo-Json -Depth 6 -Compress).Contains($sentinel)) { throw 'partial projection leaked raw output' }
         } finally { $finishedJob.Dispose() }
+        $script:SelfTestPhase='cleanup_fixture'
         Test-CleanupRestoreFixtures $root $job
+        $script:SelfTestPhase='no_start'
         Test-NoStartBoundaries $root
+        $script:SelfTestPhase='final_cleanup'
         'Windows diagnostic SelfTest PASS'
     } finally {
         if ($null -ne $job) { $job.Dispose() }
@@ -591,6 +638,7 @@ try {
     if ($SelfTest) { Test-Wrapper }
     else { Invoke-Diagnostic }
 } catch {
-    [Console]::Error.WriteLine('fixed diagnostic wrapper failed; outcome is unobserved')
+    if ($SelfTest) { [Console]::Error.WriteLine((Get-SelfTestFailure $_ | ConvertTo-Json -Compress)) }
+    else { [Console]::Error.WriteLine('fixed diagnostic wrapper failed; outcome is unobserved') }
     exit 1
 }
