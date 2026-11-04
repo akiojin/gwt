@@ -13,7 +13,130 @@
  */
 import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
-import { gotoLiveGwt } from "./_helpers/live-gwt";
+import { gotoLiveGwt, readLiveHubCatalog } from "./_helpers/live-gwt";
+
+test("Issue #6659 removes attention for unmounted and mounted windows while preserving history (isolated checkout)", async ({ page }, testInfo) => {
+  const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+  test.skip(!base || !process.env.GWT_PLAYWRIGHT_CHECK_HOME, "requires browser-check checkout and fresh HOME");
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  const catalog = await readLiveHubCatalog(page, base!);
+  const primary = catalog.projects[0];
+  expect(primary).toBeTruthy();
+  const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+  const agent = (id: string) => ({
+    id, title: id, preset: "codex", status: "error", agent_id: "codex",
+    geometry: { x: 40, y: 60, width: 800, height: 500 }, z_index: 1,
+    minimized: false, maximized: false, persist: true,
+  });
+  const orphan = agent("issue-6659-unmounted");
+  const keeper = agent("issue-6659-retained");
+  const mounted = agent("issue-6659-mounted");
+  const snapshot = {
+    app_version: "playwright",
+    tabs: [
+      { ...primary, project_root: process.env.GWT_PLAYWRIGHT_PROJECT_ROOT, kind: "git", workspace: {
+        viewport: { x: 0, y: 0, zoom: 1 }, windows: [] as ReturnType<typeof agent>[],
+      } },
+      { id: "issue-6659-background", project_key: "6659665966596659", title: "Background fixture", project_root: "/fixture/background", kind: "git", workspace: {
+        viewport: { x: 0, y: 0, zoom: 1 }, windows: [orphan, keeper],
+      } },
+    ],
+    active_tab_id: primary.id,
+    recent_projects: [],
+  };
+  // Only transport is deterministic: HTML/JS/CSS still come from the fresh
+  // checkout binary. No window is launched and no backend state is rewritten.
+  await page.addInitScript(({ selectedTheme, initial }) => {
+    localStorage.setItem("gwt:ui:theme", selectedTheme);
+    class SnapshotSocket extends EventTarget {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSING = 2;
+      static CLOSED = 3;
+      readyState = 0;
+      constructor(_url: string) {
+        super();
+        setTimeout(() => {
+          this.readyState = SnapshotSocket.OPEN;
+          this.dispatchEvent(new Event("open"));
+        }, 0);
+      }
+      send(raw: string) {
+        if (JSON.parse(raw).kind !== "frontend_ready") return;
+        for (const payload of [
+          { kind: "hub_state", hub: { app_version: initial.app_version, projects: initial.tabs, recent_projects: [] } },
+          { kind: "workspace_state", workspace: initial },
+        ]) {
+          this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(payload) }));
+        }
+      }
+      close() { this.readyState = SnapshotSocket.CLOSED; }
+    }
+    // @ts-ignore - deterministic transport over binary-served frontend assets.
+    window.WebSocket = SnapshotSocket;
+  }, { selectedTheme: theme, initial: snapshot });
+  await gotoLiveGwt(page, new URL(`/p/${primary.project_key}`, base!).href);
+  const toast = (id: string) => page.locator(`.toast-alerts__item[data-toast-id="attention-${id}"]`);
+  const alerts = page.locator(".toast-alerts__item");
+  const rows = page.locator("#notification-center .notification-center__item");
+  const publish = () => inject(page, { kind: "workspace_state", workspace: snapshot });
+
+  await expect(toast(orphan.id)).toHaveCount(1);
+  await expect(toast(keeper.id)).toHaveAttribute("data-level", "error");
+  await expect(page.locator(`.workspace-window[data-id="${orphan.id}"]`)).toHaveCount(0);
+  await expect(rows).toHaveCount(2);
+  await publish();
+  await expect(alerts).toHaveCount(2);
+  await expect(rows).toHaveCount(2);
+
+  snapshot.tabs[1].workspace.windows = [keeper];
+  await publish();
+  await expect(toast(orphan.id)).toHaveCount(0);
+  await expect(toast(keeper.id)).toHaveCount(1);
+  await expect(rows).toHaveCount(2);
+
+  snapshot.tabs[0].workspace.windows = [mounted];
+  await publish();
+  await expect(page.locator(`.workspace-window[data-id="${mounted.id}"]`)).toHaveCount(1);
+  await expect(toast(mounted.id)).toHaveCount(1);
+  await publish();
+  await expect(rows).toHaveCount(3);
+  snapshot.tabs[0].workspace.windows = [];
+  await publish();
+  await expect(toast(mounted.id)).toHaveCount(0);
+  await expect(rows).toHaveCount(3);
+
+  for (let cycle = 0; cycle < 3; cycle += 1) {
+    snapshot.tabs[1].workspace.windows = [orphan, keeper];
+    await publish();
+    await expect(toast(orphan.id)).toHaveCount(1);
+    await expect(rows).toHaveCount(4 + cycle);
+    await publish();
+    await expect(rows).toHaveCount(4 + cycle);
+    snapshot.tabs[1].workspace.windows = [keeper];
+    await publish();
+    await expect(toast(orphan.id)).toHaveCount(0);
+    await expect(toast(keeper.id)).toHaveCount(1);
+  }
+  // Removing the inactive Project from the authoritative catalog is also
+  // removal authority, even without a new runtime-status snapshot.
+  await inject(page, { kind: "hub_state", hub: {
+    app_version: snapshot.app_version, projects: [snapshot.tabs[0]], recent_projects: [],
+  } });
+  await expect(alerts).toHaveCount(0);
+  await page.locator("#op-notifications-button").click();
+  await expect(rows).toHaveCount(6);
+  await expect(rows.filter({ hasText: orphan.id })).toHaveCount(4);
+  await expect(rows.filter({ hasText: mounted.id })).toHaveCount(1);
+  await expect(rows.filter({ hasText: keeper.id })).toHaveCount(1);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  const screenshot = testInfo.outputPath(`removed-window-attention-${theme}.png`);
+  await page.screenshot({ path: screenshot, fullPage: true });
+  await testInfo.attach(`removed-window-attention-${theme}`, { path: screenshot, contentType: "image/png" });
+  expect(errors).toEqual([]);
+});
 
 test("Monitor notifications coalesce launch requests and preserve other events (isolated checkout)", async ({ page }, testInfo) => {
   const base = process.env.GWT_PLAYWRIGHT_BASE_URL;

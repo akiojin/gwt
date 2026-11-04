@@ -3865,6 +3865,10 @@ mod linked_pr_batch_tests {
 
     #[test]
     fn issue_3924_completion_batch_failure_is_recorded_once() {
+        // HOME fixtures must remain under OS temp when compiler TEMP moves volumes.
+        #[cfg(windows)]
+        let temp = tempfile::tempdir_in(dirs::data_local_dir().unwrap().join("Temp")).unwrap();
+        #[cfg(not(windows))]
         let temp = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let batch = LinkedPrProbeBatch::prefetch_with(&[1, 2], &BTreeMap::new(), |_| {

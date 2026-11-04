@@ -1,6 +1,22 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.148.4] - 2026-11-04
+
+### Bug Fixes
+
+- **notifications:** Dismiss attention for removed unmounted windows
+
+### Performance
+
+- **issue-monitor:** Read initial pr pages before continuations
+
+### Testing
+
+- **issue-monitor:** Keep home fixture in windows temp
+- **issue-monitor:** Expose last-settings launch phases
+- **issue-monitor:** チャンク間のPR継続結果保持を固定
+
 ## [9.148.3] - 2026-11-03
 
 ### Bug Fixes
