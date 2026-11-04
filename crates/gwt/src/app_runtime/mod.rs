@@ -14254,9 +14254,9 @@ impl AppRuntime {
             }
             _ => return Vec::new(),
         };
-        if snapshot.screen_seq < runtime.screen_seq {
-            // Output can overtake the worker. Keep every waiting client and
-            // converge with one new owner request instead of losing hydration.
+        if snapshot.screen_seq < runtime.output_seq {
+            // Never replace output already forwarded to clients with an older
+            // snapshot. Preserve every target until the owner catches up.
             let mut events = Vec::new();
             for target in targets {
                 events.extend(self.request_owner_snapshot(id, target));
@@ -14264,9 +14264,13 @@ impl AppRuntime {
             return events;
         }
         self.pending_runtime_outputs.remove(id);
-        runtime.screen = snapshot.screen;
-        runtime.screen_ansi = snapshot.screen_ansi;
-        runtime.screen_seq = snapshot.screen_seq;
+        let behind_current_screen = snapshot.screen_seq < runtime.screen_seq;
+        let data_base64 = base64::engine::general_purpose::STANDARD.encode(&snapshot.screen_ansi);
+        if !behind_current_screen {
+            runtime.screen = snapshot.screen;
+            runtime.screen_ansi = snapshot.screen_ansi;
+            runtime.screen_seq = snapshot.screen_seq;
+        }
         runtime.has_unsent_user_input.store(
             snapshot.has_unsent_user_input,
             std::sync::atomic::Ordering::Release,
@@ -14282,7 +14286,6 @@ impl AppRuntime {
             runtime.exit_confirmed = snapshot.exit_confirmed;
             runtime.exit_code = snapshot.exit_code;
         }
-        let data_base64 = base64::engine::general_purpose::STANDARD.encode(&runtime.screen_ansi);
         let status = runtime.status;
         let detail = runtime.detail.clone();
         let snapshot_event = BackendEvent::TerminalSnapshot {
@@ -14303,6 +14306,12 @@ impl AppRuntime {
                     event.target = DispatchTarget::Client(client_id.clone());
                 }
                 events.push(event);
+            }
+            if behind_current_screen {
+                // Gap repair must make progress even while output overtakes
+                // every worker. Keep the newer projection and converge with
+                // one shared follow-up request, without rolling clients back.
+                events.extend(self.request_owner_snapshot(id, target));
             }
         }
         events

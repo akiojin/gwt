@@ -2338,6 +2338,11 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_with_scrollback_history(
                 .collect::<Vec<_>>()
         };
         assert!(!snapshots.is_empty(), "{path}: owner snapshot must arrive");
+        if path == "stale_completion" {
+            let mut replay = vt100::Parser::new(rows, cols, SNAPSHOT_SCROLLBACK_REPLAY_LIMIT);
+            replay.process(snapshots.last().unwrap());
+            assert!(replay.screen().contents().contains("AFTER-SNAPSHOT"));
+        }
         for snapshot in snapshots {
             let mut replay = vt100::Parser::new(rows, cols, SNAPSHOT_SCROLLBACK_REPLAY_LIMIT);
             replay.process(&snapshot);
@@ -2345,9 +2350,6 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_with_scrollback_history(
                 replay.screen().contents().contains("CURRENT-SCREEN"),
                 "{path}: current screen"
             );
-            if path == "stale_completion" {
-                assert!(replay.screen().contents().contains("AFTER-SNAPSHOT"));
-            }
             replay.screen_mut().set_scrollback(usize::MAX);
             assert!(
                 replay.screen().scrollback() >= 1_000,
@@ -2359,6 +2361,138 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_with_scrollback_history(
             );
         }
     }
+}
+
+#[test]
+fn app_runtime_frontend_ready_snapshot_makes_progress_during_continuous_output() {
+    use gwt::project_runtime::events::OwnerEvent;
+
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, probe, window_id) = owner_browser_input_fixture(temp.path());
+    let context = runtime.test_context();
+    let identity = runtime.runtimes[&window_id].owner_identity.clone();
+    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+        unreachable!();
+    };
+    let tasks = Arc::clone(tasks);
+    let AppEventProxy::Stub(completions) = &runtime.proxy else {
+        unreachable!();
+    };
+    let completions = Arc::clone(completions);
+    let take_completion = || {
+        let mut completions = completions.lock().unwrap();
+        let index = completions
+            .iter()
+            .position(|event| matches!(event, UserEvent::ProjectOwnerSnapshot(_)))
+            .expect("captured owner snapshot");
+        let UserEvent::ProjectOwnerSnapshot(completion) = completions.remove(index) else {
+            unreachable!();
+        };
+        completion
+    };
+    probe.pane.lock().unwrap().process_bytes(b"HISTORY\r\n");
+    let mut displayed = Vec::new();
+
+    for cycle in 0..3 {
+        runtime.request_owner_snapshot(&window_id, Some("client-1".into()));
+        drain_queued_blocking_tasks(&tasks);
+        let completion = take_completion();
+        let captured_seq = completion.result.as_ref().unwrap().screen_seq;
+        let data = format!("OUTPUT-{cycle}\r\n").into_bytes();
+        let (seq, screen, screen_ansi) = {
+            let mut pane = probe.pane.lock().unwrap();
+            pane.process_bytes(&data);
+            (
+                pane.output_seq(),
+                pane.screen().contents(),
+                pane.screen().contents_formatted(),
+            )
+        };
+        let expected_screen = screen.clone();
+        let expected_ansi = screen_ansi.clone();
+        // A newer visible projection overtakes every snapshot response, but
+        // its delta cannot cross the missing predecessor to reach the client.
+        runtime.handle_project_owner_event(
+            &context,
+            1,
+            &identity,
+            OwnerEvent::Output {
+                id: probe.id.clone(),
+                incarnation: probe.incarnation,
+                data,
+                seq,
+                previous_seq: Some(captured_seq),
+                screen,
+                screen_ansi,
+                screen_seq: seq,
+            },
+        );
+        displayed.extend(
+            runtime
+                .handle_project_owner_snapshot(*completion)
+                .into_iter()
+                .filter(|event| matches!(event.event, BackendEvent::TerminalSnapshot { .. }))
+                .filter(|event| event.target == DispatchTarget::Client("client-1".into()))
+                .filter_map(|event| event.terminal_stream_seq),
+        );
+        let projection = &runtime.runtimes[&window_id];
+        assert_eq!(projection.output_seq, captured_seq);
+        assert_eq!(projection.screen_seq, seq);
+        assert_eq!(projection.screen, expected_screen);
+        assert_eq!(projection.screen_ansi, expected_ansi);
+    }
+
+    assert_eq!(
+        displayed.len(),
+        3,
+        "repair must progress before output goes idle"
+    );
+    assert!(displayed.windows(2).all(|pair| pair[0] < pair[1]));
+
+    // Catch up, then let a contiguous delta reach the frontend before the next
+    // snapshot completion. That older snapshot must never rewind the stream.
+    drain_owner_snapshot_completions(&mut runtime);
+    let forwarded_seq = runtime.runtimes[&window_id].output_seq;
+    runtime.request_owner_snapshot(&window_id, Some("client-1".into()));
+    drain_queued_blocking_tasks(&tasks);
+    let completion = take_completion();
+    let (seq, screen, screen_ansi) = {
+        let mut pane = probe.pane.lock().unwrap();
+        pane.process_bytes(b"FORWARDED\r\n");
+        (
+            pane.output_seq(),
+            pane.screen().contents(),
+            pane.screen().contents_formatted(),
+        )
+    };
+    let output = runtime.handle_project_owner_event(
+        &context,
+        1,
+        &identity,
+        OwnerEvent::Output {
+            id: probe.id.clone(),
+            incarnation: probe.incarnation,
+            data: b"FORWARDED\r\n".to_vec(),
+            seq,
+            previous_seq: Some(forwarded_seq),
+            screen: screen.clone(),
+            screen_ansi: screen_ansi.clone(),
+            screen_seq: seq,
+        },
+    );
+    assert!(output
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::TerminalOutput { .. })));
+    assert!(runtime
+        .handle_project_owner_snapshot(*completion)
+        .iter()
+        .all(|event| !matches!(event.event, BackendEvent::TerminalSnapshot { .. })));
+    let projection = &runtime.runtimes[&window_id];
+    assert_eq!(projection.output_seq, seq);
+    assert_eq!(projection.screen_seq, seq);
+    assert_eq!(projection.screen, screen);
+    assert_eq!(projection.screen_ansi, screen_ansi);
 }
 
 #[test]
