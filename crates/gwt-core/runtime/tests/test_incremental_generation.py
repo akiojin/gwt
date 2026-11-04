@@ -1760,6 +1760,46 @@ class IncrementalModeRoutingTests(_IncrementalFixture):
             "incremental mode must not resurrect the migrated legacy store",
         )
 
+    def test_unchanged_copy_resolves_generation_under_shared_lock(self):
+        self.assertTrue(self._build().get("ok"))
+        db_path = self._db_path()
+        hashes = {
+            entry["path"]: entry["content_hash"]
+            for entry in runner.read_manifest(db_path, scope="files")
+        }
+        real_lock, real_resolve = runner.acquire_lock, runner.resolve_active_store
+        real_manifest = runner.read_manifest
+        held = False
+
+        @contextlib.contextmanager
+        def shared_lock(path, exclusive=True):
+            nonlocal held
+            self.assertEqual((path, exclusive), (db_path, False))
+            with real_lock(path, exclusive=exclusive):
+                held = True
+                yield
+                held = False
+
+        def resolve_locked(path):
+            self.assertTrue(held, "generation selection must follow reader admission")
+            return real_resolve(path)
+
+        def manifest_locked(path, scope):
+            self.assertTrue(held, "manifest and generation must share reader admission")
+            return real_manifest(path, scope)
+
+        with mock.patch.object(
+            runner, "acquire_lock", side_effect=shared_lock
+        ), mock.patch.object(
+            runner, "resolve_active_store", side_effect=resolve_locked
+        ), mock.patch.object(
+            runner, "read_manifest", side_effect=manifest_locked
+        ):
+            copied = runner._copy_unchanged_records(
+                db_path, "files", mock.Mock(), "files_code", hashes
+            )
+        self.assertEqual(copied, len(hashes))
+
 
 class PublishVerificationTests(unittest.TestCase):
     """PR #3301 review (Critical): a staging build whose verification read

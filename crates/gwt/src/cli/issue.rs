@@ -7133,12 +7133,11 @@ fn fetch_linked_prs_bulk_via_gh_with_observer(
                 chunk.to_vec(),
                 std::collections::BTreeMap::new(),
                 std::collections::BTreeSet::new(),
-                std::collections::BTreeMap::<u64, Vec<serde_json::Value>>::new(),
+                std::collections::BTreeMap::<u64, LinkedPrAccumulator>::new(),
             )
         })
         .collect();
-    while let Some((pending, mut cursors, mut seen_cursors, mut nodes_by_issue)) =
-        chunks.pop_front()
+    while let Some((pending, mut cursors, mut seen_cursors, mut prs_by_issue)) = chunks.pop_front()
     {
         gwt_core::operation_deadline::ensure_remaining("linked PR timeline page")?;
         let query = if cursors.is_empty() {
@@ -7180,10 +7179,10 @@ fn fetch_linked_prs_bulk_via_gh_with_observer(
                 .get("nodes")
                 .and_then(serde_json::Value::as_array)
                 .ok_or_else(invalid)?;
-            nodes_by_issue
+            prs_by_issue
                 .entry(*number)
                 .or_default()
-                .extend(nodes.iter().cloned());
+                .extend(nodes, *number);
             match timeline.get("pageInfo") {
                 Some(info)
                     if info.get("hasNextPage").and_then(serde_json::Value::as_bool)
@@ -7206,15 +7205,12 @@ fn fetch_linked_prs_bulk_via_gh_with_observer(
                         == Some(false) => {}
                 _ => return Err(invalid()),
             }
-            let complete = serde_json::json!({"timelineItems": {
-                "nodes": nodes_by_issue.remove(number).unwrap_or_default()
-            }});
-            let prs = parse_linked_pr_timeline(&complete, *number);
+            let prs = prs_by_issue.remove(number).unwrap_or_default().prs;
             observe(*number, &prs);
             linked.insert(*number, prs);
         }
         if !next.is_empty() {
-            chunks.push_back((next, cursors, seen_cursors, nodes_by_issue));
+            chunks.push_back((next, cursors, seen_cursors, prs_by_issue));
         }
     }
     Ok(linked)
@@ -7243,81 +7239,93 @@ pub(crate) fn parse_linked_pr_timeline(
     issue: &serde_json::Value,
     issue_number: u64,
 ) -> Vec<LinkedPrSummary> {
-    let nodes = issue
+    let mut linked = LinkedPrAccumulator::default();
+    if let Some(nodes) = issue
         .get("timelineItems")
         .and_then(|v| v.get("nodes"))
         .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    let mut index: std::collections::BTreeMap<u64, usize> = std::collections::BTreeMap::new();
-    let mut out: Vec<LinkedPrSummary> = Vec::new();
-    for node in nodes {
-        let typename = node
-            .get("__typename")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        let (pr, mut will_close_target) = match typename {
-            "CrossReferencedEvent" => (
-                node.get("source"),
-                node.get("willCloseTarget")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false),
-            ),
-            "ConnectedEvent" => (node.get("subject"), true),
-            _ => (None, false),
-        };
-        let Some(pr) = pr else { continue };
-        // gwt merges fixes into develop (not the default branch), so GitHub
-        // reports willCloseTarget=false for every real fix PR (measured on
-        // #3222/#3213). The closing INTENT therefore also comes from closing
-        // keywords in the PR body targeting THIS issue (`Closes #N` — the gwt
-        // PR-body contract).
-        if !will_close_target {
-            if let Some(body) = pr.get("body").and_then(|v| v.as_str()) {
-                will_close_target = body_closes_issue(body, issue_number);
-            }
-        }
-        if pr.get("__typename").and_then(|v| v.as_str()) != Some("PullRequest") {
-            continue;
-        }
-        let Some(pr_number) = pr.get("number").and_then(serde_json::Value::as_u64) else {
-            continue;
-        };
-        let merged_at = pr
-            .get("mergedAt")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
-        if let Some(existing) = index.get(&pr_number) {
-            out[*existing].will_close_target |= will_close_target;
-            if out[*existing].merged_at.is_none() {
-                out[*existing].merged_at = merged_at;
-            }
-            continue;
-        }
-        index.insert(pr_number, out.len());
-        out.push(LinkedPrSummary {
-            number: pr_number,
-            will_close_target,
-            merged_at,
-            title: pr
-                .get("title")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            state: pr
-                .get("state")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            url: pr
-                .get("url")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-        });
+    {
+        linked.extend(nodes, issue_number);
     }
-    out
+    linked.prs
+}
+
+/// Retain summaries, not raw timeline nodes and PR bodies, between pages.
+/// The single-page parser uses the same first-occurrence/OR merge contract.
+#[derive(Default)]
+struct LinkedPrAccumulator {
+    index: std::collections::BTreeMap<u64, usize>,
+    prs: Vec<LinkedPrSummary>,
+}
+
+impl LinkedPrAccumulator {
+    fn extend(&mut self, nodes: &[serde_json::Value], issue_number: u64) {
+        for node in nodes {
+            let typename = node
+                .get("__typename")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let (pr, mut will_close_target) = match typename {
+                "CrossReferencedEvent" => (
+                    node.get("source"),
+                    node.get("willCloseTarget")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
+                ),
+                "ConnectedEvent" => (node.get("subject"), true),
+                _ => (None, false),
+            };
+            let Some(pr) = pr else { continue };
+            // gwt merges fixes into develop (not the default branch), so GitHub
+            // reports willCloseTarget=false for every real fix PR (measured on
+            // #3222/#3213). The closing INTENT therefore also comes from closing
+            // keywords in the PR body targeting THIS issue (`Closes #N` — the gwt
+            // PR-body contract).
+            if !will_close_target {
+                if let Some(body) = pr.get("body").and_then(|v| v.as_str()) {
+                    will_close_target = body_closes_issue(body, issue_number);
+                }
+            }
+            if pr.get("__typename").and_then(|v| v.as_str()) != Some("PullRequest") {
+                continue;
+            }
+            let Some(pr_number) = pr.get("number").and_then(serde_json::Value::as_u64) else {
+                continue;
+            };
+            let merged_at = pr
+                .get("mergedAt")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            if let Some(existing) = self.index.get(&pr_number) {
+                self.prs[*existing].will_close_target |= will_close_target;
+                if self.prs[*existing].merged_at.is_none() {
+                    self.prs[*existing].merged_at = merged_at;
+                }
+                continue;
+            }
+            self.index.insert(pr_number, self.prs.len());
+            self.prs.push(LinkedPrSummary {
+                number: pr_number,
+                will_close_target,
+                merged_at,
+                title: pr
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                state: pr
+                    .get("state")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                url: pr
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            });
+        }
+    }
 }
 
 /// GitHub closing keywords (close/closes/closed, fix/fixes/fixed,
@@ -17979,8 +17987,13 @@ command = "my-agent-cli"
             queries.push(query.to_string());
             assert!(query.contains("pageInfo { hasNextPage endCursor }"));
             let repository = if queries.len() == 1 {
+                let mut first = event(7, false);
+                first["source"]["title"] = serde_json::json!("first title");
+                first["source"]["url"] = serde_json::json!("first URL");
+                let mut empty_merge = event(8, true);
+                empty_merge["source"]["mergedAt"] = serde_json::json!("");
                 serde_json::json!({
-                    "i42": {"timelineItems": {"nodes": [event(7, false)],
+                    "i42": {"timelineItems": {"nodes": [first, empty_merge],
                         "pageInfo": {"hasNextPage": true, "endCursor": cursor}}},
                     "i43": {"timelineItems": {"nodes": [],
                         "pageInfo": {"hasNextPage": false, "endCursor": null}}}
@@ -17993,8 +18006,16 @@ command = "my-agent-cli"
                     "after: {}",
                     serde_json::to_string(cursor).unwrap()
                 )));
+                let mut later = event(7, false);
+                later["source"]["body"] = serde_json::json!("Fixes #42");
+                later["source"]["title"] = serde_json::json!("later title");
+                later["source"]["url"] = serde_json::json!("later URL");
+                later["source"]["state"] = serde_json::json!("MERGED");
+                later["source"]["mergedAt"] = serde_json::json!("2026-11-04T00:00:00Z");
+                let mut later_merge = event(8, true);
+                later_merge["source"]["mergedAt"] = serde_json::json!("2026-11-04T00:00:00Z");
                 serde_json::json!({"i42": {"timelineItems": {
-                    "nodes": [event(7, true), event(8, true)],
+                    "nodes": [later, later_merge],
                     "pageInfo": {"hasNextPage": false, "endCursor": null}
                 }}})
             };
@@ -18007,6 +18028,14 @@ command = "my-agent-cli"
             vec![7, 8]
         );
         assert!(linked[&42].iter().all(|pr| pr.will_close_target));
+        assert_eq!(linked[&42][0].title, "first title");
+        assert_eq!(linked[&42][0].url, "first URL");
+        assert_eq!(linked[&42][0].state, "OPEN");
+        assert_eq!(
+            linked[&42][0].merged_at.as_deref(),
+            Some("2026-11-04T00:00:00Z")
+        );
+        assert_eq!(linked[&42][1].merged_at.as_deref(), Some(""));
         assert!(linked[&43].is_empty());
 
         for cursor in [serde_json::Value::Null, serde_json::json!("unchanged")] {

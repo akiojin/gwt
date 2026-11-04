@@ -398,6 +398,12 @@ pub(crate) fn prepare_owner_saved_session_restore(
             && admission != RestoreAdmission::RefuseCompletedWork
         {
             let terminal = matches!(admission, RestoreAdmission::RefuseTerminal(_));
+            let retire_source = terminal
+                || matches!(
+                    admission,
+                    RestoreAdmission::RefuseRetainedTerminal
+                        | RestoreAdmission::RefuseHeld("launch_revoked")
+                );
             let reason = match admission {
                 RestoreAdmission::RefuseTerminal(reason) => reason.as_str(),
                 RestoreAdmission::RefuseRetainedTerminal => "closed_work_diagnostic_retained",
@@ -407,14 +413,16 @@ pub(crate) fn prepare_owner_saved_session_restore(
                 | RestoreAdmission::RefuseUnprovable(reason) => reason,
                 RestoreAdmission::Admit => unreachable!(),
             };
-            if terminal {
+            if retire_source {
                 mark_restore_source_completed_exact(sessions_dir, &restore.source)?;
+            }
+            if terminal {
                 remove_restore_placeholders(root, restore, false)?;
             }
             let error = restore.refuse(
                 reason,
                 format!("Automatic restore refused: {reason}"),
-                !terminal,
+                !retire_source,
             );
             restore
                 .refusal
@@ -429,8 +437,8 @@ pub(crate) fn prepare_owner_saved_session_restore(
             owner_restore_placeholder_known_empty(restore),
         ) {
             let remove_placeholder = code == "empty_landed_worktree";
+            mark_restore_source_completed_exact(sessions_dir, &restore.source)?;
             if remove_placeholder {
-                mark_restore_source_completed_exact(sessions_dir, &restore.source)?;
                 remove_restore_placeholders(root, restore, true)?;
             }
             let error = restore.refuse(code, format!("Automatic restore refused: {code}"), false);
@@ -442,6 +450,7 @@ pub(crate) fn prepare_owner_saved_session_restore(
             return Err(error);
         }
         if admission == RestoreAdmission::RefuseCompletedWork {
+            mark_restore_source_completed_exact(sessions_dir, &restore.source)?;
             return Err(restore.refuse(
                 "completed_work_retained",
                 "Automatic restore refused: completed_work_retained",

@@ -1322,6 +1322,9 @@ The design lives in SPEC
 gwt keeps project knowledge close to the agent workspace:
 
 - JSON operation `issue.spec.read` reads GitHub Issue-backed SPECs from the local cache.
+- `issue.spec.edit` reports `outcome: committed_unverified` when the write committed
+  but cleanup or final confirmation failed. Read the section before retrying; this
+  outcome does not confirm a verified write.
 - JSON operations `issue.view` and `issue.comments` provide cache-backed Issue
   access through the gwt CLI surface.
 - `gwt-search` searches SPECs, Issues, source files, docs, and PM Reports through the shared

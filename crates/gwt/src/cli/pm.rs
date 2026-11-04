@@ -29,6 +29,12 @@ use crate::pm_registry;
 /// Parsed `pm.*` command surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PmCommand {
+    /// Read a summary or one explicit record, without a raw-store dump.
+    RequestTasksRead { selector: RequestTaskSelector },
+    /// Mutate tracking state as the current PM, never as an intake/user actor.
+    RequestTasksApply {
+        request: Box<gwt_core::pm_request_tasks::Request>,
+    },
     /// Read the canonical project's durable planning snapshot.
     PlanStatus,
     /// Apply one planning-only update as the ambient registered PM.
@@ -81,6 +87,30 @@ pub enum PmCommand {
     /// `pm.capabilities` (Issue #4249 FR-003) — what the PM can do through
     /// JSON operations, and the owner action for everything it cannot.
     Capabilities,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RequestTaskSelector {
+    Summary {},
+    Source { id: String },
+    Task { id: String },
+    Receipt { operation_id: String },
+}
+
+impl RequestTaskSelector {
+    pub(super) fn validate(&self) -> Result<(), &'static str> {
+        let id = match self {
+            Self::Summary {} => return Ok(()),
+            Self::Source { id } | Self::Task { id } => id,
+            Self::Receipt { operation_id } => operation_id,
+        };
+        if id.trim().is_empty() {
+            Err("selector identity must be nonempty")
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// Why the PM cannot perform a capability itself.
@@ -247,6 +277,12 @@ pub(super) fn run<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     match command {
+        PmCommand::RequestTasksRead { selector } => {
+            request_tasks(env.repo_path(), Some(selector), None, out)
+        }
+        PmCommand::RequestTasksApply { request } => {
+            request_tasks(env.repo_path(), None, Some(&request), out)
+        }
         PmCommand::PlanStatus => {
             let state = crate::pm_planning::load_planning_state(
                 &peer_project_dir(env.repo_path()).join("project-state/pm-planning.json"),
@@ -672,6 +708,134 @@ pub(super) fn run<E: CliEnv>(
     }
 }
 
+fn request_tasks(
+    repo: &Path,
+    selector: Option<RequestTaskSelector>,
+    request: Option<&gwt_core::pm_request_tasks::Request>,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    use gwt_core::pm_request_tasks::{Actor, ActorKind, TaskError, TaskStore};
+    use serde_json::json;
+
+    let store = TaskStore::for_repo(repo);
+    let mut current_revision = None;
+    let result = (|| {
+        // Resolve authority before touching private task state. Keep the same
+        // registration lock as its writers until the result is constructed.
+        let actor =
+            std::env::var(gwt_agent::GWT_SESSION_ID_ENV).map_err(|_| TaskError::Unauthorized)?;
+        let record = peer_registration(repo)
+            .map_err(|error| TaskError::Unreadable(error.to_string()))?
+            .filter(|record| record.registration.session_id == actor)
+            .ok_or(TaskError::Unauthorized)?;
+        let _authority_lock = gwt_core::operation_deadline::NamedFileLock::acquire(
+            &record.prefs_path.with_extension("lock"),
+            "pm_request_tasks",
+        )
+        .map_err(|error| TaskError::PersistenceUnconfirmed(error.to_string()))?;
+        if !pm_registry::session_is_registered_pm(&record.prefs_path, &actor) {
+            return Err(TaskError::Unauthorized);
+        }
+        if let Some(request) = request {
+            // Domain authorization rejects Capture even for an internal caller
+            // bypassing JSON parsing. PM tracking cannot mint human provenance.
+            let result = store.apply(
+                &Actor {
+                    kind: ActorKind::Pm,
+                    id: actor,
+                },
+                request,
+            );
+            if result.is_err() {
+                // A failed publication can have renamed before losing its
+                // acknowledgement. Observe after failure, never call the
+                // pre-write revision current or turn an unreadable store into 0.
+                current_revision = store
+                    .read()
+                    .ok()
+                    .map(|state| state.map_or(0, |state| state.revision));
+            }
+            return result.map(|receipt| json!({"schema_version":1,"ok":true,"receipt":receipt}));
+        }
+        let state = store.read()?;
+        current_revision = Some(state.as_ref().map_or(0, |state| state.revision));
+        let selector = selector.expect("read command has a selector");
+        selector
+            .validate()
+            .map_err(|error| TaskError::Invalid(error.into()))?;
+        let Some(state) = state else {
+            return match selector {
+                RequestTaskSelector::Summary {} => {
+                    Ok(json!({"schema_version":1,"ok":true,"state":"absent","revision":0}))
+                }
+                RequestTaskSelector::Source { .. } => Err(TaskError::MissingSource),
+                RequestTaskSelector::Task { .. } => Err(TaskError::MissingTask),
+                RequestTaskSelector::Receipt { .. } => {
+                    Err(TaskError::Invalid("operation receipt not found".into()))
+                }
+            };
+        };
+        let mut value = json!({"schema_version":1,"ok":true,"state":"ready","project_key":state.project_key,"revision":state.revision});
+        match selector {
+            RequestTaskSelector::Summary {} => {
+                value["counts"] = json!({"sources":state.sources.len(),"pending":state.pending.len(),"tasks":state.tasks.len(),"receipts":state.receipts.len()});
+            }
+            RequestTaskSelector::Source { id } => {
+                value["source"] = json!(state.sources.get(&id).ok_or(TaskError::MissingSource)?);
+                value["pending"] = json!(state.pending.contains(&id));
+            }
+            RequestTaskSelector::Task { id } => {
+                value["task"] = json!(state.tasks.get(&id).ok_or(TaskError::MissingTask)?);
+            }
+            RequestTaskSelector::Receipt { operation_id } => {
+                value["receipt"] = json!(state
+                    .receipts
+                    .iter()
+                    .find(|receipt| receipt.operation_id == operation_id)
+                    .ok_or_else(|| TaskError::Invalid("operation receipt not found".into()))?);
+            }
+        }
+        Ok(value)
+    })();
+    let (code, value) = match result {
+        Ok(value) => (0, value),
+        Err(error) => {
+            let error_code = match &error {
+                TaskError::Unauthorized => "unauthorized",
+                TaskError::ForeignProject => "foreign_project",
+                TaskError::Conflict {
+                    current_revision: revision,
+                } => {
+                    current_revision = Some(*revision);
+                    "conflict"
+                }
+                TaskError::OperationConflict => "operation_conflict",
+                TaskError::StaleReview => "stale_review",
+                TaskError::ReassessmentRequired => "reassessment_required",
+                TaskError::UnfinishedChildren => "unfinished_children",
+                TaskError::Invalid(_) => "invalid_request",
+                TaskError::MissingSource => "missing_source",
+                TaskError::MissingTask => "missing_task",
+                TaskError::Unreadable(_) => "unreadable_store",
+                TaskError::PersistenceUnconfirmed(_) => "persistence_unconfirmed",
+            };
+            let recovery = if matches!(error, TaskError::Unauthorized) {
+                "pm.status"
+            } else {
+                "pm.request_tasks.read"
+            };
+            (
+                1,
+                json!({"schema_version":1,"ok":false,"current_revision":current_revision,
+                "error":{"code":error_code,"message":error.to_string(),"recovery_operation":recovery}}),
+            )
+        }
+    };
+    out.push_str(&value.to_string());
+    out.push('\n');
+    Ok(code)
+}
+
 fn apply_plan(
     repo: &Path,
     request: &crate::pm_planning::PlanningApplyRequest,
@@ -892,6 +1056,194 @@ mod tests {
     use super::*;
     use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
     use std::fs;
+
+    #[test]
+    fn pm_request_tasks_adapter_preserves_authority_project_and_receipt_boundaries() {
+        use gwt_core::pm_request_tasks::{Actor, ActorKind, TaskStore};
+        use serde_json::{json, Value};
+        let _lock = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let invoke = |path: &Path, operation: &str, params: Value| {
+            let command = crate::cli::json_envelope::parse_operation(operation, &params).unwrap();
+            let mut env = crate::cli::env::TestEnv::new(path.to_path_buf());
+            let (code, output) = crate::cli::run_collect(&mut env, command).unwrap();
+            (code, serde_json::from_str::<Value>(&output).unwrap())
+        };
+        let apply = json!({"operation_id":"decompose-1","expected_revision":1,"reason":"Track accepted work",
+            "action":{"kind":"decompose","source_id":"source-1","root":{
+                "id":"task-1","title":"Original task","purpose":"Preserve the request",
+                "completion_conditions":["Demonstrate the result"],"issue_numbers":[],"goal_ids":[],"assignee":null},"children":[]}});
+        let _direct = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let denied = invoke(&repo, "pm.request_tasks.read", json!({}));
+        assert_eq!(denied.0, 1);
+        assert_eq!(denied.1["error"]["code"], "unauthorized");
+        assert!(denied.1["current_revision"].is_null());
+        assert!(!peer_project_dir(&repo)
+            .join("project-state/request-tasks")
+            .exists());
+        let prefs = pm_registry::pm_prefs_path_for_repo_path(&repo);
+        let register = |id: &str| {
+            pm_registry::save_pm_prefs(
+                &prefs,
+                &pm_registry::PmPrefs {
+                    registration: Some(pm_registry::PmRegistration {
+                        session_id: id.into(),
+                        agent_id: "codex".into(),
+                        worktree_path: pm_registry::pm_worktree_path_for_repo_path(&repo)
+                            .display()
+                            .to_string(),
+                        created_at: None,
+                        consecutive_crashes: 0,
+                        next_not_before: None,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        };
+        register("pm-a");
+        let _pm = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-a");
+        let absent = invoke(&repo, "pm.request_tasks.read", json!({}));
+        assert_eq!(absent.0, 0);
+        assert_eq!(absent.1["state"], "absent");
+        assert!(absent.1.get("counts").is_none());
+        assert!(!peer_project_dir(&repo)
+            .join("project-state/request-tasks")
+            .exists());
+        let original = "Keep the exact original.\nEven before a Q&A post.";
+        let store = TaskStore::for_repo(&repo);
+        let capture = json!({"operation_id":"capture-1","expected_revision":0,"reason":"Authenticated native input",
+            "action":{"kind":"capture","source":{"id":"source-1",
+                "project_key":gwt_core::paths::project_scope_hash(&repo).to_string(),"original":original,
+                "authority":{"session_id":"prior-pm","turn_id":"native-1",
+                    "prompt_sha256":gwt_core::pm_authorization::digest(original.as_bytes())}}}});
+        store
+            .apply(
+                &Actor {
+                    kind: ActorKind::Intake,
+                    id: "prior-pm".into(),
+                },
+                &serde_json::from_value(capture).unwrap(),
+            )
+            .unwrap();
+        let state_path = peer_project_dir(&repo).join("project-state/request-tasks/state.json");
+        let original_bytes = fs::read(&state_path).unwrap();
+        for caller in ["implementation-agent", "foreign-pm", " pm-a "] {
+            let _caller = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, caller);
+            for (operation, params) in [
+                (
+                    "pm.request_tasks.read",
+                    json!({"selector":{"kind":"source","id":"source-1"}}),
+                ),
+                ("pm.request_tasks.apply", apply.clone()),
+            ] {
+                let result = invoke(&repo, operation, params);
+                assert_eq!(result.0, 1);
+                assert_eq!(result.1["error"]["code"], "unauthorized");
+                assert!(result.1["current_revision"].is_null());
+            }
+        }
+        let foreign = home.path().join("foreign");
+        fs::create_dir_all(&foreign).unwrap();
+        assert_eq!(
+            invoke(&foreign, "pm.request_tasks.apply", apply.clone()).0,
+            1
+        );
+        assert_eq!(fs::read(&state_path).unwrap(), original_bytes);
+        let prefs_bytes = fs::read(&prefs).unwrap();
+        let first = invoke(&repo, "pm.request_tasks.apply", apply.clone());
+        assert_eq!(first.0, 0);
+        assert_eq!(
+            first.1["receipt"]["actor"],
+            json!({"kind":"pm","id":"pm-a"})
+        );
+        let committed = fs::read(&state_path).unwrap();
+        assert_eq!(
+            invoke(&repo, "pm.request_tasks.apply", apply.clone()),
+            first
+        );
+        assert_eq!(fs::read(&state_path).unwrap(), committed);
+        let mut conflict = apply.clone();
+        conflict["operation_id"] = json!("other-operation");
+        let conflict = invoke(&repo, "pm.request_tasks.apply", conflict);
+        assert_eq!(conflict.0, 1);
+        assert_eq!(conflict.1["error"]["code"], "conflict");
+        assert_eq!(conflict.1["current_revision"], 2);
+        assert_eq!(
+            conflict.1["error"]["recovery_operation"],
+            "pm.request_tasks.read"
+        );
+        let summary = invoke(&repo, "pm.request_tasks.read", json!({})).1;
+        assert_eq!(summary["state"], "ready");
+        assert_eq!(
+            summary["counts"],
+            json!({"sources":1,"pending":0,"tasks":1,"receipts":2})
+        );
+        for field in ["sources", "tasks", "receipts", "original"] {
+            assert!(summary.get(field).is_none());
+        }
+        let runtime = peer_project_dir(&repo).join("pm/runtime/nested");
+        fs::create_dir_all(&runtime).unwrap();
+        let source = invoke(
+            &runtime,
+            "pm.request_tasks.read",
+            json!({"selector":{"kind":"source","id":"source-1"}}),
+        );
+        assert_eq!(source.0, 0);
+        assert_eq!(source.1["source"]["original"], original);
+        assert_eq!(
+            invoke(&runtime, "pm.request_tasks.read", json!({})).1,
+            summary
+        );
+        assert_eq!(
+            invoke(
+                &repo,
+                "pm.request_tasks.read",
+                json!({"selector":{"kind":"receipt","operation_id":"decompose-1"}})
+            )
+            .1["receipt"],
+            first.1["receipt"]
+        );
+        assert_eq!(
+            invoke(
+                &repo,
+                "pm.request_tasks.read",
+                json!({"selector":{"kind":"task","id":"task-1"}})
+            )
+            .1["task"]["draft"]["title"],
+            "Original task"
+        );
+        assert_eq!(
+            invoke(
+                &repo,
+                "pm.request_tasks.read",
+                json!({"selector":{"kind":"source","id":"missing"}})
+            )
+            .1["error"]["code"],
+            "missing_source"
+        );
+        assert_eq!(
+            fs::read(&prefs).unwrap(),
+            prefs_bytes,
+            "Task updates grant no PM/Monitor authority"
+        );
+        register("replacement-pm");
+        assert_eq!(
+            invoke(&repo, "pm.request_tasks.apply", apply).1["error"]["code"],
+            "unauthorized"
+        );
+        assert_eq!(fs::read(&state_path).unwrap(), committed);
+        register("pm-a");
+        fs::write(&state_path, b"broken snapshot").unwrap();
+        let broken = invoke(&repo, "pm.request_tasks.read", json!({}));
+        assert_eq!(broken.0, 1);
+        assert_eq!(broken.1["error"]["code"], "unreadable_store");
+        assert!(broken.1.get("counts").is_none());
+        assert_eq!(fs::read(&state_path).unwrap(), b"broken snapshot");
+    }
 
     #[test]
     fn pm_plan_adapter_binds_authority_to_current_project_and_registration() {
