@@ -1,5 +1,9 @@
 use std::{io::IsTerminal, path::PathBuf, process::ExitCode};
 
+#[cfg(windows)]
+#[path = "gwtd/windows_verification_recovery.rs"]
+mod windows_verification_recovery;
+
 // Issue #3675: unit tests must never reach the real GitHub API. Armed before
 // any test runs; unsandboxed ProcessKind::Gh spawns then fail explicitly.
 // SAFETY(pre-main): only stores a relaxed AtomicBool.
@@ -11,6 +15,12 @@ fn forbid_real_gh_in_tests() {
 
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().collect();
+    #[cfg(windows)]
+    if let Some(code) = windows_verification_recovery::run_private_role(&argv, |input| {
+        dispatch_json_envelope("gwtd", input)
+    }) {
+        return ExitCode::from(code.clamp(0, 255) as u8);
+    }
     if let Some(code) = gwt::cli::run_feedback_private_role(&argv) {
         // A bounded private owner may still have an unobserved bookkeeping
         // thread. This role must not enter ordinary startup or join that I/O.
@@ -957,9 +967,17 @@ fn run_json_envelope_cli(argv: &[String]) -> i32 {
         eprintln!("{prog}: failed to read JSON envelope: {error}");
         return 1;
     }
+    #[cfg(windows)]
+    if let Some(code) = windows_verification_recovery::forward_if_needed(&input) {
+        return code;
+    }
+    dispatch_json_envelope(prog, &input)
+}
+
+fn dispatch_json_envelope(prog: &str, input: &str) -> i32 {
     let repo_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let mut env = json_envelope_env(repo_path, &input);
-    gwt::cli::dispatch_json_input(&mut env, prog, &input)
+    let mut env = json_envelope_env(repo_path, input);
+    gwt::cli::dispatch_json_input(&mut env, prog, input)
 }
 
 fn json_envelope_env(repo_path: PathBuf, input: &str) -> gwt::cli::DefaultCliEnv {

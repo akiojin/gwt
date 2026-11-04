@@ -52,6 +52,21 @@ pub fn observe_current() -> Result<CurrentJobCpu, String> {
     }
 }
 
+/// Query whether a required target belongs to any native Windows Job.
+/// Unlike best-effort descendant observation, a vanished or unreadable target
+/// is unknown and returns an error; it is never evidence of an uncapped target.
+pub fn is_in_job(pid: u32) -> Result<bool, String> {
+    #[cfg(windows)]
+    {
+        windows::is_in_job(pid)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = pid;
+        Ok(false)
+    }
+}
+
 #[cfg(windows)]
 pub(super) use windows::{hard_cap_percent, register};
 
@@ -180,6 +195,19 @@ mod windows {
             in_job: in_job.as_bool(),
             hard_cap_percent,
         })
+    }
+
+    pub(super) fn is_in_job(pid: u32) -> Result<bool, String> {
+        // SAFETY: this opens an owned query-only handle to the exact target.
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
+            .map_err(|error| format!("query required target {pid}: {error}"))?;
+        let process = unsafe { Owned::new(process) };
+        let mut in_job = ::windows::core::BOOL::default();
+        // SAFETY: None checks all Job membership; the process and output buffer
+        // remain live for this read-only query. Failures remain unknown.
+        unsafe { IsProcessInJob(*process, None, &mut in_job) }
+            .map_err(|error| format!("query required target {pid} Job membership: {error}"))?;
+        Ok(in_job.as_bool())
     }
 
     pub(in crate::process_tree) fn hard_cap_percent(
