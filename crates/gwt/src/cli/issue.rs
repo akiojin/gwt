@@ -17887,6 +17887,85 @@ command = "my-agent-cli"
     }
 
     #[test]
+    fn linked_pr_bulk_retains_nodes_across_successful_chunk_interleaving() {
+        let numbers: Vec<u64> = (1..=26).collect();
+        let event = |number| {
+            serde_json::json!({
+                "__typename": "CrossReferencedEvent", "willCloseTarget": true,
+                "source": {"__typename": "PullRequest", "number": number, "state": "OPEN"}
+            })
+        };
+        let mut queries = Vec::new();
+        let mut observed = Vec::new();
+        let linked =
+            fetch_linked_prs_bulk_via_gh_with_observer(
+                &numbers,
+                |query| {
+                    queries.push(query.to_string());
+                    let repository = match queries.len() {
+                    1 => (1..=25)
+                        .map(|number| {
+                            (format!("i{number}"), serde_json::json!({"timelineItems": {
+                                "nodes": if number == 1 { vec![event(101)] } else { vec![] },
+                                "pageInfo": {"hasNextPage": number == 1, "endCursor": "next"}
+                            }}))
+                        })
+                        .collect::<serde_json::Map<_, _>>()
+                        .into(),
+                    2 => serde_json::json!({"i26": {"timelineItems": {
+                        "nodes": [], "pageInfo": {"hasNextPage": false, "endCursor": null}
+                    }}}),
+                    3 => serde_json::json!({"i1": {"timelineItems": {
+                        "nodes": [event(102)],
+                        "pageInfo": {"hasNextPage": false, "endCursor": null}
+                    }}}),
+                    _ => panic!("unexpected extra query"),
+                };
+                    Ok(serde_json::json!({"data": {"repository": repository}}).to_string())
+                },
+                |number, prs| {
+                    observed.push((
+                        number,
+                        prs.iter()
+                            .map(|pr| (pr.number, pr.will_close_target))
+                            .collect::<Vec<_>>(),
+                    ));
+                },
+            )
+            .expect("all initial pages and the continuation succeed");
+
+        assert_eq!(queries.len(), 3);
+        assert!(queries[0].contains("i1: issue(number: 1)"));
+        assert!(queries[0].contains("i25: issue(number: 25)"));
+        assert!(!queries[0].contains("i26: issue("));
+        assert!(queries[1].contains("i26: issue(number: 26)"));
+        assert!(!queries[1].contains("i1: issue("));
+        assert!(!queries[1].contains("after:"));
+        assert!(queries[2].contains("i1: issue(number: 1)"));
+        assert!(queries[2].contains("after: \"next\""));
+        assert!(!queries[2].contains("i26: issue("));
+        assert_eq!(
+            observed
+                .iter()
+                .map(|(number, _)| *number)
+                .collect::<Vec<_>>(),
+            (2..=26).chain([1]).collect::<Vec<_>>()
+        );
+        assert_eq!(observed.last().unwrap().1, vec![(101, true), (102, true)]);
+        assert_eq!(linked.len(), 26);
+        for (number, prs) in &observed {
+            let returned: Vec<_> = linked[number]
+                .iter()
+                .map(|pr| (pr.number, pr.will_close_target))
+                .collect();
+            assert_eq!(&returned, prs);
+            if *number != 1 {
+                assert!(prs.is_empty());
+            }
+        }
+    }
+
+    #[test]
     fn issue_4157_linked_pr_bulk_read_follows_only_incomplete_timelines() {
         let event = |number, closing| {
             serde_json::json!({
