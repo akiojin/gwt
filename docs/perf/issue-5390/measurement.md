@@ -681,3 +681,40 @@ continuation might fail; this can move CPU work earlier. No timeout, retry,
 query, scheduler, public API or completion authority changed. LF6's original
 coverage timeout and parent AC-1/2/3, installed and real-fleet performance remain
 unproven. Final-head canonical verification and CI are separate delivery evidence.
+
+### Coverage timeout: finite concurrent replay (LF6, 2026-11-04)
+
+The original [coverage shard 3 failure](https://github.com/akiojin/gwt/actions/runs/41736787341/job/126267934629)
+passed 2,073 tests and timed out the last-settings runtime-target case at
+120.011 seconds. Its log predates the nine fixed phase markers and contains
+neither a stopping phase nor a stack. All other cases finished before that
+timeout; the fixture's successful Git setup does not identify the later wait.
+
+Read-only inspection identified initial Monitor scan idle, launch preparation
+completion, Close and owner shutdown as possible waits. Close has a 120-second
+request timeout; the surrounding waits can also outlive the test deadline.
+No particular wait or deadlock was demonstrated.
+
+[Replay evidence](coverage-timeout-replay.json) records two bounded experiments
+using the preserved instrumented Linux artifact, unchanged, with a fresh private
+`gwt-%8m.profraw` pool for each experiment. Each invocation selected exactly one
+fully qualified test; all exit codes and result counts were checked.
+
+| Experiment | Cases | Observed process duration | Result |
+| --- | ---: | --- | --- |
+| Same last-settings case, four concurrent processes, two waves | 8 | 2.315–2.414 s | 8 passed |
+| The 16 same-module cases extracted from the original shard, one concurrent wave | 16 | 0.566–2.528 s | 16 passed |
+
+No process reached the 20-second slow-capture threshold, so no stopping stack
+was collected. The artifact has debug line information and predates LF5; its
+exact producing source SHA was not independently reconstructed. These are
+artifact replay results, not current-source verification. Neither experiment
+recreates the original debug-zero build or the complete 2,074-test mixed shard.
+Hashes, case inventory and raw report digests are retained in the linked JSON;
+raw logs remain in the local investigation directory.
+
+LF6 remains unresolved. The next useful evidence is the last delivered phase
+marker and an owned stopping stack on recurrence. Passing replays do not justify
+a timeout extension or a speculative product change. This slice changes only
+the investigation record; parent AC-1/2/3, installed-runtime and real-fleet
+CPU/RSS acceptance remain unproven.
