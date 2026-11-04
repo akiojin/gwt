@@ -599,3 +599,26 @@ alone must not be reported as its repair. Fresh canonical and mandatory CI
 evidence determine delivery of this limited FIFO/observability slice.
 The existing exact Linux case with these markers passed in 5.04 seconds and
 observed all nine phases through `stopped`; all original assertions passed.
+
+### Successful linked-PR chunk interleaving (LF8, 2026-11-04)
+
+The failed-continuation fixture above has no initial PR nodes, while the
+existing successful pagination fixture stays within one chunk. Neither proves
+that accumulated nodes survive processing a different chunk. One adjacent
+26-candidate regression now fixes that gap: Issue 1 starts with closing PR 101,
+Issue 26 completes in the second query, and Issue 1's continuation adds closing
+PR 102 in the third query. It asserts the query order and cursor, complete-only
+publication of Issue 1 exactly once with both PRs, and agreement with the
+returned results for all 26 Issues.
+
+Before the addition, `cargo test -p gwt --lib --all-features linked_pr` passed
+all 13 selected existing tests. Afterwards,
+`cargo nextest run -p gwt --lib --all-features -E "test(linked_pr) | test(body_closes_issue)" --profile gwt-verify --retries 0`
+passed all 15 selected tests, including the new case. Independent read-only
+diff review found no blocking issue. Final-head canonical and CI evidence
+belongs to this follow-up PR.
+
+This is test coverage for the delivered FIFO reader, with no product change,
+new helper, timer or environment mutation. The original timeout cause (LF6),
+raw-node residency measurement (LF7), parent AC-1/2/3 and installed/real-fleet
+performance remain unproven. No CPU, RSS or elapsed-time improvement is claimed.
