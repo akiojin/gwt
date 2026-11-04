@@ -1,7 +1,7 @@
 # Issue #6743: Windows idle CPU
 
 本資料は調査途中の証跡。R5 の直接 shipping Dark 600 秒は GUI / daemon の
-CPU 閾値を満たした。canonical / uncapped 検証は R2 の環境拒否（Issue #6735）が
+CPU 閾値を満たした。pushed source に対する最新 canonical / uncapped 検証でも環境拒否（Issue #6735）が
 未解消であり、全 AC 完了、Ready PR、develop 配送はまだ完了していない。
 
 分類は gwt runtime の性能機能。開始時の fetch 後、HEAD と
@@ -364,5 +364,35 @@ launch で照合し、Release binary hashes はそれらと CPU snapshot で照�
 source generation は CRLF→LF により SHA256 が変わるため、raw / 保存後の両 SHA を
 最終集計に記載した。
 
-この直接測定は canonical uncapped の証明ではない。保存済み R2 canonical 記録の
-環境拒否（Issue #6735）は未解消であり、全 AC / PR / develop 配送は未完了。
+この直接測定は canonical uncapped の証明ではない。全 AC / PR / develop 配送は未完了。
+
+## pushed source の最終 canonical 結果
+
+source と証跡は `5811e37b989f28908586832af678fe62d432fb55` に commit/push した。
+この HEAD の derived pre-pr 20 commands を改めて verify.run した記録は
+`vrr-ea6904466bca4308bb92d13b222fcdeb`。17 commands PASS、製品テスト失敗 0、
+environment incompatible 1、外部 signal による中断 0。
+[記録要約](r5-verification-summary.json) に精算結果・各 command・原記録 hash を保存した。
+private な execution authority は含めていない。
+
+headed 開始前に `PID 13100 has unregistered ancestor gwt PID 54020` で拒否された。
+raw_exit_code は null、合成 exit 125、fresh Chromium dark/light はともに 0 実行。
+CLI の自動 artifact 復元は PASS。fail-fast で後続 3 planned commands を省略し、
+別の自動復元を含めた結果数は 18。plan_covered=true は全 command の成功を意味せず、
+all_passed=false である。
+
+この run の named regressions は monitor 8、inventory 26、bin fixture/usage 5、
+process 17、lifetime 2、OFF worker 1、fresh disk 1、ON worker 1、index counter 1、
+index integration 8、hygiene 36 PASS（既存 ignored 1）。strict workspace Clippy/fmt と
+helper contract も PASS。受け入れの CPU 直接測定と、canonical の環境拒否を区別する。
+
+依存 #6735 の clean source `892ef9cfb` には同一 verify.run を Windows worker へ
+転送する回復実装があるが、他 checkout の driver を指定する公開経路はない。
+embedded driver source HEAD と対象 HEAD の完全一致が必要なため、この binary を
+5811 の代用にはしない。独立した source 調査結果を PM へ引き継いだ。
+共有 GUI/registry/authority/gate の手動改変は行っていない。
+
+この後の記録保全は Work/文書だけで、runtime source の変更ではない。
+Issue #6743 と親 #5390 は OPEN、AC は unchecked、PR/CI/merge は未実施。
+coverage は未測定（PR 未作成）。outer shell 除外後の gwt-core+gwt 90% と他 domain 80% の
+必須 CI gate を未達と判定したものではない。
