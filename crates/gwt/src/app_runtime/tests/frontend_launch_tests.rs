@@ -2394,6 +2394,48 @@ fn app_runtime_frontend_ready_snapshot_makes_progress_during_continuous_output()
     probe.pane.lock().unwrap().process_bytes(b"HISTORY\r\n");
     runtime.request_owner_snapshot(&window_id, Some("client-1".into()));
     drain_owner_snapshot_completions(&mut runtime);
+
+    // The private HTTP snapshot can capture output before the independent
+    // WebSocket delivers it. Every client needs the bytes its shared cursor skips.
+    let previous_seq = runtime.runtimes[&window_id].output_seq;
+    runtime.request_owner_snapshot(&window_id, Some("client-1".into()));
+    let data = b"SNAPSHOT-AHEAD\r\n".to_vec();
+    let (seq, screen, screen_ansi) = {
+        let mut pane = probe.pane.lock().unwrap();
+        pane.process_bytes(&data);
+        (
+            pane.output_seq(),
+            pane.screen().contents(),
+            pane.screen().contents_formatted(),
+        )
+    };
+    drain_queued_blocking_tasks(&tasks);
+    let events = runtime.handle_project_owner_snapshot(*take_completion());
+    assert!(
+        events.iter().any(|event| {
+            matches!(event.event, BackendEvent::TerminalSnapshot { .. })
+                && event.target == DispatchTarget::Project(context.project_key.clone())
+                && event.terminal_stream_seq == Some(seq)
+        }),
+        "an advancing private snapshot must deliver the skipped output to existing clients"
+    );
+    assert!(runtime
+        .handle_project_owner_event(
+            &context,
+            1,
+            &identity,
+            OwnerEvent::Output {
+                id: probe.id.clone(),
+                incarnation: probe.incarnation,
+                data,
+                seq,
+                previous_seq: Some(previous_seq),
+                screen,
+                screen_ansi,
+                screen_seq: seq,
+            },
+        )
+        .is_empty());
     let mut displayed = Vec::new();
 
     for cycle in 0..3 {

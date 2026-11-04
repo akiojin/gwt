@@ -14241,7 +14241,7 @@ impl AppRuntime {
             return Vec::new();
         }
         let runtime = self.runtimes.get_mut(id).expect("fenced remote runtime");
-        let targets = runtime
+        let mut targets = runtime
             .pending_snapshot
             .take()
             .map(|pending| pending.targets)
@@ -14262,6 +14262,11 @@ impl AppRuntime {
                 events.extend(self.request_owner_snapshot(id, target));
             }
             return events;
+        }
+        // HTTP snapshots can overtake the output WebSocket. Every client needs
+        // the bytes that advancing this shared cursor will skip on that stream.
+        if snapshot.screen_seq > runtime.output_seq && !targets.contains(&None) {
+            targets.push(None);
         }
         self.pending_runtime_outputs.remove(id);
         let behind_current_screen = snapshot.screen_seq < runtime.screen_seq;
