@@ -2192,10 +2192,13 @@ fn diagnostic_artifacts() -> serde_json::Value {
         "expired":false,"workflow_run":{"id":42}}]})
 }
 
-fn enqueue_diagnostic_run(transport: &FakeTransport) {
-    transport.enqueue(ok_body(&diagnostic_run_metadata().to_string()));
+fn enqueue_diagnostic_run(transport: &FakeTransport, path: &str) -> serde_json::Value {
+    let mut run = diagnostic_run_metadata();
+    run["path"] = serde_json::json!(path);
+    transport.enqueue(ok_body(&run.to_string()));
     transport.enqueue(ok_body(&diagnostic_artifacts().to_string()));
     enqueue_diagnostic_assets(transport);
+    run
 }
 
 fn enqueue_diagnostic_assets(transport: &FakeTransport) {
@@ -2212,24 +2215,29 @@ fn enqueue_diagnostic_assets(transport: &FakeTransport) {
 #[test]
 fn diagnostic_run_snapshot_hashes_assets_at_the_actual_run_head() {
     use sha2::{Digest, Sha256};
-    let transport = FakeTransport::new();
-    enqueue_diagnostic_run(&transport);
-    let client = client_with(transport);
-    let snapshot = client.diagnostic_run_snapshot(42).unwrap();
-    assert_eq!(snapshot["run"], diagnostic_run_metadata());
-    for (key, body) in [
-        ("profile_sha256", "fixed-profile"),
-        ("patch_sha256", "fixed-patch"),
-        ("workflow_sha256", "fixed-workflow"),
-        ("harness_sha256", "fixed-harness"),
+    for path in [
+        ".github/workflows/windows-diagnostic.yml",
+        ".github/workflows/windows-diagnostic.yml@refs/heads/develop",
     ] {
-        assert_eq!(snapshot[key], hex::encode(Sha256::digest(body.as_bytes())));
+        let transport = FakeTransport::new();
+        let run = enqueue_diagnostic_run(&transport, path);
+        let client = client_with(transport);
+        let snapshot = client.diagnostic_run_snapshot(42).unwrap();
+        assert_eq!(snapshot["run"], run);
+        for (key, body) in [
+            ("profile_sha256", "fixed-profile"),
+            ("patch_sha256", "fixed-patch"),
+            ("workflow_sha256", "fixed-workflow"),
+            ("harness_sha256", "fixed-harness"),
+        ] {
+            assert_eq!(snapshot[key], hex::encode(Sha256::digest(body.as_bytes())));
+        }
+        assert!(client.transport().recorded()[2..]
+            .iter()
+            .all(|request| request
+                .url
+                .ends_with("?ref=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")));
     }
-    assert!(client.transport().recorded()[2..]
-        .iter()
-        .all(|request| request
-            .url
-            .ends_with("?ref=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")));
 }
 
 #[test]
@@ -2276,12 +2284,14 @@ fn diagnostic_artifact_binds_a_fresh_run_and_drops_credentials_on_the_signed_dow
 
 #[test]
 fn diagnostic_run_snapshot_refuses_foreign_identity_and_incomplete_artifact_lists() {
-    for foreign in [true, false] {
+    for case in ["repository", "workflow", "artifacts"] {
         let transport = FakeTransport::new();
         let mut run = diagnostic_run_metadata();
         let mut artifacts = diagnostic_artifacts();
-        if foreign {
+        if case == "repository" {
             run["repository"]["full_name"] = serde_json::json!("secret-input-value/foreign");
+        } else if case == "workflow" {
+            run["path"] = serde_json::json!(".github/workflows/foreign.yml@refs/heads/develop");
         } else {
             artifacts["total_count"] = serde_json::json!(101);
         }

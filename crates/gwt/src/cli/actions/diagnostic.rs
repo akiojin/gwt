@@ -413,6 +413,13 @@ fn refusal(record: &Receipt, reason: &str) -> Value {
     value
 }
 
+fn uncertain(record: &Receipt, reason: &str) -> Value {
+    let mut value = refusal(record, reason);
+    value["state"] = json!("ExpiredUnknown");
+    value["uncertainty"] = json!(true);
+    value
+}
+
 fn allowed() -> io::Result<bool> {
     let path = gwt_core::paths::gwt_config_path();
     if !path.exists() {
@@ -641,7 +648,7 @@ fn observe_request<E: CliEnv + ?Sized>(
     };
     let snapshot = match env.diagnostic_run_snapshot(run_id) {
         Ok(snapshot) => snapshot,
-        Err(_) => return Ok(response("ExpiredUnknown", "RunUnavailable")),
+        Err(_) => return Ok(uncertain(&record, "RunUnavailable")),
     };
     if !run_matches(&snapshot, &record) {
         return Ok(refusal(&record, "RunIdentityMismatch"));
@@ -650,7 +657,7 @@ fn observe_request<E: CliEnv + ?Sized>(
         Some("queued" | "waiting" | "pending" | "requested") => "BoundQueued",
         Some("in_progress") => "Running",
         Some("completed") => "TerminalObserved",
-        _ => return Ok(response("ExpiredUnknown", "RunUnavailable")),
+        _ => return Ok(uncertain(&record, "RunUnavailable")),
     };
     if record.result.is_some() {
         return Ok(view(&record));
@@ -666,25 +673,25 @@ fn observe_request<E: CliEnv + ?Sized>(
         }
         let name = format!("windows-diagnostic-{}", record.request.request_id);
         let Some(artifacts) = snapshot["artifacts"].as_array() else {
-            return Ok(response("ExpiredUnknown", "ArtifactUnavailable"));
+            return Ok(uncertain(&record, "ArtifactUnavailable"));
         };
         let matching: Vec<_> = artifacts
             .iter()
             .filter(|a| a["name"].as_str() == Some(&name))
             .collect();
         if matching.len() != 1 || matching[0]["expired"].as_bool() != Some(false) {
-            return Ok(response("ExpiredUnknown", "ArtifactUnavailable"));
+            return Ok(uncertain(&record, "ArtifactUnavailable"));
         }
         let Some(artifact_id) = matching[0]["id"].as_u64().filter(|id| *id > 0) else {
-            return Ok(response("Refused", "ArtifactRejected"));
+            return Ok(refusal(&record, "ArtifactRejected"));
         };
         let bytes = match env.diagnostic_artifact(run_id, artifact_id) {
             Ok(bytes) => bytes,
-            Err(_) => return Ok(response("ExpiredUnknown", "ArtifactUnavailable")),
+            Err(_) => return Ok(uncertain(&record, "ArtifactUnavailable")),
         };
         let result = match read_result(&bytes, &record, &snapshot) {
             Ok(result) => result,
-            Err(_) => return Ok(response("Refused", "ArtifactRejected")),
+            Err(_) => return Ok(refusal(&record, "ArtifactRejected")),
         };
         record.no_start_verified = result.no_start_verified;
         record.state = if result.cleanup == "Unobserved" {
@@ -1011,7 +1018,7 @@ fn cancel_request<E: CliEnv + ?Sized>(
     }
     let snapshot = match env.diagnostic_run_snapshot(cancel.expected_run_id) {
         Ok(snapshot) => snapshot,
-        Err(_) => return Ok(response("ExpiredUnknown", "RunUnavailable")),
+        Err(_) => return Ok(uncertain(&record, "RunUnavailable")),
     };
     if !run_matches(&snapshot, &record) {
         return Ok(refusal(&record, "RunIdentityMismatch"));
@@ -1020,10 +1027,10 @@ fn cancel_request<E: CliEnv + ?Sized>(
         snapshot["run"]["status"].as_str(),
         Some("queued" | "waiting" | "pending" | "requested" | "in_progress")
     ) {
-        return Ok(response("Refused", "RunNotLive"));
+        return Ok(refusal(&record, "RunNotLive"));
     }
     if env.release_policy_context().ok().as_ref() != Some(actor) {
-        return Ok(response("Refused", "AuthorityChanged"));
+        return Ok(refusal(&record, "AuthorityChanged"));
     }
     record.cancel_requested = true;
     record.cancel_outcome = Some("Unknown".into());
@@ -1220,7 +1227,30 @@ mod tests {
                 html_url: "https://github.com/akiojin/gwt/actions/runs/77".into(),
             },
         ));
-        execute(&mut env, request(id)).unwrap();
+        let bound = execute(&mut env, request(id)).unwrap();
+        for command in [
+            DiagnosticCommand::Observe(Observe {
+                request_id: Some(id.into()),
+                profile_id: None,
+            }),
+            DiagnosticCommand::Cancel(Cancel {
+                request_id: id.into(),
+                expected_run_id: 77,
+                expected_revision: bound["revision"].as_u64().unwrap(),
+            }),
+        ] {
+            let unavailable = execute(&mut env, command).unwrap();
+            assert_eq!(unavailable["state"], "ExpiredUnknown");
+            assert_eq!(unavailable["request_id"], id);
+            assert_eq!(unavailable["revision"], bound["revision"]);
+            assert_eq!(unavailable["binding"], bound["binding"]);
+            assert_eq!(unavailable["uncertainty"], true);
+        }
+        assert_eq!(
+            load(&root(repo.path()), id).unwrap().unwrap().revision,
+            bound["revision"].as_u64().unwrap()
+        );
+        assert!(env.cancel_call_log.is_empty());
         env.diagnostic_runs.insert(77, json!({"run":{"id":77,"workflow_id":123,"event":"workflow_dispatch","path":".github/workflows/windows-diagnostic.yml","head_sha":"a".repeat(40),"run_attempt":1,"status":"in_progress","repository":{"full_name":REPOSITORY}},"artifacts":[]}));
         let running = execute(
             &mut env,

@@ -1089,7 +1089,9 @@ impl<T: HttpTransport> HttpIssueClient<T> {
         let run = self.diagnostic_json_get(&prefix)?;
         if run["id"].as_u64() != Some(run_id)
             || run["repository"]["full_name"] != format!("{}/{}", self.owner, self.repo)
-            || run["path"] != ".github/workflows/windows-diagnostic.yml"
+            || !run["path"].as_str().is_some_and(|path| {
+                path.split('@').next() == Some(".github/workflows/windows-diagnostic.yml")
+            })
             || run["event"] != "workflow_dispatch"
             || !run["head_sha"]
                 .as_str()

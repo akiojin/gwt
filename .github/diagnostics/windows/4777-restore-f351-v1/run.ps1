@@ -455,9 +455,10 @@ function Test-Wrapper {
         $script:SelfTestPhase='environment'
         $environment = New-ChildEnvironment $root
         if ($environment.ContainsKey('GWT_DIAGNOSTIC_SECRET_SENTINEL') -or $environment.ContainsKey('GITHUB_TOKEN') -or $environment.ContainsKey('ACTIONS_RUNTIME_TOKEN')) { throw 'unsafe environment' }
-        $command = Join-Path $env:SystemRoot 'System32/cmd.exe'
+        $command = [Environment]::ProcessPath
+        $probe = 'if ($null -ne [Environment]::GetEnvironmentVariable(''GWT_DIAGNOSTIC_SECRET_SENTINEL'')) { exit 13 }; [Console]::WriteLine(''private-diagnostic-sentinel''); [Console]::WriteLine(''test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out;''); exit 0'
         $script:SelfTestPhase='probe_spawn'
-        $job = [GwtFixedDiagnostic.OwnedJob]::new($command,@('/d','/c','if defined GWT_DIAGNOSTIC_SECRET_SENTINEL (exit 13) else (echo private-diagnostic-sentinel & echo test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; & exit 0)'),$root,$environment,(Join-Path $root 'private.raw'))
+        $job = [GwtFixedDiagnostic.OwnedJob]::new($command,@('-NoLogo','-NoProfile','-NonInteractive','-Command',$probe),$root,$environment,(Join-Path $root 'private.raw'))
         $script:SelfTestPhase='probe_wait'
         if (-not (Wait-OwnedJobs @($job) 1)) { throw 'owned process failed' }
         $script:SelfTestChildExit=$job.ExitCode
