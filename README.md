@@ -642,10 +642,10 @@ See [SPEC #3200](https://github.com/akiojin/gwt/issues/3200) for the shared capa
 the recommendation are allowed, with a warning that verification may not finish and
 timing-dependent test failures may block unrelated PRs. In roster projects, automation uses
 `issue.monitor.config.set` with `{"max_active":4}` to resize the roster to four enabled
-members; Auto requests are rejected to keep membership and requested capacity equal.
-For legacy projects without a roster, automation uses
-`issue.monitor.config.set` with `{"max_active_mode":"auto"}` for Auto or
-`{"max_active":4}` for a Manual limit of four. `issue.monitor.status` reports the effective limit,
+members. To return the machine limit to Auto, use the **Auto** button beside
+**Agent limit** or `issue.monitor.config.set` with `{"max_active_mode":"auto"}`;
+this also works with a roster and keeps its members. Without a roster,
+`{"max_active":4}` sets a Manual limit of four. `issue.monitor.status` reports the effective limit,
 `max_active_agents_override` (the shared requested value), `max_active_agents_scope: "machine"`,
 and the shared `agent_capacity` measurement. Roster projects also report
 `agent_roster_capacity` and `agent_roster_revision` for the project member setting.

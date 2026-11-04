@@ -600,8 +600,9 @@ PM 窓の会計は別に表示します。
 共通の容量設定の仕様は [SPEC #3200](https://github.com/akiojin/gwt/issues/3200) を参照してください。推奨値を超える入力も許可しますが、
 検証が完走しない可能性と、時間に依存するテストの失敗が無関係な PR を妨げる可能性を警告します。
 名簿のあるプロジェクトでは `issue.monitor.config.set` に `{"max_active":4}` を渡すと有効メンバーを4人へ増減します。
-人数と要求上限を一致させるため、Auto への変更は拒否します。名簿のない旧設定では、
-`issue.monitor.config.set` に `{"max_active_mode":"auto"}` を渡すと Auto、
+machine 上限を Auto に戻すには **Agent limit** の隣の **Auto** ボタン、または
+`issue.monitor.config.set` の `{"max_active_mode":"auto"}` を使います。
+名簿のあるプロジェクトでも使え、登録メンバーは維持します。名簿のない旧設定では、
 `{"max_active":4}` を渡すと上限 4 の Manual になります。`issue.monitor.status` は実効上限、
 `max_active_agents_override`（共有の要求値）、`max_active_agents_scope: "machine"`、共有実測値の `agent_capacity` を返します。
 名簿のあるプロジェクトでは `agent_roster_capacity` と `agent_roster_revision` がプロジェクトの人数設定を表します。
