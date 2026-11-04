@@ -158,21 +158,25 @@ test("Issue #6729 keeps only unresolved local errors across launch retry and for
   const catalog = await readLiveHubCatalog(page, base!);
   const primary = catalog.projects[0];
   expect(primary).toBeTruthy();
-  const agent = (id: string, issue: number) => ({
+  const agent = (id: string, issue: number, startedAt?: number | null) => ({
     id, linked_issue_number: issue, title: id, preset: "codex", status: "error", agent_id: "codex",
+    runtime_started_at_ms: startedAt,
     geometry: { x: 40, y: 60, width: 800, height: 500 }, z_index: 1,
     minimized: false, maximized: false, persist: true,
   });
-  const first = agent("timeout-first", 6729);
+  const first = agent("timeout-first", 6729, 1000);
   const successor = agent("timeout-successor", 6729);
-  const real = agent("real-local-error", 6730);
+  const real = agent("real-local-error", 6730, null);
+  const unprovenSuccessor = { ...agent("unknown-order-successor", 6730), status: "running" };
+  const recoveredOld = agent("recovered-old", 6731, 1000);
+  const recoveredNew = { ...agent("recovered-new", 6731, 2000), status: "running" };
   const snapshot = {
     app_version: "playwright", active_tab_id: primary.id, recent_projects: [],
     tabs: [
       { ...primary, kind: "git", workspace: { viewport: { x: 0, y: 0, zoom: 1 }, windows: [] } },
       { id: "notifications-background", project_key: "6729672967296729", title: "Monitor Off", project_root: "/fixture/foreign",
         kind: "git", workspace: { viewport: { x: 0, y: 0, zoom: 1 },
-          windows: [first, successor, real, agent("foreign-machine", 9999)] } },
+          windows: [first, successor, real, unprovenSuccessor, agent("foreign-machine", 9999), recoveredOld, recoveredNew] } },
     ],
   };
   // Use binary-served assets with a deterministic runtime stream. No Agent is
@@ -208,6 +212,16 @@ test("Issue #6729 keeps only unresolved local errors across launch retry and for
     inject(page, { kind: "terminal_status", id, status: state, detail, retryable });
   await expect(alerts).toHaveCount(0);
   await expect(rows).toHaveCount(0);
+  await status(recoveredOld.id, "error", "Retained old local diagnostic");
+  await expect(alerts).toHaveCount(0);
+  snapshot.tabs[1].workspace.windows = snapshot.tabs[1].workspace.windows.filter(w => w.id !== recoveredNew.id);
+  await inject(page, { kind: "workspace_state", workspace: snapshot });
+  await status(recoveredOld.id, "error", "Retained old local diagnostic");
+  await expect(alerts).toHaveCount(0);
+  await page.reload();
+  await expect(page.locator("#app-version")).toHaveText("vplaywright");
+  await status(recoveredOld.id, "error", "Retained old local diagnostic");
+  await expect(alerts).toHaveCount(0);
   await status(first.id, "starting", "Launching...");
   await inject(page, { kind: "window_state", window_id: first.id, state: "error" });
   await expect(alerts).toHaveCount(0);
@@ -215,6 +229,8 @@ test("Issue #6729 keeps only unresolved local errors across launch retry and for
   await expect(alerts).toHaveCount(1);
   await expect(alerts).toContainText("Launch timed out");
   await expect(alerts).not.toContainText("Launching...");
+  successor.runtime_started_at_ms = 2000;
+  await inject(page, { kind: "workspace_state", workspace: snapshot });
   await status(successor.id, "error", "Second local launch failed");
   await expect(alerts).toHaveCount(1);
   await expect(alerts).toContainText(successor.id);
@@ -227,6 +243,10 @@ test("Issue #6729 keeps only unresolved local errors across launch retry and for
   await expect(alerts).toHaveCount(0);
   await expect(rows).toHaveAttribute("data-resolved", "true");
   await status(real.id, "error", "Process exited with status 1");
+  unprovenSuccessor.runtime_started_at_ms = 3000;
+  await inject(page, { kind: "workspace_state", workspace: snapshot });
+  await expect(alerts).toHaveCount(1);
+  await expect(alerts).toContainText(real.id);
   await status(successor.id, "error", "Retry attempt failed");
   await status(successor.id, "running", null);
   await expect(alerts).toHaveCount(1);
@@ -244,6 +264,7 @@ test("Issue #6729 keeps only unresolved local errors across launch retry and for
     await status(successor.id, "error", "Automatic retry pending", true);
     await status(successor.id, "running", null);
     await status(first.id, "error", "Launch timed out: no window was created within 120s");
+    await status(recoveredOld.id, "error", "Retained old local diagnostic");
     await expect(alerts).toHaveCount(1);
     await expect(alerts).toContainText(real.id);
     await expect(rows).toHaveCount(2);

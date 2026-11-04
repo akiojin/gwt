@@ -106,11 +106,13 @@ test("unsupported OS constructor failures are logged safely once and remain dedu
 // SPEC-2356 Anshin Addendum (FR-040) — in-app attention toaster.
 function collectAttentionToaster() {
   const toasts = [];
+  const dismissed = [];
   const toaster = createAgentAttentionToaster({
     showToast: (notice) => toasts.push(notice),
+    dismissToast: id => dismissed.push(id),
     now: () => 1000,
   });
-  return { toaster, toasts };
+  return { toaster, toasts, dismissed };
 }
 
 test("FR-040: needs_input (waiting) fires an in-app toast even while present", () => {
@@ -253,6 +255,31 @@ test("Issue #6729: superseded windows cannot clear current errors or replay reco
   toaster.handleRuntimeState({ ...input, windowId: "new" });
   assert.equal(shown.length, 2, "reconnect must not replay either superseded diagnostic");
   assert.deepEqual(dismissed, [shown[1].id]);
+});
+
+test("Issue #6729: reload uses known local runtime start times without hiding unknown pre-spawn failures", () => {
+  for (const reverse of [false, true]) {
+    const { toaster, toasts, dismissed } = collectAttentionToaster();
+    const input = { projectKey: "project", windowId: "old", runtimeState: "error",
+      windowData: { linked_issue_number: 6729, runtime_started_at_ms: 1000 } };
+    const current = { ...input, windowId: "current", runtimeState: "running",
+      windowData: { linked_issue_number: 6729, runtime_started_at_ms: 2000 } };
+    const snapshot = [input, current];
+    if (reverse) snapshot.reverse();
+    for (const frame of snapshot) toaster.handleRuntimeState({ ...frame, source: "snapshot" });
+    toaster.handleRuntimeState(input);
+    assert.deepEqual(toasts, [], "older retained diagnostics must stay resolved after a full reload");
+    toaster.forgetWindow("current");
+    toaster.handleRuntimeState(input);
+    assert.deepEqual(toasts, [], "closing the successful successor must not revive retained diagnostics");
+    toaster.handleRuntimeState({ ...input, windowId: "pre-spawn", windowData: { linked_issue_number: 6729 } });
+    assert.equal(toasts.length, 1, "missing start time must not be treated as older than a known runtime");
+    toaster.handleRuntimeState({ ...input, windowId: "null-start",
+      windowData: { linked_issue_number: 6729, runtime_started_at_ms: null } });
+    toaster.handleRuntimeState({ ...current, source: "snapshot",
+      windowData: { linked_issue_number: 6729, runtime_started_at_ms: 3000 } });
+    assert.deepEqual(dismissed, [], "a newer known start cannot order an unknown/null failure");
+  }
 });
 
 
