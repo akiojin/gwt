@@ -90,6 +90,32 @@ pub fn reconcile_repo(opts: &ReconcileOptions) -> Result<()> {
         }
     }
 
+    // Reconcile on the existing refresh/startup path, before a new writer pins
+    // its artifacts. The sweep was previously only called by tests.
+    let sweep = sweep_file_index_v2(&FileIndexGcOptions {
+        index_root: opts.index_root.clone(),
+        repo_hash: opts.repo_hash.clone(),
+        active_worktree_hashes: valid_hashes.into_iter().collect(),
+        now_unix_nanos: Utc::now().timestamp_nanos_opt().unwrap_or(i64::MAX).max(0) as u64,
+        artifact_ttl: Duration::from_secs(24 * 60 * 60),
+        worktree_grace: Duration::from_secs(24 * 60 * 60),
+    });
+    match sweep {
+        Ok(report) if !report.deleted.is_empty() || !report.retry_pending.is_empty() => {
+            tracing::info!(
+                deleted = report.deleted.len(),
+                retry_pending = report.retry_pending.len(),
+                "file-index artifact reconciliation"
+            );
+        }
+        Err(error) => {
+            // Reachability validation fails closed for GC, but housekeeping
+            // must not prevent the refresh path from repairing a corrupt head.
+            tracing::warn!(%error, "file-index artifact reconciliation skipped");
+        }
+        Ok(_) => {}
+    }
+
     Ok(())
 }
 
@@ -142,6 +168,7 @@ const GC_LEASES_DIR: &str = "leases";
 const GC_LOCK_FILE: &str = ".lock";
 const GC_PIN_FILE: &str = "pin.json";
 const GC_ORPHAN_MARKER: &str = ".gc-orphaned.json";
+const GC_RETIRED_DIR: &str = ".gc-retired";
 
 /// Deterministic inputs for one repository-scoped file-index v2 sweep.
 #[derive(Debug, Clone)]
@@ -298,7 +325,7 @@ where
     fs::create_dir_all(&leases_root)?;
     let setup_lock_path = leases_root.join(GC_LOCK_FILE);
     let setup_lock = open_gc_lock(&setup_lock_path)?;
-    FileExt::lock_exclusive(&setup_lock).map_err(|error| {
+    crate::operation_deadline::lock_exclusive(&setup_lock).map_err(|error| {
         GwtError::Other(format!(
             "lock file-index GC lease registry {}: {error}",
             setup_lock_path.display()
@@ -331,20 +358,43 @@ where
         candidates.dedup();
 
         let mut report = FileIndexGcReport::default();
+        let retirement_root = v2_root.join(GC_RETIRED_DIR);
+        let mut retired = Vec::new();
         for candidate in candidates {
             if !candidate.exists() || gc_paths_intersect(&candidate, &protected) {
                 continue;
             }
-            match remover(candidate.clone()) {
-                Ok(()) => report.deleted.push(candidate),
+            if candidate.starts_with(&retirement_root) {
+                retired.push((candidate.clone(), candidate));
+                continue;
+            }
+            fs::create_dir_all(&retirement_root)?;
+            let destination = retirement_root.join(uuid::Uuid::new_v4().to_string());
+            // Atomically retire while new pins are excluded. Once the registry
+            // is released, a new writer can rebuild but cannot reuse this path.
+            match fs::rename(&candidate, &destination) {
+                Ok(()) => retired.push((candidate, destination)),
                 Err(_) => report.retry_pending.push(candidate),
             }
         }
-        Ok(report)
+        Ok::<_, GwtError>((report, retired))
     })();
 
     let _ = FileExt::unlock(&setup_lock);
-    sweep_result
+    let (mut report, retired) = sweep_result?;
+    for (original, path) in retired {
+        // Recursive disk I/O must not hold up new readers, nor drain an entire
+        // backlog after the refresh operation's existing deadline has expired.
+        if crate::operation_deadline::ensure_remaining("file-index GC deletion").is_err() {
+            report.retry_pending.push(path);
+            continue;
+        }
+        match remover(path.clone()) {
+            Ok(()) => report.deleted.push(original),
+            Err(_) => report.retry_pending.push(path),
+        }
+    }
+    Ok(report)
 }
 
 fn open_gc_lock(path: &Path) -> io::Result<File> {
@@ -649,6 +699,50 @@ fn collect_expired_gc_artifacts(
     ttl: Duration,
     candidates: &mut Vec<PathBuf>,
 ) -> Result<()> {
+    // Only inspect layout containers, never recurse into immutable Chroma
+    // stores or the embedding CAS. Cache size must not make every refresh a
+    // full recursive filesystem walk.
+    collect_gc_artifact_container(&root.join("bases"), now_unix_nanos, ttl, true, candidates)?;
+    collect_gc_artifact_container(&root.join("cas"), now_unix_nanos, ttl, false, candidates)?;
+    let retired = root.join(GC_RETIRED_DIR);
+    if retired.is_dir() {
+        for entry in fs::read_dir(retired)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                candidates.push(entry.path());
+            }
+        }
+    }
+    let worktrees = root.join("worktrees");
+    if worktrees.is_dir() {
+        for entry in fs::read_dir(worktrees)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                for container in ["overlays", "views"] {
+                    collect_gc_artifact_container(
+                        &entry.path().join(container),
+                        now_unix_nanos,
+                        ttl,
+                        true,
+                        candidates,
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn collect_gc_artifact_container(
+    root: &Path,
+    now_unix_nanos: u64,
+    ttl: Duration,
+    completed_artifacts: bool,
+    candidates: &mut Vec<PathBuf>,
+) -> Result<()> {
+    if !root.is_dir() {
+        return Ok(());
+    }
     let mut entries = fs::read_dir(root)?.collect::<io::Result<Vec<_>>>()?;
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
@@ -659,12 +753,20 @@ fn collect_expired_gc_artifacts(
         let name = entry.file_name().to_string_lossy().to_string();
         if let Some(created_at) = gc_artifact_created_at(&name) {
             let elapsed = now_unix_nanos.saturating_sub(created_at) as u128;
-            if elapsed > ttl.as_nanos() {
+            // The mark set already protects all live writers/continuations.
+            // A dead writer's staging has nothing to resume; don't retain it
+            // for another day after each interrupted background build.
+            if name.contains(".staging-") || elapsed > ttl.as_nanos() {
                 candidates.push(path);
-                continue;
             }
+        } else if completed_artifacts
+            && !name.starts_with('.')
+            && path.join("descriptor.json").is_file()
+        {
+            // Completed artifacts have a zero unreferenced-cache budget.
+            // Active/previous closures and live pins are filtered at deletion.
+            candidates.push(path);
         }
-        collect_expired_gc_artifacts(&path, now_unix_nanos, ttl, candidates)?;
     }
     Ok(())
 }

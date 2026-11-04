@@ -3523,15 +3523,19 @@ def _materialize_file_artifact_pair(
     hit instead of re-embedding it. A yielded build publishes nothing — the
     caller must not materialize a View from a partial artifact.
     """
-    if _artifact_pair_metadata_is_verified(
-        artifact_dir, records, descriptor_identity
-    ):
-        if on_checkpoint is not None:
-            on_checkpoint(len(records))
-        return 0, len(records), False
     artifact_dir.parent.mkdir(parents=True, exist_ok=True)
     lock_dir = artifact_dir.parent / ".locks" / artifact_dir.name
     with acquire_lock(lock_dir, exclusive=True):
+        # This artifact's writer lock also proves any previous staging writer
+        # has exited, including when the completed artifact is already reusable.
+        staging_pattern = rf"\.{re.escape(artifact_dir.name)}\.staging-\d+-\d+"
+        for candidate in artifact_dir.parent.iterdir():
+            if (
+                re.fullmatch(staging_pattern, candidate.name)
+                and candidate.is_dir()
+                and not candidate.is_symlink()
+            ):
+                shutil.rmtree(candidate, ignore_errors=True)
         if _artifact_pair_metadata_is_verified(
             artifact_dir, records, descriptor_identity
         ):
@@ -3633,7 +3637,6 @@ def _materialize_file_artifact_pair(
                     for client, _ in opened.values():
                         _close_chroma_client(client)
                     opened.clear()
-                    shutil.rmtree(staging, ignore_errors=True)
                     return computed, hits, True
             for bucket in ("code", "docs"):
                 expected_count = sum(
@@ -3670,12 +3673,12 @@ def _materialize_file_artifact_pair(
                 raise RuntimeError("file-index-v2 staging artifact verification failed")
             _durably_replace_file_index_v2_directory(staging, artifact_dir)
             return computed, hits, False
-        except Exception:
-            shutil.rmtree(staging, ignore_errors=True)
-            raise
         finally:
             for client, _ in opened.values():
                 _close_chroma_client(client)
+            # Windows cannot delete SQLite files while Chroma owns their handles.
+            # A process kill or delayed native close is retried under the next lock.
+            shutil.rmtree(staging, ignore_errors=True)
 
 
 _BASE_DESCRIPTOR_FIELDS = {
@@ -4444,7 +4447,6 @@ STAGING_DIR_SUFFIX = ".staging"
 CONTINUATION_FILENAME = "continuation.json"
 GENERATIONS_DIR_SUFFIX = ".gen"
 ACTIVE_POINTER_FILENAME = "active.json"
-GENERATION_GC_SECONDS = 24 * 3600
 
 
 def _staging_dir_for(db_path: Path) -> Path:
@@ -4551,8 +4553,8 @@ def _publish_generation(
 
     Under the exclusive target lock: rename the staging store into an
     immutable generation directory, atomically replace `active.json`, clean
-    the legacy in-place store (lazy migration), and GC generations that have
-    been abandoned for more than 24 hours (keeping the previous active one).
+    the legacy in-place store (lazy migration), and GC all completed generations
+    except the active and previous ones.
     Any OS failure returns a typed `PUBLISH_FAILED` payload — the previous
     active generation stays untouched.
 
@@ -4634,27 +4636,26 @@ def _publish_generation(
 
 
 def _gc_abandoned_generations(gen_root: Path, keep: set) -> None:
-    """Remove generation directories abandoned for more than 24 hours.
+    """Retain only the active and previous completed generations.
 
-    The active and previous generations are always kept; recently abandoned
-    directories are retained so a crashed build can be inspected / resumed.
+    The caller holds the exclusive logical store lock, excluding live readers.
+    Unknown directories are not completed generations and remain untouched.
     Deletion failures (e.g. Windows open handles) are ignored — the next
     publish retries.
     """
-    now = time.time()
     try:
         entries = list(gen_root.iterdir())
     except OSError:
         return
     for entry in entries:
-        if not entry.is_dir() or entry.name in keep:
+        if (
+            not re.fullmatch(r"gen-\d+-\d+", entry.name)
+            or not entry.is_dir()
+            or entry.is_symlink()
+            or entry.name in keep
+        ):
             continue
-        try:
-            abandoned_for = now - entry.stat().st_mtime
-        except OSError:  # pragma: no cover - entry vanished mid-scan
-            continue
-        if abandoned_for > GENERATION_GC_SECONDS:
-            shutil.rmtree(entry, ignore_errors=True)
+        shutil.rmtree(entry, ignore_errors=True)
 
 
 def _looks_like_chroma_segment(name: str) -> bool:
@@ -5273,23 +5274,23 @@ def _copy_unchanged_records(
 ) -> int:
     """FR-391: copy records whose content hash is unchanged from the previous
     verified generation into the staging store, reusing their embeddings."""
-    prev_entries = read_manifest(db_path, scope=scope)
-    prev_hashes = {
-        entry.get("path"): entry.get("content_hash") for entry in prev_entries
-    }
-    unchanged = [
-        rel
-        for rel, content_hash in new_hashes.items()
-        if content_hash and prev_hashes.get(rel) == content_hash
-    ]
-    if not unchanged:
-        return 0
-    prev_store = resolve_active_store(db_path)
-    if not (prev_store / "chroma.sqlite3").exists():
-        return 0
     copied = 0
     try:
         with acquire_lock(db_path, exclusive=False):
+            prev_entries = read_manifest(db_path, scope=scope)
+            prev_hashes = {
+                entry.get("path"): entry.get("content_hash") for entry in prev_entries
+            }
+            unchanged = [
+                rel
+                for rel, content_hash in new_hashes.items()
+                if content_hash and prev_hashes.get(rel) == content_hash
+            ]
+            if not unchanged:
+                return 0
+            prev_store = resolve_active_store(db_path)
+            if not (prev_store / "chroma.sqlite3").exists():
+                return 0
             client, previous = _open_chroma_collection(prev_store, collection_name)
             try:
                 batch = 64
