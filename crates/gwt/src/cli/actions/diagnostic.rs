@@ -289,7 +289,7 @@ fn publish(path: &Path, bytes: &[u8], create: bool) -> io::Result<()> {
                 .map_err(|_| unavailable())?;
         }
         temp.disable_cleanup(true);
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(windows))]
     if create {
