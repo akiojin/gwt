@@ -250,6 +250,10 @@ function Complete-ProviderObservation([bool]$AllFinished, [object[]]$Providers, 
     if ($AllFinished -and @($Result.cases | Where-Object { $_.outcome -ne 'pass' -or $_.exit_code -ne 0 }).Count -gt 0) { $Result.reason='CasesFailed' }
 }
 
+function Resolve-Application([string]$Name) {
+    return (Get-Command $Name -CommandType Application | Select-Object -First 1).Source
+}
+
 function Read-StaticCommand([string]$Executable, [string[]]$Arguments, [string]$Directory, [string]$RawPath, [int]$MaximumMilliseconds=300000) {
     # These are wrapper-owned metadata queries, never historical build/test code.
     $start = [Diagnostics.ProcessStartInfo]::new($Executable)
@@ -382,7 +386,19 @@ function Test-CleanupRestoreFixtures([string]$Root, [object]$NativeJob) {
     $source=Join-Path $Root 'cleanup-fixture'
     $hooks=Join-Path $source 'empty-hooks'
     [void][IO.Directory]::CreateDirectory($hooks)
-    $git=(Get-Command git -CommandType Application).Source
+    $primaryGit=(Get-Command git -CommandType Application | Select-Object -First 1).Source
+    $savedPath=$env:PATH
+    try {
+        # Both copies are discovery fixtures only; the original must stay first.
+        foreach ($name in @('git-candidate-first','git-candidate-second')) {
+            $directory=Join-Path $Root $name
+            [void][IO.Directory]::CreateDirectory($directory)
+            [IO.File]::Copy($primaryGit,(Join-Path $directory ([IO.Path]::GetFileName($primaryGit))))
+            $env:PATH += [IO.Path]::PathSeparator+$directory
+        }
+        $git=Resolve-Application 'git'
+        if ($git -isnot [string] -or $git -cne $primaryGit) { throw 'application resolution did not select the first candidate' }
+    } finally { $env:PATH=$savedPath }
     $original=[Text.Encoding]::UTF8.GetBytes("fixture original`n")
     $overlay=[Text.Encoding]::UTF8.GetBytes("fixture overlay`n")
     $lock=[Text.Encoding]::UTF8.GetBytes("fixture lock`n")
@@ -585,7 +601,7 @@ function Invoke-Diagnostic {
         if ($env:GWT_DIAG_EXPECTED_WORKFLOW -cne $result.workflow_commit) { $result.reason='RefDrift'; $result.no_start_verified=$true; $result.cleanup='NotStarted'; return }
         if ($env:GWT_DIAG_EXPECTED_PROFILE -cne $result.profile_digest) { $result.reason='InputMismatch'; $result.no_start_verified=$true; $result.cleanup='NotStarted'; return }
         $source = [IO.Path]::GetFullPath($env:GWT_DIAG_SOURCE_ROOT)
-        $git = (Get-Command git.exe -CommandType Application).Source
+        $git = Resolve-Application 'git.exe'
         $head = Read-SetupCommand $git @('rev-parse','HEAD') $source (Join-Path $private 'head.raw') $setupWatch
         $tree = Read-SetupCommand $git @('rev-parse','HEAD^{tree}') $source (Join-Path $private 'tree.raw') $setupWatch
         $target = Join-Path $source $profile.target_path
@@ -596,11 +612,11 @@ function Invoke-Diagnostic {
         if (-not (Test-FixedSourceInputs $profile $head $tree $original $lock $patch)) { $result.reason='InputMismatch'; $result.no_start_verified=$true; $result.cleanup='NotStarted'; return }
         $result.source_commit=$head; $result.source_tree=$tree; $result.source_lock_sha256=Get-BytesHash $lock
         $result.restore.before_bytes=$original.Length; $result.restore.before_sha256=Get-BytesHash $original
-        $rustup = (Get-Command rustup.exe -CommandType Application).Source
+        $rustup = Resolve-Application 'rustup.exe'
         $cargo = Read-SetupCommand $rustup @('which','--toolchain','1.99.1','cargo') $source (Join-Path $private 'cargo-path.raw') $setupWatch
         $rustc = Read-SetupCommand $rustup @('which','--toolchain','1.99.1','rustc') $source (Join-Path $private 'rustc-path.raw') $setupWatch
         $rustVersion = Read-SetupCommand $rustc @('-vV') $source (Join-Path $private 'rust-version.raw') $setupWatch
-        $node = (Get-Command node.exe -CommandType Application).Source
+        $node = Resolve-Application 'node.exe'
         $nodeVersion = Read-SetupCommand $node @('--version') $source (Join-Path $private 'node-version.raw') $setupWatch
         if ($rustVersion -notmatch '^rustc 1\.99\.1 ' -or $nodeVersion -cnotmatch '^v22\.[0-9]+\.[0-9]+$') { $result.reason='SetupNotStarted'; $result.no_start_verified=$true; $result.cleanup='NotStarted'; return }
         $result.image.rust_version='1.99.1'; $result.image.node_major=22; $result.image.node_version=$nodeVersion.Substring(1)
