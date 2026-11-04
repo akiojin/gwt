@@ -2441,8 +2441,8 @@ fn app_runtime_frontend_ready_snapshot_makes_progress_during_continuous_output()
     for cycle in 0..3 {
         runtime.request_owner_snapshot(&window_id, Some("client-1".into()));
         drain_queued_blocking_tasks(&tasks);
-        let completion = take_completion();
-        let captured_seq = completion.result.as_ref().unwrap().screen_seq;
+        let mut completion = take_completion();
+        let mut captured_seq = completion.result.as_ref().unwrap().screen_seq;
         let data = format!("OUTPUT-{cycle}\r\n").into_bytes();
         let (seq, screen, screen_ansi) = {
             let mut pane = probe.pane.lock().unwrap();
@@ -2472,6 +2472,30 @@ fn app_runtime_frontend_ready_snapshot_makes_progress_during_continuous_output()
                 screen_seq: seq,
             },
         );
+        if cycle == 2 {
+            // No new output arrives after this failure. The existing scheduler
+            // must retry without spinning and preserve both reply targets.
+            completion.result = Err("project snapshot timed out".into());
+            runtime.handle_project_owner_snapshot(*completion);
+            let deadline = runtime
+                .next_runtime_output_deadline()
+                .expect("idle snapshot retry deadline");
+            runtime.flush_runtime_output_batches(deadline - Duration::from_millis(100));
+            assert!(
+                tasks.lock().unwrap().is_empty(),
+                "failed requests must not spin"
+            );
+            runtime.flush_runtime_output_batches(deadline);
+            assert_eq!(tasks.lock().unwrap().len(), 1, "coalesced retry");
+            drain_queued_blocking_tasks(&tasks);
+            completion = take_completion();
+            captured_seq = completion.result.as_ref().unwrap().screen_seq;
+        }
+        let expected_ansi = if captured_seq == seq {
+            completion.result.as_ref().unwrap().screen_ansi.clone()
+        } else {
+            expected_ansi
+        };
         let events = runtime.handle_project_owner_snapshot(*completion);
         assert!(
             events.iter().any(|event| {

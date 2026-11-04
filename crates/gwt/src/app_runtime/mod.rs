@@ -703,6 +703,7 @@ pub struct WindowRuntime {
 struct PendingOwnerSnapshot {
     connection_id: u64,
     targets: Vec<Option<ClientId>>,
+    retry_at: Option<Instant>,
 }
 
 impl WindowRuntime {
@@ -14173,6 +14174,7 @@ impl AppRuntime {
         runtime.pending_snapshot = Some(PendingOwnerSnapshot {
             connection_id,
             targets,
+            retry_at: None,
         });
         let id = id.to_string();
         let pending_id = id.clone();
@@ -14209,10 +14211,13 @@ impl AppRuntime {
                 },
             )));
         }) {
-            self.runtimes
+            if let Some(pending) = self
+                .runtimes
                 .get_mut(&pending_id)
-                .expect("snapshot runtime")
-                .pending_snapshot = None;
+                .and_then(|runtime| runtime.pending_snapshot.as_mut())
+            {
+                pending.retry_at = Some(Instant::now() + Duration::from_secs(1));
+            }
             tracing::warn!(%error, "could not enqueue project snapshot");
         }
         Vec::new()
@@ -14251,6 +14256,17 @@ impl AppRuntime {
                 if runtime.owner_pane_id == snapshot.id && snapshot.incarnation == incarnation =>
             {
                 snapshot
+            }
+            Err(error) => {
+                // Output was withheld for these targets. Retry even if the
+                // owner goes idle, with a delay so transport failures cannot spin.
+                runtime.pending_snapshot = Some(PendingOwnerSnapshot {
+                    connection_id,
+                    targets,
+                    retry_at: Some(Instant::now() + Duration::from_secs(1)),
+                });
+                tracing::warn!(%error, id, "project snapshot failed; retry scheduled");
+                return Vec::new();
             }
             _ => return Vec::new(),
         };
