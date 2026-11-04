@@ -305,6 +305,13 @@ fn sample(
             }
         };
         #[cfg(windows)]
+        if target.required_uncapped && pid != std::process::id() {
+            if let Err(error) = validate_nominated_job(pid, &caps) {
+                target.job_cap_error = Some(error.clone());
+                unknown.get_or_insert(error);
+            }
+        }
+        #[cfg(windows)]
         let (caps, unregistered_current) = {
             let mut caps = caps;
             let unknown = if pid == std::process::id() {
@@ -366,6 +373,23 @@ fn sample(
         return Err(reason);
     }
     Ok(capped)
+}
+
+#[cfg(windows)]
+fn validate_nominated_job(pid: u32, caps: &[JobCap]) -> Result<(), String> {
+    if !caps.is_empty() {
+        return Ok(());
+    }
+    let recovery = "use a runtime with registered uncapped Jobs, or nominate a process outside all Jobs, then rerun the registered matrix";
+    match gwt_core::process_tree::job_cpu::is_in_any_job(pid) {
+        Ok(false) => Ok(()),
+        Ok(true) => Err(format!(
+            "PID {pid} has an unregistered native Job; {recovery}"
+        )),
+        Err(error) => Err(format!(
+            "PID {pid} native Job membership is unreadable: {error}; {recovery}"
+        )),
+    }
 }
 
 fn descends_from(system: &System, pid: u32, seeds: &[u32]) -> bool {
@@ -437,6 +461,83 @@ fn validate_gwt_ancestors_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "paused child fixture exercises nominated native Job membership"
+    )]
+    fn nominated_target_rejects_unregistered_native_job() {
+        use gwt_core::{process_tree::WindowsJobObject, test_support::ScopedGwtHome};
+        use std::process::{Command, Stdio};
+
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let mut command = Command::new("cmd");
+        command
+            .args(["/C", "pause"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        WindowsJobObject::configure_suspended(&mut command);
+        let mut private_job = WindowsJobObject::new().unwrap();
+        let mut child = command.spawn().unwrap();
+        if let Err(error) = private_job.assign_and_resume(child.id()) {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("assign nominated fixture Job: {error}");
+        }
+        let registered = WindowsJobObject::attach_running(child.id()).unwrap();
+        let caps = gwt_core::process_tree::job_cpu::observe(child.id()).unwrap();
+        assert_eq!(caps.len(), 1);
+        assert!(caps[0].hard_cap_percent.is_none());
+        assert!(gwt_core::process_tree::job_cpu::is_in_any_job(child.id()).unwrap());
+        assert_eq!(validate_nominated_job(child.id(), &caps), Ok(()));
+        for entry in
+            std::fs::read_dir(gwt_core::paths::gwt_runtime_dir().join("windows-pane-jobs")).unwrap()
+        {
+            std::fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+        assert!(gwt_core::process_tree::job_cpu::observe(child.id())
+            .unwrap()
+            .is_empty());
+        let mut evidence = Evidence {
+            status: "ready".into(),
+            reason: None,
+            admission_wait_ms: 0,
+            cap_relief_wait_ms: 0,
+            raw_exit_code: None,
+            targets: Vec::new(),
+        };
+        let result = sample(&mut evidence, &[child.id()], Duration::ZERO, true);
+        let target = evidence
+            .targets
+            .iter()
+            .find(|target| target.pid == child.id())
+            .unwrap();
+        assert!(target.required_uncapped);
+        assert!(target.job_caps.is_empty());
+        assert!(
+            target
+                .job_cap_error
+                .as_deref()
+                .is_some_and(|error| error.contains("unregistered native Job")),
+            "{result:?}; {target:?}"
+        );
+        assert!(result.unwrap_err().contains("unregistered native Job"));
+        drop(registered);
+        drop(private_job);
+        let _ = child.wait();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn nominated_target_fails_closed_on_native_query_error() {
+        let reason = validate_nominated_job(0, &[]).unwrap_err();
+        assert!(reason.contains("PID 0 native Job membership is unreadable"));
+        assert!(reason.contains("rerun the registered matrix"));
+    }
 
     #[test]
     fn ancestry_ignores_recycled_parent_before_gwt_registration() {

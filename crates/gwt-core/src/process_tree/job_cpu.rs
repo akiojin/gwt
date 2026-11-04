@@ -37,6 +37,20 @@ pub fn observe(pid: u32) -> Result<Vec<JobCpuCap>, String> {
     }
 }
 
+/// Query whether a PID belongs to any native Job, including unregistered Jobs.
+/// Query failures are unknown membership, never evidence of a Job-free process.
+pub fn is_in_any_job(pid: u32) -> Result<bool, String> {
+    #[cfg(windows)]
+    {
+        windows::is_in_any_job(pid)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = pid;
+        Ok(false)
+    }
+}
+
 /// Query the caller's immediate native Job without assuming it is registered.
 pub fn observe_current() -> Result<CurrentJobCpu, String> {
     #[cfg(windows)]
@@ -164,6 +178,18 @@ mod windows {
         }
         observed.sort_by(|left, right| left.job_name.cmp(&right.job_name));
         Ok(observed)
+    }
+
+    pub(super) fn is_in_any_job(pid: u32) -> Result<bool, String> {
+        // SAFETY: the query-only handle is owned and closed after this read.
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
+            .map(|handle| unsafe { Owned::new(handle) })
+            .map_err(|error| format!("query process {pid} Job membership: {error}"))?;
+        let mut in_job = ::windows::core::BOOL::default();
+        // SAFETY: the process handle and output remain valid for the query.
+        unsafe { IsProcessInJob(*process, None, &mut in_job) }
+            .map_err(|error| format!("query process {pid} Job membership: {error}"))?;
+        Ok(in_job.as_bool())
     }
 
     pub(super) fn observe_current() -> Result<CurrentJobCpu, String> {
