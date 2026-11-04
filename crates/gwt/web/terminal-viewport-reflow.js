@@ -4,6 +4,8 @@
 // window interaction features must be covered by behavior tests, not just
 // source-string contracts).
 
+import { scheduleTerminalTask } from "./terminal-output-buffer.js";
+
 const DEFAULT_MAX_TERMINAL_FITS_PER_FRAME = 4;
 const DEFAULT_MAX_TERMINAL_REFRESHES_PER_FRAME = 4;
 
@@ -17,23 +19,7 @@ function defaultScheduleFrame(callback) {
 // Initial readiness must advance even when an inactive window receives no
 // animation frames. Ordinary fit/refresh queues keep their frame budgets.
 export function scheduleTerminalInitialFit(callback) {
-  let finished = false;
-  let frame = null;
-  const cancel = () => {
-    finished = true;
-    clearTimeout(timer);
-    if (frame !== null && typeof cancelAnimationFrame === "function") {
-      cancelAnimationFrame(frame);
-    }
-  };
-  const run = () => {
-    if (finished) return;
-    cancel();
-    callback();
-  };
-  const timer = setTimeout(run, 100);
-  if (typeof requestAnimationFrame === "function") frame = requestAnimationFrame(run);
-  return cancel;
+  return scheduleTerminalTask(callback, globalThis);
 }
 
 function normalizeMaxTerminalFitsPerFrame(value) {
