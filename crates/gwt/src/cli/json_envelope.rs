@@ -1851,6 +1851,37 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             })
         }
         "pm.capabilities" => CliCommand::Pm(crate::cli::pm::PmCommand::Capabilities),
+        "pm.request_tasks.read" => {
+            reject_unknown_params(params, &["selector"], "pm.request_tasks.read")?;
+            let selector: crate::cli::pm::RequestTaskSelector = lookup(params, "selector")
+                .map(|value| serde_json::from_value(value.clone()))
+                .transpose()
+                .map_err(|error| CliParseError::InvalidJson(error.to_string()))?
+                .unwrap_or(crate::cli::pm::RequestTaskSelector::Summary {});
+            selector
+                .validate()
+                .map_err(|error| CliParseError::InvalidJson(error.into()))?;
+            CliCommand::Pm(crate::cli::pm::PmCommand::RequestTasksRead { selector })
+        }
+        "pm.request_tasks.apply" => {
+            reject_unknown_params(
+                params,
+                &["operation_id", "expected_revision", "reason", "action"],
+                "pm.request_tasks.apply",
+            )?;
+            let request: gwt_core::pm_request_tasks::Request =
+                serde_json::from_value(Value::Object(params.clone()))
+                    .map_err(|error| CliParseError::InvalidJson(error.to_string()))?;
+            if matches!(
+                request.action,
+                gwt_core::pm_request_tasks::Action::Capture { .. }
+            ) {
+                return Err(CliParseError::InvalidJson("Capture requires authenticated native intake; pm.request_tasks.apply only changes tracking state".into()));
+            }
+            CliCommand::Pm(crate::cli::pm::PmCommand::RequestTasksApply {
+                request: Box::new(request),
+            })
+        }
         "pm.plan.status" => {
             reject_unknown_params(params, &[], "pm.plan.status")?;
             CliCommand::Pm(crate::cli::pm::PmCommand::PlanStatus)
@@ -8055,6 +8086,58 @@ mod tests {
                 assert_eq!(project_root.as_deref(), Some("/tmp/elsewhere"));
             }
             other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pm_request_tasks_operations_parse_only_project_local_typed_requests() {
+        for selector in [
+            json!({"kind":"summary"}),
+            json!({"kind":"source","id":"source-1"}),
+            json!({"kind":"task","id":"task-1"}),
+            json!({"kind":"receipt","operation_id":"operation-1"}),
+        ] {
+            ok("pm.request_tasks.read", json!({"selector":selector}));
+        }
+        ok("pm.request_tasks.read", json!({}));
+        let request = json!({"operation_id":"classify-1","expected_revision":1,
+            "reason":"A question, not a work request",
+            "action":{"kind":"classify_non_task","source_id":"source-1"}});
+        ok("pm.request_tasks.apply", request.clone());
+        for field in ["actor", "project_root", "project_key", "path"] {
+            assert!(matches!(
+                err("pm.request_tasks.read", json!({field:"forged"})),
+                CliParseError::InvalidJson(_)
+            ));
+            let mut forged = request.clone();
+            forged[field] = json!("forged");
+            assert!(matches!(
+                err("pm.request_tasks.apply", forged),
+                CliParseError::InvalidJson(_)
+            ));
+        }
+        for selector in [
+            json!({"kind":"source","id":" "}),
+            json!({"kind":"summary","id":"unexpected"}),
+        ] {
+            assert!(matches!(
+                err("pm.request_tasks.read", json!({"selector":selector})),
+                CliParseError::InvalidJson(_)
+            ));
+        }
+        let mut capture = request;
+        capture["action"] = json!({"kind":"capture","source":{
+            "id":"forged","project_key":"project","original":"forged",
+            "authority":{"session_id":"pm","turn_id":"turn","prompt_sha256":"hash"}}});
+        assert!(matches!(
+            err("pm.request_tasks.apply", capture),
+            CliParseError::InvalidJson(_)
+        ));
+        for operation in ["pm.request_tasks.read", "pm.request_tasks.apply"] {
+            assert!(crate::cli::pm::capabilities_report()
+                .capabilities
+                .iter()
+                .any(|row| row.operation == operation && row.executable));
         }
     }
 
