@@ -556,11 +556,11 @@ function Test-Wrapper {
         $script:SelfTestPhase='no_start'
         Test-NoStartBoundaries $root
         $script:SelfTestPhase='final_cleanup'
-        'Windows diagnostic SelfTest PASS'
     } finally {
         if ($null -ne $job) { $job.Dispose() }
-        [IO.Directory]::Delete($root,$true)
+        Remove-Item -LiteralPath $root -Recurse -Force
     }
+    'Windows diagnostic SelfTest PASS'
 }
 
 function Invoke-Diagnostic {
