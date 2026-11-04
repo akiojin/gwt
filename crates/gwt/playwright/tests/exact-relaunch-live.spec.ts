@@ -291,6 +291,7 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
     const secondDefaults = { agent_id: "codex", runtime_target: "Host", skip_permissions: true,
       prefer_for: ["label:project-b"] };
     const fixture = await startExactRelaunchFixture(info, {
+      freshNativeIds: true,
       async beforeStart({ home, project, env, preferences: primaryPreferences }) {
         firstProjectKey = basename(dirname(primaryPreferences));
         expect(firstProjectKey).toMatch(/^[a-f0-9]{16}$/);
@@ -327,8 +328,10 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
     });
     const errors = capture(page);
     const tuningRequests: any[] = [];
+    const pmProfileRequests: any[] = [];
     page.on("websocket", socket => socket.on("framesent", ({ payload }) => {
-      try { const event = JSON.parse(String(payload)); if (event.kind === "agent_roster" && event.action?.kind === "set_tuning") tuningRequests.push(event); }
+      try { const event = JSON.parse(String(payload)); if (event.kind === "agent_roster" && event.action?.kind === "set_tuning") tuningRequests.push(event);
+        if (event.kind === "set_pm_launch_profile") pmProfileRequests.push(event); }
       catch { /* unrelated non-JSON frame */ }
     }));
     const secondErrors = capture(secondPage);
@@ -599,6 +602,142 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       await page.setViewportSize({ width: 1280, height: 1000 });
       await expect(revisionInput).toHaveValue(savedRevision!);
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      // Integrated PM settings use the same stopped member without rewriting its manual history.
+      const pmSettingsPath = join(fixture.home, ".gwt/projects", firstProjectKey, "project-state/pm.json");
+      const secondPmSettingsPath = join(dirname(secondPreferencesPath), "pm.json");
+      const pmSettings = async (path: string) => JSON.parse(await readFile(path, "utf8")).settings;
+      const pmStatus = async (target: Page, projectKey: string, after = -1, expected: Record<string, unknown> = {}) =>
+        target.waitForFunction(({ projectKey, after, expected }) => ((window as any).__gwtPlaywrightMessages || []).findLast((entry: any) =>
+          entry.sequence > after && entry.payload.kind === "pm_status" && entry.payload.project_key === projectKey
+          && Object.entries(expected).every(([key, value]) => entry.payload[key] === value))?.payload,
+        { projectKey, after, expected }).then(handle => handle.jsonValue());
+      const secondPmBefore = await pmSettings(secondPmSettingsPath);
+      const secondStatusBefore = await pmStatus(secondPage, secondProjectKey);
+      const firstPmBefore = await pmSettings(pmSettingsPath);
+      const firstStatusBefore = await pmStatus(page, firstProjectKey);
+      expect(firstStatusBefore.auto_start).toBe(firstPmBefore.auto_start);
+      expect(firstStatusBefore.is_running).toBe(false);
+      const launchesBeforePm = (await fixture.launches()).length;
+      const detail = surface.locator(".roster-detail");
+      await surface.locator(`.roster-row[data-member-id="${memberId}"]`).click();
+      await detail.locator('[data-action="pm-eligible"]').check();
+      const beforePmSelection = await cursor(page);
+      await detail.locator('[data-action="select-pm"]').click();
+      await pmStatus(page, firstProjectKey, beforePmSelection, { configured_member_id: memberId });
+      await surface.locator('[data-tab="past"]').click();
+      await page.locator("#op-pm-settings-button").click();
+      await expect(surface.locator('[data-tab="team"]')).toHaveAttribute("aria-selected", "true");
+      await expect(detail.locator('[data-action="select-pm"]')).toHaveText("Configured Project Manager");
+      await expect(detail).toContainText("Saved Project Manager profile");
+      await expect(page.locator('[data-settings-tab="project-manager"], .workspace-window[data-preset="pm-settings"]')).toHaveCount(0);
+      const operations = surface.locator('[data-role="pm-project-operations"]');
+      await expect(operations).toBeVisible();
+      const interval = operations.locator('[data-role="pm-loop-interval"]');
+      const autoStart = operations.locator('[data-role="pm-auto-start"]');
+      let afterPm = await cursor(page);
+      await interval.fill("90");
+      await interval.press("Tab");
+      await pmStatus(page, firstProjectKey, afterPm, { loop_interval_secs_decimal: "90" });
+      await expect.poll(async () => (await pmSettings(pmSettingsPath)).loop_interval_secs).toBe(90);
+      if (!(await pmStatus(page, firstProjectKey)).paused) {
+        afterPm = await cursor(page);
+        await operations.locator('[data-role="pm-pause-toggle"]').click();
+        await pmStatus(page, firstProjectKey, afterPm, { paused: true });
+      }
+      await expect.poll(async () => (await pmSettings(pmSettingsPath)).paused).toBe(true);
+      for (const enabled of [true, false]) {
+        afterPm = await cursor(page);
+        await autoStart.setChecked(enabled);
+        await pmStatus(page, firstProjectKey, afterPm, { auto_start: enabled });
+        await expect.poll(async () => (await pmSettings(pmSettingsPath)).auto_start).toBe(enabled);
+      }
+      let pmRevision = (await pmStatus(page, firstProjectKey)).profile_revision;
+      for (const [field, value] of [["model", "gpt-6.1-sol"], ["reasoning", "low"]]) {
+        const requestCount = pmProfileRequests.length;
+        afterPm = await cursor(page);
+        await detail.locator(`[data-member-tuning-field="${field}"]`).fill(value);
+        await expect.poll(() => pmProfileRequests.length).toBe(requestCount + 1);
+        const request = pmProfileRequests[requestCount];
+        expect(request).toMatchObject({ project_key: firstProjectKey, member_id: memberId,
+          expected_profile_revision: pmRevision, agent_id: "codex", [field]: value });
+        expect(request.request_id).toBeTruthy();
+        const reply = await page.waitForFunction(({ after, requestId }) => ((window as any).__gwtPlaywrightMessages || []).find((entry: any) =>
+          entry.sequence > after && entry.payload.kind === "pm_launch_profile_result"
+          && entry.payload.request_id === requestId)?.payload,
+        { after: afterPm, requestId: request.request_id }).then(handle => handle.jsonValue());
+        expect(reply, reply.message).toMatchObject({ success: true, project_key: firstProjectKey,
+          member_id: memberId, profile: { agent_id: "codex", [field]: value } });
+        expect(reply.profile_revision).toBeTruthy();
+        expect(reply.profile_revision).not.toBe(pmRevision);
+        pmRevision = reply.profile_revision;
+        await pmStatus(page, firstProjectKey, afterPm, { [`configured_${field}`]: value, profile_revision: pmRevision });
+        await expect(detail.locator('[data-member-tuning-status]')).toHaveText("Saved");
+        await expect(detail.locator('[data-member-tuning-revision]')).toHaveText(`Revision: ${pmRevision}`);
+      }
+      const savedPm = await pmSettings(pmSettingsPath);
+      expect(savedPm).toMatchObject({ loop_interval_secs: 90, paused: true, auto_start: false,
+        launch_profile: { agent_id: "codex", model: "gpt-6.1-sol", reasoning: "low" } });
+      expect((await fixture.launches()).length).toBe(launchesBeforePm);
+      const savedOriginalRecord = await sessionRecord(fixture.home, launch.gwt_session_id);
+      for (const key of ["agent_member_id", "agent_name", "model", "reasoning_level", "agent_session_id"])
+        expect(tomlString(savedOriginalRecord, key)).toBe(tomlString(record, key));
+      await assertHistory();
+      await assertSharedSaved();
+      await page.reload();
+      await pmStatus(page, firstProjectKey, -1, { configured_member_id: memberId, configured_model: "gpt-6.1-sol",
+        configured_reasoning: "low", loop_interval_secs_decimal: "90", paused: true, auto_start: false });
+      await page.locator("#op-pm-settings-button").click();
+      await expect(operations).toBeVisible();
+      await expect(interval).toHaveValue("90");
+      await expect(autoStart).not.toBeChecked();
+      await expect(operations.locator('[data-role="pm-pause-toggle"]')).toHaveText("Resume");
+      await expect(detail.locator('[data-member-tuning-field="model"]')).toHaveValue("gpt-6.1-sol");
+      await expect(detail.locator('[data-member-tuning-field="reasoning"]')).toHaveValue("low");
+      expect(await pmSettings(pmSettingsPath)).toEqual(savedPm);
+      await secondPage.reload();
+      await secondPage.locator('.op-rail__surface[data-surface="agents"]').click();
+      const secondStatus = await pmStatus(secondPage, secondProjectKey);
+      for (const key of ["configured_member_id", "configured_agent_id", "configured_model", "configured_reasoning",
+        "loop_interval_secs_decimal", "paused", "auto_start"]) expect(secondStatus[key]).toEqual(secondStatusBefore[key]);
+      expect(await pmSettings(secondPmSettingsPath)).toEqual(secondPmBefore);
+      await assertSharedSaved();
+      expect((await fixture.launches()).length).toBe(launchesBeforePm);
+      afterPm = await cursor(page);
+      await page.locator("#op-pm-entry").click();
+      await expect.poll(async () => (await fixture.launches()).length).toBe(launchesBeforePm + 1);
+      const pmLaunch = (await fixture.launches())[launchesBeforePm];
+      expect(pmLaunch.gwt_session_id).toBeTruthy();
+      expect(pmLaunch.gwt_session_id).not.toBe(launch.gwt_session_id);
+      expect(pmLaunch.provider_session_id).toMatch(/^[0-9a-f-]{36}$/i);
+      expect(pmLaunch.provider_session_id).not.toBe(launch.provider_session_id);
+      expect(pmLaunch.resume_session_id).toBeNull();
+      expect(pmLaunch.argv).not.toContain("resume");
+      expect(pmLaunch.argv).not.toContain("--last");
+      expect(pmLaunch.argv).toContain("--model=gpt-6.1-sol");
+      expect(pmLaunch.argv.some((arg, index) => arg === "-c" && pmLaunch.argv[index + 1] === "model_reasoning_effort=low")).toBe(true);
+      expect(pmLaunch.argv).toContain("--yolo");
+      await pmStatus(page, firstProjectKey, afterPm, { running_session_id: pmLaunch.gwt_session_id,
+        running_member_id: memberId, running_model: "gpt-6.1-sol", running_reasoning: "low" });
+      const pmWindow = await liveCodexWindow(page, pmLaunch.gwt_session_id!);
+      await page.waitForFunction(({ id, session }) => ((window as any).__gwtPlaywrightMessages || []).findLast((entry: any) =>
+        entry.payload.kind === "workspace_state")?.payload.workspace.tabs.flatMap((tab: any) => tab.workspace.windows)
+        .some((window: any) => window.id === id && window.session_id === session && window.is_pm),
+      { id: pmWindow.id, session: pmLaunch.gwt_session_id });
+      await expect.poll(async () => tomlString(await sessionRecord(fixture.home, pmLaunch.gwt_session_id!), "agent_session_id"),
+        { timeout: 60_000, message: `Session ${pmLaunch.gwt_session_id} learns the native id` }).toBe(pmLaunch.provider_session_id);
+      const pmRecord = await sessionRecord(fixture.home, pmLaunch.gwt_session_id!);
+      expect(tomlString(pmRecord, "agent_member_id")).toBe(memberId);
+      expect(tomlString(pmRecord, "model")).toBe("gpt-6.1-sol");
+      expect(tomlString(pmRecord, "reasoning_level")).toBe("low");
+      expect(tomlString(pmRecord, "agent_session_id")).toBe(pmLaunch.provider_session_id);
+      const originalRecord = await sessionRecord(fixture.home, launch.gwt_session_id);
+      for (const key of ["agent_member_id", "agent_name", "model", "reasoning_level", "agent_session_id"])
+        expect(tomlString(originalRecord, key)).toBe(tomlString(record, key));
+      await page.locator('.op-rail__surface[data-surface="agents"]').click();
+      await assertHistory();
+      await assertSharedSaved();
+      expect(await pmSettings(secondPmSettingsPath)).toEqual(secondPmBefore);
+      expect((await fixture.launches()).length).toBe(launchesBeforePm + 1);
       expect(errors, "actual recorded-history/rename/reload/restart console and page errors").toEqual([]);
       expect(secondErrors, "project B shared settings/reload/restart console and page errors").toEqual([]);
     } finally {
@@ -630,7 +769,9 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
     });
     const errors = capture(page);
     const theme = info.project.name.includes("light") ? "light" : "dark";
-    await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+    await page.addInitScript(theme => {
+      if (location.protocol === "http:" || location.protocol === "https:") localStorage.setItem("gwt:ui:theme", theme);
+    }, theme);
     const surface = page.locator(".works-surface:not(.works-surface--preview)");
     const config = join(fixture.home, ".gwt", "config.toml");
     const restartObservations: unknown[] = [];
@@ -741,7 +882,9 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       await expect(page.locator('.workspace-window[data-preset="settings"]')).toHaveCount(0);
       const oldPid = fixture.ownedPid;
       await snapshot("before-restart");
-      const restarted = await fixture.restart({ coldOwner: await readLatestOwnActivity(page) });
+      const coldOwner = await readLatestOwnActivity(page);
+      await page.goto("about:blank");
+      const restarted = await fixture.restart({ coldOwner });
       expect(fixture.ownedPid).not.toBe(oldPid);
       await gotoLiveGwt(page, restarted, { enableTestBridge: true });
       await snapshot("after-restart");
@@ -904,7 +1047,9 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
     };
     try {
       await page.setViewportSize({ width: 1600, height: 1500 });
-      await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+      await page.addInitScript(theme => {
+        if (location.protocol === "http:" || location.protocol === "https:") localStorage.setItem("gwt:ui:theme", theme);
+      }, theme);
       await gotoLiveGwt(page, fixture.url, { enableTestBridge: true, suppressProjectSurfaces: true });
       await sendLiveGwtEvent(page, { kind: "open_pm_agent" });
       await expect.poll(async () => (await windows()).filter((window: any) => window.is_pm).length, { timeout: 90_000 }).toBe(1);
@@ -963,7 +1108,9 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
       await expect(rows.first()).toHaveAttribute("data-state", "running");
       await expect(main.locator(".works-active")).toHaveText("Active 5");
       await assertAggregates();
-      const restarted = await fixture.restart({ coldOwner: await readLatestOwnActivity(page) }); workspace = null; usage = null; activity = null;
+      const coldOwner = await readLatestOwnActivity(page);
+      await page.goto("about:blank");
+      const restarted = await fixture.restart({ coldOwner }); workspace = null; usage = null; activity = null;
       await gotoLiveGwt(page, restarted, { enableTestBridge: true, suppressProjectSurfaces: true });
       await page.locator('.op-rail__surface[data-surface="works"]').click();
       await expect(rows).toHaveCount(5, { timeout: 90_000 });

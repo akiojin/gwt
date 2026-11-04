@@ -329,7 +329,7 @@ test("owned actual Codex PM retains genuine history and composer across Works re
   const { isAbsolute } = await import("node:path");
   const { access, chmod, copyFile, readFile, readdir, rename, rm, writeFile } = await import("node:fs/promises");
   const { homedir } = await import("node:os");
-  const { startExactRelaunchFixture, writeFixtureNodeCommand } = await import("./_helpers/exact-relaunch");
+  const { readLatestOwnActivity, selectLatestOwnActivity, startExactRelaunchFixture, writeFixtureNodeCommand } = await import("./_helpers/exact-relaunch");
   const nativePath = process.env.GWT_PLAYWRIGHT_REAL_CODEX_PATH;
   expect(process.platform, "actual native proof requires Darwin").toBe("darwin");
   expect(nativePath, "GWT_PLAYWRIGHT_REAL_CODEX_PATH must identify the installed native executable").toBeTruthy();
@@ -467,8 +467,18 @@ exit 67
     await detail.locator('[data-action="select-pm"]').click();
     await expect(detail.locator('[data-action="select-pm"]')).toHaveText("Configured Project Manager");
     expect(JSON.parse(await readFile(join(preferences, "pm.json"), "utf8")).settings.launch_profile.agent_id).toBe("codex");
+    const selectedPmSettings = JSON.parse(await readFile(join(preferences, "pm.json"), "utf8")).settings;
+    await surface.locator('[data-tab="past"]').click();
+    await page.locator("#op-pm-settings-button").click();
+    await expect(surface.locator('[data-tab="team"]')).toHaveAttribute("aria-selected", "true");
+    await expect(surface.locator('[data-role="pm-project-operations"]')).toBeVisible();
+    await expect(detail.locator('[data-action="select-pm"]')).toHaveText("Configured Project Manager");
+    await expect(detail).toContainText("Saved Project Manager profile");
+    expect(JSON.parse(await readFile(join(preferences, "pm.json"), "utf8")).settings).toEqual(selectedPmSettings);
+    expect(selectedPmSettings)
+      .toMatchObject({ auto_start: false, paused: true, launch_profile: { agent_id: "codex" } });
     gateRequested = true;
-    await sendLiveGwtEvent(page, { kind: "open_pm_agent" });
+    await page.locator("#op-pm-entry").click();
     await expect.poll(async () => (await readFile(join(home, "native-owner"), "utf8").catch(() => "")).split("\n").length,
       { timeout: 60_000 }).toBeGreaterThanOrEqual(7);
     const [pidText, ownerSession, cwd, birth, deadlineText, ...ancestors] = (await readFile(join(home, "native-owner"), "utf8")).trim().split("\n");
@@ -480,7 +490,6 @@ exit 67
     expect(Number.isFinite(Date.parse(captured.birth))).toBe(true);
     expect(ps(captured.pid, "lstart=")).toBe(captured.birth);
     session = captured.session;
-    const latestOwnActivity = (snapshots: any[], projectKey: string) => snapshots.filter(value => value?.project_key === projectKey).at(-1);
     const matchesIdentity = (value: any, windowId: string, sessionId: string, incarnation?: number) =>
       !!value?.host_id && Array.isArray(value.agents) && value.agents.some((agent: any) => agent.window_id === windowId
         && agent.session_id === sessionId && agent.runtime_incarnation > 0
@@ -488,14 +497,13 @@ exit 67
     const matching = { project_key: "probe", host_id: "host", agents: [{ window_id: "w", session_id: "s", runtime_incarnation: 1 }] };
     for (const agents of [[], null, [{ window_id: "w", session_id: "replacement", runtime_incarnation: 2 }],
       [{ window_id: "w", session_id: "s", runtime_incarnation: 2 }]]) {
-      expect(matchesIdentity(latestOwnActivity([matching, { ...matching, agents }], "probe"), "w", "s", 1)).toBe(false);
+      expect(matchesIdentity(selectLatestOwnActivity([matching, { ...matching, agents }], "probe"), "w", "s", 1)).toBe(false);
     }
-    expect(matchesIdentity(latestOwnActivity([matching, { ...matching }], "probe"), "w", "s", 1)).toBe(true);
+    expect(matchesIdentity(selectLatestOwnActivity([matching, { ...matching }], "probe"), "w", "s", 1)).toBe(true);
     const projectKey = await page.evaluate(() => location.pathname.split("/")[2]);
-    const activity = async () => latestOwnActivity(await page.evaluate(() => ((window as any).__gwtPlaywrightMessages ?? [])
-      .map((row: any) => row.payload.kind === "local_agent_activity" ? row.payload.activity : row.payload.projection?.local_agent_activity)), projectKey);
+    const activity = () => readLatestOwnActivity(page, projectKey);
     await expect.poll(async () => {
-      const latest = await activity();
+      const latest = await activity().catch(() => null);
       return Array.isArray(latest?.agents) && latest.agents.some((agent: any) => agent.session_id === session && agent.runtime_incarnation > 0);
     }, { timeout: 60_000 }).toBe(true);
     const initialActivity = await activity();
