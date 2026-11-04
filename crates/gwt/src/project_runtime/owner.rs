@@ -5244,6 +5244,9 @@ impl OwnerState {
             if let Some(error) = result.as_ref().err().filter(|_| {
                 restore
                     .as_ref()
+                    .filter(|restore| {
+                        restore.origin == gwt_agent::SessionLaunchOrigin::AutomaticRestore
+                    })
                     .and_then(|restore| restore.refusal.as_ref())
                     .is_none_or(|refusal| {
                         !super::installation::is_expected_restore_exclusion(&refusal.code)

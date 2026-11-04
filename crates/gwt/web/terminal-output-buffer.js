@@ -9,48 +9,51 @@ export const DEFAULT_MAX_CHARS_PER_FLUSH = 65536;
 export const DEFAULT_MAX_WINDOWS_PER_FLUSH = 8;
 export const DEFAULT_MAX_TOTAL_CHARS_PER_FLUSH = DEFAULT_MAX_CHARS_PER_FLUSH;
 
-// A background document can suspend frames and clamp timers to one second.
-// MessageChannel preserves a yielding task boundary without either delay.
-export function scheduleTerminalTask(callback) {
-  if (typeof document !== "undefined" && document.hidden && typeof MessageChannel === "function") {
-    const channel = new MessageChannel();
-    let cancelled = false;
-    const cancel = () => {
-      cancelled = true;
-      channel.port1.onmessage = null;
-      channel.port1.close();
-      channel.port2.close();
-    };
-    channel.port1.onmessage = () => {
-      if (cancelled) return;
-      cancel();
-      callback();
-    };
-    channel.port2.postMessage(null);
-    return cancel;
+// A document can become hidden after work is queued. Promote pending work to
+// a yielding MessageChannel task before frames suspend and timers are clamped.
+// Supplying a window keeps visible work coalesced on that window's next frame.
+export function scheduleTerminalTask(callback, frameWindow = null) {
+  const owner = frameWindow ?? globalThis;
+  const visibility = owner.document;
+  let finished = false;
+  let timer = null;
+  let frame = null;
+  let task = null;
+  const cancel = () => {
+    finished = true;
+    visibility?.removeEventListener?.("visibilitychange", scheduleHidden);
+    owner.clearTimeout(timer);
+    if (frame !== null) owner.cancelAnimationFrame?.(frame);
+    if (task) {
+      task.port1.onmessage = null;
+      task.port1.close();
+      task.port2.close();
+      task = null;
+    }
+  };
+  const run = () => {
+    if (finished) return;
+    cancel();
+    callback();
+  };
+  const scheduleHidden = () => {
+    if (finished || task || !visibility?.hidden || typeof owner.MessageChannel !== "function") return;
+    task = new owner.MessageChannel();
+    task.port1.onmessage = run;
+    task.port2.postMessage(null);
+  };
+  scheduleHidden();
+  if (!task) {
+    visibility?.addEventListener?.("visibilitychange", scheduleHidden);
+    const hasFrames = frameWindow && !visibility?.hidden && typeof owner.requestAnimationFrame === "function";
+    timer = owner.setTimeout(run, hasFrames ? 100 : 0);
+    if (hasFrames) frame = owner.requestAnimationFrame(run);
   }
-  const timer = setTimeout(callback, 0);
-  return () => clearTimeout(timer);
+  return cancel;
 }
 
 function defaultSchedule(callback) {
-  if (typeof document !== "undefined" && document.hidden) return scheduleTerminalTask(callback);
-  const hasFrames = typeof requestAnimationFrame === "function";
-  let finished = false;
-  const run = () => {
-    if (finished) return;
-    finished = true;
-    clearTimeout(timer);
-    if (frame !== null && typeof cancelAnimationFrame === "function") {
-      cancelAnimationFrame(frame);
-    }
-    callback();
-  };
-  // Receive dispatch also has a fallback: the downstream xterm buffer must
-  // keep advancing when an inactive WebView stops delivering animation frames.
-  const timer = setTimeout(run, hasFrames ? 100 : 0);
-  const frame = hasFrames ? requestAnimationFrame(run) : null;
-  return frame ?? timer;
+  return scheduleTerminalTask(callback, globalThis);
 }
 
 function normalizeMaxCharsPerFlush(value) {

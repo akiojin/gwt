@@ -627,6 +627,14 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &["pm.pane.send"],
     },
     Operation {
+        name: "pm.request_tasks.apply",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.request_tasks.read",
+        aliases: &[],
+    },
+    Operation {
         name: "pm.status",
         aliases: &[],
     },
