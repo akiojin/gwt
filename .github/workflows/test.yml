@@ -741,6 +741,7 @@ jobs:
         shell: bash
         run: |
           node scripts/ci-windows-tests.mjs run-runtime gwt test ci_contracts windows_binary_subsystem_test:: -- --test-threads=1
+          node scripts/ci-windows-tests.mjs run-runtime gwt test ci_contracts ci_concurrency_contract_test::windows_diagnostic_selftest_keeps_secret_sentinels_private -- --exact --test-threads=1
           node scripts/ci-windows-tests.mjs run-runtime gwt test runtime_tests pty_start_gate_console_test:: -- --test-threads=1
           node scripts/ci-windows-tests.mjs run-runtime gwt-terminal test pty_start_gate_test -- --test-threads=1
         timeout-minutes: 15
@@ -862,6 +863,12 @@ jobs:
             grep -Fq 'test result: ok. 2 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/fleet-process-handles.log"
           }
           both node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::fleet_disposition::tests::orphan_process_handle_ -- --test-threads=1 --nocapture
+        timeout-minutes: 5
+      - name: Run Windows diagnostic issuer contracts
+        shell: bash
+        run: |
+          node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::actions::diagnostic::tests:: -- --test-threads=1 --nocapture | tee "$RUNNER_TEMP/diagnostic-issuer.log"
+          grep -Fq 'test result: ok. 7 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/diagnostic-issuer.log"
         timeout-minutes: 5
       - name: Run targeted issue cache refresh regression
         run: node scripts/ci-windows-tests.mjs run-lib gwt lib gwt issue_cache::tests::targeted_issue_refresh_writes_one_snapshot_without_marking_full_cache_fresh -- --exact

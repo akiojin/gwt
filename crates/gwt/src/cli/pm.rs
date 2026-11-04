@@ -194,6 +194,14 @@ pub struct CapabilitiesReport {
 /// missing operation lands or a permission row names an unknown operation.
 const CAPABILITY_GAPS: &[(&str, &str, CapabilityGapReason, &str)] = &[
     (
+        "actions.diagnostic.policy.add", r#"{}"#, CapabilityGapReason::Permission,
+        "Read actions.diagnostic.policy.status and use the current registered PM Host context plus fresh exact scoped instruction_id or pm.approval.request; only akiojin/gwt/windows-diagnostic.yml permission changes, and release authority is not reusable",
+    ),
+    (
+        "actions.diagnostic.policy.rollback", r#"{}"#, CapabilityGapReason::Permission,
+        "Read actions.diagnostic.policy.status and use fresh exact scoped authority plus added_by naming this target's successful add and unchanged post-state",
+    ),
+    (
         "actions.release_policy.add", r#"{}"#, CapabilityGapReason::Permission,
         "Read actions.release_policy.status, then use the current registered PM Host context and an exact scoped instruction_id or pm.approval.request; only this repository's prepare-release.yml permission is added",
     ),
@@ -289,7 +297,16 @@ pub(crate) fn capabilities_report() -> CapabilitiesReport {
         });
     CapabilitiesReport {
         schema_version: 1,
-        capabilities: executable.chain(gaps).collect(),
+        capabilities: executable.chain(gaps).chain([
+            "actions.diagnostic.request",
+            "actions.diagnostic.cancel",
+        ].into_iter().map(|operation| Capability {
+            operation: operation.into(), params:Some(serde_json::json!({})), executable:false,
+            reason:Some(CapabilityGapReason::Permission),
+            owner_action:Some("Use actions.diagnostic.observe with the fixed profile_id to inspect current PM Host authority, publication and repository permission. Requests reserve the historical source budget; cancellation requires the current exact run/revision. Release-policy approval does not authorize the diagnostic workflow.".into()),
+            permission_stage:Some("registered_pm_and_repository_policy".into()),
+            alternative_operation:Some("actions.diagnostic.observe".into()),
+        })).collect(),
     }
 }
 
@@ -1881,6 +1898,21 @@ mod tests {
                 } else {
                     "pm.approval.request"
                 }
+            );
+        }
+        for operation in ["actions.diagnostic.request", "actions.diagnostic.cancel"] {
+            let row = report
+                .capabilities
+                .iter()
+                .find(|row| row.operation == operation && !row.executable)
+                .unwrap();
+            assert_eq!(
+                row.permission_stage.as_deref(),
+                Some("registered_pm_and_repository_policy")
+            );
+            assert_eq!(
+                row.alternative_operation.as_deref(),
+                Some("actions.diagnostic.observe")
             );
         }
     }

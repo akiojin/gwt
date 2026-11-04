@@ -407,6 +407,29 @@ authority, plus `added_by` naming the successful add request. It removes only
 permission added by that request while its recorded post-state remains current.
 These operations configure permission; workflow submission remains separate.
 
+For the fixed historical Windows diagnostic, inspect `actions.diagnostic.observe`
+with `profile_id: "windows-4777-restore-f351-v1"`. The response reports the
+published profile digest, required PM authority, repository permission and recovery.
+`actions.diagnostic.request` accepts that profile, its `expected_profile_digest`
+and a UUID `request_id`; it cannot select another source, patch or command.
+The dedicated workflow must already be explicitly permitted. For `akiojin/gwt`,
+read `actions.diagnostic.policy.status`, then use `actions.diagnostic.policy.add`
+with a fresh UUID `request_id`, its current `expected_token`, a short `reason`,
+and an exact scoped `instruction_id` or native `approval_id`. This permits only
+`windows-diagnostic.yml` and retains existing settings. Its `.rollback` operation
+uses the same parameters plus `added_by` naming its successful add receipt.
+Release policy approval cannot authorize this operation. Configuring permission
+does not submit the diagnostic.
+
+Observe a submitted request by `request_id`. An unknown submission is retained
+without resending. Only a verified preexecution result permits one correction
+using `preexecution_of` and `expected_predecessor_revision`.
+`actions.diagnostic.cancel` requires its exact `expected_run_id` and current
+`expected_revision`; cancellation acknowledgement does not prove cleanup.
+Results retain failures and unknown cleanup, and do not count as Ready evidence.
+Each case's exit code is the shared provider test process exit, not a separate
+case process. Binary metadata records Cargo's `test` profile and actual hashes.
+
 ```bash
 gwtd <<'JSON'
 {"schema_version":1,"operation":"actions.dispatch","params":{"workflow":"prepare-release.yml","ref":"develop","inputs":{"bump":"auto"}}}

@@ -633,6 +633,18 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
                     .contains("grep -Fq 'test result: ok. 2 passed; 0 failed; 0 ignored;'"),
                 "the native handle filter must not pass with zero matches"
             );
+            let issuer = &steps[build + 4];
+            assert_eq!(
+                issuer["name"].as_str(),
+                Some("Run Windows diagnostic issuer contracts")
+            );
+            assert_eq!(issuer["shell"].as_str(), Some("bash"));
+            assert_eq!(issuer["timeout-minutes"].as_u64(), Some(5));
+            assert!(issuer["if"].is_null());
+            assert!(issuer["continue-on-error"].is_null());
+            let issuer_run = issuer["run"].as_str().unwrap();
+            assert!(issuer_run.contains("node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::actions::diagnostic::tests:: -- --test-threads=1 --nocapture | tee \"$RUNNER_TEMP/diagnostic-issuer.log\""));
+            assert!(issuer_run.contains("grep -Fq 'test result: ok. 7 passed; 0 failed; 0 ignored;' \"$RUNNER_TEMP/diagnostic-issuer.log\""));
         }
         for (index, step) in steps.iter().enumerate() {
             if step["uses"].as_str() == Some("Swatinem/rust-cache@v2") {
@@ -725,6 +737,7 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
     let mut expected_filters = vec![
         "gwt lib gwt cli::feedback -- --test-threads=1 --nocapture | tee \"$RUNNER_TEMP/feedback-ownership.log\"",
         "gwt lib gwt cli::fleet_disposition::tests::orphan_process_handle_ -- --test-threads=1 --nocapture",
+        "gwt lib gwt cli::actions::diagnostic::tests:: -- --test-threads=1 --nocapture | tee \"$RUNNER_TEMP/diagnostic-issuer.log\"",
         "gwt lib gwt issue_cache::tests::targeted_issue_refresh_writes_one_snapshot_without_marking_full_cache_fresh -- --exact",
         "gwt bin gwt app_runtime::tests::continuation_completion_tests::startup_self_heal_converges_legacy_config_without_a_runtime_guard -- --exact --test-threads=1",
         "gwt test hook_contracts hook_health_test::codex_hook_audit_and_repair_cover_worktree_local_and_workspace_home_copies -- --exact --test-threads=1",
@@ -740,6 +753,7 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
         "gwt-terminal lib gwt_terminal pty::windows_spawn::tests -- --test-threads=1",
         "gwt-agent lib gwt_agent claude_child_session_marker -- --test-threads=1",
         "gwt test ci_contracts windows_binary_subsystem_test:: -- --test-threads=1",
+        "gwt test ci_contracts ci_concurrency_contract_test::windows_diagnostic_selftest_keeps_secret_sentinels_private -- --exact --test-threads=1",
         "gwt test runtime_tests pty_start_gate_console_test:: -- --test-threads=1",
         "gwt-terminal test pty_start_gate_test -- --test-threads=1",
         "gwt bin gwt scheduled_tick_is_single_flight_per_canonical_project_scope -- --test-threads=1",
@@ -792,7 +806,7 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
         "gwt test cli_contracts memory_cli_test::memory_add_writes_to_machine_local_work_notes -- --exact --test-threads=1 --nocapture",
         "gwt test cli_contracts gwtd_cli_test::auto_feedback_real_worker_has_no_consent_auth_process_or_raw_sinks -- --exact --test-threads=1 --nocapture",
     ];
-    assert_eq!(expected_filters.len(), 68);
+    assert_eq!(expected_filters.len(), 70);
     expected_filters.sort_unstable();
     actual_filters.sort_unstable();
     assert_eq!(actual_filters, expected_filters);
