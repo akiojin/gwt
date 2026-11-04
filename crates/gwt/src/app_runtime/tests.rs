@@ -2607,6 +2607,7 @@ fn issue_monitor_autonomous_record(
         reviewed_sha: None,
         review_passed: None,
         wait: None,
+        wait_control: None,
         needs_human_kind: None,
         steering: None,
         review_dispatch_hold: None,

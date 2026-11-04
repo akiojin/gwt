@@ -5214,30 +5214,114 @@ fn record_monitor_wait_in_prefs(
     now: &str,
 ) -> Result<(), String> {
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project_root);
-    crate::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
-        let position = prefs
-            .autonomous_records
-            .iter()
-            .position(|record| record.issue_number == number);
-        let index = match position {
-            Some(index) => index,
-            None => {
-                prefs
-                    .autonomous_records
-                    .push(crate::AutonomousIssueRecord::new(number));
-                prefs.autonomous_records.len() - 1
+    mutate_monitor_wait_with_subject(
+        project_root,
+        &prefs_path,
+        number,
+        !clear,
+        |prefs, subject| {
+            let position = prefs
+                .autonomous_records
+                .iter()
+                .position(|record| record.issue_number == number);
+            let index = match position {
+                Some(index) => index,
+                None => {
+                    prefs
+                        .autonomous_records
+                        .push(crate::AutonomousIssueRecord::new(number));
+                    prefs.autonomous_records.len() - 1
+                }
+            };
+            let record = &mut prefs.autonomous_records[index];
+            if clear {
+                crate::clear_wait_on_record(record, now);
+            } else {
+                if let Some(subject) = subject {
+                    if !crate::issue_monitor::apply_wait_subject_on_record(record, subject) {
+                        return Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            "wait provenance changed before fallback declaration",
+                        ));
+                    }
+                }
+                crate::declare_wait_on_record(record, reason, resume_condition, now);
             }
-        };
-        let record = &mut prefs.autonomous_records[index];
-        if clear {
-            crate::clear_wait_on_record(record, now);
-        } else {
-            crate::declare_wait_on_record(record, reason, resume_condition, now);
-        }
-        Ok(())
-    })
+            Ok(())
+        },
+    )
     .map(|_| ())
     .map_err(|error| error.to_string())
+}
+
+/// The fallback changes only the target record from the latest locked prefs.
+/// Preserve its original subject on clear/invalidation; a fresh declaration
+/// captures native authority before taking prefs, then checks it again leased.
+fn mutate_monitor_wait_with_subject<T>(
+    project_root: &std::path::Path,
+    prefs_path: &std::path::Path,
+    number: u64,
+    declare: bool,
+    mutation: impl FnOnce(
+        &mut crate::IssueMonitorPrefs,
+        Option<&crate::issue_monitor::IssueMonitorWaitSubject>,
+    ) -> io::Result<T>,
+) -> io::Result<(crate::IssueMonitorPrefs, T)> {
+    let snapshot = crate::load_issue_monitor_prefs(prefs_path)?;
+    let record = snapshot
+        .autonomous_records
+        .iter()
+        .find(|record| record.issue_number == number);
+    let original = record
+        .and_then(|record| record.wait_control.as_ref())
+        .map(|control| control.subject.clone());
+    let legacy_wait =
+        record.is_some_and(|record| record.wait.is_some() && record.wait_control.is_none());
+    let subject = if declare && !legacy_wait {
+        let current = super::execution_state::capture_current_wait_subject(project_root, number)?;
+        if original.is_some() && current.is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "typed wait has no current native subject",
+            ));
+        }
+        current
+    } else {
+        original.clone()
+    };
+    let subjects = subject.iter().cloned().collect::<Vec<_>>();
+    super::execution_state::with_wait_subject_leases(project_root, &subjects, |live, _retired| {
+        if declare
+            && subject
+                .as_ref()
+                .is_some_and(|subject| !live.contains(subject))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "wait subject changed before fallback",
+            ));
+        }
+        crate::try_mutate_issue_monitor_prefs_without_authority_fence(prefs_path, |prefs| {
+            let control = prefs
+                .autonomous_records
+                .iter()
+                .find(|record| record.issue_number == number)
+                .and_then(|record| record.wait_control.as_ref());
+            if control.map(|control| &control.subject) != original.as_ref()
+                || (declare
+                    && control.is_some_and(|control| {
+                        control.ended && Some(&control.subject) == subject.as_ref()
+                    }))
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "wait control subject changed before fallback commit",
+                ));
+            }
+            gwt_core::operation_deadline::ensure_remaining("wait fallback commit")?;
+            mutation(prefs, subject.as_ref())
+        })
+    })
 }
 
 /// Issue #3844 AC-1/AC-2: tell the Issue Monitor that the current launch is
@@ -5411,16 +5495,22 @@ fn record_monitor_wait_invalidation_in_prefs(
     now: &str,
 ) -> Result<(), String> {
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project_root);
-    crate::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
-        if let Some(record) = prefs
-            .autonomous_records
-            .iter_mut()
-            .find(|record| record.issue_number == number)
-        {
-            crate::invalidate_wait_on_record(record, by, reason, now);
-        }
-        Ok(())
-    })
+    mutate_monitor_wait_with_subject(
+        project_root,
+        &prefs_path,
+        number,
+        false,
+        |prefs, _subject| {
+            if let Some(record) = prefs
+                .autonomous_records
+                .iter_mut()
+                .find(|record| record.issue_number == number)
+            {
+                crate::invalidate_wait_on_record(record, by, reason, now);
+            }
+            Ok(())
+        },
+    )
     .map(|_| ())
     .map_err(|error| error.to_string())
 }
@@ -16431,6 +16521,67 @@ command = "my-agent-cli"
     /// a daemon being reachable. With no daemon at all (the shape a platform
     /// without a publish transport produces) the declaration is still recorded
     /// in the durable prefs and `issue.monitor.status` shows the row waiting.
+    #[test]
+    fn typed_monitor_wait_fallback_retains_intake_subject_and_clear_tombstone() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = tempfile::tempdir().unwrap();
+        let (session, monitor, now) =
+            crate::issue_monitor_worker::tests::issue_3809_bound_activity_fixture(repo.path());
+        let path = crate::issue_monitor_prefs_path_for_repo_path(repo.path());
+        crate::save_issue_monitor_prefs(&path, &monitor.prefs()).unwrap();
+        record_monitor_wait_in_prefs(repo.path(), 3809, "CI", "checks finish", false, &now)
+            .unwrap();
+        let prefs = crate::load_issue_monitor_prefs(&path).unwrap();
+        let record = prefs
+            .autonomous_records
+            .iter()
+            .find(|record| record.issue_number == 3809)
+            .unwrap();
+        let subject = record.wait_control.as_ref().unwrap().subject.clone();
+        assert_eq!(subject.execution_identity.session_id, session.id);
+        record_monitor_wait_invalidation_in_prefs(repo.path(), 3809, "pm", "finished", &now)
+            .unwrap();
+        let invalidated = crate::load_issue_monitor_prefs(&path).unwrap();
+        let record = invalidated
+            .autonomous_records
+            .iter()
+            .find(|record| record.issue_number == 3809)
+            .unwrap();
+        assert_eq!(&record.wait_control.as_ref().unwrap().subject, &subject);
+        assert!(record.wait.as_ref().unwrap().invalidated.is_some());
+        record_monitor_wait_in_prefs(repo.path(), 3809, "", "", true, &now).unwrap();
+        let cleared = crate::load_issue_monitor_prefs(&path).unwrap();
+        let record = cleared
+            .autonomous_records
+            .iter()
+            .find(|record| record.issue_number == 3809)
+            .unwrap();
+        assert!(record.wait.is_none());
+        assert_eq!(&record.wait_control.as_ref().unwrap().subject, &subject);
+        let before = std::fs::read(&path).unwrap();
+        let runtime_path =
+            gwt_agent::runtime_state_path(&gwt_core::paths::gwt_sessions_dir(), &session.id);
+        std::fs::remove_file(runtime_path).unwrap();
+        assert!(record_monitor_wait_in_prefs(
+            repo.path(),
+            3809,
+            "CI",
+            "checks finish",
+            false,
+            &now
+        )
+        .is_err());
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "unknown canonical runtime cannot downgrade a typed wait to legacy"
+        );
+    }
+
     #[test]
     fn monitor_wait_records_the_declaration_durably_without_a_publish_transport() {
         use gwt_core::test_support::ScopedEnvVar;
