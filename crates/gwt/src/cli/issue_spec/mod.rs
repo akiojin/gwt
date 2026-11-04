@@ -917,6 +917,14 @@ fn render_write_receipt(section: &str, receipt: &gwt_github::WriteReceipt) -> St
         1 => "1 comment part".to_string(),
         n => format!("{n} comment parts"),
     };
+    if let Some(error) = &receipt.verification_error {
+        return format!(
+            "outcome: committed_unverified\nwrote {} bytes to section '{section}' \
+             ({shape}, sha256:{})\nwrite committed; cleanup or final confirmation failed: \
+             {error}\nread the section before retrying; this is not a verified write receipt\n",
+            receipt.bytes, receipt.sha256
+        );
+    }
     format!(
         "wrote {} bytes to section '{section}' ({shape}, sha256:{}, readback verified)\n",
         receipt.bytes, receipt.sha256

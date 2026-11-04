@@ -1196,6 +1196,9 @@ head が変わった場合は再レビューと新しい許可が必要です。
 gwt は project knowledge を Agent workspace の近くに置きます。
 
 - JSON operation `issue.spec.read` は GitHub Issue-backed SPEC をローカル cache から読みます。
+- `issue.spec.edit` は書き込み確定後に cleanup または最終確認が失敗すると、
+  `outcome: committed_unverified` を返します。再実行の前に section を読み直してください。
+  この結果は書き込みの確認完了を意味しません。
 - JSON operations `issue.view` と `issue.comments` は gwt CLI surface から
   cache-backed Issue access を提供します。
 - `gwt-search` は共有 ChromaDB runtime を通じて SPEC、Issue、source files、
