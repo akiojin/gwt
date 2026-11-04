@@ -622,3 +622,62 @@ This is test coverage for the delivered FIFO reader, with no product change,
 new helper, timer or environment mutation. The original timeout cause (LF6),
 raw-node residency measurement (LF7), parent AC-1/2/3 and installed/real-fleet
 performance remain unproven. No CPU, RSS or elapsed-time improvement is claimed.
+
+### Queued linked-PR payload residency (LF7, 2026-11-04)
+
+FIFO initial-page fairness can leave several incomplete chunks queued at once.
+The shipped reader retained each page's raw timeline nodes, including PR bodies,
+until that Issue completed. The single-page parser also cloned those nodes before
+parsing. The correction moves the existing event parser into one incremental
+accumulator shared by the single-page and bulk paths. Each incomplete Issue now
+retains summaries and their number-to-position index in its original chunk.
+
+The finite native probe in [measure-linked-pr-residency.py](measure-linked-pr-residency.py)
+extracts the actual query functions, bulk reader and parser from the preserved
+baseline and current source. Only the queue sampling call is inserted; closed
+deadline/budget/clock stubs and a finite fake transport replace unrelated runtime
+services. [linked-pr-residency.json](linked-pr-residency.json) records source,
+extraction, probe, fixture and cached dependency hashes plus every queue sample.
+It does not exercise the installed Host, real GitHub transport or deadline/budget
+integration.
+
+The identical fixture has 50 Issues in two chunks, 100 initial events per Issue,
+ten unique PRs per Issue and a 4,096-byte body per initial event. Every Issue has
+one continuation page. After the first two queries, both chunks are incomplete:
+
+| Queued payload at the peak | Baseline | Shared accumulator |
+| --- | ---: | ---: |
+| Raw timeline nodes | 5,000 | 0 |
+| Raw PR body bytes | 20,480,000 | 0 |
+| Raw JSON string-value bytes | 20,863,200 | 0 |
+| Summaries / number-index entries | 0 / 0 | 500 / 500 |
+| Summary string bytes | 0 | 22,820 |
+
+The zero-queued-raw-body acceptance failed on the baseline with
+`actual=20480000` and passed on the correction. Both runs completed four queries;
+query hashes, 50-Issue observer order/content and all 500 returned summaries
+matched exactly. Each Issue was published only after its continuation completed.
+The original positive and failed-continuation controls remain in the regular
+test suite. Before this change, the related linked-PR/closing selection passed
+all 15 tests. The existing pagination fixture now also checks first metadata,
+body-derived closing intent, later merge time and retention of the first
+`Some("")` merge value across pages.
+The same 15-test selection passed after the correction; no additional test
+matrix or fixture helper was added.
+
+To reproduce, preserve the pre-change `crates/gwt/src/cli/issue.rs` from
+`dee5fbd0cc662cfdb76cbc2dcddfb4f8f495caa0`, then run the script with
+`--baseline <preserved-file> --current crates/gwt/src/cli/issue.rs
+--deps-dir target/debug/deps --output <report.json>`. It uses native `rustc` and
+an existing `serde_json` rlib; it downloads nothing and prints the retained probe
+directory. Use a separate output report during verification.
+
+The counters measure UTF-8 string lengths and entry counts in queued payloads.
+They exclude the active stdout/parsed response, fixture storage, JSON keys,
+cursor state, numeric storage, capacities and allocator overhead. They are not
+RSS, total allocation or elapsed-time measurements. Summaries still grow with
+unique PRs. Parsing bodies now occurs per page, including pages whose later
+continuation might fail; this can move CPU work earlier. No timeout, retry,
+query, scheduler, public API or completion authority changed. LF6's original
+coverage timeout and parent AC-1/2/3, installed and real-fleet performance remain
+unproven. Final-head canonical verification and CI are separate delivery evidence.
