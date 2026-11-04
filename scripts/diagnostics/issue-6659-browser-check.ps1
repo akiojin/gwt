@@ -1,6 +1,10 @@
 #Requires -Version 7.0
 [CmdletBinding(PositionalBinding = $false)]
-param([Parameter(ValueFromRemainingArguments = $true)][string[]]$PlaywrightArguments)
+param(
+    [string]$TestFilter = 'Issue #6659',
+    [ValidateRange(0, 7200)][int]$SoakSeconds = 0,
+    [Parameter(ValueFromRemainingArguments = $true)][string[]]$PlaywrightArguments
+)
 
 $ErrorActionPreference = 'Stop'
 $checkout = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
@@ -123,14 +127,14 @@ try {
     $anchor.Options.SetRequestHeader('Origin', $base.TrimEnd('/'))
     $anchor.ConnectAsync([Uri](($base -replace '^http','ws') + 'ws'), [Threading.CancellationToken]::None).GetAwaiter().GetResult() | Out-Null
     Assert-Preflight ((Invoke-SourceEnvelope 'hook.doctor' @{purpose='managed_browser';expected_hook_bin=$hook}).output | ConvertFrom-Json)
-    $runner = @{GWT_PLAYWRIGHT_BASE_URL=$base;GWT_PLAYWRIGHT_CHECK_HOME=$checkHome;GWT_PLAYWRIGHT_PROJECT_ROOT=$checkout;
+    $runner = @{GWT_PLAYWRIGHT_ATTENTION_SOAK_SECONDS=[string]$SoakSeconds;GWT_PLAYWRIGHT_BASE_URL=$base;GWT_PLAYWRIGHT_CHECK_HOME=$checkHome;GWT_PLAYWRIGHT_PROJECT_ROOT=$checkout;
         GWT_PLAYWRIGHT_PROJECT_STATE=$state;GWT_PLAYWRIGHT_NODE_MODULES=(Join-Path $deps 'node_modules');
         NODE_OPTIONS=('--require "' + $resolver.Replace('\','/') + '" ' + $env:NODE_OPTIONS)}
     foreach ($key in $runner.Keys) {
         $savedRunner[$key] = [Environment]::GetEnvironmentVariable($key)
         [Environment]::SetEnvironmentVariable($key, $runner[$key])
     }
-    & node $cli test toast-host.spec.ts --grep "Issue #6659" --config crates/gwt/playwright/playwright.config.ts --workers=1 --retries=0 --headed --output "$checkHome/playwright" @PlaywrightArguments
+    & node $cli test toast-host.spec.ts --grep $TestFilter --config crates/gwt/playwright/playwright.config.ts --workers=1 --retries=0 --headed --output "$checkHome/playwright" @PlaywrightArguments
     $exitCode = $LASTEXITCODE
 } finally {
     foreach ($key in $savedRunner.Keys) { [Environment]::SetEnvironmentVariable($key, $savedRunner[$key]) }

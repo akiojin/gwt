@@ -197,6 +197,64 @@ test("FR-040: missing windowId yields no toast", () => {
   assert.equal(toasts.length, 0);
 });
 
+test("Issue #6729: status projections cannot turn persisted errors or stale launch details into attention", () => {
+  const { toaster, toasts } = collectAttentionToaster();
+  const input = { windowId: "foreign", runtimeState: "error", windowData: { title: "agent" } };
+  toaster.handleRuntimeState({ ...input, source: "snapshot" });
+  toaster.handleRuntimeState({ ...input, source: "window_state", statusDetail: "Launching..." });
+  assert.deepEqual(toasts, []);
+  toaster.handleRuntimeState({ ...input, source: "terminal_status", statusDetail: "Process exited with status 1" });
+  assert.equal(toasts.length, 1, "a real local diagnostic must still notify, including after reconnect");
+  assert.match(toasts[0].body, /Process exited with status 1/);
+  assert.doesNotMatch(toasts[0].body, /Launching/);
+});
+
+test("Issue #6729: retryable failure and successful retry resolve sticky errors", () => {
+  const shown = [], dismissed = [];
+  const toaster = createAgentAttentionToaster({ showToast: n => shown.push(n), dismissToast: id => dismissed.push(id) });
+  const input = { windowId: "retry", runtimeState: "error", statusDetail: "Launch timed out" };
+  toaster.handleRuntimeState(input);
+  toaster.handleRuntimeState({ ...input, retryable: true });
+  assert.deepEqual(dismissed, [shown[0].id]);
+  assert.equal(shown.length, 1);
+  toaster.handleRuntimeState(input);
+  toaster.handleRuntimeState({ ...input, runtimeState: "running" });
+  assert.deepEqual(dismissed, [shown[0].id, shown[1].id]);
+});
+
+test("Issue #6729: errors share one project/Issue key across windows and recover on the successor", () => {
+  const shown = [], dismissed = [];
+  const toaster = createAgentAttentionToaster({ showToast: n => shown.push(n), dismissToast: id => dismissed.push(id) });
+  const input = { projectKey: "project-a", windowId: "old", runtimeState: "error", windowData: { linked_issue_number: 6729 } };
+  toaster.handleRuntimeState(input);
+  toaster.handleRuntimeState({ ...input, windowId: "new" });
+  assert.equal(shown[0].id, shown[1].id);
+  assert.equal(shown[1].windowId, "new", "the toast must target the current failed window");
+  toaster.forgetWindow("old");
+  assert.deepEqual(dismissed, [], "removing an old window cannot dismiss the successor's error");
+  toaster.handleRuntimeState({ ...input, projectKey: "project-b", windowId: "other-project" });
+  toaster.handleRuntimeState({ ...input, windowId: "other-issue", windowData: { linked_issue_number: 6730 } });
+  assert.equal(new Set(shown.map(n => n.id)).size, 3);
+  toaster.handleRuntimeState({ ...input, windowId: "recovered", runtimeState: "starting" });
+  assert.deepEqual(dismissed, [shown[0].id]);
+});
+
+test("Issue #6729: superseded windows cannot clear current errors or replay recovered errors", () => {
+  const shown = [], dismissed = [];
+  const toaster = createAgentAttentionToaster({ showToast: n => shown.push(n), dismissToast: id => dismissed.push(id) });
+  const input = { projectKey: "project", windowId: "old", runtimeState: "error", windowData: { linked_issue_number: 6729 } };
+  toaster.handleRuntimeState(input);
+  toaster.handleRuntimeState({ ...input, windowId: "new" });
+  toaster.handleRuntimeState({ ...input, runtimeState: "stopped" });
+  toaster.handleRuntimeState({ ...input, runtimeState: "running" });
+  assert.deepEqual(dismissed, [], "late old frames must leave the latest error unresolved");
+  toaster.handleRuntimeState({ ...input, windowId: "recovered", runtimeState: "starting" });
+  toaster.handleRuntimeState(input);
+  toaster.handleRuntimeState({ ...input, windowId: "new" });
+  assert.equal(shown.length, 2, "reconnect must not replay either superseded diagnostic");
+  assert.deepEqual(dismissed, [shown[1].id]);
+});
+
 
 test("typed inputs retain source authority and never infer NeedsHuman from Waiting", () => {
   const {notificationForTransition} = notifications;
