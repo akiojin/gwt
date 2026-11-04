@@ -15626,6 +15626,13 @@ impl AppRuntime {
                             return notification;
                         }
                     }
+                    if restore_refusal.as_ref().is_some_and(|refusal| {
+                        gwt::project_runtime::installation::is_expected_restore_exclusion(
+                            &refusal.code,
+                        )
+                    }) {
+                        return notification;
+                    }
                     let retained_diagnostic = restore_feedback.as_ref().is_some_and(|feedback| {
                         feedback.placeholder_existed
                             && (self

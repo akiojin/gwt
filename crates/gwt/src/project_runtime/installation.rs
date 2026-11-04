@@ -82,6 +82,18 @@ pub(crate) struct OwnerRestoreRefusal {
     pub retryable: bool,
 }
 
+/// Known restore admission decisions that do not describe a failed launch.
+pub fn is_expected_restore_exclusion(code: &str) -> bool {
+    matches!(
+        code,
+        "closed_work_diagnostic_retained"
+            | "execution_blocked"
+            | "landed_worktree"
+            | "monitor_stopped"
+            | "unregistered_pm"
+    )
+}
+
 impl OwnerSavedSessionRestore {
     pub fn refuse(&mut self, code: &str, message: impl Into<String>, retryable: bool) -> String {
         let message = message.into();

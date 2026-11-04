@@ -5241,7 +5241,14 @@ impl OwnerState {
                 && input.pending_fresh_execution.is_none()
                 && input.pending_continue_work.is_none();
             let cancelled_cleanup = cancelled_cleanup && !unproved_manual_cleanup;
-            if let Err(error) = &result {
+            if let Some(error) = result.as_ref().err().filter(|_| {
+                restore
+                    .as_ref()
+                    .and_then(|restore| restore.refusal.as_ref())
+                    .is_none_or(|refusal| {
+                        !super::installation::is_expected_restore_exclusion(&refusal.code)
+                    })
+            }) {
                 let source = restore
                     .as_ref()
                     .map(|restore| &restore.source)
