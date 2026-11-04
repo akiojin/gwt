@@ -1890,7 +1890,6 @@ export function createKnowledgeKanbanSurface({
             pendingPhaseUpdates: new Map(),
             autoRefreshTimer: null,
             eventRefreshDirty: false,
-            workSnapshotDirty: false,
             autoRefreshDirty: false,
             autoRefreshChanged: false,
             autoRefreshRevision: null,
@@ -2206,11 +2205,14 @@ export function createKnowledgeKanbanSurface({
       function refreshKnowledgeWorkSnapshot(forceReload) {
         const projection = getActiveWorkProjection?.();
         const issueKey = workAssociationKey(projection);
-        for (const state of knowledgeBridgeStateMap.values()) {
-          state.eventRefreshDirty ||= forceReload || issueKey !== issueWorkAssociationKey;
-          state.workSnapshotDirty = true;
-        }
+        const associationChanged = forceReload || issueKey !== issueWorkAssociationKey;
         issueWorkAssociationKey = issueKey;
+        for (const [windowId, state] of knowledgeBridgeStateMap) {
+          state.eventRefreshDirty ||= associationChanged;
+          // Already committed local data must not wait for a visible-only reload.
+          updateKnowledgeWorkSnapshot(state);
+          renderKnowledgeBridge(windowId);
+        }
         scheduleKnowledgeEventRefresh();
       }
 
@@ -2240,11 +2242,6 @@ export function createKnowledgeKanbanSurface({
               continue;
             }
             if (!isKnowledgeWindowVisible(windowId)) continue;
-            if (state.workSnapshotDirty) {
-              state.workSnapshotDirty = false;
-              updateKnowledgeWorkSnapshot(state);
-              renderKnowledgeBridge(windowId);
-            }
             if (state.eventRefreshDirty && !state.loading) {
               state.eventRefreshDirty = false;
               requestKnowledgeBridge(windowId, state.kind, false);
@@ -2262,7 +2259,7 @@ export function createKnowledgeKanbanSurface({
         if (relatedWorkRefreshTimer !== null) return;
         if ([...knowledgeBridgeStateMap].some(([id, state]) =>
           isKnowledgeWindowVisible(id) &&
-          (state.workSnapshotDirty || (state.eventRefreshDirty && !state.loading)))) {
+          state.eventRefreshDirty && !state.loading)) {
           scheduleKnowledgeEventRefresh();
         }
       }
