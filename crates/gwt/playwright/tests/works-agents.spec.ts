@@ -351,6 +351,27 @@ test.describe("Works and Agents approved baseline", () => {
     await page.screenshot({ path: info.outputPath("works-measured-zero.png") });
   });
 
+  test("the PM row shows the reported next step and user action and opens the PM surface", async ({ page }, info) => {
+    const summary = workRow(page, "pm-window").locator(".work-pm-summary");
+    await expect(summary).toBeVisible();
+    await expect(workRow(page, "agent-one").locator(".work-pm-summary")).toHaveCount(0);
+    await page.evaluate(() => (window as any).__worksAgentsFixture.pmStatus("Review the open PRs after CI", "Approve the release PR"));
+    // The existing PM report poll (5s) delivers the status; Works never invents it.
+    await expect(summary.locator('[data-pm="next"]')).toHaveText("Review the open PRs after CI", { timeout: 15_000 });
+    await expect(summary.locator('[data-pm="user-action"]')).toHaveText("Approve the release PR");
+    await expect(summary).toHaveAttribute("data-user-action", "requested");
+    await page.screenshot({ path: info.outputPath("works-pm-summary.png") });
+    await page.setViewportSize({ width: 400, height: 900 });
+    await expect(summary).toBeVisible();
+    await expectNoHorizontalOverflow(page, ".works-surface:not(.works-surface--preview) .works-overview");
+    await summary.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: info.outputPath("works-pm-summary-400.png") });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await summary.getByRole("button", { name: "Open Yuu reports" }).click();
+    await expect(main(page)).toHaveAttribute("data-surface", "pm");
+    expect((await sent(page)).filter(message => message.kind === "load_pm_reports").length).toBeGreaterThan(0);
+  });
+
   test("telemetry updates retain native host focus and unchanged SVG children", async ({ page }, info) => {
     await page.evaluate(() => (window as any).__worksAgentsFixture.usage());
     const metric = works(page).locator('[data-metric="today-input"]');
@@ -756,6 +777,8 @@ async function installWorksAgentsBackend(page: Page) {
     // Fixture-only backing storage models backend persistence across page reload.
     let worksPreviewLines = Number(sessionStorage.getItem("fixture:works-preview-lines") || 3);
     let revision = 3, activityRevision = 0;
+    // Fixture PM status, in the canonical pm_reports `current` shape.
+    let pmReportsRevision = 1, pmCurrent: any = null;
     let agents: any[] = [
       { window_id: "agent-two", session_id: "s-two", runtime_incarnation: 2, issue_number: 4001, is_pm: false },
       { window_id: "agent-one", session_id: "s-one", runtime_incarnation: 1, issue_number: 4777, is_pm: false },
@@ -814,6 +837,8 @@ async function installWorksAgentsBackend(page: Page) {
           windows.push(baseWindow("settings-window", { title: "Settings", preset: "settings", z_index: 101, surface_owner: message.surface_owner }));
           this.emit(workspace());
         }
+        if (message.kind === "load_pm_reports" && message.id === "pm-window") this.emit({ kind: "pm_reports", id: message.id, session_id: "s-pm", request_id: message.request_id,
+          version: { epoch: "fixture-pm", revision: pmReportsRevision }, snapshot: message.version === null, reports: [], current: pmCurrent, error: null });
         if (message.kind === "get_system_settings") this.emit({ kind: "system_settings", language: "auto", works_preview_lines: worksPreviewLines });
         if (message.kind === "update_system_settings") {
           if (Number.isInteger(message.works_preview_lines) && message.works_preview_lines >= 3 && message.works_preview_lines <= 10) {
@@ -884,6 +909,10 @@ async function installWorksAgentsBackend(page: Page) {
       },
       reorderMembers(ids: string[]) { members.splice(0, members.length, ...ids.map(id => members.find(member => member.agent_member_id === id))); revision++; socket.emit(rosterSnapshot()); },
       currentIdentity() { return { windows: windows.filter(data => data.session_id).map(({ id, session_id, status }) => ({ id, session_id, status })), agents, assignments: members.map(member => ({ member_id: member.agent_member_id, assignment: member.assignment })) }; },
+      pmStatus(next_trigger: string, user_action: string | null) {
+        pmReportsRevision++;
+        pmCurrent = { status: { items: [], next_trigger, user_action, updated_at: "2026-11-04T00:00:00Z" }, facts: null, stale_minutes: null };
+      },
       deferSchedule() { deferredSchedule = true; },
       changeQueueRevision() { queueRevision = "queue-v1:fixture-2"; },
       releaseSchedule() { if (!pendingSchedule) throw new Error("no schedule mutation is pending"); const action = pendingSchedule; pendingSchedule = null; applySchedule(action); },

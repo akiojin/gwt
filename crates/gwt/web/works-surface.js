@@ -59,7 +59,8 @@ function drawSpark(document, svg, input, maximum) {
 }
 
 export function createWorksSurface({ document, windowCatalogModel, activityModel, rosterModel, windowDisplayTitle, systemSettingsModel,
-  mountTerminal, mountPreview, onLayout = () => {}, onFocus = () => {}, onSelectMember = () => {}, getTelemetry = () => null }) {
+  mountTerminal, mountPreview, onLayout = () => {}, onFocus = () => {}, onSelectMember = () => {}, getTelemetry = () => null,
+  getPmStatus = () => undefined, onOpenPm = () => {} }) {
   const element = document.createElement("section");
   element.className = "works-surface"; element.setAttribute("aria-label", "Works");
   element.innerHTML = `<div class="works-overview"><header class="works-heading"><h2>Works</h2><div class="works-counts">
@@ -102,6 +103,31 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
       badge = document.createElement("span"); badge.className = "window-role-badge"; badge.textContent = "PM";
       host.append(badge);
     } else if (!work.assignment.is_pm) badge?.remove();
+  }
+  // The PM row repeats the PM's own reported next step and user request. A
+  // status that has not been loaded stays unknown rather than "None".
+  function syncPmSummary(row, work) {
+    let summary = row.querySelector(".work-pm-summary");
+    if (!work.assignment.is_pm) { summary?.remove(); return; }
+    if (!summary) {
+      summary = document.createElement("div"); summary.className = "work-pm-summary";
+      summary.innerHTML = `<span><strong title="What the PM reported it will do next">PM next</strong> <span data-pm="next"></span></span>
+        <span><strong title="What the PM reported it needs from you">Your action</strong> <span data-pm="user-action"></span></span>
+        <button type="button" class="work-open-pm">Open PM</button>`;
+      summary.querySelector(".work-open-pm").addEventListener("click", event => { event.stopPropagation(); onOpenPm(row.dataset.windowId); });
+      row.querySelector(".work-body").append(summary);
+    }
+    const state = getPmStatus(work.data.id), current = state?.loaded ? state.current : undefined, status = current?.status;
+    const unknown = !state?.loaded, reported = !!status;
+    summary.querySelector('[data-pm="next"]').textContent = unknown ? "—" : reported ? status.next_trigger || "—" : "Not reported";
+    summary.querySelector('[data-pm="user-action"]').textContent = unknown ? "—" : reported ? status.user_action || "None" : "Not reported";
+    summary.dataset.userAction = unknown ? "unknown" : status?.user_action ? "requested" : "none";
+    let stale = summary.querySelector(".work-pm-stale");
+    if (finite(current?.stale_minutes)) {
+      if (!stale) { stale = document.createElement("span"); stale.className = "work-pm-stale"; summary.querySelector(".work-open-pm").before(stale); }
+      stale.textContent = `PM has not updated for ${current.stale_minutes} minutes`;
+    } else stale?.remove();
+    summary.querySelector(".work-open-pm").setAttribute("aria-label", `Open ${nameFor(work)} reports`);
   }
   function park(entry, rehost = false) {
     const moved = entry.terminal.parentElement !== entry.cache;
@@ -183,6 +209,7 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
     row.querySelector(".work-warnings").textContent = `Warnings ${number(t.warning_count)}`;
     for (const [key, value] of Object.entries({ input: number(t.input_tokens), cache: number(t.cache_tokens), output: number(t.output_tokens), context: finite(t.context_remaining_percent) ? `${t.context_remaining_percent}%` : "—", branch: t.branch || "—", ahead: number(t.ahead_of_develop), verification: t.verification || "—", last: t.last_action || "—" })) row.querySelector(`[data-stat="${key}"]`).textContent = value;
     drawSpark(document, row.querySelector("svg"), t.tokens_per_minute, max);
+    syncPmSummary(row, work);
   }
   function syncPreview() {
     if (!previewElement) return;

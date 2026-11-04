@@ -4138,7 +4138,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       const pmChatViews = new Map();
-      const { requestPmReports, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
+      const { requestPmReports, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, readPmWindowState, subscribePmWindowState } = createPmWindowModel();
       subscribePmWindowState(state => state.resyncRequest, recovery => {
         if (!recovery) return;
         const request = requestPmReports(recovery.windowId);
@@ -5562,6 +5562,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           agentsSurface.selectMember(memberId);
         },
         getTelemetry: () => worksTelemetryModel.read(),
+        getPmStatus: (id) => readPmWindowState().windows[id],
+        // Reuse the rail's PM navigation for the live PM only; never launch one.
+        onOpenPm: (id) => { if (id === pmWindowId && windowMap.has(id)) openPmAgent(); },
         onFocus: focusWindowLocally,
         onPreviewFocus: (id) => {
           focusWindowLocally(id);
@@ -5587,6 +5590,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       });
       worksSurface.element.hidden = true;
       document.querySelector(".surface-area").appendChild(worksSurface.element);
+      // Only report loads change the PM summary; terminal packets do not.
+      subscribePmWindowState(state => Object.values(state.windows).map(pm =>
+        `${pm.windowId}:${pm.loaded}:${pm.reportsVersion?.epoch}:${pm.reportsVersion?.revision}`).join("|"), () => worksSurface.sync(false));
       let latestSessionUsage = [];
       function updateWorksTelemetry(sessions = latestSessionUsage) {
         latestSessionUsage = sessions;

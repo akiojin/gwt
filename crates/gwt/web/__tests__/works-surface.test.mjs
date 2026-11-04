@@ -14,7 +14,7 @@ const windows = [
 const live = windows.slice(0, 2).map((w, i) => ({ window_id: w.id, session_id: w.session_id, runtime_incarnation: i + 1, is_pm: !!w.is_pm, issue_number: w.is_pm ? null : 4777,
   current_task: w.is_pm ? "Coordinate the current project work" : null }));
 function catalog(wins, version = 1) { return { version, runtimeStates: {}, appState: { active_tab_id: "p", tabs: [{ id: "p", workspace: { windows: wins } }] } }; }
-async function fixture(telemetry = null, initialCatalog = catalog(windows)) {
+async function fixture(telemetry = null, initialCatalog = catalog(windows), extra = {}) {
   const { createWorksSurface } = await import(moduleUrl);
   const { document, window } = parseHTML("<main></main>");
   const frames = new Set();
@@ -28,7 +28,7 @@ async function fixture(telemetry = null, initialCatalog = catalog(windows)) {
     windowDisplayTitle: w => `${w.agent_name || w.title || "Agent"}${w.dynamic_title ? ` — ${w.dynamic_title}` : ""}`,
     mountTerminal(id, root, options) { let input = runtimes.get(id); if (!input) { input = document.createElement("textarea"); input.className = "xterm"; runtimes.set(id, input); } root.appendChild(input); mounts.push({ id, root, readOnly: options?.readOnly }); },
     mountPreview(id, root, options) { const pre = document.createElement("pre"); pre.textContent = `${id} output`; root.appendChild(pre); previews.add(pre); previewMounts.push({ id, root, lines: options?.tailLines }); return () => { previews.delete(pre); pre.remove(); }; },
-    onFocus: id => focused.push(id), onLayout() { layouts.push(true); }, onSelectMember: id => selected.push(id), getTelemetry: () => telemetry,
+    onFocus: id => focused.push(id), onLayout() { layouts.push(true); }, onSelectMember: id => selected.push(id), getTelemetry: () => telemetry, ...extra,
   });
   document.querySelector("main").append(surface.element); surface.sync();
   const flush = () => { for (const frame of [...frames]) { frames.delete(frame); frame(); } };
@@ -67,6 +67,39 @@ test("Works joins exact local-live sessions, places PM first and keeps unknown t
   assert.equal(surface.element.querySelector(".works-empty").textContent, "Local agent activity is unavailable.");
   assert.equal(surface.element.querySelector('[data-count="running"]').textContent, "—");
   surface.dispose();
+});
+
+test("Works PM row shows the reported next step and user action without inventing missing status", async () => {
+  let pmState = null; const opened = [];
+  const f = await fixture(null, catalog(windows), { getPmStatus: id => id === "pm" ? pmState : undefined, onOpenPm: id => opened.push(id) });
+  const pmRow = () => f.surface.element.querySelector('.work-row[data-window-id="pm"]');
+  const summary = () => pmRow().querySelector(".work-pm-summary");
+  assert.ok(summary(), "the PM row carries the approved next-step summary");
+  assert.equal(f.surface.element.querySelector('.work-row[data-window-id="one"] .work-pm-summary'), null, "implementation rows have no PM summary");
+  assert.equal(summary().querySelector('[data-pm="next"]').textContent, "—", "an unloaded PM status stays unknown");
+  assert.equal(summary().querySelector('[data-pm="user-action"]').textContent, "—");
+
+  pmState = { loaded: true, current: null }; f.surface.sync(false);
+  assert.equal(summary().querySelector('[data-pm="next"]').textContent, "Not reported");
+  assert.equal(summary().querySelector('[data-pm="user-action"]').textContent, "Not reported");
+
+  pmState = { loaded: true, current: { status: { next_trigger: "CI completes", user_action: null, items: [] }, stale_minutes: null } }; f.surface.sync(false);
+  assert.equal(summary().querySelector('[data-pm="next"]').textContent, "CI completes");
+  assert.equal(summary().querySelector('[data-pm="user-action"]').textContent, "None");
+  assert.equal(summary().querySelector(".work-pm-stale"), null);
+
+  pmState = { loaded: true, current: { status: { next_trigger: "Next scan", user_action: "Approve the release", items: [] }, stale_minutes: 42 } }; f.surface.sync(false);
+  assert.equal(summary().querySelector('[data-pm="next"]').textContent, "Next scan");
+  assert.equal(summary().querySelector('[data-pm="user-action"]').textContent, "Approve the release");
+  assert.equal(summary().dataset.userAction, "requested");
+  assert.match(summary().querySelector(".work-pm-stale").textContent, /42 minutes/);
+
+  const rowBefore = pmRow();
+  summary().querySelector(".work-open-pm").click();
+  assert.deepEqual(opened, ["pm"]);
+  assert.equal(f.surface.element.querySelector(".works-full").hidden, true, "Open PM does not open the PM terminal inside Works");
+  assert.equal(pmRow(), rowBefore, "status updates keep the same row");
+  f.surface.dispose();
 });
 
 test("Works keeps stable member order after PM when census arrival order changes", async () => {
@@ -383,6 +416,8 @@ test("Works and Agents CSS uses Operator tokens, responsive wrapping and an in-s
   assert.match(css, /data-state="waiting"[^}]*\.work-spark[^}]*--color-state-needs-input/s);
   assert.match(css, /\.works-full[\s\S]*min-height:\s*0/);
   assert.match(css, /\.works-availability[^}]*var\(--type-xs\)[^}]*overflow-wrap:\s*anywhere/s);
+  assert.match(css, /\.work-pm-summary\s*\{[^}]*grid-column:\s*1\s*\/\s*-1[^}]*flex-wrap:\s*wrap[^}]*overflow-wrap:\s*anywhere/s);
+  assert.match(css, /\.work-pm-summary\[data-user-action="requested"\][^}]*--color-state-needs-input/s);
 });
 
 
