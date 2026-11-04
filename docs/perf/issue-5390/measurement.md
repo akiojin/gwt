@@ -497,3 +497,105 @@ The intermediate native canonical record
 `vrr-0bc801c3c9ae4d9ca9ed89cbe58947eb` passed 14/14 commands, including
 1,716 frontend and 101 Rust tests. Its earlier WSL-runner FAIL is retained.
 Neither record establishes final-head, actual headed or Mac acceptance.
+
+### Initial linked-PR page fairness (2026-11-04)
+
+The current bulk timeline reader drained every continuation of the first
+25 Issues before starting the next group. A deep early timeline could therefore
+leave unrelated later Issues unobserved inside the existing 15-second readback
+budget. The installed log recorded `linked PR discovery incomplete`, a process
+deadline error, and `completed_issues=48` at 2026-11-04T06:57:04.059546500+09:00
+and 06:57:38.604358300+09:00. These two observations identify the linked-discovery
+boundary; they do not attribute all 375 open-pr-readback errors observed since
+18:00 UTC to this scheduling mechanism.
+
+The reader now queues every initial group before incomplete continuations,
+retaining each group's existing cursors, seen-cursor set, and accumulated nodes.
+It keeps complete-only publication, strict errors, all-page retrieval, the PR
+body closing-keyword fallback for develop, and the existing deadline checks.
+No cache, parallel requests, retry, or timeout extension was introduced.
+
+The deterministic 26-Issue fixture gives Issue 1 a continuation that fails;
+Issues 2 through 26 complete on their initial page. With baseline production
+from `a2ac1f13f19d35cc94390058b3eb2a4c5674c53f` and only the new regression,
+the test failed because Issue 26 was not observed. The same test then passed
+after the scheduling change:
+
+```json
+{
+  "candidate_count": 26,
+  "before": { "completed_issue_ids": [2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25], "queries": 2 },
+  "after": { "completed_issue_ids": [2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26], "queries": 3 },
+  "original_continuation_error_preserved": true,
+  "unfinished_issue_1_published": false
+}
+```
+
+The baseline related selection passed 12 tests. The new regression was RED
+(0 pass, 1 fail), followed by GREEN for the same related selection (13 pass,
+0 fail). Commands used the checkout's isolated
+`target/ui-perf-20261103/cargo`: `cargo test -p gwt --lib linked_pr` and,
+for RED, the `linked_pr_bulk_reads_later_initial_chunks` filter with
+`-- --nocapture`. Original RED/GREEN output remains in the local
+`gwt-5390-linked-first-{red,green}.log` files. Independent actual-diff review
+found no blocking issue. Final-head canonical and CI evidence belongs to the PR.
+
+The extra query before failure performs the previously blocked useful initial
+read; this is a partial-freshness improvement, not a query-count reduction.
+For stable successful responses the same page requests are still necessary;
+the existing 30-Issue single-page test retains its two-query assertion.
+A later initial-page failure can now precede an earlier continuation's
+completion, so partial results are not always a superset of the old schedule.
+More unfinished groups can retain raw bodies simultaneously. Cross-group
+duplicate input numbers can also change final insertion order; actual Monitor
+candidate sets contain unique Issue numbers.
+
+This slice does not establish a shorter successful total duration, lower RSS,
+resolution of every installed timeout, or complete 15-second fanout. Parent
+AC-1/2/3, installed rollout, real eight-Agent 60-minute/four-hour operation,
+whole-GUI CPU/RSS and Mac acceptance remain unproven. The earlier UI slice was
+delivered separately through PR #6705.
+
+User Verification Result: n/a (autonomous).
+Agent Visual Check: n/a (no UI surface).
+
+The first canonical attempt, `vrr-a798ccdc2f1e4de8970f91d2e68368e4`, passed
+rustc and formatting but could not admit Clippy: compiler TEMP was on C,
+with a 99,961,379,020-byte free-space floor and 28,802,355,200 bytes available.
+It was cancelled through the owning operation and remains Interrupted, not PASS.
+Moving compiler TEMP/TMP to D exposed one existing HOME fixture that followed
+that redirected TEMP: the 14-case linked/closing selection passed 13 and failed
+`issue_3924_completion_batch_failure_is_recorded_once` at the OS-temp HOME guard.
+Only that test's Windows TempDir placement now uses LocalAppData/Temp; the
+guard, all assertions, non-Windows placement and worker production code remain
+unchanged. The same selection passed all 14 with D compiler TEMP afterwards.
+Independent review found no blocking issue. This proves the tested placement,
+not every USERPROFILE override or LocalAppData redirection. The complete
+five-command canonical matrix must run fresh for the final committed head.
+
+The first PR CI run at `4060520e4` stopped in
+[Coverage shard 3](https://github.com/akiojin/gwt/actions/runs/41736787341/job/126267934629):
+2,073 tests passed and the existing
+`app_runtime_issue_monitor_auto_launch_uses_last_settings_runtime_target`
+timed out at 120 seconds. No coverage was exported. The other CI checks
+completed successfully. This fixture uses a cache-only Monitor scan override,
+which does not call the modified bulk reader; the Windows HOME change is not
+compiled into that Linux run.
+
+The current-source Linux exact case passed in 2.29 seconds, its instrumented
+coverage-profile run passed in 5.638 seconds, and three owned debugger runs
+completed normally. These did not reproduce the original stall. Local coverage
+retained line-table debug information, whereas CI uses debug level zero, and
+the local case did not reproduce the concurrent full-shard workload. An initial
+short exact filter selected zero tests and is excluded from evidence.
+
+Only this existing test now prints fixed phase names around owner startup,
+launch preparation, Close and shutdown. The markers expose no dynamic content
+and change no helper, assertion, timeout, retry or product code. `closed` means
+the Close result returned, and `stopped` means shutdown returned; the original
+subsequent assertions still determine success. The original timeout root cause
+remains open as T-5390-LF6 in the parent. A new passing head or these diagnostics
+alone must not be reported as its repair. Fresh canonical and mandatory CI
+evidence determine delivery of this limited FIFO/observability slice.
+The existing exact Linux case with these markers passed in 5.04 seconds and
+observed all nine phases through `stopped`; all original assertions passed.

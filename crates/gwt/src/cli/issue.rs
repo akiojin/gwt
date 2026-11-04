@@ -7124,86 +7124,97 @@ fn fetch_linked_prs_bulk_via_gh_with_observer(
     mut observe: impl FnMut(u64, &[LinkedPrSummary]),
 ) -> io::Result<std::collections::BTreeMap<u64, Vec<LinkedPrSummary>>> {
     let mut linked = std::collections::BTreeMap::new();
-    for chunk in numbers.chunks(LINKED_PR_BULK_CHUNK) {
-        let mut pending = chunk.to_vec();
-        let mut cursors = std::collections::BTreeMap::new();
-        let mut seen_cursors = std::collections::BTreeSet::new();
-        let mut nodes_by_issue = std::collections::BTreeMap::<u64, Vec<serde_json::Value>>::new();
-        while !pending.is_empty() {
-            gwt_core::operation_deadline::ensure_remaining("linked PR timeline page")?;
-            let query = if cursors.is_empty() {
-                linked_prs_bulk_query(&pending)
-            } else {
-                linked_prs_bulk_query_with_cursors(&pending, &cursors)
+    // Start every chunk before continuing deep timelines, so one long history
+    // cannot hide unrelated first-page results behind its continuation failure.
+    let mut chunks: std::collections::VecDeque<_> = numbers
+        .chunks(LINKED_PR_BULK_CHUNK)
+        .map(|chunk| {
+            (
+                chunk.to_vec(),
+                std::collections::BTreeMap::new(),
+                std::collections::BTreeSet::new(),
+                std::collections::BTreeMap::<u64, Vec<serde_json::Value>>::new(),
+            )
+        })
+        .collect();
+    while let Some((pending, mut cursors, mut seen_cursors, mut nodes_by_issue)) =
+        chunks.pop_front()
+    {
+        gwt_core::operation_deadline::ensure_remaining("linked PR timeline page")?;
+        let query = if cursors.is_empty() {
+            linked_prs_bulk_query(&pending)
+        } else {
+            linked_prs_bulk_query_with_cursors(&pending, &cursors)
+        };
+        let stdout = run(&query)?;
+        let value: serde_json::Value = serde_json::from_str(&stdout)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+        if let Some(rate_limit) = gwt_core::github_budget::parse_graphql_rate_limit(&value) {
+            gwt_core::github_budget::BudgetLedger::global().record_graphql_response(
+                &gwt_core::github_budget::spawn_source(&["api", "graphql"]),
+                &rate_limit,
+                chrono::Utc::now(),
+            );
+        }
+        gwt_core::operation_deadline::ensure_remaining("linked PR timeline page")?;
+        let repository = value.get("data").and_then(|v| v.get("repository"));
+        let mut next = Vec::new();
+        for number in &pending {
+            let invalid = || {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("issue #{number} linked PR timeline is incomplete"),
+                )
             };
-            let stdout = run(&query)?;
-            let value: serde_json::Value = serde_json::from_str(&stdout)
-                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
-            if let Some(rate_limit) = gwt_core::github_budget::parse_graphql_rate_limit(&value) {
-                gwt_core::github_budget::BudgetLedger::global().record_graphql_response(
-                    &gwt_core::github_budget::spawn_source(&["api", "graphql"]),
-                    &rate_limit,
-                    chrono::Utc::now(),
-                );
-            }
-            gwt_core::operation_deadline::ensure_remaining("linked PR timeline page")?;
-            let repository = value.get("data").and_then(|v| v.get("repository"));
-            let mut next = Vec::new();
-            for number in &pending {
-                let invalid = || {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("issue #{number} linked PR timeline is incomplete"),
-                    )
-                };
-                let Some(issue) = repository
-                    .and_then(|v| v.get(format!("i{number}")))
-                    .filter(|v| !v.is_null())
-                else {
-                    if cursors.contains_key(number) {
+            let Some(issue) = repository
+                .and_then(|v| v.get(format!("i{number}")))
+                .filter(|v| !v.is_null())
+            else {
+                if cursors.contains_key(number) {
+                    return Err(invalid());
+                }
+                continue;
+            };
+            let timeline = issue.get("timelineItems").ok_or_else(invalid)?;
+            let nodes = timeline
+                .get("nodes")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(invalid)?;
+            nodes_by_issue
+                .entry(*number)
+                .or_default()
+                .extend(nodes.iter().cloned());
+            match timeline.get("pageInfo") {
+                Some(info)
+                    if info.get("hasNextPage").and_then(serde_json::Value::as_bool)
+                        == Some(true) =>
+                {
+                    let cursor = info
+                        .get("endCursor")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|cursor| !cursor.trim().is_empty())
+                        .ok_or_else(invalid)?;
+                    if !seen_cursors.insert((*number, cursor.to_string())) {
                         return Err(invalid());
                     }
+                    cursors.insert(*number, cursor.to_string());
+                    next.push(*number);
                     continue;
-                };
-                let timeline = issue.get("timelineItems").ok_or_else(invalid)?;
-                let nodes = timeline
-                    .get("nodes")
-                    .and_then(serde_json::Value::as_array)
-                    .ok_or_else(invalid)?;
-                nodes_by_issue
-                    .entry(*number)
-                    .or_default()
-                    .extend(nodes.iter().cloned());
-                match timeline.get("pageInfo") {
-                    Some(info)
-                        if info.get("hasNextPage").and_then(serde_json::Value::as_bool)
-                            == Some(true) =>
-                    {
-                        let cursor = info
-                            .get("endCursor")
-                            .and_then(serde_json::Value::as_str)
-                            .filter(|cursor| !cursor.trim().is_empty())
-                            .ok_or_else(invalid)?;
-                        if !seen_cursors.insert((*number, cursor.to_string())) {
-                            return Err(invalid());
-                        }
-                        cursors.insert(*number, cursor.to_string());
-                        next.push(*number);
-                        continue;
-                    }
-                    Some(info)
-                        if info.get("hasNextPage").and_then(serde_json::Value::as_bool)
-                            == Some(false) => {}
-                    _ => return Err(invalid()),
                 }
-                let complete = serde_json::json!({"timelineItems": {
-                    "nodes": nodes_by_issue.remove(number).unwrap_or_default()
-                }});
-                let prs = parse_linked_pr_timeline(&complete, *number);
-                observe(*number, &prs);
-                linked.insert(*number, prs);
+                Some(info)
+                    if info.get("hasNextPage").and_then(serde_json::Value::as_bool)
+                        == Some(false) => {}
+                _ => return Err(invalid()),
             }
-            pending = next;
+            let complete = serde_json::json!({"timelineItems": {
+                "nodes": nodes_by_issue.remove(number).unwrap_or_default()
+            }});
+            let prs = parse_linked_pr_timeline(&complete, *number);
+            observe(*number, &prs);
+            linked.insert(*number, prs);
+        }
+        if !next.is_empty() {
+            chunks.push_back((next, cursors, seen_cursors, nodes_by_issue));
         }
     }
     Ok(linked)
@@ -17824,6 +17835,55 @@ command = "my-agent-cli"
         assert_eq!(linked[&7][0].number, 107);
         assert!(linked[&7][0].will_close_target);
         assert_eq!(linked[&30][0].number, 130);
+    }
+
+    #[test]
+    fn linked_pr_bulk_reads_later_initial_chunks_before_failing_continuations() {
+        let numbers: Vec<u64> = (1..=26).collect();
+        let mut queries = Vec::new();
+        let mut completed = Vec::new();
+        let error = fetch_linked_prs_bulk_via_gh_with_observer(
+            &numbers,
+            |query| {
+                queries.push(query.to_string());
+                if query.contains("after:") {
+                    return Err(io::Error::other("continuation failed"));
+                }
+                let repository: serde_json::Map<_, _> = numbers
+                    .iter()
+                    .filter(|number| query.contains(&format!("i{number}: issue(")))
+                    .map(|number| {
+                        (
+                            format!("i{number}"),
+                            serde_json::json!({"timelineItems": {
+                                "nodes": [], "pageInfo": {
+                                    "hasNextPage": *number == 1, "endCursor": "next"
+                                }
+                            }}),
+                        )
+                    })
+                    .collect();
+                Ok(serde_json::json!({"data": {"repository": repository}}).to_string())
+            },
+            |number, _| completed.push(number),
+        )
+        .unwrap_err();
+        println!(
+            "{}",
+            serde_json::json!({
+                "completed_issue_ids": completed, "queries": queries.len(),
+                "continuation_failed": error.to_string() == "continuation failed"
+            })
+        );
+        assert_eq!(error.to_string(), "continuation failed");
+        assert!(
+            completed.contains(&26),
+            "later initial chunks must be observed"
+        );
+        assert!(!completed.contains(&1), "unfinished timelines stay unknown");
+        assert_eq!(completed.len(), 25);
+        assert_eq!(queries.len(), 3);
+        assert!(queries[1].contains("i26: issue(number: 26)"));
     }
 
     #[test]
