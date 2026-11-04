@@ -1,7 +1,8 @@
 # Issue #6743: Windows idle CPU
 
-本資料は調査途中の証跡。性能 AC は未達、canonical headed は環境拒否で
-未実行であり、Ready PR / develop 配送はまだ行っていない。
+本資料は調査途中の証跡。R5 の直接 shipping Dark 600 秒は GUI / daemon の
+CPU 閾値を満たした。canonical / uncapped 検証は R2 の環境拒否（Issue #6735）が
+未解消であり、全 AC 完了、Ready PR、develop 配送はまだ完了していない。
 
 分類は gwt runtime の性能機能。開始時の fetch 後、HEAD と
 origin/develop は `bcf777ed432df9fd96dc5dd9c13d01ec859d7ea2` で一致し、
@@ -194,7 +195,18 @@ R4 の追加は singleton conversation の未使用 identity 確認を省く 1 �
 既存 common-clock fixture の RED は呼出し 4 vs 0、GREEN は 0。
 既存 collect_sessions_ 3 件と strict gwt all-target/all-feature Clippy が PASS。
 multi-owner identity / selection と出力 project_path の取得は保持する。
-R4 の shipping 600 秒結果はまだない。
+R4 の shipping 600 秒実測も両方 RED。
+
+| Process | CPU 秒 | wall 秒 | CPU fraction | logical-core CPU | 結果 |
+| --- | ---: | ---: | ---: | ---: | --- |
+| GUI | 33.609375 | 600.0886088000001 | 0.056007353759320345 | 5.600735% | RED (<5%) |
+| Monitor OFF daemon | 8.703125 | 600.0890807999999 | 0.014503055093749677 | 1.450306% | RED (<1%) |
+
+[GUI](steady-r4-idle-cpu.json)、[daemon](steady-r4-daemon-cpu.json)、
+[source generation](r4-source-generation.json) と
+[準備完了](steady-r4-work-projection-readiness.json) を保存した。
+この run の full 投影は Work 1,752/1,752、missing 0、active rows 897、
+現在の Session 5/5 を照合済み。旧 run の 1,751 件とは区別する。
 
 Light の cached full replay は次の prepare 完了を証明しなかったため、
 5-pane mode は Dark を通常 cleanup し、Light を新しい 5 Session / root で
@@ -215,3 +227,142 @@ nearest public symbol しか得られず、Rust 関数に帰属できない。ke
 独立 target に構築して残因を調べる。この診断 artifact は shipping CPU AC に使わない。
 
 User Verification Result: n/a (autonomous)
+
+## R4 optimized profile（関数帰属専用）
+
+shipping run `b01cf9b2dee04eb5ac2d908e3754edfb` とは別に、diagnostic run
+`c7c07b025c264aabaf5eb07138f2ff96` を既存 bench profile の
+`debug=line-tables-only` / `strip=none` で採取した。出力先 directory と
+harness の profile 表示は `release` だが、shipping CPU AC には使わない。
+両 source generation に記録された 6 source-file hashes と commit association
+`8d2087d43d989904ae94f38cdd4395c3c1e7c69f` は一致する。binary は異なる。
+
+[集計・provenance・代表 stack](r4-optimized-profile-summary.json) に raw の
+local path / SHA256、shipping の保存先 / SHA256、各 binary hash と diagnostic
+source generation を記録した。巨大な raw profile 全体は配送資料へ複製していない。
+GUI は 120.3281053 秒 / 225 samples、daemon は 120.2466389 秒 / 52 samples、
+context failure は各 0。標本数は CPU fraction、CPU 秒、CPU% ではない。
+
+以下は関数名の短縮表記。leaf は各 sample の先頭 frame を 1 回だけ数える。
+上位 5 行の cutoff と同数の関数はすべて載せる。
+
+| GUI leaf | samples / 225 |
+| --- | ---: |
+| NtCreateFile | 46 |
+| ZwQuerySystemInformation | 32 |
+| NtDeviceIoControlFile | 20 |
+| NtQueryInformationFile | 15 |
+| NtClose | 14 |
+| _lread | 14 |
+
+| daemon leaf | samples / 52 |
+| --- | ---: |
+| ZwCreateUserProcess | 17 |
+| NtCreateFile | 10 |
+| NtClose | 4 |
+| NtWaitForAlertByThreadId | 4 |
+| NtReadFile | 3 |
+
+inclusive は同じ関数を 1 sample 内で最大 1 回数える。入れ子の関数が重複するため、
+行を合計して占有率にしない。ここでの product 関数は symbol が `gwt` で始まるもの。
+
+| GUI inclusive product | samples / 225 |
+| --- | ---: |
+| agent_capacity::RuntimeProbe::refresh_projects_with_scan | 76 |
+| usage_poller::Poller::poll_once | 46 |
+| runtime_health_poller::run | 32 |
+| usage_poller::collect_sessions_with_clock::closure$1 | 28 |
+| session_inventory::capture_process_resources_with_system | 22 |
+
+| daemon inclusive product | samples / 52 |
+| --- | ---: |
+| process_console::spawn::spawn_logged_inner | 24 |
+| process_console::spawn::block_on_spawn::closure$0 | 24 |
+| process::resolved_tokio_command | 6 |
+| process::windows_resolver::resolve_process_plan_for_platform | 6 |
+| process::windows_resolver::resolve_windows_candidate | 6 |
+| process::windows_resolver::resolve_windows_target | 6 |
+| session::inspect_session_path | 6 |
+
+optimized inlining により product 名が generic retain / closure environment の
+型名内に入ることがある。GUI の gwt-prefix frame 不在 35 samples のうち 29 は
+index thread のこの表現だった。frame 文字列内の owner 名も含める別集計では
+capacity 76、usage 46、index drain 45、runtime-health 32。
+index filter は 29 samples、そのうち canonicalize を含むものが 19。
+
+R4 の singleton guard 後にも、usage poll 46 samples 中 43 に canonicalize があり、
+confirmed-identity closure 28 samples はすべて canonicalize を含む。
+R4 source では残る multi-owner group の判定を各 reference で再評価している。
+これは初期 fixture の静的評価とは別の R4 観測であり、sample 数から削減 CPU を
+見積もったものではない。
+
+daemon の spawn helper は inclusive 24、process-creation leaf は 17。
+別の caller stack 2 samples には `github_remote_owner_and_repo` から spawn helper
+の完了を待つ経路があり、R4 source の command は `git remote get-url origin`。
+spawn thread 自体の sample に command arguments や caller との対応記録はないため、
+17 samples 全件をこの Git command に帰属させない。stripped shipping の nearest
+public symbol と、この診断の product 件数も比較しない。
+
+## R5 の残因修正と検証
+
+usage は同じ collection 内の conversation group の判定だけを共有する。
+既存 shared-owner fixture の identity 呼出しは RED 14 vs 5 から GREEN 5 へ。
+既存 collect_sessions_ 3 件が PASS し、次 collection では新しい foreign PM を
+反映して NoData に戻る。出力順・PM/member 選択・singleton・出力 path は保持する。
+
+daemon の native origin shortcut は、fresh な壊れた HEAD/config の Git 診断を
+迂回するという独立レビュー指摘を受けて完全に撤回した。新しい Git parser や
+正の validation cache と比較し、既存 GUI の OFF/後処理なし定期 scan 省略を
+daemon の自動 timer/capacity 要求に適用する小さい修正を選んだ。
+現在の runtime と現在/最新 disk の driver・cleanup 状態が空の場合だけ省略する。
+読取失敗、ON、active/cleanup、明示要求、retry は従来の処理を維持する。
+Git resolver と IssueMonitorState の変更はない。
+
+実 worker の RED は不要な自動 scan 2 回 vs 期待 0 回、GREEN は 0 回で、
+同じ test の後段の ScanNow は実行された。最新 binary の関連 worker 32 件は
+ON の周期処理、容量更新、retry、explicit、fresh disk の境界を含めて全 PASS。
+両 source diff の独立レビューは blocking 0。workspace all-target/all-feature
+strict Clippy、整形、test hygiene の関連 3 件も PASS。
+
+Debug の隔離 headed 実 Chromium は dark/light 各 1 PASS、各 theme は異なる
+5 Session、各 PTY は 600 行、console/page error 0、所有 GUI/daemon 終了を確認した。
+[証跡要約](r5-functional-summary.json) に source binary hash と原 artifact の hash を残す。
+この functional run は persisted Work frontier を必須にせず startup を含むため、
+短い CPU 値や health の needs_attention を steady 性能・健康性の成功には使わない。
+R5 の直接 shipping Dark 600 秒は両 strict CPU 閾値に PASS。
+
+| Process | CPU 秒 | 実測 wall 秒 | CPU fraction | logical-core CPU | 結果 |
+| --- | ---: | ---: | ---: | ---: | --- |
+| GUI | 28.578125 | 600.0889017 | 0.04762315203470793 | 4.762315% | PASS (<5%) |
+| Monitor OFF daemon | 3.03125 | 600.0822326 | 0.005051391018304914 | 0.505139% | PASS (<1%) |
+
+[GUI](steady-r5-idle-cpu.json)、[daemon](steady-r5-daemon-cpu.json)、
+[full 投影の準備完了](steady-r5-work-projection-readiness.json)、
+[source generation](r5-source-generation.json)、
+[最終集計と全 provenance](r5-performance-summary.json) を保存した。
+Dark は Work 1,752/1,752、missing 0、active rows 897、現在の Session 5/5 の
+root と non-null health を照合後に計測した。needs_attention は監査完了の結果であり、
+健康性の PASS とはしない。
+
+同じ GUI 上で別の 5 Session / root を通常 Launch した Light は追加 30 秒。
+GUI 1.0625 / 30.0614369 秒 = 3.534429%、daemon 0.125 / 30.0516355 秒 =
+0.415951% で短時間の閾値は満たしたが、600 秒 AC の代わりには使わない。
+Light の full 投影は Work 1,757/1,757、missing 0、active rows 902、Session 5/5。
+
+各 theme の console/page error は 0、前後各 5 件の入力 probe を照合した。
+CPU 計測中の全 5 窓は raw bytes/chunks 0、入力 0。
+Dark IPC は計測内 275/275 成功。Light は末尾で 14 attempts / 13 successes だったが、
+残る read は CPU 区間終了後の 21:32:39.613Z に成功完了しており、失敗記録はない。
+最終 .last-run は passed、owned cleanup は GUI 33424 / daemon 34764 とも exited=true、
+記録時刻は 2026-11-04T21:32:52.7206239Z。
+
+fixture clone は従来と同じ `8d2087d43d989904ae94f38cdd4395c3c1e7c69f`。
+R5 binary はその base 上の working tree を compile したもので、fixture SHA を
+R5 の source commit と扱わない。7 source-file hashes は source generation と
+launch で照合し、Release binary hashes はそれらと CPU snapshot で照合した。
+保存は UTF-8 の LF 正規化だけとし、3 計測/準備 JSON は raw と同じ bytes。
+source generation は CRLF→LF により SHA256 が変わるため、raw / 保存後の両 SHA を
+最終集計に記載した。
+
+この直接測定は canonical uncapped の証明ではない。保存済み R2 canonical 記録の
+環境拒否（Issue #6735）は未解消であり、全 AC / PR / develop 配送は未完了。

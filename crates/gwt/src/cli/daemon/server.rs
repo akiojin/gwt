@@ -471,10 +471,12 @@ impl OwnerDaemonFixture {
             #[cfg(all(test, unix))]
             startup_retry_started: None,
         };
-        let task = tokio::spawn(run_bound_server(
+        let hub = BroadcastHub::new();
+        let initial_scan = hub.clone();
+        let server = run_bound_server(
             endpoint.clone(),
             endpoint_path.into(),
-            BroadcastHub::new(),
+            hub,
             shutdown.clone(),
             crate::IssueMonitorConfig {
                 poll_interval_secs: 3600,
@@ -483,7 +485,24 @@ impl OwnerDaemonFixture {
             gwt_core::deadline_budget::HANG_GUARD,
             bound,
             hooks,
-        ));
+        );
+        let task = tokio::spawn(async move {
+            let (served, requested) = tokio::join!(
+                server,
+                initial_scan.publish_issue_monitor_control(DaemonFrame::Event {
+                    channel: crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL.into(),
+                    payload: crate::runtime_daemon_events::issue_monitor_payload(
+                        "control",
+                        serde_json::json!({"scan_now": {}}),
+                        std::process::id(),
+                    ),
+                }),
+            );
+            requested.map_err(|error| {
+                config_error(format!("fixture initial scan: {}", error.message()))
+            })?;
+            served
+        });
         Ok(Self {
             endpoint,
             owner,
@@ -609,6 +628,139 @@ async fn monitor_fixture_idle_waits_for_initial_scan() {
     assert!(waiting.as_mut().now_or_never().is_none());
     gate.publish_idle(true);
     waiting.await;
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn disabled_empty_monitor_skips_periodic_scans_but_keeps_explicit_scan_now() {
+    let temp = tempfile::tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let root = temp.path().join("project");
+    fs::create_dir_all(&root).unwrap();
+    let scope = RuntimeScope::new(
+        "abcdef0123456789",
+        "feedfacecafebeef",
+        root,
+        gwt_core::daemon::RuntimeTarget::Host,
+    )
+    .unwrap();
+    let hub = BroadcastHub::new();
+    let shutdown = Arc::new(DaemonShutdown::new());
+    let scans = Arc::new(AtomicUsize::new(0));
+    let scan_count = scans.clone();
+    let (observed, mut observations) = mpsc::unbounded_channel();
+    // test-hygiene: allow-wall-clock-deadline Observe the real driver after a full poll period; no maximum scheduling delay is asserted.
+    let first_period = Instant::now() + Duration::from_secs(1);
+    let worker = spawn_issue_monitor_worker_with_lease(
+        scope,
+        hub.clone(),
+        shutdown.clone(),
+        crate::IssueMonitorConfig {
+            poll_interval_secs: 1,
+            ..Default::default()
+        },
+        gwt_core::deadline_budget::HANG_GUARD,
+        IssueMonitorWorkerTestHooks {
+            scan_override: Some(Arc::new(move |monitor| {
+                scan_count.fetch_add(1, Ordering::SeqCst);
+                Ok(monitor)
+            })),
+            admission_override: Some(Arc::new(Ok)),
+            scan_idle_observer: Some(Arc::new(move |idle| {
+                let _ = observed.send((Instant::now(), idle));
+            })),
+            hold_effects: true,
+            ..Default::default()
+        },
+        None,
+    );
+    // test-hygiene: allow-wall-clock-deadline Observe a completed real periodic driver pass, then its explicit control, without a scheduling-delay assertion.
+    let result = tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+        while let Some((at, idle)) = observations.recv().await {
+            if at >= first_period && idle {
+                break;
+            }
+        }
+        let periodic_scans = scans.load(Ordering::SeqCst);
+        hub.publish_issue_monitor_control(DaemonFrame::Event {
+            channel: crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL.into(),
+            payload: crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({"scan_now": {}}),
+                std::process::id(),
+            ),
+        })
+        .await
+        .unwrap();
+        while let Some((_, idle)) = observations.recv().await {
+            if idle && scans.load(Ordering::SeqCst) > periodic_scans {
+                break;
+            }
+        }
+        periodic_scans
+    })
+    .await;
+    shutdown.request();
+    worker.await.unwrap();
+    assert_eq!(
+        result.unwrap(),
+        0,
+        "an empty disabled monitor has no periodic scan work"
+    );
+    assert!(
+        scans.load(Ordering::SeqCst) > 0,
+        "explicit ScanNow still scans"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn periodic_scan_guard_keeps_late_cleanup_and_unknown_disk_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(temp.path());
+    let mut monitor = test_monitor(crate::IssueMonitorConfig::default());
+    monitor.record_monitor_runtime_counts(1, 1, Default::default(), "2026-11-04T00:00:00Z");
+    let mut prefs = monitor.prefs();
+    crate::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+    assert!(!issue_monitor_needs_periodic_scan(&monitor, &prefs_path));
+
+    prefs
+        .pending_effects
+        .push(crate::PendingIssueMonitorEffect::prepared(
+            "release:claim-42:0",
+            0,
+            crate::IssueMonitorEffectPayload::ReleaseClaim {
+                issue_number: 42,
+                claim_id: "claim-42".into(),
+                owner: "host/session".into(),
+            },
+        ));
+    crate::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+    assert!(issue_monitor_needs_periodic_scan(&monitor, &prefs_path));
+
+    prefs.pending_effects.clear();
+    prefs
+        .launching_issues
+        .push(crate::issue_monitor::IssueMonitorLaunchingIssue {
+            issue_number: 42,
+            claimed_at: None,
+        });
+    crate::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+    assert!(issue_monitor_needs_periodic_scan(&monitor, &prefs_path));
+
+    prefs.launching_issues.clear();
+    prefs
+        .monitor_runtime_counts
+        .get_mut("1:1")
+        .unwrap()
+        .counts
+        .insert(42, 1);
+    crate::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+    assert!(issue_monitor_needs_periodic_scan(&monitor, &prefs_path));
+
+    fs::write(&prefs_path, "invalid preferences").unwrap();
+    assert!(issue_monitor_needs_periodic_scan(&monitor, &prefs_path));
 }
 
 fn acquire_daemon_startup_lease(
@@ -1029,6 +1181,43 @@ fn spawn_issue_monitor_worker_with_config_timeout_and_hooks(
         test_hooks,
         None,
     )
+}
+
+fn issue_monitor_needs_periodic_scan(
+    monitor: &crate::IssueMonitorState,
+    prefs_path: &Path,
+) -> bool {
+    fn prefs_have_driver_work(prefs: &crate::IssueMonitorPrefs) -> bool {
+        prefs.enabled
+            || !prefs.pending_effects.is_empty()
+            || !prefs.pending_launch_deliveries.is_empty()
+            || !prefs.claim_identities.is_empty()
+            || !prefs.launch_bindings.is_empty()
+            || !prefs.autonomous_records.is_empty()
+            || !prefs.autonomous_handoffs.is_empty()
+            || !prefs.launched_issues.is_empty()
+            || !prefs.launching_issues.is_empty()
+            || prefs
+                .monitor_runtime_counts
+                .values()
+                .any(|observation| observation.counts.values().any(|count| *count > 0))
+    }
+
+    if monitor.config.enabled
+        || monitor.active_count() > 0
+        || !monitor.execution_settlement_issue_numbers().is_empty()
+        || !monitor.review_windows().is_empty()
+        || monitor.has_open_launch_plan_candidates()
+        || monitor.has_merged_issue_settlement_prospects()
+        || prefs_have_driver_work(&monitor.prefs())
+    {
+        return true;
+    }
+    // Hooks and sibling processes can add cleanup after our last rebase.
+    // Unknown disk state must retain the normal scan and its diagnostics.
+    crate::load_issue_monitor_prefs(prefs_path)
+        .map(|prefs| prefs_have_driver_work(&prefs))
+        .unwrap_or(true)
 }
 
 fn spawn_issue_monitor_worker_with_lease(
@@ -1957,9 +2146,9 @@ fn spawn_issue_monitor_worker_with_lease(
                     if previous_policy != monitor.max_active_agents_policy() {
                         let Some(next_revision) = revision.checked_add(1) else { break; };
                         revision = next_revision;
-                        scan_requested = true;
+                        scan_requested |= issue_monitor_needs_periodic_scan(&monitor, &prefs_path);
                     } else if previous_limit != monitor.effective_max_active_agents() {
-                        scan_requested = true;
+                        scan_requested |= issue_monitor_needs_periodic_scan(&monitor, &prefs_path);
                     }
                     publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
                 }
@@ -1978,7 +2167,7 @@ fn spawn_issue_monitor_worker_with_lease(
                             revision = next_revision;
                             publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
                         }
-                        scan_requested = true;
+                        scan_requested |= issue_monitor_needs_periodic_scan(&monitor, &prefs_path);
                         // A timed-out blocking scan retains single-flight ownership.
                         // Reuse bounded admission to refill without a GUI ScanNow.
                         admission_requested |= in_flight_scan.as_ref().is_some_and(|scan| scan.watchdog_fired);
