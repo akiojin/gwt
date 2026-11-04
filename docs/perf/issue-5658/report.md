@@ -1,5 +1,22 @@
 # Issue #5658: idle GUI CPU
 
+## Current input acceptance interpretation (2026-11-03)
+
+PM decision `a587af43-f3dc-4780-a10c-a50491fb1bf8` for Issue #5390 clarifies
+the current acceptance: the complete provider marker must appear in xterm
+within 15 seconds from its input request. Normal raw output and the formal
+sequence-gap snapshot replacement are both valid display paths. The historical
+"raw output and xterm" wording below describes visible delivery, and is not a
+requirement that a separate raw frame survive a correct snapshot replacement.
+
+Current runs retain separate raw, snapshot, wire-send and visible timings;
+an unobserved raw timing stays unobserved. They also capture sequence-gap causes,
+connection events and existing queue gauges. A missing visible marker still
+fails. The twelve-Agent workload, authenticated read rate, idle quietness,
+CPU budget, theme reuse, retries and cleanup remain unchanged. This note does
+not rewrite the historical measurements or turn an earlier failed record into
+a PASS. See [the continuation evidence](../issue-5390/ui-resume-20261103.md).
+
 ## Scope
 
 This is a gwt runtime performance change, applicable to every opened project.

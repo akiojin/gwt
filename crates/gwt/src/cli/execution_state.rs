@@ -13140,6 +13140,25 @@ fn probe_blocked_build_abort_recovery(
         }
         Err(error) => return unavailable(GovernanceCause::Integrity, &error.to_string()),
     }
+    match crate::agent_project_state::snapshot_blocked_done_build_abort_authority(
+        worktree,
+        session_id,
+        owner_number,
+    ) {
+        Ok(Some(_)) => {
+            let mut probe = RecoveryProbe::available(
+                "build.abort",
+                GovernanceMetadata {
+                    target_state: Some("build_inactive".into()),
+                    ..governance
+                },
+            );
+            probe.reason = Some("Current Blocked execution has an exact Done Work and same active build; build.abort requires a non-empty reason and ends only the build lifecycle, preserving Done Work and execution history".into());
+            return probe;
+        }
+        Ok(None) => {}
+        Err(error) => return unavailable(GovernanceCause::Authority, &error.to_string()),
+    }
     match crate::agent_project_state::snapshot_bound_terminal_compatibility_authority(
         worktree,
         session_id,

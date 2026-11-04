@@ -1891,6 +1891,7 @@ fn run_monitor_queue_push<E: CliEnv>(
     let mut accepted_numbers = Vec::new();
     let mut outcomes: Vec<QueuePushOutcome> = Vec::new();
     let mut urgent_observations = Vec::new();
+    let mut accepted_snapshots = Vec::new();
     let source_repository = monitor_client_source_repository(env, &root);
     let mut source_monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
     source_monitor.set_source_repository(
@@ -2010,6 +2011,7 @@ fn run_monitor_queue_push<E: CliEnv>(
                 );
             }
             accepted_numbers.push(*number);
+            accepted_snapshots.push(snapshot);
             outcomes.push(QueuePushOutcome::accepted(*number));
         } else {
             accepted_numbers.push(*number);
@@ -2027,6 +2029,33 @@ fn run_monitor_queue_push<E: CliEnv>(
                 .map(|(owner, repo)| (owner.as_str(), repo.as_str())),
         );
         if !accepted_numbers.is_empty() {
+            // The CLI starts with a cold inbox. Reuse the accepted live fetch
+            // so timeout recovery can validate the candidate before releasing
+            // its persisted failure; membership alone is not that evidence.
+            for snapshot in &accepted_snapshots {
+                if prefs.autonomous_mode
+                    && prefs.failed_issues.iter().any(|failed| {
+                        failed.issue_number == snapshot.number.0
+                            && crate::issue_monitor::MonitorFailureKind::classify(&failed.message)
+                                == crate::issue_monitor::MonitorFailureKind::LaunchWindowTimeout
+                    })
+                {
+                    monitor.record_candidate(crate::IssueMonitorIssue {
+                        author_login: snapshot.author_login.clone(),
+                        number: snapshot.number.0,
+                        title: snapshot.title.clone(),
+                        labels: snapshot.labels.clone(),
+                        state: match snapshot.state {
+                            IssueState::Open => crate::IssueMonitorIssueState::Open,
+                            IssueState::Closed => crate::IssueMonitorIssueState::Closed,
+                        },
+                        body: Some(snapshot.body.clone()),
+                        url: None,
+                        readiness: crate::IssueMonitorReadiness::NotApplicable,
+                        updated_at: Some(snapshot.updated_at.0.clone()),
+                    });
+                }
+            }
             monitor.terminal_queue_push(&accepted_numbers, "operation", &now);
         }
         for (snapshot, assignment) in &urgent_observations {
@@ -7095,86 +7124,97 @@ fn fetch_linked_prs_bulk_via_gh_with_observer(
     mut observe: impl FnMut(u64, &[LinkedPrSummary]),
 ) -> io::Result<std::collections::BTreeMap<u64, Vec<LinkedPrSummary>>> {
     let mut linked = std::collections::BTreeMap::new();
-    for chunk in numbers.chunks(LINKED_PR_BULK_CHUNK) {
-        let mut pending = chunk.to_vec();
-        let mut cursors = std::collections::BTreeMap::new();
-        let mut seen_cursors = std::collections::BTreeSet::new();
-        let mut nodes_by_issue = std::collections::BTreeMap::<u64, Vec<serde_json::Value>>::new();
-        while !pending.is_empty() {
-            gwt_core::operation_deadline::ensure_remaining("linked PR timeline page")?;
-            let query = if cursors.is_empty() {
-                linked_prs_bulk_query(&pending)
-            } else {
-                linked_prs_bulk_query_with_cursors(&pending, &cursors)
+    // Start every chunk before continuing deep timelines, so one long history
+    // cannot hide unrelated first-page results behind its continuation failure.
+    let mut chunks: std::collections::VecDeque<_> = numbers
+        .chunks(LINKED_PR_BULK_CHUNK)
+        .map(|chunk| {
+            (
+                chunk.to_vec(),
+                std::collections::BTreeMap::new(),
+                std::collections::BTreeSet::new(),
+                std::collections::BTreeMap::<u64, Vec<serde_json::Value>>::new(),
+            )
+        })
+        .collect();
+    while let Some((pending, mut cursors, mut seen_cursors, mut nodes_by_issue)) =
+        chunks.pop_front()
+    {
+        gwt_core::operation_deadline::ensure_remaining("linked PR timeline page")?;
+        let query = if cursors.is_empty() {
+            linked_prs_bulk_query(&pending)
+        } else {
+            linked_prs_bulk_query_with_cursors(&pending, &cursors)
+        };
+        let stdout = run(&query)?;
+        let value: serde_json::Value = serde_json::from_str(&stdout)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+        if let Some(rate_limit) = gwt_core::github_budget::parse_graphql_rate_limit(&value) {
+            gwt_core::github_budget::BudgetLedger::global().record_graphql_response(
+                &gwt_core::github_budget::spawn_source(&["api", "graphql"]),
+                &rate_limit,
+                chrono::Utc::now(),
+            );
+        }
+        gwt_core::operation_deadline::ensure_remaining("linked PR timeline page")?;
+        let repository = value.get("data").and_then(|v| v.get("repository"));
+        let mut next = Vec::new();
+        for number in &pending {
+            let invalid = || {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("issue #{number} linked PR timeline is incomplete"),
+                )
             };
-            let stdout = run(&query)?;
-            let value: serde_json::Value = serde_json::from_str(&stdout)
-                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
-            if let Some(rate_limit) = gwt_core::github_budget::parse_graphql_rate_limit(&value) {
-                gwt_core::github_budget::BudgetLedger::global().record_graphql_response(
-                    &gwt_core::github_budget::spawn_source(&["api", "graphql"]),
-                    &rate_limit,
-                    chrono::Utc::now(),
-                );
-            }
-            gwt_core::operation_deadline::ensure_remaining("linked PR timeline page")?;
-            let repository = value.get("data").and_then(|v| v.get("repository"));
-            let mut next = Vec::new();
-            for number in &pending {
-                let invalid = || {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("issue #{number} linked PR timeline is incomplete"),
-                    )
-                };
-                let Some(issue) = repository
-                    .and_then(|v| v.get(format!("i{number}")))
-                    .filter(|v| !v.is_null())
-                else {
-                    if cursors.contains_key(number) {
+            let Some(issue) = repository
+                .and_then(|v| v.get(format!("i{number}")))
+                .filter(|v| !v.is_null())
+            else {
+                if cursors.contains_key(number) {
+                    return Err(invalid());
+                }
+                continue;
+            };
+            let timeline = issue.get("timelineItems").ok_or_else(invalid)?;
+            let nodes = timeline
+                .get("nodes")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(invalid)?;
+            nodes_by_issue
+                .entry(*number)
+                .or_default()
+                .extend(nodes.iter().cloned());
+            match timeline.get("pageInfo") {
+                Some(info)
+                    if info.get("hasNextPage").and_then(serde_json::Value::as_bool)
+                        == Some(true) =>
+                {
+                    let cursor = info
+                        .get("endCursor")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|cursor| !cursor.trim().is_empty())
+                        .ok_or_else(invalid)?;
+                    if !seen_cursors.insert((*number, cursor.to_string())) {
                         return Err(invalid());
                     }
+                    cursors.insert(*number, cursor.to_string());
+                    next.push(*number);
                     continue;
-                };
-                let timeline = issue.get("timelineItems").ok_or_else(invalid)?;
-                let nodes = timeline
-                    .get("nodes")
-                    .and_then(serde_json::Value::as_array)
-                    .ok_or_else(invalid)?;
-                nodes_by_issue
-                    .entry(*number)
-                    .or_default()
-                    .extend(nodes.iter().cloned());
-                match timeline.get("pageInfo") {
-                    Some(info)
-                        if info.get("hasNextPage").and_then(serde_json::Value::as_bool)
-                            == Some(true) =>
-                    {
-                        let cursor = info
-                            .get("endCursor")
-                            .and_then(serde_json::Value::as_str)
-                            .filter(|cursor| !cursor.trim().is_empty())
-                            .ok_or_else(invalid)?;
-                        if !seen_cursors.insert((*number, cursor.to_string())) {
-                            return Err(invalid());
-                        }
-                        cursors.insert(*number, cursor.to_string());
-                        next.push(*number);
-                        continue;
-                    }
-                    Some(info)
-                        if info.get("hasNextPage").and_then(serde_json::Value::as_bool)
-                            == Some(false) => {}
-                    _ => return Err(invalid()),
                 }
-                let complete = serde_json::json!({"timelineItems": {
-                    "nodes": nodes_by_issue.remove(number).unwrap_or_default()
-                }});
-                let prs = parse_linked_pr_timeline(&complete, *number);
-                observe(*number, &prs);
-                linked.insert(*number, prs);
+                Some(info)
+                    if info.get("hasNextPage").and_then(serde_json::Value::as_bool)
+                        == Some(false) => {}
+                _ => return Err(invalid()),
             }
-            pending = next;
+            let complete = serde_json::json!({"timelineItems": {
+                "nodes": nodes_by_issue.remove(number).unwrap_or_default()
+            }});
+            let prs = parse_linked_pr_timeline(&complete, *number);
+            observe(*number, &prs);
+            linked.insert(*number, prs);
+        }
+        if !next.is_empty() {
+            chunks.push_back((next, cursors, seen_cursors, nodes_by_issue));
         }
     }
     Ok(linked)
@@ -11253,10 +11293,47 @@ mod tests {
         assert_eq!(queued_numbers(&repo), vec![4812]);
     }
 
+    #[test]
+    fn issue_6689_queue_push_releases_a_cold_timeout_failure() {
+        let test_home = gwt_config::home::user_home().expect("isolated test home");
+        std::fs::create_dir_all(&test_home).expect("test home dir");
+        let tmp = TempDir::new_in(test_home).expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        queue_push_issue(&mut env, 6689, None);
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &path,
+            &crate::IssueMonitorPrefs {
+                autonomous_mode: true,
+                failed_issues: vec![crate::issue_monitor::IssueMonitorFailedIssue {
+                    issue_number: 6689,
+                    message: "Launch timed out: no window was created within 120s".to_string(),
+                    window_id: None,
+                }],
+                ..Default::default()
+            },
+        )
+        .expect("seed historical failure");
+        let (code, _) = run_queue_push(&mut env, vec![6689], false);
+        assert_eq!(code, 0);
+        let prefs = crate::load_issue_monitor_prefs(&path).expect("saved prefs");
+        assert!(
+            prefs.failed_issues.is_empty(),
+            "queue.push must release the old failure immediately"
+        );
+        assert_eq!(prefs.autonomous_records[0].attempts, 1);
+        assert_eq!(prefs.released_failures.len(), 1);
+    }
+
     /// #5133 AC-1/AC-4: queue.push and the Monitor run in different processes.
     #[test]
     fn queue_push_claim_launches_on_the_next_scan_from_another_monitor_pid() {
-        let tmp = TempDir::new().expect("tempdir");
+        let test_home = gwt_config::home::user_home().expect("isolated test home");
+        std::fs::create_dir_all(&test_home).expect("test home dir");
+        let tmp = TempDir::new_in(test_home).expect("tempdir");
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
@@ -17758,6 +17835,134 @@ command = "my-agent-cli"
         assert_eq!(linked[&7][0].number, 107);
         assert!(linked[&7][0].will_close_target);
         assert_eq!(linked[&30][0].number, 130);
+    }
+
+    #[test]
+    fn linked_pr_bulk_reads_later_initial_chunks_before_failing_continuations() {
+        let numbers: Vec<u64> = (1..=26).collect();
+        let mut queries = Vec::new();
+        let mut completed = Vec::new();
+        let error = fetch_linked_prs_bulk_via_gh_with_observer(
+            &numbers,
+            |query| {
+                queries.push(query.to_string());
+                if query.contains("after:") {
+                    return Err(io::Error::other("continuation failed"));
+                }
+                let repository: serde_json::Map<_, _> = numbers
+                    .iter()
+                    .filter(|number| query.contains(&format!("i{number}: issue(")))
+                    .map(|number| {
+                        (
+                            format!("i{number}"),
+                            serde_json::json!({"timelineItems": {
+                                "nodes": [], "pageInfo": {
+                                    "hasNextPage": *number == 1, "endCursor": "next"
+                                }
+                            }}),
+                        )
+                    })
+                    .collect();
+                Ok(serde_json::json!({"data": {"repository": repository}}).to_string())
+            },
+            |number, _| completed.push(number),
+        )
+        .unwrap_err();
+        println!(
+            "{}",
+            serde_json::json!({
+                "completed_issue_ids": completed, "queries": queries.len(),
+                "continuation_failed": error.to_string() == "continuation failed"
+            })
+        );
+        assert_eq!(error.to_string(), "continuation failed");
+        assert!(
+            completed.contains(&26),
+            "later initial chunks must be observed"
+        );
+        assert!(!completed.contains(&1), "unfinished timelines stay unknown");
+        assert_eq!(completed.len(), 25);
+        assert_eq!(queries.len(), 3);
+        assert!(queries[1].contains("i26: issue(number: 26)"));
+    }
+
+    #[test]
+    fn linked_pr_bulk_retains_nodes_across_successful_chunk_interleaving() {
+        let numbers: Vec<u64> = (1..=26).collect();
+        let event = |number| {
+            serde_json::json!({
+                "__typename": "CrossReferencedEvent", "willCloseTarget": true,
+                "source": {"__typename": "PullRequest", "number": number, "state": "OPEN"}
+            })
+        };
+        let mut queries = Vec::new();
+        let mut observed = Vec::new();
+        let linked =
+            fetch_linked_prs_bulk_via_gh_with_observer(
+                &numbers,
+                |query| {
+                    queries.push(query.to_string());
+                    let repository = match queries.len() {
+                    1 => (1..=25)
+                        .map(|number| {
+                            (format!("i{number}"), serde_json::json!({"timelineItems": {
+                                "nodes": if number == 1 { vec![event(101)] } else { vec![] },
+                                "pageInfo": {"hasNextPage": number == 1, "endCursor": "next"}
+                            }}))
+                        })
+                        .collect::<serde_json::Map<_, _>>()
+                        .into(),
+                    2 => serde_json::json!({"i26": {"timelineItems": {
+                        "nodes": [], "pageInfo": {"hasNextPage": false, "endCursor": null}
+                    }}}),
+                    3 => serde_json::json!({"i1": {"timelineItems": {
+                        "nodes": [event(102)],
+                        "pageInfo": {"hasNextPage": false, "endCursor": null}
+                    }}}),
+                    _ => panic!("unexpected extra query"),
+                };
+                    Ok(serde_json::json!({"data": {"repository": repository}}).to_string())
+                },
+                |number, prs| {
+                    observed.push((
+                        number,
+                        prs.iter()
+                            .map(|pr| (pr.number, pr.will_close_target))
+                            .collect::<Vec<_>>(),
+                    ));
+                },
+            )
+            .expect("all initial pages and the continuation succeed");
+
+        assert_eq!(queries.len(), 3);
+        assert!(queries[0].contains("i1: issue(number: 1)"));
+        assert!(queries[0].contains("i25: issue(number: 25)"));
+        assert!(!queries[0].contains("i26: issue("));
+        assert!(queries[1].contains("i26: issue(number: 26)"));
+        assert!(!queries[1].contains("i1: issue("));
+        assert!(!queries[1].contains("after:"));
+        assert!(queries[2].contains("i1: issue(number: 1)"));
+        assert!(queries[2].contains("after: \"next\""));
+        assert!(!queries[2].contains("i26: issue("));
+        assert_eq!(
+            observed
+                .iter()
+                .map(|(number, _)| *number)
+                .collect::<Vec<_>>(),
+            (2..=26).chain([1]).collect::<Vec<_>>()
+        );
+        assert_eq!(observed.last().unwrap().1, vec![(101, true), (102, true)]);
+        assert_eq!(linked.len(), 26);
+        for (number, prs) in &observed {
+            let returned: Vec<_> = linked[number]
+                .iter()
+                .map(|pr| (pr.number, pr.will_close_target))
+                .collect();
+            assert_eq!(&returned, prs);
+            if *number != 1 {
+                assert!(prs.is_empty());
+            }
+        }
     }
 
     #[test]

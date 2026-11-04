@@ -100,6 +100,7 @@ const ROOT_MODULES = new Set([
   // SPEC-2809 — Console window per-kind tab live tail.
   // SPEC-3064 Phase 3 (E4) — Settings windows surface.
   "settings-surface.js",
+  "hook-center-panel.js",
   "socket-receive-dispatcher.js",
   "ui-state-store.js",
   "ui-content.js",

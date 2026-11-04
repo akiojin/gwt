@@ -22,17 +22,17 @@ async function fixture(telemetry = null, initialCatalog = catalog(windows)) {
   const windowCatalogModel = createUiStateStore({ catalog: initialCatalog }, options);
   const activityModel = createUiStateStore({ agents: live, count: 2 }, options);
   const rosterModel = createUiStateStore({ members: [{ member_id: "m1", name: "One", enabled: true, assignment: { session_id: "s1" } }] }, options);
-  const runtimes = new Map(), mounts = [], previews = new Set(), previewMounts = [], selected = [], focused = [];
+  const runtimes = new Map(), mounts = [], layouts = [], previews = new Set(), previewMounts = [], selected = [], focused = [];
   const systemSettingsModel = createUiStateStore({ worksPreviewLines: 3 }, options);
   const surface = createWorksSurface({ document, windowCatalogModel, activityModel, rosterModel, systemSettingsModel,
     windowDisplayTitle: w => `${w.agent_name || w.title || "Agent"}${w.dynamic_title ? ` — ${w.dynamic_title}` : ""}`,
-    mountTerminal(id, root, options) { let input = runtimes.get(id); if (!input) { input = document.createElement("textarea"); runtimes.set(id, input); } root.appendChild(input); mounts.push({ id, root, readOnly: options?.readOnly }); },
+    mountTerminal(id, root, options) { let input = runtimes.get(id); if (!input) { input = document.createElement("textarea"); input.className = "xterm"; runtimes.set(id, input); } root.appendChild(input); mounts.push({ id, root, readOnly: options?.readOnly }); },
     mountPreview(id, root, options) { const pre = document.createElement("pre"); pre.textContent = `${id} output`; root.appendChild(pre); previews.add(pre); previewMounts.push({ id, root, lines: options?.tailLines }); return () => { previews.delete(pre); pre.remove(); }; },
-    onFocus: id => focused.push(id), onLayout() {}, onSelectMember: id => selected.push(id), getTelemetry: () => telemetry,
+    onFocus: id => focused.push(id), onLayout() { layouts.push(true); }, onSelectMember: id => selected.push(id), getTelemetry: () => telemetry,
   });
   document.querySelector("main").append(surface.element); surface.sync();
   const flush = () => { for (const frame of [...frames]) { frames.delete(frame); frame(); } };
-  return { surface, document, window, windowCatalogModel, activityModel, rosterModel, frames, flush, runtimes, mounts, previews, previewMounts, systemSettingsModel, selected, focused };
+  return { surface, document, window, windowCatalogModel, activityModel, rosterModel, frames, flush, runtimes, mounts, layouts, previews, previewMounts, systemSettingsModel, selected, focused };
 }
 
 test("Works implements the approved list and native terminal API", () => {
@@ -276,6 +276,76 @@ test("Works retains native input and fixed names when runtime state and purpose 
   f.flush();
   assert.match(f.surface.element.querySelector(".works-full-meta").textContent, /Running.*Interactive/,
     "a current runtime recovery supersedes the earlier interrupted catalog status");
+  f.surface.dispose();
+});
+
+test("Works telemetry refresh preserves the terminal host without requesting layout", async () => {
+  const telemetry = { today: { input_tokens: 1, output_tokens: 2 } };
+  const f = await fixture(telemetry);
+  f.surface.openWork("one");
+  const input = f.runtimes.get("one"), host = input.parentElement;
+  const mounts = f.mounts.length, layouts = f.layouts.length;
+  telemetry.today.input_tokens = 10;
+  f.surface.sync(false);
+  assert.equal(f.surface.element.querySelector('[data-metric="today-total"]').textContent, "12");
+  assert.equal(input.parentElement, host);
+  assert.equal(f.mounts.length, mounts, "telemetry must not rehost the live terminal");
+  assert.equal(f.layouts.length, layouts, "telemetry must not trigger persisted terminal fits");
+  f.surface.sync();
+  assert.ok(f.mounts.length > mounts, "explicit host synchronization still reclaims runtimes");
+  assert.equal(f.layouts.length, layouts + 1, "explicit host synchronization still requests layout");
+  const external = f.document.createElement("aside"); f.document.querySelector("main").append(external);
+  const progress = f.document.createElement("div"); progress.className = "attachment-progress"; progress.hidden = true;
+  host.append(progress);
+  external.append(input);
+  const beforeReclaim = f.mounts.length, beforeLayout = f.layouts.length;
+  f.surface.sync(false);
+  assert.ok(input.parentElement === host, "telemetry reclaims a selected native terminal even with retained attachment progress");
+  assert.ok(progress.parentElement === host, "reclaim preserves attachment progress");
+  assert.equal(f.mounts.length, beforeReclaim + 1, "only the selected host missing its xterm is mounted again");
+  assert.equal(f.layouts.length, beforeLayout, "reclaim avoids a global persisted-layout pass");
+  f.surface.sync(false);
+  assert.equal(f.mounts.length, beforeReclaim + 1, "an unchanged host returns to the ordinary no-mount fast path");
+  const app = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+  assert.match(app, /worksTelemetryModel\.subscribeFrame\(state => state, \(\) => worksSurface\.sync\(false\)\)/);
+  f.surface.dispose();
+});
+
+test("Works reuses unchanged sparklines but redraws changed buckets and shared scales", async () => {
+  const values = () => Array(30).fill(1);
+  const telemetry = { fleet_tokens_per_minute: values(), by_window: {
+    one: { tokens_per_minute: values() }, pm: { tokens_per_minute: values() },
+  } };
+  const f = await fixture(telemetry);
+  const graphs = [...f.surface.element.querySelectorAll("svg")];
+  const mounts = f.mounts.length, layouts = f.layouts.length;
+  let clears = 0, nodes = 0;
+  const create = f.document.createElementNS.bind(f.document);
+  f.document.createElementNS = (...args) => { nodes++; return create(...args); };
+  for (const graph of graphs) {
+    const replace = graph.replaceChildren.bind(graph);
+    graph.replaceChildren = (...args) => { clears++; return replace(...args); };
+  }
+  for (let tick = 0; tick < 20; tick++) {
+    telemetry.fleet_tokens_per_minute = values();
+    telemetry.by_window.one.tokens_per_minute = values();
+    telemetry.by_window.pm.tokens_per_minute = values();
+    f.activityModel.update(state => ({ ...state, snapshot: { observed_at: tick } }));
+    f.flush();
+  }
+  assert.deepEqual({ clears, nodes, mounts: f.mounts.length - mounts, layouts: f.layouts.length - layouts, pending: f.frames.size },
+    { clears: 0, nodes: 0, mounts: 0, layouts: 0, pending: 0 }, "same data must not rebuild the SVG trees");
+  const row = id => f.surface.element.querySelector(`[data-window-id="${id}"] svg`);
+  const beforeOne = row("one").innerHTML, beforePm = row("pm").innerHTML;
+  telemetry.by_window.one.tokens_per_minute[0] = 2;
+  f.surface.sync(false);
+  assert.notEqual(row("one").innerHTML, beforeOne, "changed measurements redraw");
+  assert.notEqual(row("pm").innerHTML, beforePm, "an unchanged row follows the shared scale");
+  assert.equal(clears, 2, "the fleet graph is independent of the row scale");
+  telemetry.by_window.one.tokens_per_minute[0] = null;
+  f.surface.sync(false);
+  assert.equal(row("one").dataset.knownCount, "29", "missing buckets remain visible as gaps");
+  assert.equal(row("one").querySelectorAll("circle").length, 29);
   f.surface.dispose();
 });
 

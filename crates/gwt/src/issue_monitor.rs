@@ -1178,6 +1178,9 @@ pub struct IssueMonitorPrefs {
     pub queued_launch_session_strategies: BTreeMap<u64, IssueMonitorLaunchSessionStrategy>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failed_issues: Vec<IssueMonitorFailedIssue>,
+    /// Ordering evidence for a failed attempt, never an active reservation.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub failed_launch_started_at: BTreeMap<u64, String>,
     /// Issue #3645 / #3628: failure holds an operator released.
     ///
     /// Removing an entry from `failed_issues` says nothing to a process that
@@ -1403,6 +1406,7 @@ impl Default for IssueMonitorPrefs {
             pending_launch_deliveries: Vec::new(),
             queued_launch_session_strategies: BTreeMap::new(),
             failed_issues: Vec::new(),
+            failed_launch_started_at: BTreeMap::new(),
             released_failures: Vec::new(),
             requeue_audit: Vec::new(),
             failure_release_version: 0,
@@ -2998,6 +3002,8 @@ pub enum MonitorFailureKind {
     /// fleet at once, and an operator reading N unclassified rows cannot see
     /// that. On 2026-10-03 it held four rows whose messages were byte-identical.
     HookTrust,
+    /// The launcher never created an agent window before its deadline.
+    LaunchWindowTimeout,
     /// Nothing recognisable. Read `error_message`.
     Unclassified,
 }
@@ -3006,6 +3012,11 @@ impl MonitorFailureKind {
     /// Classify a durable failure message.
     #[must_use]
     pub fn classify(message: &str) -> Self {
+        if message.contains(WINDOWLESS_LAUNCH_TIMEOUT_MESSAGE)
+            || message.starts_with("Launch stalled: no window for ")
+        {
+            return Self::LaunchWindowTimeout;
+        }
         if message.contains("reclaim loop detected") {
             return Self::ReclaimLoop;
         }
@@ -3043,6 +3054,7 @@ impl MonitorFailureKind {
             Self::ReclaimLoop => "reclaim_loop",
             Self::LaunchProcessExit => "launch_process_exit",
             Self::HookTrust => "hook_trust",
+            Self::LaunchWindowTimeout => "launch_window_timeout",
             Self::Unclassified => "unclassified",
         }
     }
@@ -5364,6 +5376,8 @@ pub struct IssueMonitorState {
     /// issue number (attempt counter, phase, in-flight launch id, snapshot).
     autonomous_records: BTreeMap<u64, AutonomousIssueRecord>,
     failed_issues: BTreeMap<u64, String>,
+    #[serde(default)]
+    failed_launch_started_at: BTreeMap<u64, String>,
     /// #3165 error-window lifecycle: the stale agent window id retained per
     /// failed issue, so an explicit Launch Now can close it before relaunching.
     failed_windows: BTreeMap<u64, String>,
@@ -8188,6 +8202,7 @@ impl IssueMonitorState {
             autonomous_tuning: AutonomousTuning::default(),
             autonomous_records: BTreeMap::new(),
             failed_issues: BTreeMap::new(),
+            failed_launch_started_at: BTreeMap::new(),
             failed_windows: BTreeMap::new(),
             released_failures: BTreeMap::new(),
             requeue_audit: Vec::new(),
@@ -8341,6 +8356,10 @@ impl IssueMonitorState {
                 state.failed_windows.insert(failed.issue_number, window_id);
             }
         }
+        state.failed_launch_started_at = prefs.failed_launch_started_at;
+        state
+            .failed_launch_started_at
+            .retain(|number, _| state.failed_issues.contains_key(number));
         state.failure_release_version = prefs.failure_release_version;
         for release in prefs.released_failures {
             state
@@ -8515,6 +8534,12 @@ impl IssueMonitorState {
                 })
                 .collect(),
             released_failures: self.released_failures.values().cloned().collect(),
+            failed_launch_started_at: self
+                .failed_launch_started_at
+                .iter()
+                .filter(|(number, _)| self.failed_issues.contains_key(number))
+                .map(|(number, at)| (*number, at.clone()))
+                .collect(),
             requeue_audit: self.requeue_audit.clone(),
             failure_release_version: self.failure_release_version,
             merged_issues: self.merged_issues.iter().copied().collect(),
@@ -9033,6 +9058,7 @@ impl IssueMonitorState {
         self.queue.retain(|queued| *queued != issue_number);
         self.inbox.retain(|item| item.issue.number != issue_number);
         self.failed_issues.remove(&issue_number);
+        self.failed_launch_started_at.remove(&issue_number);
         self.failed_windows.remove(&issue_number);
         self.released_failures.remove(&issue_number);
         if let Some(pr_number) = self
@@ -9649,6 +9675,29 @@ impl IssueMonitorState {
     /// own, so a gate reading the bare floor would keep the Issue out for
     /// good after another candidate was released.
     pub(crate) fn retry_ready_for_saved_profile(&self, issue_number: u64, now: &str) -> bool {
+        // Issue #6689: retry window creation one at a time. An already reserved
+        // delivery must not veto itself (or another restored reservation).
+        // Once a window exists, its implementation no longer holds this lane.
+        if self.autonomous_mode && self.is_launch_window_timeout_retry(issue_number) {
+            let reservations = self.pending_claim_issue_numbers();
+            let creating_window = |number: u64| {
+                self.is_launch_window_timeout_retry(number)
+                    && !self.launched_windows.contains_key(&number)
+                    && !self.pending_launch_deliveries.iter().any(|delivery| {
+                        delivery.issue_number == number && delivery.materialized_window_id.is_some()
+                    })
+                    && (self.active_launches.contains(&number) || reservations.contains(&number))
+            };
+            if !creating_window(issue_number)
+                && self
+                    .active_launches
+                    .iter()
+                    .chain(reservations.iter())
+                    .any(|number| creating_window(*number))
+            {
+                return false;
+            }
+        }
         if self.launch_auto {
             let holds = parse_rfc3339_utc(now).map_or_else(
                 || self.provider_quota_holds.clone(),
@@ -10869,6 +10918,7 @@ impl IssueMonitorState {
     /// snapshot alone.
     fn unpark_answered_autonomous_issue(&mut self, issue_number: u64, now: &str) {
         self.failed_issues.remove(&issue_number);
+        self.failed_launch_started_at.remove(&issue_number);
         self.failed_windows.remove(&issue_number);
         self.last_error = None;
         self.set_autonomous_phase(issue_number, AutonomousPhase::Implementing);
@@ -12997,6 +13047,18 @@ impl IssueMonitorState {
             }
         }
         self.enforce_open_pr_holds();
+        // A newer failed successor may no longer have an active companion or
+        // an ACK. Adopt its clock only alongside the same accepted failure.
+        for failed in &disk.failed_issues {
+            if self.failed_issues.get(&failed.issue_number) != Some(&failed.message) {
+                continue;
+            }
+            let Some(at) = disk.failed_launch_started_at.get(&failed.issue_number) else {
+                continue;
+            };
+            self.remember_failed_launch_start(failed.issue_number, at);
+        }
+        self.reconcile_delivered_failures();
         self.reconcile_terminal_queue();
     }
 
@@ -13233,6 +13295,18 @@ impl IssueMonitorState {
         for failed in &disk.failed_issues {
             let issue_number = failed.issue_number;
             if failed.message.trim().is_empty()
+                // Suppress only the exact automatically released failure.
+                // A lower disk watermark can also carry a concurrent terminal
+                // decision that supersedes an uncommitted local retry.
+                || (self.released_failures.get(&issue_number).is_some_and(|release| {
+                    release.release_version > disk.failure_release_version
+                        && release.retry_record.as_ref().is_some_and(|record| {
+                            record.last_failure_message.as_deref() == Some(failed.message.as_str())
+                        })
+                }) && !disk.autonomous_records.iter().any(|record| {
+                    record.issue_number == issue_number
+                        && record.phase == AutonomousPhase::NeedsHuman
+                }))
                 || (skip_migration_tombstones && self.is_migrated_failure_tombstone(failed))
                 || disk
                     .released_failures
@@ -13336,6 +13410,7 @@ impl IssueMonitorState {
 
         for issue_number in targets.keys() {
             self.failed_issues.remove(issue_number);
+            self.failed_launch_started_at.remove(issue_number);
         }
         self.inbox.retain(|item| {
             !(targets.contains_key(&item.issue.number)
@@ -13364,6 +13439,7 @@ impl IssueMonitorState {
 
     fn clear_recovered_issue_failure(&mut self, issue_number: u64) {
         if let Some(reason) = self.failed_issues.remove(&issue_number) {
+            self.failed_launch_started_at.remove(&issue_number);
             if self.last_error.as_deref() == Some(&format!("issue #{issue_number}: {reason}")) {
                 self.last_error = self.first_failed_issue_banner();
             }
@@ -15596,6 +15672,44 @@ impl IssueMonitorState {
                 record.last_failure_message = None;
             }
         }
+        self.reconcile_delivered_failures();
+    }
+
+    /// A delivery retires its failed attempt, not the OPEN parent's remaining
+    /// work. Reuse the durable release fence so stale prefs cannot restore it.
+    fn reconcile_delivered_failures(&mut self) {
+        let delivered = self
+            .inbox
+            .iter()
+            .filter(|item| {
+                failed_inbox_state(item.state)
+                    && self.current_delivery_retires_failure(item.issue.number)
+            })
+            .map(|item| item.issue.number)
+            .collect::<Vec<_>>();
+        let now = format_rfc3339_utc(chrono::Utc::now());
+        for number in delivered {
+            self.release_failed_issue_hold(
+                number,
+                "failed attempt delivered by merged work PR",
+                &now,
+            );
+            self.record_issue_completion(number, IssueCompletionEvidence::WorkBranch);
+        }
+    }
+
+    fn current_delivery_retires_failure(&self, issue_number: u64) -> bool {
+        self.merged_deliveries.contains_key(&issue_number)
+            && self.merged_delivery_postdates_launch(issue_number)
+            && !self.issue_is_closed(issue_number)
+            && self.inbox_item(issue_number).is_some_and(|item| {
+                item.issue.state == IssueMonitorIssueState::Open
+                    && item.state != MonitorInboxState::NeedsHuman
+            })
+            && !self
+                .autonomous_record(issue_number)
+                .is_some_and(|record| record.phase == AutonomousPhase::NeedsHuman)
+            && self.open_autonomous_handoff(issue_number).is_none()
     }
 
     /// Whether `delivery` may still be settled for `issue_number`. Fail-closed:
@@ -18273,6 +18387,9 @@ impl IssueMonitorState {
             }
         }
         queue.last_seen_at = Some(now.to_string());
+        for number in issue_numbers {
+            self.recover_failed_launch_window_timeout(*number, now);
+        }
         self.apply_priority_order_to_queue();
     }
 
@@ -18548,8 +18665,12 @@ impl IssueMonitorState {
             return None;
         }
         self.reconcile_terminal_queue();
+        let pending_claims = self.pending_claim_issue_numbers();
         let position = self.queue.iter().position(|issue| {
             !self.has_monitor_pane_for_issue(*issue)
+                && (!(self.autonomous_mode && self.is_launch_window_timeout_retry(*issue))
+                    || (!pending_claims.contains(issue)
+                        && self.retry_ready_for_saved_profile(*issue, now)))
                 && !self.cancelled_claim_awaits_runtime(*issue)
                 && !self.open_pr_launch_held(*issue)
                 && self.launch_source_exclusion(*issue).is_none()
@@ -21100,6 +21221,7 @@ impl IssueMonitorState {
         self.clear_active_tracking(issue_number);
         self.queue.retain(|queued| *queued != issue_number);
         self.failed_issues.remove(&issue_number);
+        self.failed_launch_started_at.remove(&issue_number);
         self.released_failures.remove(&issue_number);
         self.merged_issues.insert(issue_number);
         self.set_inbox_state(
@@ -21272,12 +21394,9 @@ impl IssueMonitorState {
 
     /// Issue #4852 AC-1: when the current launch of `issue_number` started —
     /// the claim anchor while the launch is unbound, the launch ACK once it is
-    /// bound. `None` when the Issue holds no slot or the launch predates the
-    /// ordering evidence (older prefs).
-    fn active_launch_started_at(&self, issue_number: u64) -> Option<&str> {
-        if !self.active_launches.contains(&issue_number) {
-            return None;
-        }
+    /// bound. Keep these anchors after failure frees the slot. `None` when the
+    /// launch predates the ordering evidence (older prefs).
+    fn launch_started_at(&self, issue_number: u64) -> Option<&str> {
         self.launching_claimed_at
             .get(&issue_number)
             .map(String::as_str)
@@ -21305,9 +21424,15 @@ impl IssueMonitorState {
             .and_then(|delivery| delivery.merged_at.as_deref())
             .and_then(parse_rfc3339_utc);
         let started_at = self
-            .active_launch_started_at(issue_number)
+            // A failed launch no longer holds a slot. Keep its claim/ACK
+            // ordering evidence, including a successor that failed before ACK.
+            .launch_started_at(issue_number)
             .and_then(parse_rfc3339_utc);
-        match (merged_at, started_at) {
+        let failed_at = self
+            .failed_launch_started_at
+            .get(&issue_number)
+            .and_then(|at| parse_rfc3339_utc(at));
+        match (merged_at, started_at.into_iter().chain(failed_at).max()) {
             (Some(merged), Some(started)) => merged > started,
             _ => true,
         }
@@ -21393,10 +21518,7 @@ impl IssueMonitorState {
                 && item.launch_plan.is_some()
                 && !matches!(
                     item.state,
-                    MonitorInboxState::NeedsHuman
-                        | MonitorInboxState::LaunchFailed
-                        | MonitorInboxState::AgentFailed
-                        | MonitorInboxState::Released
+                    MonitorInboxState::NeedsHuman | MonitorInboxState::Released
                 )
                 && !self.issue_is_closed(item.issue.number)
         })
@@ -23020,6 +23142,7 @@ impl IssueMonitorState {
             .get(&issue_number)
             .map(|message| format!("issue #{issue_number}: {message}"));
         self.failed_issues.remove(&issue_number);
+        self.failed_launch_started_at.remove(&issue_number);
         self.failed_windows.remove(&issue_number);
         if retry_record.is_some() {
             self.launch_bindings
@@ -25208,6 +25331,92 @@ impl IssueMonitorState {
         );
     }
 
+    fn is_launch_window_timeout_retry(&self, issue_number: u64) -> bool {
+        self.autonomous_record(issue_number)
+            .and_then(|record| record.last_failure_message.as_deref())
+            .is_some_and(|message| {
+                MonitorFailureKind::classify(message) == MonitorFailureKind::LaunchWindowTimeout
+            })
+    }
+
+    /// Recover old terminal timeout rows through the same durable retry fence
+    /// as new failures. Queue membership alone never grants launch authority.
+    fn recover_failed_launch_window_timeout(&mut self, issue_number: u64, now: &str) {
+        if !self.autonomous_mode
+            || self.issue_is_closed(issue_number)
+            || self.merged_issues.contains(&issue_number)
+            || !self.terminal_queue_contains(issue_number)
+            || self.active_launches.contains(&issue_number)
+            || self.launched_windows.contains_key(&issue_number)
+            || self.process_held_issues.contains(&issue_number)
+            || self.has_monitor_pane_for_issue(issue_number)
+            || self.has_monitor_runtime_census(issue_number)
+            || self
+                .pending_launch_deliveries
+                .iter()
+                .any(|delivery| delivery.issue_number == issue_number)
+            || self
+                .autonomous_record(issue_number)
+                .is_some_and(|record| record.phase == AutonomousPhase::NeedsHuman)
+        {
+            return;
+        }
+        let Some(item) = self.inbox_item(issue_number) else {
+            return;
+        };
+        if item.issue.state != IssueMonitorIssueState::Open
+            || !self.allows_issue_labels(&item.issue)
+            || issue_monitor_candidate_exclusion(&item.issue, self.source_repository).is_some()
+        {
+            return;
+        }
+        let Some(message) = self
+            .failed_issues
+            .get(&issue_number)
+            .filter(|message| {
+                MonitorFailureKind::classify(message) == MonitorFailureKind::LaunchWindowTimeout
+            })
+            .cloned()
+        else {
+            return;
+        };
+        self.record_launch_window_timeout(issue_number, message, now);
+    }
+
+    fn record_launch_window_timeout(&mut self, issue_number: u64, message: String, now: &str) {
+        if self
+            .autonomous_record(issue_number)
+            .is_some_and(|record| record.phase == AutonomousPhase::NeedsHuman)
+        {
+            return;
+        }
+        let max = self.autonomous_tuning.max_attempts;
+        if self.attempt_count(issue_number).saturating_add(1) >= max {
+            let attempt = if self.attempt_count(issue_number) < max {
+                self.record_classified_attempt(
+                    issue_number,
+                    IssueMonitorFailureClass::Infrastructure,
+                )
+            } else {
+                self.attempt_count(issue_number)
+            };
+            self.revoke_launch_binding(issue_number);
+            self.require_fresh_launch_session(issue_number);
+            let record = self.autonomous_record_mut(issue_number);
+            record.last_failure_message = Some(message.clone());
+            record.retry_not_before = None;
+            self.escalate_to_needs_human(issue_number, NeedsHumanKind::UserChoiceRequired,
+                format!("Window creation attempts exhausted ({attempt}/{max}): {message}. After checking host load, retry with issue.monitor.requeue."));
+        } else {
+            self.record_classified_autonomous_failure(
+                issue_number,
+                message,
+                IssueMonitorFailureClass::Infrastructure,
+                now,
+            );
+        }
+    }
+
     /// `bound_window_failure` (Issue #4815): the caller proved the failure
     /// came from the Issue's bound implementation window, so it is never
     /// read as the review's.
@@ -25232,6 +25441,14 @@ impl IssueMonitorState {
         if self.rebind_revoked_launch_to_a_surviving_window(issue_number, &message, now) {
             return;
         }
+        // A windowless launch has not entered an agent phase yet. It still
+        // owns a bounded infrastructure retry in unattended mode.
+        if self.autonomous_mode
+            && MonitorFailureKind::classify(&message) == MonitorFailureKind::LaunchWindowTimeout
+        {
+            self.record_launch_window_timeout(issue_number, message, now);
+            return;
+        }
         // A remote-tracking ref race between concurrent fetches is neither an
         // agent failure nor an attempt: retry behind a short backoff in every mode.
         if gwt_agent::is_transient_launch_failure(&message) {
@@ -25254,6 +25471,17 @@ impl IssueMonitorState {
             && self.review_failure_applies(issue_number, state, now)
         {
             self.record_review_failure(issue_number, message, now);
+            return;
+        }
+        // A late implementation exit cannot fail an attempt already delivered.
+        // Review failures above retain their own retry ladder and verdict veto.
+        if self.current_delivery_retires_failure(issue_number) {
+            let live_pane = self.launch_has_live_pane(issue_number, now);
+            self.record_issue_completion_with_live_pane(
+                issue_number,
+                IssueCompletionEvidence::WorkBranch,
+                live_pane,
+            );
             return;
         }
         if self.autonomous_mode && self.is_autonomous_in_flight(issue_number) {
@@ -25284,12 +25512,30 @@ impl IssueMonitorState {
         self.record_terminal_failed_issue(issue_number, message, state);
     }
 
+    fn remember_failed_launch_start(&mut self, issue_number: u64, at: &str) {
+        let Some(incoming) = parse_rfc3339_utc(at) else {
+            return;
+        };
+        if self
+            .failed_launch_started_at
+            .get(&issue_number)
+            .and_then(|at| parse_rfc3339_utc(at))
+            .is_none_or(|local| incoming > local)
+        {
+            self.failed_launch_started_at
+                .insert(issue_number, at.to_string());
+        }
+    }
+
     fn record_terminal_failed_issue(
         &mut self,
         issue_number: u64,
         message: String,
         state: MonitorInboxState,
     ) {
+        if let Some(at) = self.launch_started_at(issue_number).map(str::to_owned) {
+            self.remember_failed_launch_start(issue_number, &at);
+        }
         self.active_launches
             .retain(|active| *active != issue_number);
         // Issue #4150: this row really did fail, so the duplicate-attempt note
@@ -25604,6 +25850,11 @@ pub fn scan_issue_monitor_candidates_for_project_tab_with_provenance(
     let mut summary = scan_issue_monitor_candidates(monitor, issues, now);
     if let Some((observed_source, _)) = monitor.queue_label_observation.as_mut() {
         *observed_source = source;
+    }
+    if source == IssueMonitorCandidateSource::Live {
+        for issue in issues {
+            monitor.recover_failed_launch_window_timeout(issue.number, now);
+        }
     }
     if let Some(diagnosis) = drive_diagnosis {
         monitor.last_error = Some(diagnosis);
@@ -26682,6 +26933,18 @@ mod tests {
         let mut monitor = IssueMonitorState::with_prefs(config, prefs);
         monitor.set_source_repository(Some(("example", "project")));
         monitor
+    }
+
+    // Compiler/verification TEMP may live on another drive. HOME fixtures must
+    // stay beneath the OS user's Temp directory required by the isolation gate.
+    fn test_home_tempdir() -> tempfile::TempDir {
+        #[cfg(windows)]
+        let root =
+            std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA").expect("OS local app data"))
+                .join("Temp");
+        #[cfg(not(windows))]
+        let root = std::env::temp_dir();
+        tempfile::tempdir_in(root).expect("temporary fixture home")
     }
 
     // Existing lifecycle fixtures start from explicitly scheduled work. Admission
@@ -28035,6 +28298,220 @@ mod tests {
                 .error_message
                 .is_none());
         }
+    }
+
+    #[test]
+    fn issue_6689_window_timeout_retries_before_an_agent_phase_and_stops_at_cap() {
+        let now = "2026-07-02T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
+        scan_queued_candidates(&mut monitor, &[issue(42)], now);
+        monitor.autonomous_mode = true;
+        monitor.autonomous_tuning.max_attempts = 2;
+        monitor.record_launch_failed_at(42, WINDOWLESS_LAUNCH_TIMEOUT_MESSAGE, now);
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        assert_eq!(monitor.attempt_count(42), 1);
+        assert_eq!(monitor.autonomous_record(42).unwrap().non_agent_attempts, 1);
+        assert!(!monitor.retry_ready(42, "2026-07-02T00:00:59Z"));
+        assert!(monitor.retry_ready(42, "2026-07-02T00:01:00Z"));
+        assert_eq!(
+            MonitorFailureKind::classify(WINDOWLESS_LAUNCH_TIMEOUT_MESSAGE).slug(),
+            "launch_window_timeout"
+        );
+        monitor.take_autonomous_notices();
+        monitor.record_agent_issue_failed_at(
+            42,
+            WINDOWLESS_LAUNCH_TIMEOUT_MESSAGE,
+            "2026-07-02T00:03:00Z",
+        );
+        assert_eq!(monitor.attempt_count(42), 2);
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::NeedsHuman
+        );
+        assert!(!monitor.queue.contains(&42));
+        let notices = monitor.take_autonomous_notices();
+        assert_eq!(
+            notices
+                .iter()
+                .filter(|notice| notice.notification_transition
+                    == Some(MonitorNotificationTransition::NeedsHuman))
+                .count(),
+            1
+        );
+        monitor.record_launch_failed_at(
+            42,
+            WINDOWLESS_LAUNCH_TIMEOUT_MESSAGE,
+            "2026-07-02T00:04:00Z",
+        );
+        assert_eq!(monitor.attempt_count(42), 2);
+        assert!(monitor.take_autonomous_notices().is_empty());
+    }
+
+    #[test]
+    fn issue_6689_timeout_retry_claims_are_serial_until_the_window_exists() {
+        let now = "2026-07-02T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            max_active: 4,
+            ..Default::default()
+        });
+        scan_queued_candidates(&mut monitor, &[issue(42), issue(43)], now);
+        monitor.autonomous_mode = true;
+        monitor.set_gui_connected(true);
+        for number in [42, 43] {
+            monitor.record_classified_autonomous_failure(
+                number,
+                WINDOWLESS_LAUNCH_TIMEOUT_MESSAGE,
+                IssueMonitorFailureClass::Infrastructure,
+                now,
+            );
+        }
+        let ready = "2026-07-02T00:01:00Z";
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("host/session", ready, 4, |_| false),
+            1
+        );
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("host/session", ready, 4, |_| false),
+            0
+        );
+        // The compatibility launch path observes the same reservation.
+        assert!(monitor.next_launch_request(ready).is_none());
+        let (number, claim_id, effect_id) = monitor
+            .pending_effects
+            .iter()
+            .find_map(|effect| match &effect.payload {
+                IssueMonitorEffectPayload::AcquireClaim {
+                    issue_number,
+                    claim_id,
+                    ..
+                } => Some((*issue_number, claim_id.clone(), effect.effect_id.clone())),
+                _ => None,
+            })
+            .unwrap();
+        assert!(monitor.apply_confirmed_claim(number, claim_id, "host/session", &effect_id, ready));
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("host/session", ready, 4, |_| false),
+            0
+        );
+        monitor.complete_active_launch_at(number, "tab-1::agent-42", ready);
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("host/session", ready, 4, |_| false),
+            1
+        );
+    }
+
+    #[test]
+    fn issue_6689_live_scan_recovers_legacy_timeout_failures_once() {
+        let now = "2026-07-02T00:00:00Z";
+        let issues = (1..=46).map(issue).collect::<Vec<_>>();
+        let mut legacy = test_monitor(IssueMonitorConfig::default());
+        scan_queued_candidates(&mut legacy, &issues, now);
+        for candidate in &issues {
+            legacy.record_agent_issue_failed_at(
+                candidate.number,
+                WINDOWLESS_LAUNCH_TIMEOUT_MESSAGE,
+                now,
+            );
+        }
+        legacy.autonomous_mode = true;
+        let stale = legacy.prefs();
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), stale.clone());
+        scan_issue_monitor_candidates_with_provenance(
+            &mut restored,
+            &issues,
+            IssueMonitorCandidateSource::Cache,
+            Path::new("."),
+            now,
+        );
+        assert_eq!(restored.failure_surge().unwrap().failed, 46);
+        scan_issue_monitor_candidates_with_provenance(
+            &mut restored,
+            &issues,
+            IssueMonitorCandidateSource::Live,
+            Path::new("."),
+            now,
+        );
+        assert!(restored.failure_surge().is_none());
+        assert!(restored
+            .inbox
+            .iter()
+            .all(|item| item.state == MonitorInboxState::Queued));
+        restored.rebase_daemon_driver_prefs(&stale);
+        let mut cold = test_monitor_with_prefs(IssueMonitorConfig::default(), restored.prefs());
+        scan_issue_monitor_candidates_with_provenance(
+            &mut cold,
+            &issues,
+            IssueMonitorCandidateSource::Live,
+            Path::new("."),
+            now,
+        );
+        assert!(cold.failed_issues.is_empty());
+        assert!(cold
+            .inbox
+            .iter()
+            .all(|item| item.state == MonitorInboxState::Queued));
+        assert!(
+            issues
+                .iter()
+                .all(|candidate| cold.attempt_count(candidate.number) == 1),
+            "attempts after recovery: {:?}",
+            cold.autonomous_records
+                .iter()
+                .map(|(number, record)| (*number, record.attempts))
+                .collect::<Vec<_>>()
+        );
+
+        // The same old snapshot can commit a new terminal decision before the
+        // retry scan commits. Its lower watermark does not make that stale.
+        let mut terminal_writer = legacy;
+        terminal_writer.escalate_to_needs_human(
+            1,
+            NeedsHumanKind::UserChoiceRequired,
+            WINDOWLESS_LAUNCH_TIMEOUT_MESSAGE,
+        );
+        cold.rebase_daemon_driver_prefs(&terminal_writer.prefs());
+        assert_eq!(cold.failed_issues.len(), 1);
+        assert!(cold.failed_issues.contains_key(&1));
+        assert!(!cold.released_failures.contains_key(&1));
+        assert_eq!(
+            cold.autonomous_record(1).unwrap().phase,
+            AutonomousPhase::NeedsHuman
+        );
+        assert_eq!(
+            cold.inbox_item(1).unwrap().state,
+            MonitorInboxState::NeedsHuman
+        );
+        assert!(!cold.queue.contains(&1));
+    }
+
+    #[test]
+    fn issue_6689_queue_push_recovers_timeout_without_releasing_other_failures() {
+        let now = "2026-07-02T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
+        scan_queued_candidates(&mut monitor, &[issue(42), issue(43)], now);
+        monitor.record_agent_issue_failed_at(42, WINDOWLESS_LAUNCH_TIMEOUT_MESSAGE, now);
+        monitor.record_agent_issue_failed_at(43, "unrelated failure", now);
+        monitor.terminal_queue_push(&[42, 43], "test", now);
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::AgentFailed,
+            "manual mode retains its hold"
+        );
+        monitor.autonomous_mode = true;
+        monitor.terminal_queue_push(&[42, 43], "test", now);
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        assert_eq!(
+            monitor.inbox_item(43).unwrap().state,
+            MonitorInboxState::AgentFailed
+        );
+        assert_eq!(monitor.attempt_count(42), 1);
     }
 
     #[test]
@@ -37278,6 +37755,8 @@ mod tests {
     /// published fact, not the absence of one.
     #[test]
     fn requeue_failed_issue_release_survives_a_cross_process_rebase() {
+        let temp = test_home_tempdir();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let mut recovering = agent_failed_monitor(42, "an execution generation already exists");
         recovering.record_attempt(42);
         recovering.record_attempt(42);
@@ -49277,6 +49756,132 @@ mod tests {
         )
         .expect("pre-#4477 closure record");
         assert!(!legacy.reopened_after_close);
+    }
+
+    #[test]
+    fn issue_6690_delivered_failures_converge_after_reload_and_stale_rebase() {
+        let temp = test_home_tempdir();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let parent = spec_issue(
+            42,
+            IssueMonitorReadiness::ReadyWithOpenTasks,
+            "2026-09-01T00:00:00Z",
+        );
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
+        let mut candidates = vec![parent.clone()];
+        candidates.extend((43..48).map(issue));
+        scan_queued_candidates(&mut monitor, &candidates, "2026-09-01T00:00:00Z");
+        for number in 42..48 {
+            monitor.record_terminal_failed_issue(
+                number,
+                "old agent exit".into(),
+                MonitorInboxState::AgentFailed,
+            );
+        }
+        let stale = monitor.prefs();
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), stale.clone());
+        for candidate in candidates {
+            restored.record_candidate(candidate);
+        }
+        assert!(
+            restored.has_merged_issue_settlement_prospects(),
+            "failed-only legacy inbox must still probe merged deliveries"
+        );
+        let deliveries = (42..48)
+            .filter(|number| *number != 43)
+            .map(|number| {
+                (
+                    format!("work/issue-{number}"),
+                    merged_delivery(number + 100, "aaa", "2026-09-01T01:00:00Z"),
+                )
+            })
+            .collect();
+        restored.record_merged_deliveries(&deliveries);
+        restored.rebase_daemon_driver_prefs(&stale);
+        let status = restored.agent_status();
+        let delivered = status
+            .inbox
+            .iter()
+            .find(|row| row.issue_number == 42)
+            .unwrap();
+        assert_eq!(delivered.state, MonitorInboxState::Queued);
+        assert!(delivered.recoverable_merged);
+        assert_eq!(delivered.error_message, None);
+        assert!(status.failure_surge.is_none());
+        assert!(!status.needs_human.contains(&42));
+        assert_eq!(
+            restored.inbox_item(42).unwrap().issue.state,
+            IssueMonitorIssueState::Open
+        );
+        assert!(!restored.failed_issues.contains_key(&42));
+        assert!(
+            restored.failed_issues.contains_key(&43),
+            "undelivered failures remain visible"
+        );
+        let normalized = restored.prefs();
+        assert_eq!(normalized.released_failures.len(), 5);
+        restored.record_merged_deliveries(&deliveries);
+        assert_eq!(
+            restored.prefs().failure_release_version,
+            normalized.failure_release_version,
+            "migration is idempotent"
+        );
+        // A late exit from the delivered attempt cannot recreate the failure.
+        restored.record_agent_issue_failed_at(42, "late agent exit", "2026-09-01T02:00:00Z");
+        assert_eq!(
+            restored.inbox_item(42).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        assert!(!restored.failed_issues.contains_key(&42));
+        let mut cold = test_monitor_with_prefs(IssueMonitorConfig::default(), restored.prefs());
+        cold.record_candidate(parent);
+        cold.record_merged_deliveries(&deliveries);
+        assert_eq!(
+            cold.inbox_item(42).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        println!(
+            "ISSUE6690_NORMALIZED={}",
+            serde_json::to_string(&restored.agent_status()).unwrap()
+        );
+    }
+
+    #[test]
+    fn issue_6690_previous_delivery_does_not_erase_a_failed_successor() {
+        let temp = test_home_tempdir();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        for unacked in [false, true] {
+            let deliveries = BTreeMap::from([(
+                "work/issue-42".into(),
+                merged_delivery(7, "aaa", "2026-06-26T12:00:00Z"),
+            )]);
+            let mut reader = launched_monitor(42, "tab-1::agent-1");
+            reader.record_merged_deliveries(&deliveries);
+            reader.record_merged(42);
+            let mut writer = reader.clone();
+            writer.set_gui_connected(true);
+            assert!(writer.next_launch_request("2026-06-27T00:00:00Z").is_some());
+            if !unacked {
+                writer.complete_active_launch_at(42, "tab-1::agent-2", "2026-06-27T00:00:05Z");
+            }
+            writer.record_agent_issue_failed_at(42, "current failure", "2026-06-27T00:01:00Z");
+            reader.rebase_daemon_driver_prefs(&writer.prefs());
+            reader.record_agent_issue_failed_at(42, "current failure", "2026-06-27T00:02:00Z");
+            let mut restored =
+                test_monitor_with_prefs(IssueMonitorConfig::default(), reader.prefs());
+            restored.record_candidate(issue(42));
+            restored.record_merged_deliveries(&deliveries);
+            for monitor in [&reader, &restored] {
+                let row = monitor.agent_status().inbox.remove(0);
+                assert_eq!(
+                    row.state,
+                    MonitorInboxState::AgentFailed,
+                    "unacked={unacked}"
+                );
+                assert!(!row.recoverable_merged, "unacked={unacked}");
+                assert!(monitor.failed_issues.contains_key(&42));
+            }
+        }
     }
 
     /// Issue #4477 AC-1: the delivered-but-open anomaly is read from the work

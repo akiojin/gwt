@@ -249,6 +249,21 @@ fn owner_output_coalescing_order(
             && id == previous_id
             && incarnation == previous_incarnation =>
         {
+            // A matching queue entry always discards one of these two observations.
+            // Global sequence distance is not a count of discarded output chunks.
+            tracing::debug!(
+                target: "gwt.terminal.delivery",
+                stage = "gui_output_coalesced",
+                process_id = std::process::id(),
+                project_key = context.project_key.as_str(),
+                connection_id = *connection_id,
+                pane_id = id.as_str(),
+                incarnation = *incarnation,
+                discarded_count = 1u64,
+                discarded_seq = (*seq).min(*previous_seq),
+                retained_seq = (*seq).max(*previous_seq),
+                "GUI output inbox coalesced one observation"
+            );
             Some(seq.cmp(previous_seq))
         }
         _ => None,
@@ -503,7 +518,15 @@ fn update_notice(level: &str, message: String) -> OutboundEvent {
 }
 
 fn update_elevation_notice(version: &str) -> String {
-    format!("Update v{version}: Administrator privileges required; the update stays staged. Use the update button to apply manually.")
+    let reason = gwt_core::update::load_pending_update_manifest()
+        .filter(|manifest| manifest.version == version)
+        .and_then(|manifest| {
+            std::env::current_exe().ok().and_then(|exe| {
+                gwt_core::update::prepared_payload_automatic_apply_refusal(&manifest.payload, &exe)
+            })
+        })
+        .unwrap_or_else(|| "Administrator privileges required".into());
+    format!("Update v{version}: {reason}; the update stays staged. Use the update button to apply manually.")
 }
 
 fn record_pending_update_observation(
@@ -612,6 +635,20 @@ impl BlockingTaskSpawner {
                 Ok(())
             }
         }
+    }
+}
+
+struct HookDoctorFlight {
+    in_flight: Arc<Mutex<HashSet<PathBuf>>>,
+    project_root: PathBuf,
+}
+
+impl Drop for HookDoctorFlight {
+    fn drop(&mut self) {
+        self.in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.project_root);
     }
 }
 
@@ -2005,6 +2042,7 @@ pub struct AppRuntime {
     pub(crate) project_log_scopes: HashMap<String, gwt_core::logging::ProjectLogScope>,
     pub(crate) proxy: AppEventProxy,
     pub(crate) blocking_tasks: BlockingTaskSpawner,
+    pub(crate) hook_doctor_in_flight: Arc<Mutex<HashSet<PathBuf>>>,
     pub(crate) agent_maintenance: agent_maintenance::AgentMaintenanceState,
     pub(crate) sessions_dir: PathBuf,
     pub(crate) launch_wizard_cache: LaunchWizardMemoryCache,
@@ -4898,6 +4936,7 @@ impl AppRuntime {
             project_log_scopes: HashMap::new(),
             proxy,
             blocking_tasks,
+            hook_doctor_in_flight: Default::default(),
             agent_maintenance: Default::default(),
             sessions_dir,
             launch_wizard_cache,
@@ -10898,6 +10937,73 @@ impl AppRuntime {
         generation
     }
 
+    fn spawn_hook_doctor(
+        &self,
+        context: &ProjectContext,
+        client_id: ClientId,
+        request_id: u64,
+        repair: bool,
+    ) -> Vec<OutboundEvent> {
+        let project_root = context.project_root.clone();
+        if !self
+            .hook_doctor_in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(project_root.clone())
+        {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::HookDoctor {
+                    project_root: project_root.to_string_lossy().into_owned(),
+                    request_id,
+                    report: None,
+                    error: Some("Hook audit or regeneration is already in progress for this project. Retry after it finishes.".to_string()),
+                },
+            )];
+        }
+        // Own the reservation before enqueue so a rejected or discarded task
+        // releases it as well as a completed or unwinding worker.
+        let flight = HookDoctorFlight {
+            in_flight: Arc::clone(&self.hook_doctor_in_flight),
+            project_root: project_root.clone(),
+        };
+        let proxy = self.proxy.for_project(context.clone());
+        let worker_root = project_root.clone();
+        let worker_client = client_id.clone();
+        if let Err(error) = self.blocking_tasks.try_spawn(move || {
+            let mut input = gwt::cli::hook::health::ManagedHookHealthInput::new(&worker_root);
+            // This is a project audit, not an observation of the GUI parent's
+            // agent Session or its runtime sidecar.
+            input.runtime_state_path = None;
+            let (report, error) =
+                match gwt::cli::hook::health::read_hook_doctor(&input, repair, None) {
+                    Ok(report) => (Some(report), None),
+                    Err(error) => (None, Some(error.to_string())),
+                };
+            drop(flight);
+            proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
+                worker_client,
+                BackendEvent::HookDoctor {
+                    project_root: worker_root.to_string_lossy().into_owned(),
+                    request_id,
+                    report,
+                    error,
+                },
+            )]));
+        }) {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::HookDoctor {
+                    project_root: project_root.to_string_lossy().into_owned(),
+                    request_id,
+                    report: None,
+                    error: Some(format!("Hook audit worker could not start: {error}")),
+                },
+            )];
+        }
+        Vec::new()
+    }
+
     fn spawn_agent_backend_connection_probe(
         &mut self,
         client_id: ClientId,
@@ -11241,6 +11347,15 @@ impl AppRuntime {
                     self.update_settings_event(None),
                 )]
             }
+            FrontendEvent::GetHookDoctor { request_id, .. } => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::HookDoctor {
+                    project_root: String::new(),
+                    request_id,
+                    report: None,
+                    error: Some("Open a project to audit managed hooks.".to_string()),
+                },
+            )],
             FrontendEvent::GetSystemSettings => self.system_settings_get_events(client_id),
             FrontendEvent::GetBoardAuthStatus => self.board_auth_status_events(client_id, None),
             FrontendEvent::BoardProviderSignIn { provider } => {
@@ -12425,6 +12540,9 @@ impl AppRuntime {
                 &client_id,
                 self.update_settings_event(Some(&context.project_root)),
             )],
+            FrontendEvent::GetHookDoctor { request_id, repair } => {
+                self.spawn_hook_doctor(context, client_id, request_id, repair)
+            }
             FrontendEvent::GetSystemSettings => self.system_settings_get_events(client_id),
             FrontendEvent::GetBoardAuthStatus => self.board_auth_status_events(client_id, None),
             FrontendEvent::BoardProviderSignIn { provider } => {
@@ -13920,6 +14038,15 @@ impl AppRuntime {
         if !changed {
             return Vec::new();
         }
+        tracing::debug!(
+            target: "gwt.terminal.delivery",
+            stage = "owner_connection",
+            process_id = std::process::id(),
+            project_key = context.project_key.as_str(),
+            connection_id,
+            state = ?health.state,
+            "project owner connection changed"
+        );
         let mut events = vec![
             OutboundEvent::project(
                 context.project_key.clone(),
@@ -14246,15 +14373,17 @@ impl AppRuntime {
         };
         match event {
             OwnerEvent::Output {
-                id,
+                id: owner_pane_id,
                 incarnation,
                 data,
                 seq,
+                previous_seq,
                 screen,
                 screen_ansi,
                 screen_seq,
             } => {
-                let Some(id) = self.window_id_for_owner_pane(context, identity, &id, incarnation)
+                let Some(id) =
+                    self.window_id_for_owner_pane(context, identity, &owner_pane_id, incarnation)
                 else {
                     return Vec::new();
                 };
@@ -14262,7 +14391,31 @@ impl AppRuntime {
                 if seq <= runtime.output_seq {
                     return Vec::new();
                 }
-                let gap = seq != runtime.output_seq.saturating_add(1);
+                // Positions are process-wide, so another pane may legitimately
+                // occupy every numerical position between these two outputs.
+                let gap = previous_seq != Some(runtime.output_seq);
+                if gap {
+                    tracing::debug!(
+                        target: "gwt.terminal.delivery",
+                        stage = "output_gap",
+                        process_id = std::process::id(),
+                        project_key = context.project_key.as_str(),
+                        connection_id,
+                        pane_id = owner_pane_id.as_str(),
+                        window_id = id.as_str(),
+                        incarnation,
+                        accepted_seq = runtime.output_seq,
+                        previous_seq = ?previous_seq,
+                        seq,
+                        screen_seq,
+                        repair = if screen_seq.max(runtime.screen_seq) < seq {
+                            "request_snapshot"
+                        } else {
+                            "inline_snapshot"
+                        },
+                        "owner output predecessor requires snapshot repair"
+                    );
+                }
                 // Coalescing may omit deltas, but the owner carries its full
                 // parsed screen with every output event. Never forward a
                 // surviving delta across a gap as though it were contiguous.

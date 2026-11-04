@@ -837,6 +837,30 @@ test("Workspace detail surfaces Managed Hooks health without raw JSON dumps", ()
   assert.match(hookSection.textContent, /workflow-policy/);
   assert.match(hookSection.textContent, /1250ms/);
   assert.match(hookSection.textContent, /Stop/);
+  assert.deepEqual(Array.from(hookSection.querySelectorAll("dd"), node => node.textContent), [
+    "Needs attention", "PreToolUse", "2026-06-17T00:00:00Z", "Proposal A", "Implement hook health first",
+  ]);
+  assert.deepEqual(Array.from(hookSection.querySelectorAll("p"), node => node.textContent), ["Choose the repair path"]);
+});
+
+test("Work detail renders all six hook health states without inventing pending work", () => {
+  for (const [status, label] of [
+    ["ready", "Ready"],
+    ["needs_attention", "Needs attention"],
+    ["self_healed", "Self healed"],
+    ["degraded", "Degraded"],
+    ["inactive", "Inactive"],
+    ["waiting_for_first_hook_event", "Waiting for first hook event"],
+  ]) {
+    const projection = sampleProjection();
+    projection.works[0].managed_hook_health = { status };
+    const fixture = createFixture();
+    createSurface(fixture, projection).renderInto(fixture.body, fixture.windowData.id);
+    const section = fixture.body.querySelector('[data-section="managed-hooks"]');
+    assert.equal(section.dataset.status, status);
+    assert.equal(section.querySelector("dd").textContent, label);
+    assert.deepEqual(Array.from(section.querySelectorAll("dt"), node => node.textContent), ["Status"]);
+  }
 });
 
 test("Workspace detail renders Sessions under a Work, highlighting the active one (SPEC-2359)", () => {

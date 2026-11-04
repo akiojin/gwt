@@ -1194,6 +1194,159 @@ fn runtime_hook_coordination_event(session_id: &str) -> gwt::RuntimeHookEvent {
     }
 }
 
+#[test]
+fn hook_center_uses_connection_project_and_preserves_failed_repair() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let project_a = temp.path().join("a");
+    let project_b = temp.path().join("b");
+    for root in [&project_a, &project_b] {
+        fs::create_dir_all(root).unwrap();
+        init_repo(root);
+    }
+    let config = project_b.join(".claude/settings.local.json");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::write(&config, [0xff]).unwrap();
+    let original = fs::read(&config).unwrap();
+    let tabs = vec![
+        sample_project_tab("a", "A", project_a.clone(), ProjectKind::Git, &[]),
+        sample_project_tab("b", "B", project_b.clone(), ProjectKind::Git, &[]),
+    ];
+    let (mut runtime, events) = sample_runtime_with_events(temp.path(), tabs, Some("a"));
+    let context = runtime.project_context_for_root(&project_b).unwrap();
+    let other_context = runtime.project_context_for_root(&project_a).unwrap();
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let request = |request_id, repair| {
+        serde_json::from_value(serde_json::json!({
+            "kind": "get_hook_doctor", "request_id": request_id, "repair": repair
+        }))
+        .expect("Hook Center request is supported")
+    };
+    let rejected = |reply: &[OutboundEvent], client_id: &str, request_id, error: &str| {
+        assert_eq!(reply.len(), 1, "a rejected request receives its own reply");
+        assert!(matches!(&reply[0].target, DispatchTarget::Client(id) if id == client_id));
+        let wire = serde_json::to_value(&reply[0].event).unwrap();
+        assert_eq!(wire["project_root"], project_b.to_string_lossy().as_ref());
+        assert_eq!(wire["request_id"], request_id);
+        assert!(wire["report"].is_null());
+        assert!(wire["error"].as_str().unwrap().contains(error));
+    };
+    for (request_id, repair) in [(193501, false), (193502, true)] {
+        events.lock().unwrap().clear();
+        let immediate = runtime.handle_frontend_event_for_project(
+            &context,
+            "client-b".to_string(),
+            request(request_id, repair),
+        );
+        assert!(immediate.is_empty(), "Doctor runs off the UI event loop");
+        let busy = runtime.handle_frontend_event_for_project(
+            &context,
+            "client-busy".to_string(),
+            request(request_id + 10, repair),
+        );
+        rejected(&busy, "client-busy", request_id + 10, "already in progress");
+        if repair {
+            let read_during_repair = runtime.handle_frontend_event_for_project(
+                &context,
+                "client-b".to_string(),
+                request(193520, false),
+            );
+            rejected(
+                &read_during_repair,
+                "client-b",
+                193520,
+                "already in progress",
+            );
+        }
+        assert_eq!(tasks.lock().unwrap().len(), 1, "one worker per project");
+        if !repair {
+            assert!(runtime
+                .handle_frontend_event_for_project(
+                    &other_context,
+                    "client-a".to_string(),
+                    request(193599, false),
+                )
+                .is_empty());
+            assert_eq!(
+                tasks.lock().unwrap().len(),
+                2,
+                "other projects remain available"
+            );
+        }
+        drain_queued_blocking_tasks(&tasks);
+        let recorded = events.lock().unwrap();
+        let reply = recorded.iter().find_map(|event| {
+            let UserEvent::Dispatch(dispatched) = recorded_project_payload(event) else {
+                return None;
+            };
+            dispatched.iter().find_map(|outbound| {
+                let wire = serde_json::to_value(&outbound.event).unwrap();
+                (wire["kind"] == "hook_doctor" && wire["request_id"] == request_id).then(|| {
+                    assert!(matches!(&outbound.target, DispatchTarget::Client(id) if id == "client-b"));
+                    wire
+                })
+            })
+        }).expect("correlated Doctor reply");
+        assert_eq!(reply["request_id"], request_id);
+        assert_eq!(reply["project_root"], project_b.to_string_lossy().as_ref());
+        if repair {
+            assert!(reply["report"].is_null());
+            assert!(reply["error"]
+                .as_str()
+                .is_some_and(|error| !error.is_empty()));
+        } else {
+            assert!(reply["error"].is_null());
+            assert_eq!(
+                reply["report"]["configuration_audit"]["asset_root"],
+                project_b.to_string_lossy().as_ref()
+            );
+            assert_eq!(
+                reply["report"]["configuration_audit"]["configs"][0]["state"],
+                "unreadable"
+            );
+            assert!(reply["report"]["repair"].is_null());
+        }
+        assert_eq!(fs::read(&config).unwrap(), original);
+        assert!(
+            !project_a.join(".claude").exists(),
+            "active project A is untouched"
+        );
+    }
+    runtime.blocking_tasks = BlockingTaskSpawner::failing("worker unavailable");
+    let failed = runtime.handle_frontend_event_for_project(
+        &context,
+        "client-b".to_string(),
+        request(193530, false),
+    );
+    rejected(&failed, "client-b", 193530, "worker unavailable");
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    assert!(
+        runtime
+            .handle_frontend_event_for_project(
+                &context,
+                "client-b".to_string(),
+                request(193531, false),
+            )
+            .is_empty(),
+        "failed spawn must release the project"
+    );
+    tasks.lock().unwrap().clear();
+    assert!(
+        runtime
+            .handle_frontend_event_for_project(
+                &context,
+                "client-b".to_string(),
+                request(193532, false),
+            )
+            .is_empty(),
+        "dropping a queued worker must release the project"
+    );
+    assert_eq!(tasks.lock().unwrap().len(), 1);
+    drain_queued_blocking_tasks(&tasks);
+}
+
 pub(super) fn sample_runtime(
     temp_root: &Path,
     tabs: Vec<ProjectTabRuntime>,
@@ -1810,6 +1963,7 @@ fn sample_runtime_with_events(
         project_log_scopes: HashMap::new(),
         proxy,
         blocking_tasks,
+        hook_doctor_in_flight: Default::default(),
         agent_maintenance: Default::default(),
         sessions_dir,
         launch_wizard_cache,
@@ -11261,27 +11415,31 @@ pub(super) fn attach_live_pm_pane(runtime: &mut AppRuntime, window_id: &str) -> 
     state.project_owner_connection_id = 1;
     state.project_owner_identity = Some(identity);
     let readiness_snapshot = owner_fixture_block_on(async {
+        let mut last_error = None;
         // test-hygiene: allow-wall-clock-deadline The native provider's real output establishes readiness; this only bounds an OS/IPC hang.
         tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
             loop {
-                let snapshot = owner
+                match owner
                     .command(OwnerCommand::Snapshot {
                         id: owner_id.clone(),
                         incarnation,
                     })
                     .await
-                    .expect("actual native PM snapshot");
-                if snapshot["screen"]
-                    .as_str()
-                    .is_some_and(|screen| screen.contains("GWT_PM_FIXTURE_READY"))
                 {
-                    break snapshot;
+                    Ok(snapshot) if snapshot["screen"].as_str()
+                        .is_some_and(|screen| screen.contains("GWT_PM_FIXTURE_READY")) => {
+                        break snapshot;
+                    }
+                    Err(error) => last_error = Some(error),
+                    _ => {}
                 }
-                tokio::task::yield_now().await;
+                // Each private call uses a fresh connection. Busy-polling can
+                // exhaust Windows ephemeral ports before the provider starts.
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
         })
         .await
-        .expect("actual native PM provider must finish startup")
+        .unwrap_or_else(|error| panic!("actual native PM provider must finish startup: {error}; last snapshot error: {last_error:?}"))
     });
     // The sample GUI cache starts in temp/sessions; the physical owner uses
     // the real isolated HOME namespace, including this Host's runtime PID.

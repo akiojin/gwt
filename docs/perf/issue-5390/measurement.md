@@ -3,6 +3,10 @@
 This is a gwt runtime performance fix. It applies to every project opened with
 gwt. The parent performance family remains open.
 
+The current delivery is the [backend-only slice](backend-delivery.md). UI
+experiments below remain historical results of their named commits; their
+source is preserved at `0df66c0e1` for later headed verification and delivery.
+
 ## Observed production context
 
 The unchanged installed v9.145.0 process was PID 33132, started at
@@ -373,3 +377,248 @@ verification, headed dark/light checks, required CI and base inclusion belong
 to the delivery record. The initial discovery fanout timeout, installed
 rollout, PM20s availability, parent CPU/RSS and real fleet 60-minute/four-hour
 acceptance remain unproven.
+
+## Empty execution observation (2026-11-01)
+
+`read_execution_observations` used to collect the Session/OS inventory and
+Git worktree list even when its input contained no Issues. Its eventual map
+was always empty. Return that empty map before collecting those inputs; keep
+the existing timing, nonempty diagnosis and caller's process-held-set update.
+No deadline, cache, scheduler, schema or effect authority changes.
+
+The focused regression failed with one Git spawn versus zero expected, then
+passed after the three-line guard. Existing stopped-holder/reaper recovery
+and blocked/dead-host release regressions also passed. The test directly
+counts Git; source review establishes the census is skipped before the worker
+is constructed.
+
+The identical temporary native probe called the read-only function twelve
+times against the real `E:/llmlb` and Session store. Before: 3463.9462ms total
+wall time and 3.40625 probe CPU seconds. After: 0.0407ms and no observed CPU
+ticks. The first before call was 938.4819ms; subsequent calls benefited from
+warm process-local caches. These are probe-process measurements, excluding
+child Git CPU, startup and the rest of the scan. Zero ticks means below the
+observed resolution of `GetProcessTimes` for this short loop.
+
+`empty-execution-observation.json` preserves the probe source, identical source
+hash, executable hashes, per-call results, RED/GREEN output and limitations.
+The baseline executable preceded the test-only addition; its recorded worktree
+source hash includes that regression. The fixed library adds the guard.
+The temporary example was removed after measurement.
+
+Installed PID 38952 still consumed 51.265625 CPU seconds over 30.0667689 wall
+seconds, about 1.705 cores. Sampled native stacks had no product symbols.
+Recent execution-observation logs mix projects and daemon processes, omit
+owner counts, and include nested stages. Neither those wall times nor this
+empty-input probe proves a reduction in production GUI CPU or fleet budgets.
+
+The managed-browser preflight returned `unknown` with `ledger_unavailable`
+and `completion_missing` despite a current context and converged target.
+Feedback Issue #6635 records the complete output. PM ruling `db103f30` directs
+backend canonical verification first, followed by the original headed gate
+after Issue #6622 is delivered. Parent AC-1/2/3 and overall delivery remain
+unproven; this record does not replace headed, required CI or base inclusion.
+
+### Resume checkpoint (2026-11-02)
+
+The previous four commits were preserved and merged with fetched develop at
+`ef7fdfe67d3a266ee8a0a3cafd7e137f935b6308`, including the delivered
+Issue #6622 source. The current managed caller now has a normal hook completion.
+Checkout `hook.doctor` reports current/converged/normal, but still returns
+`unknown` with only `ledger_unavailable`. Host diagnostics identify September
+corruption rows with November 2 read-time timestamps. This separate reader
+problem is reported to Issue #1935 and existing feedback Issue #6635; no
+ledger, completion, authority or preflight condition was changed.
+
+The existing Windows functional runner used a fabricated missing runtime and
+legacy health checks. It now runs typed managed-browser doctor checks before
+launch and after readiness. Only doctor children receive the original caller
+environment; GUI, daemon and Playwright children retain their isolation.
+Before/post preflight observations are saved without source credentials.
+The focused regression first proved missing typed evidence was accepted.
+Review also exposed PowerShell string/number and case coercion; its separate
+RED accepted a string schema. The final direct test accepts normal evidence
+and rejects seven invalid observations. Independent final review found no
+blocking issues. The twelve-Agent workload and owned-PID cleanup are retained.
+
+Canonical record `vrr-988afe482cd64d438ac4c203259836ec` belongs to the merge
+head above plus the then-uncommitted runner, before the final coercion/depth
+review fixes. Record-file SHA256:
+`6595ddecf8fdd4a1bef00c605ff2eded4f34ba5fb5a713c36ab8e52bbca106bb`.
+Ten commands passed, including strict workspace Clippy, the three selected
+regressions, hygiene, both checkout binaries and driver restoration. Before
+the headed command could start, canonical measurement admission refused:
+`ENVIRONMENT_INCOMPATIBLE: PID 37900 has unregistered ancestor gwt PID 22480; restart that GUI with the updated runtime before measuring`.
+The command exited 125 and two later commands were skipped. Overall is not
+PASS. This is environment incompatibility, with zero measured headed tests;
+the target runner did not launch a browser or GUI. The shared ancestor was
+not stopped, registered or bypassed. The later runner fixes passed their
+direct contract test and diff check, but still need fresh canonical evidence.
+
+EO3/EO4 remain incomplete pending normal runtime recovery, a successful
+current-source preflight, actual headed dark/light checks, final-head
+verification, Ready PR, required CI/coverage and fetched base inclusion.
+Coverage is unmeasured for this slice; it is not a threshold failure.
+User Verification Result: n/a (autonomous).
+Agent Visual Check: not run (canonical environment admission refused).
+
+### Private RPC cause slice (2026-11-02)
+
+The actual private client reproduced a shared-connection lifetime failure:
+dropping runtime A after another caller's request reused its idle connection
+aborted that caller's send. The single regression was RED with the generic
+private command send error, then GREEN after disabling idle connection
+retention for this client. Existing project-runtime tests passed 56/56.
+The same inert native fixture with 1/2/12 concurrent command callers changed
+from one failed reused connection in every case to zero failed requests,
+without increasing server request counts. These are not genuine Agent counts.
+The backend-first canonical record `vrr-d833d31fddff43a7bb2e36aad4cf2f13`
+passed 13/13 commands, including 101 Rust tests and strict workspace Clippy.
+It covers the dirty fix before this checkpoint commit, with no headed passes;
+the current doctor still reports `ledger_unavailable`.
+See [the scoped measurements and limits](rpc-runtime-lifetime.md) and
+[the evidence artifact](rpc-runtime-lifetime.json). Historical notifications,
+installed rollout, original EO3/EO4, final verification and delivery remain
+unproven; this controlled repair is not a parent CPU/fleet acceptance result.
+
+### Works telemetry layout slice (2026-11-02)
+
+Telemetry updates forced native terminal rehosting and persisted layout even
+without a host transition. The telemetry caller now uses the existing render
+path without forced rehosting; ordinary host synchronization keeps its default.
+The same finite module probe's 20-update burst changes from one layout and
+two mount calls to zero, with one frame and no pending work in both cases.
+A single regression was RED, then all 105 related tests passed. These are
+fixture callback counts, not measured Chromium/PTY traffic or CPU improvement.
+See [the preserved observations and limits](https://github.com/akiojin/gwt/blob/0df66c0e18be4622519b8d194b23771eb4520f84/docs/perf/issue-5390/ui-telemetry-fit.md) and
+[the preserved evidence artifact](https://github.com/akiojin/gwt/blob/0df66c0e18be4622519b8d194b23771eb4520f84/docs/perf/issue-5390/ui-telemetry-fit.json). Mac scroll/typing recovery,
+actual headed acceptance and delivery remain unverified.
+The intermediate native canonical record
+`vrr-0bc801c3c9ae4d9ca9ed89cbe58947eb` passed 14/14 commands, including
+1,716 frontend and 101 Rust tests. Its earlier WSL-runner FAIL is retained.
+Neither record establishes final-head, actual headed or Mac acceptance.
+
+### Initial linked-PR page fairness (2026-11-04)
+
+The current bulk timeline reader drained every continuation of the first
+25 Issues before starting the next group. A deep early timeline could therefore
+leave unrelated later Issues unobserved inside the existing 15-second readback
+budget. The installed log recorded `linked PR discovery incomplete`, a process
+deadline error, and `completed_issues=48` at 2026-11-04T06:57:04.059546500+09:00
+and 06:57:38.604358300+09:00. These two observations identify the linked-discovery
+boundary; they do not attribute all 375 open-pr-readback errors observed since
+18:00 UTC to this scheduling mechanism.
+
+The reader now queues every initial group before incomplete continuations,
+retaining each group's existing cursors, seen-cursor set, and accumulated nodes.
+It keeps complete-only publication, strict errors, all-page retrieval, the PR
+body closing-keyword fallback for develop, and the existing deadline checks.
+No cache, parallel requests, retry, or timeout extension was introduced.
+
+The deterministic 26-Issue fixture gives Issue 1 a continuation that fails;
+Issues 2 through 26 complete on their initial page. With baseline production
+from `a2ac1f13f19d35cc94390058b3eb2a4c5674c53f` and only the new regression,
+the test failed because Issue 26 was not observed. The same test then passed
+after the scheduling change:
+
+```json
+{
+  "candidate_count": 26,
+  "before": { "completed_issue_ids": [2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25], "queries": 2 },
+  "after": { "completed_issue_ids": [2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26], "queries": 3 },
+  "original_continuation_error_preserved": true,
+  "unfinished_issue_1_published": false
+}
+```
+
+The baseline related selection passed 12 tests. The new regression was RED
+(0 pass, 1 fail), followed by GREEN for the same related selection (13 pass,
+0 fail). Commands used the checkout's isolated
+`target/ui-perf-20261103/cargo`: `cargo test -p gwt --lib linked_pr` and,
+for RED, the `linked_pr_bulk_reads_later_initial_chunks` filter with
+`-- --nocapture`. Original RED/GREEN output remains in the local
+`gwt-5390-linked-first-{red,green}.log` files. Independent actual-diff review
+found no blocking issue. Final-head canonical and CI evidence belongs to the PR.
+
+The extra query before failure performs the previously blocked useful initial
+read; this is a partial-freshness improvement, not a query-count reduction.
+For stable successful responses the same page requests are still necessary;
+the existing 30-Issue single-page test retains its two-query assertion.
+A later initial-page failure can now precede an earlier continuation's
+completion, so partial results are not always a superset of the old schedule.
+More unfinished groups can retain raw bodies simultaneously. Cross-group
+duplicate input numbers can also change final insertion order; actual Monitor
+candidate sets contain unique Issue numbers.
+
+This slice does not establish a shorter successful total duration, lower RSS,
+resolution of every installed timeout, or complete 15-second fanout. Parent
+AC-1/2/3, installed rollout, real eight-Agent 60-minute/four-hour operation,
+whole-GUI CPU/RSS and Mac acceptance remain unproven. The earlier UI slice was
+delivered separately through PR #6705.
+
+User Verification Result: n/a (autonomous).
+Agent Visual Check: n/a (no UI surface).
+
+The first canonical attempt, `vrr-a798ccdc2f1e4de8970f91d2e68368e4`, passed
+rustc and formatting but could not admit Clippy: compiler TEMP was on C,
+with a 99,961,379,020-byte free-space floor and 28,802,355,200 bytes available.
+It was cancelled through the owning operation and remains Interrupted, not PASS.
+Moving compiler TEMP/TMP to D exposed one existing HOME fixture that followed
+that redirected TEMP: the 14-case linked/closing selection passed 13 and failed
+`issue_3924_completion_batch_failure_is_recorded_once` at the OS-temp HOME guard.
+Only that test's Windows TempDir placement now uses LocalAppData/Temp; the
+guard, all assertions, non-Windows placement and worker production code remain
+unchanged. The same selection passed all 14 with D compiler TEMP afterwards.
+Independent review found no blocking issue. This proves the tested placement,
+not every USERPROFILE override or LocalAppData redirection. The complete
+five-command canonical matrix must run fresh for the final committed head.
+
+The first PR CI run at `4060520e4` stopped in
+[Coverage shard 3](https://github.com/akiojin/gwt/actions/runs/41736787341/job/126267934629):
+2,073 tests passed and the existing
+`app_runtime_issue_monitor_auto_launch_uses_last_settings_runtime_target`
+timed out at 120 seconds. No coverage was exported. The other CI checks
+completed successfully. This fixture uses a cache-only Monitor scan override,
+which does not call the modified bulk reader; the Windows HOME change is not
+compiled into that Linux run.
+
+The current-source Linux exact case passed in 2.29 seconds, its instrumented
+coverage-profile run passed in 5.638 seconds, and three owned debugger runs
+completed normally. These did not reproduce the original stall. Local coverage
+retained line-table debug information, whereas CI uses debug level zero, and
+the local case did not reproduce the concurrent full-shard workload. An initial
+short exact filter selected zero tests and is excluded from evidence.
+
+Only this existing test now prints fixed phase names around owner startup,
+launch preparation, Close and shutdown. The markers expose no dynamic content
+and change no helper, assertion, timeout, retry or product code. `closed` means
+the Close result returned, and `stopped` means shutdown returned; the original
+subsequent assertions still determine success. The original timeout root cause
+remains open as T-5390-LF6 in the parent. A new passing head or these diagnostics
+alone must not be reported as its repair. Fresh canonical and mandatory CI
+evidence determine delivery of this limited FIFO/observability slice.
+The existing exact Linux case with these markers passed in 5.04 seconds and
+observed all nine phases through `stopped`; all original assertions passed.
+
+### Successful linked-PR chunk interleaving (LF8, 2026-11-04)
+
+The failed-continuation fixture above has no initial PR nodes, while the
+existing successful pagination fixture stays within one chunk. Neither proves
+that accumulated nodes survive processing a different chunk. One adjacent
+26-candidate regression now fixes that gap: Issue 1 starts with closing PR 101,
+Issue 26 completes in the second query, and Issue 1's continuation adds closing
+PR 102 in the third query. It asserts the query order and cursor, complete-only
+publication of Issue 1 exactly once with both PRs, and agreement with the
+returned results for all 26 Issues.
+
+Before the addition, `cargo test -p gwt --lib --all-features linked_pr` passed
+all 13 selected existing tests. Afterwards,
+`cargo nextest run -p gwt --lib --all-features -E "test(linked_pr) | test(body_closes_issue)" --profile gwt-verify --retries 0`
+passed all 15 selected tests, including the new case. Independent read-only
+diff review found no blocking issue. Final-head canonical and CI evidence
+belongs to this follow-up PR.
+
+This is test coverage for the delivered FIFO reader, with no product change,
+new helper, timer or environment mutation. The original timeout cause (LF6),
+raw-node residency measurement (LF7), parent AC-1/2/3 and installed/real-fleet
+performance remain unproven. No CPU, RSS or elapsed-time improvement is claimed.

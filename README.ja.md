@@ -373,6 +373,20 @@ workflow のファイル名を許可します。
 "akiojin/gwt" = ["prepare-release.yml"]
 ```
 
+リリース用の許可は、登録済み PM が `actions.release_policy.status` と
+`actions.release_policy.add` で設定できます。先に status を読み、UUID の
+`request_id`、現在の `expected_token`、短い `reason`、exact scope の
+`instruction_id` または native `approval_id` を指定します。現在のリポジトリの
+`prepare-release.yml` だけを追加し、既存設定を保持します。検証済み checkout CLI は
+アプリ更新前でも PM の既存 Host bridge を使用でき、代替の認証情報は不要です。
+稼働版が操作を認識しない場合は `pm.capabilities` を確認してください。
+
+完了した同じ要求の再送は、変更を再適用せず receipt を返します。結果不明の場合は
+status を読み、要求を保全して再送しないでください。
+`actions.release_policy.rollback` は新しい要求と scoped 権限に加え、成功した add の
+request_id を `added_by` に指定します。その要求が追加し、記録した変更後の状態が
+維持されている許可だけを取り消せます。許可設定と workflow の送信は別操作です。
+
 ```bash
 gwtd <<'JSON'
 {"schema_version":1,"operation":"actions.dispatch","params":{"workflow":"prepare-release.yml","ref":"develop","inputs":{"bump":"auto"}}}
@@ -511,6 +525,9 @@ PowerShell 7 を選択できます。Docker 起動では引き続きコンテナ
 できます。Windows では `Ctrl+C` で現在の選択をコピーして選択を解除します。
 選択がない場合、`Ctrl+C` は実行中のターミナルプロセス向けの割り込みのままです。
 Linux では `Ctrl+Shift+C` でも現在の選択をコピーできます。
+エージェントがマウスを追跡している場合も、ホイールで保持済みの履歴をスクロールできます。
+マウス追跡中のアプリでは `Shift+drag`（macOS は `Option+drag`）で範囲選択できます。
+ターミナルにマウスを合わせると、この修飾キーの案内も表示されます。
 
 ## Issue サーフェスと Issue Monitor
 
@@ -1265,6 +1282,17 @@ Managed hooks は user hook を保持しながら、Agent state、workflow guard
 Board reminders、discussion/plan/build Stop checks、coordination-event summaries
 を追加します。
 
+**Settings → Project → Hook Center** では、選択したプロジェクトの hook 設定、
+バイナリの fallback、Codex の探索・信頼状態、任意の profile 出力先を監査できます。
+**Regenerate managed hooks** は既存の managed hook だけを修復し、user hook を保持します。
+信頼登録と新しい Agent session の開始は別の操作であり、実行中の session は更新しません。
+バイナリ観測が Unknown の場合も、信頼済み・hook 実行成功とは扱いません。
+不正または読み取り不能の設定を検出した場合は、表示されたファイルを修正し、
+監査を更新するまで再生成は無効になります。
+修復は接続中のプロジェクトへだけ送信し、再接続後に自動再送しません。
+修復の応答を失った場合は結果を Unknown として保持し、監査の更新だけでは完了扱いにしません。
+最新の監査と前回の修復結果は別々に表示します。
+
 agent の停止や pane close が Board の未読を報告した場合は、同じ agent session で
 JSON operation `board.show` に `params:{"all":true}` を渡して本文を読み、再試行します。
 自動 reminder の注入は読了として扱われません。実装 agent の判断依頼は `agent:pm`
@@ -1835,7 +1863,9 @@ JSON
   `issue.spec.repair` は二重マーカーを修復します。古い孤立 artifact が新しい内容へ
   引き継がれていることを確認した場合は、修復の `archive_comments` にコメント ID を
   指定できます（例: `{"number":1784,"archive_comments":[12345]}`）。本文を保存し、
-  外側マーカーだけを退役します。索引が参照するコメントは拒否します。
+  外側マーカーだけを退役します。全 part が揃った孤立グループでも、一部しか残って
+  いないグループでも、`part=N/M` マーカーを扱えます。索引が参照するコメントは
+  拒否します。同じ ID で再試行すると、退役済みのコメントへの書き込みを省略します。
   その後 `issue.spec.lint` を再実行し、索引の健全性を確認してください。
 
 ```bash
@@ -1858,6 +1888,12 @@ JSON
 Logs サーフェスの **Project** でそのプロジェクトのイベント、**Global** で
 起動時およびプロジェクトに属さない診断を表示します。プロジェクトを切り替えても、
 バックグラウンド処理のログは発生元プロジェクトに残ります。
+
+診断ログは既定で7日分を保持し、各ログディレクトリの
+`gwt.log.YYYY-MM-DD` ファイルの合計を2 GiBに制限します。
+`ui-trace-*.jsonl` などの他のファイルは、この上限の対象外です。
+古い日付のファイルから削除し、当日分だけで上限に達した場合は、
+次の完全なログ行から当日ファイルへの記録を再開します。
 
 - アプリログ:
   `~/.gwt/projects/<repo-hash>/logs/gwt.log.YYYY-MM-DD`

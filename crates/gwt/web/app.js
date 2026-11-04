@@ -900,10 +900,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           connectionOverlay.reportInputDropped();
           return "unavailable";
         }
-        // Revisioned names and switches belong to this live connection.
+        // These explicit writes belong to this live connection.
         // Never replay an unacknowledged write after reconnect.
         if ((message.kind === "agent_switch" && message.action.kind !== "read") ||
-            (message.kind === "agent_roster" && message.action.kind === "rename")) {
+            (message.kind === "agent_roster" && message.action.kind === "rename") ||
+            (message.kind === "get_hook_doctor" && message.repair === true)) {
           if (!socket || socket.readyState !== WebSocket.OPEN || socketProjectKey !== activeProjectKey()) return "unavailable";
           try { socket.send(JSON.stringify(message)); return "sent"; } catch (_err) { return "unavailable"; }
         }
@@ -1315,7 +1316,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         // every cleanup event emitted while it was away. Re-subscribe to the
         // operations it still shows as running.
         if (recoverSnapshots === true) resyncSocketSurfaces();
-        else if (socketProjectKey) send({ kind: "get_system_settings" });
+        else if (socketProjectKey) {
+          send({ kind: "get_system_settings" });
+          resyncHookDoctor();
+        }
         syncRunningBranchCleanups();
         requestVisiblePmReports(true);
         requestSupportedAgentRefresh();
@@ -1792,6 +1796,18 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
               active_tab_id: null,
               recent_projects: [],
             });
+            // Runtime snapshots observe unmounted windows too. Reconcile
+            // attention against the full catalog, never DOM membership.
+            const currentWindowIds = allProjectWindowIdSet();
+            for (const windowId of windowRuntimeStateMap.keys()) {
+              if (currentWindowIds.has(windowId)) continue;
+              agentAttentionToaster.forgetWindow(windowId);
+              alertsToasts.dismiss(`attention-${windowId}`);
+              windowRuntimeStateMap.delete(windowId);
+              windowRuntimeStateSinceMap.delete(windowId);
+              detailMap.delete(windowId);
+              renderedRuntimeStatusKeys.delete(windowId);
+            }
             // Rebind before rendering can emit requests for the new project.
             connectSocket();
             if (incomingRuntimeStatus) {
@@ -2957,6 +2973,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         options = {},
       ) {
         const readOnly = options.readOnly === true;
+        terminalContainer.title =
+          "Scroll to review history. Hold Shift+drag to select text (Option+drag on macOS).";
         const copyCleanup = installTerminalCopyHandlers(windowId, terminalContainer, terminal);
         const imagePasteCleanup = readOnly
           ? noopCleanup
@@ -3070,6 +3088,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           fontSize: 14,
           lineHeight: isBlinkBrowser() ? 1.35 : 1.3,
           scrollback: 5000,
+          macOptionClickForcesSelection: true,
           // SPEC-3671 FR-008.
           disableStdin: options.readOnly === true,
         });
@@ -4375,6 +4394,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // document-level <select> guard listeners, wired through this
       // factory.
       const {
+        applyHookDoctorEvent,
         applyGlobalUpdateSettings,
         applyIssueSettingsStatus,
         applyIssueMonitorProfiles,
@@ -4390,6 +4410,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         applySupportedAgentList,
         applySupportedAgentMaintenance,
         requestSupportedAgentRefresh,
+        resyncHookDoctor,
         resyncSettings,
         renderSettingsWindow,
         renderSettingsAgentList,
@@ -4616,10 +4637,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
                     detailMap.delete(windowId);
                     windowRuntimeStateMap.delete(windowId);
                     windowRuntimeStateSinceMap.delete(windowId);
-                    agentAttentionToaster.forgetWindow(windowId);
-                    // SPEC #3206: dismiss this window's attention toast from the shared
-                    // alerts stack so a sticky error toast never orphans a gone window.
-                    alertsToasts.dismiss(`attention-${windowId}`);
                     renderedWindowElementKeys.delete(windowId);
                     renderedRuntimeStatusKeys.delete(windowId);
                     renderedAgentKanbanBodyKeys.delete(windowId);
@@ -5336,6 +5353,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           case "update_settings":
             applyGlobalUpdateSettings(event);
             break;
+          case "hook_doctor":
+            applyHookDoctorEvent(event);
+            break;
           case "system_settings":
           case "system_settings_updated":
             applySystemSettingsEvent(event);
@@ -5644,7 +5664,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       });
       agentsSurface.element.hidden = true;
       document.querySelector(".surface-area").appendChild(agentsSurface.element);
-      worksTelemetryModel.subscribeFrame(state => state, () => worksSurface.sync());
+      // Telemetry updates keep the current native terminal host.
+      worksTelemetryModel.subscribeFrame(state => state, () => worksSurface.sync(false));
       splitSurfaces = createSplitSurfaces({
         document,
 

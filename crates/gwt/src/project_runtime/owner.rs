@@ -60,6 +60,7 @@ pub(crate) struct WindowRuntime {
     detail: Option<String>,
     ordinary_error_detail: Option<super::runtime_events::OrdinaryAgentErrorDetail>,
     last_output_at: Option<String>,
+    last_published_output_seq: u64,
     pub(crate) pty: Arc<PtyHandle>,
     pub(crate) incarnation: u64,
     pub(crate) pane: Arc<Mutex<Pane>>,
@@ -2044,6 +2045,7 @@ impl OwnerState {
                 detail: None,
                 ordinary_error_detail: None,
                 last_output_at: None,
+                last_published_output_seq: 0,
                 pty,
                 pane,
                 output_thread: Some(output_thread),
@@ -9414,14 +9416,13 @@ impl OwnerState {
                 screen,
                 screen_ansi,
             } if self.exact(&id, incarnation).is_ok() => {
-                self.runtimes
-                    .get_mut(&id)
-                    .expect("exact output pane")
-                    .output_bytes = self.runtimes[&id]
-                    .output_bytes
-                    .saturating_add(data.len() as u64);
-                self.runtimes.get_mut(&id).unwrap().last_output_at =
-                    Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+                let previous_seq = {
+                    let runtime = self.runtimes.get_mut(&id).expect("exact output pane");
+                    runtime.output_bytes = runtime.output_bytes.saturating_add(data.len() as u64);
+                    runtime.last_output_at =
+                        Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+                    std::mem::replace(&mut runtime.last_published_output_seq, seq)
+                };
                 use base64::Engine;
                 self.dispatch_project(
                     crate::BackendEvent::TerminalOutput {
@@ -9457,6 +9458,7 @@ impl OwnerState {
                     incarnation,
                     data,
                     seq,
+                    previous_seq: Some(previous_seq),
                     screen,
                     screen_ansi,
                     screen_seq,
@@ -11072,6 +11074,7 @@ mod tests {
     #[test]
     fn rolled_back_readiness_close_is_physical_only_after_session_removal() {
         let root = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(root.path());
         let sessions = gwt_core::paths::gwt_sessions_dir();
         let (snapshot, pane) = unbound_fixture(root.path());
         let (mut state, receiver, _) = owner_fixture(root.path());
@@ -11306,6 +11309,7 @@ mod tests {
     #[test]
     fn unbound_close_preserves_metadata_and_rejects_replacement_proof() {
         let root = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(root.path());
         let sessions = gwt_core::paths::gwt_sessions_dir();
         let (snapshot, pane) = unbound_fixture(root.path());
         let mut edited = snapshot.clone();
@@ -11350,6 +11354,7 @@ mod tests {
     #[tokio::test]
     async fn shutdown_retains_failed_close_and_accepts_exact_retry() {
         let root = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(root.path());
         let (snapshot, pane) = unbound_fixture(root.path());
         let pty = pane.shared_pty();
         let (mut state, receiver, handle) = owner_fixture(root.path());
@@ -11381,7 +11386,7 @@ mod tests {
             readiness_deadline: None,
         });
         set_fixture_incarnation(&snapshot, 2);
-        let owner = thread::spawn(move || run_fixture_owner(state, receiver));
+        let owner = spawn_owner_worker(move || run_fixture_owner(state, receiver));
         let (shutdown, mut done) = oneshot::channel();
         handle
             .sender
@@ -11428,6 +11433,7 @@ mod tests {
     #[tokio::test]
     async fn failed_agent_retirement_retains_capability_and_exact_retry() {
         let root = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(root.path());
         let sessions = gwt_core::paths::gwt_sessions_dir();
         let (snapshot, pane) = unbound_fixture(root.path());
         let pty = pane.shared_pty();
@@ -11499,7 +11505,7 @@ mod tests {
             predecessor_session_id: None,
             materialized_genesis: None,
         };
-        let owner = thread::spawn(move || run_fixture_owner(state, receiver));
+        let owner = spawn_owner_worker(move || run_fixture_owner(state, receiver));
         handle
             .sender
             .send(OwnerMessage::AgentPrepared(Box::new(AgentPrepared {
@@ -11589,6 +11595,7 @@ mod tests {
             detail: None,
             ordinary_error_detail: None,
             last_output_at: None,
+            last_published_output_seq: 0,
             pty: pane.shared_pty(),
             incarnation: 1,
             pane: Arc::new(Mutex::new(pane)),
@@ -11708,6 +11715,7 @@ mod tests {
     #[tokio::test]
     async fn natural_exit_commits_session_receipt_and_stopped_state_before_terminal_projection() {
         let root = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(root.path());
         let sessions = gwt_core::paths::gwt_sessions_dir();
         let (mut state, receiver, handle) = owner_fixture(root.path());
         let (mut snapshot, pane) = unbound_fixture(root.path());
@@ -11744,7 +11752,7 @@ mod tests {
             readiness_deadline: None,
         });
         let mut events = handle.subscribe();
-        let actor = thread::spawn(move || run_fixture_owner(state, receiver));
+        let actor = spawn_owner_worker(move || run_fixture_owner(state, receiver));
         handle
             .request(request(OwnerCommand::Input {
                 id: "pane".into(),
@@ -11886,6 +11894,7 @@ mod tests {
     #[tokio::test]
     async fn shutdown_keeps_accepted_self_close_explicit_before_origin_commit() {
         let root = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(root.path());
         let (mut snapshot, pane) = unbound_fixture(root.path());
         let sessions = gwt_core::paths::gwt_sessions_dir();
         snapshot.restore_window_on_startup = true;
@@ -11976,7 +11985,7 @@ mod tests {
         // choose the exact explicit close even if shutdown is already queued.
         state.begin_shutdown(None);
         drop(accepted);
-        let actor = thread::spawn(move || run_fixture_owner(state, receiver));
+        let actor = spawn_owner_worker(move || run_fixture_owner(state, receiver));
         // test-hygiene: allow-wall-clock-deadline Hang guard for actual physical owner drain, not an elapsed-time assertion.
         tokio::time::timeout(std::time::Duration::from_secs(10), handle.shutdown())
             .await
@@ -12004,6 +12013,7 @@ mod tests {
     #[tokio::test]
     async fn self_close_origin_disconnect_before_acceptance_keeps_lifetime_restore_intent() {
         let root = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(root.path());
         let (mut snapshot, pane) = unbound_fixture(root.path());
         let sessions = gwt_core::paths::gwt_sessions_dir();
         snapshot.restore_window_on_startup = true;
@@ -12069,7 +12079,7 @@ mod tests {
         assert!(state.runtimes.contains_key(&id));
         assert!(state.pending_agent_self_closes.is_empty());
         assert!(events.try_recv().is_err());
-        let actor = thread::spawn(move || run_fixture_owner(state, receiver));
+        let actor = spawn_owner_worker(move || run_fixture_owner(state, receiver));
         // test-hygiene: allow-wall-clock-deadline Hang guard for actual physical owner drain, not an elapsed-time assertion.
         tokio::time::timeout(std::time::Duration::from_secs(10), handle.shutdown())
             .await
@@ -12251,6 +12261,10 @@ mod drop_tests {
         let (release, resume_query) = mpsc::channel();
         let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let all_writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        // Register both scoped and unscoped contexts so a parallel cold callsite
+        // cannot cache the singleton thread's subscriber instead of this collector.
+        let _unscoped_dispatch =
+            tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let dispatch = tracing::Dispatch::new(tracing_subscriber::registry().with(CursorLayer {
             id: id.clone(),
             entered,
@@ -12309,11 +12323,22 @@ mod drop_tests {
             let transaction = reservation.transaction_revision();
             let ordinary = pane.pty.ordinary_input_observation();
             release.send(()).unwrap();
+            let mut previous_output_seq = None;
             // test-hygiene: allow-wall-clock-deadline The exact Output seq follows all responses for this parsed query; elapsed time is not the ordering proof.
             tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
                 loop {
-                    if matches!(events.recv().await.unwrap(), OwnerEvent::Output { id: ref observed, incarnation, seq, .. }
-                        if observed == &id && incarnation == pane.incarnation && seq == query_seq) { break; }
+                    match events.recv().await.unwrap() {
+                        OwnerEvent::Output { id: ref observed, incarnation, seq, previous_seq, .. }
+                            if observed == &id && incarnation == pane.incarnation => {
+                            if let Some(previous) = previous_output_seq {
+                                assert_eq!(previous_seq, Some(previous),
+                                    "the owner must link its actual published output");
+                            }
+                            previous_output_seq = Some(seq);
+                            if seq == query_seq { break; }
+                        }
+                        _ => {}
+                    }
                 }
             }).await.unwrap();
             assert_eq!(writes.load(Ordering::Acquire), 0,
@@ -12378,6 +12403,7 @@ mod drop_tests {
             detail: None,
             ordinary_error_detail: None,
             last_output_at: None,
+            last_published_output_seq: 0,
             pty: pty.clone(),
             incarnation: 1,
             pane: pane.clone(),

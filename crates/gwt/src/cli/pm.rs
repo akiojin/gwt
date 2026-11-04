@@ -125,6 +125,14 @@ pub struct CapabilitiesReport {
 /// missing operation lands or a permission row names an unknown operation.
 const CAPABILITY_GAPS: &[(&str, &str, CapabilityGapReason, &str)] = &[
     (
+        "actions.release_policy.add", r#"{}"#, CapabilityGapReason::Permission,
+        "Read actions.release_policy.status, then use the current registered PM Host context and an exact scoped instruction_id or pm.approval.request; only this repository's prepare-release.yml permission is added",
+    ),
+    (
+        "actions.release_policy.rollback", r#"{}"#, CapabilityGapReason::Permission,
+        "Read actions.release_policy.status and use fresh exact scoped authority plus added_by naming the successful add; its post-state must be unchanged and preexisting permission cannot be removed",
+    ),
+    (
         "discussion.create",
         r#"{}"#,
         CapabilityGapReason::Permission,

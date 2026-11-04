@@ -667,9 +667,21 @@ fn public_report_contains_only_gwt_diagnostics_and_no_source_identifiers() {
     report.workaround = Some("private-product: run `execution.status`".into());
     report.body = "Private monorepo uses a confidential framework".into();
     let original = report.clone();
-    let (record, _) = store.submit(report, context(&source), Utc::now()).unwrap();
+    let (mut record, _) = store.submit(report, context(&source), Utc::now()).unwrap();
+    let stored_id = record.id.clone();
+    // A public nonce may coincidentally contain a private issue number.
+    record.id = "00000000-0000-4000-8000-000000004781".into();
     let public = record.public_snapshot();
-    let rendered = format!("{}\n{}", public.input.title, public.render_issue());
+    let marker = public.marker();
+    assert_eq!(marker, record.marker());
+    let issue = public.render_issue();
+    let rendered = format!(
+        "{}\n{}",
+        public.input.title,
+        issue
+            .strip_prefix(marker.as_str())
+            .expect("public issue starts with its exact feedback marker")
+    );
     for forbidden in [
         "project_hash",
         "project_root",
@@ -694,7 +706,7 @@ fn public_report_contains_only_gwt_diagnostics_and_no_source_identifiers() {
     assert!(rendered.contains("execution.status"));
     assert!(rendered.contains("exit_code=64"));
     assert!(rendered.contains("gwtd_version"));
-    assert_eq!(store.read(&record.id).unwrap().input, original);
+    assert_eq!(store.read(&stored_id).unwrap().input, original);
 }
 
 #[test]
