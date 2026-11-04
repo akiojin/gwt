@@ -2030,6 +2030,11 @@ export function createKnowledgeKanbanSurface({
           clearTimeout(state.pendingSearchTimer);
           state.pendingSearchTimer = null;
         }
+        if (state?.queueColumnNoticeTimer) {
+          clearTimeout(state.queueColumnNoticeTimer);
+          state.queueColumnNoticeTimer = null;
+          state.queueColumnNotice = null;
+        }
         // AS-17.2: window destroy invalidates the silent retry owner.
         invalidateKnowledgeSemanticRetry(state);
         if (state) {
@@ -3390,6 +3395,16 @@ export function createKnowledgeKanbanSurface({
             }[phase]);
             heading.after(rule);
           }
+          const noticeText = state.queueColumnNotice?.phase === phase ? state.queueColumnNotice.message : "";
+          let notice = column.querySelector(".issue-queue-column-notice");
+          if (noticeText) {
+            if (!notice) {
+              notice = createNode("div", "issue-queue-column-notice");
+              notice.setAttribute("role", "status");
+              rule.after(notice);
+            }
+            if (notice.textContent !== noticeText) notice.textContent = noticeText;
+          } else notice?.remove();
           if (phase === "backlog" && items.some((entry,index) => index >= 5 &&
               (entry.number === focusedNumber || entry.number === state.selectedNumber))) state.backlogExpanded = true;
           const collapsed = phase === "backlog" && !state.backlogExpanded && !state.query.trim();
@@ -3496,9 +3511,27 @@ export function createKnowledgeKanbanSurface({
             column.appendChild(empty);
           } else if (items.length) empty?.remove();
           if (column.parentNode) continue;
-          column.addEventListener("dragover", event => event.preventDefault());
+          const refuses = phase === "active" || phase === "done";
+          // Approved mock: accepting columns light up while a card is over them;
+          // Active/Done refuse with dropEffect=none and explain at their top.
+          const hover = event => {
+            column.dataset.dropState = refuses ? "reject" : "accept";
+            if (refuses) {
+              if (event.dataTransfer) event.dataTransfer.dropEffect = "none";
+              showQueueColumnNotice(windowId, state, phase);
+              return;
+            }
+            event.preventDefault();
+            if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+          };
+          column.addEventListener("dragenter", hover);
+          column.addEventListener("dragover", hover);
+          column.addEventListener("dragleave", event => {
+            if (!column.contains(event.relatedTarget)) delete column.dataset.dropState;
+          });
           column.addEventListener("drop", event => {
             event.preventDefault();
+            delete column.dataset.dropState;
             const explain = message => {
               state.queueFeedback = message;
               issueWindowViewModel.update(() => ({windowId}));
@@ -3515,8 +3548,8 @@ export function createKnowledgeKanbanSurface({
               explain(`Issue #${number} is no longer on this board. Refresh and try again.`);
               return;
             }
-            if (phase === "active" || phase === "done") {
-              explain(`${label} is controlled by the monitor and work lifecycle; drop into Backlog or Queued.`);
+            if (refuses) {
+              showQueueColumnNotice(windowId, state, phase);
               return;
             }
             const origin = issueQueueColumnForEntry(entry, windowId);
@@ -3552,6 +3585,32 @@ export function createKnowledgeKanbanSurface({
           });
           board.appendChild(column);
         }
+        if (!board.dataset.dragEndWired) {
+          board.dataset.dragEndWired = "true";
+          board.addEventListener("dragend", () => {
+            for (const column of board.querySelectorAll("[data-drop-state]")) delete column.dataset.dropState;
+          });
+        }
+      }
+
+      const QUEUE_COLUMN_REFUSAL_REASONS = Object.freeze({
+        active: "The system controls issues while an implementation agent runs. To stop one, use Stop agent on its card.",
+        done: "Landed issues cannot be moved. Start new work with a fresh launch.",
+      });
+      const QUEUE_COLUMN_NOTICE_MS = 4000;
+
+      // The refusal stays readable after the drag ends, then clears itself so it
+      // is never mistaken for a lasting state (approved mock: about 4 seconds).
+      function showQueueColumnNotice(windowId, state, phase) {
+        const changed = state.queueColumnNotice?.phase !== phase;
+        state.queueColumnNotice = { phase, message: QUEUE_COLUMN_REFUSAL_REASONS[phase] };
+        clearTimeout(state.queueColumnNoticeTimer);
+        state.queueColumnNoticeTimer = setTimeout(() => {
+          state.queueColumnNoticeTimer = null;
+          state.queueColumnNotice = null;
+          issueWindowViewModel.update(() => ({windowId}));
+        }, QUEUE_COLUMN_NOTICE_MS);
+        if (changed) issueWindowViewModel.update(() => ({windowId}));
       }
 
       function kanbanEmptyMessage(state, phase) {

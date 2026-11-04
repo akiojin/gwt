@@ -1199,7 +1199,8 @@ test("Issue queue drops include hold-labeled cards and retain server projection"
   assert.ok(body.querySelector('[data-queue-column="backlog"] [data-issue-number="1"]'));
   drop("active",1);
   assert.equal(sent.length,before+1);
-  assert.match(body.querySelector('.issue-queue-feedback').textContent,/Active.*monitor/i);
+  assert.match(body.querySelector('[data-queue-column="active"] .issue-queue-column-notice').textContent,
+    /system controls.*Stop agent/i);
   drop("backlog",3);
   assert.deepEqual(sent.at(-1),{kind:"issue_monitor_queue_remove",issue_numbers:[3]});
 });
@@ -1222,6 +1223,67 @@ test("Issue #4499 queue drops explain missing cards, invalid data and unchanged 
   drop("backlog", "1");
   assert.match(body.querySelector(".issue-queue-feedback").textContent, /Issue #1.*already.*Backlog/);
   assert.equal(sent.length, before, "invalid and unchanged drops send no queue mutation");
+});
+
+test("Issue #4499 drag response matches the approved mock: accept/reject affordance and a column-top reason that clears in 4s", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { body, surface, load, sent } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  surface.applyKnowledgeReceiveEvent({ kind:"knowledge_entries", id:"win-1", knowledge_kind:"issue",
+    request_id:load.request_id, entries:[knowledgeEntry(1,null)], refresh_enabled:true });
+  const column = phase => body.querySelector(`[data-queue-column="${phase}"]`);
+  const fire = (target, type) => {
+    const event = new window.Event(type, {bubbles:true,cancelable:true});
+    event.dataTransfer = {dropEffect:"move", types:["text/plain"], getData:() => "1"};
+    target.dispatchEvent(event);
+    return event;
+  };
+  const notice = phase => column(phase).querySelector(".issue-queue-column-notice");
+  const before = sent.length;
+
+  for (const phase of ["backlog", "queued"]) {
+    fire(column(phase), "dragenter");
+    assert.equal(column(phase).dataset.dropState, "accept", `${phase} shows it accepts the card`);
+    const over = fire(column(phase), "dragover");
+    assert.equal(over.defaultPrevented, true, `${phase} allows the drop`);
+    assert.equal(over.dataTransfer.dropEffect, "move");
+    fire(column(phase), "dragleave");
+    assert.equal(column(phase).dataset.dropState, undefined, `${phase} clears the affordance on leave`);
+  }
+
+  const overActive = fire(column("active"), "dragover");
+  assert.equal(overActive.dataTransfer.dropEffect, "none", "Active refuses the drop with dropEffect=none");
+  assert.equal(overActive.defaultPrevented, false, "Active does not become a drop target");
+  assert.equal(column("active").dataset.dropState, "reject", "Active shows the rejection color");
+  assert.ok(notice("active"), "the reason is shown in the refused column");
+  assert.equal(column("active").querySelector(".issue-queue-rule").nextElementSibling, notice("active"),
+    "the reason sits at the top of the column, under its rule");
+  assert.equal(notice("active").getAttribute("role"), "status");
+  assert.match(notice("active").textContent, /system controls.*while an implementation agent runs.*Stop agent/i);
+  fire(column("active"), "dragleave");
+  assert.equal(column("active").dataset.dropState, undefined);
+  assert.ok(notice("active"), "the reason outlives the drag so the user can read it");
+
+  fire(column("done"), "drop");
+  assert.equal(notice("active"), null, "only the last refused column explains itself");
+  assert.match(notice("done").textContent, /Landed issues cannot be moved.*fresh launch/i);
+  assert.equal(sent.length, before, "refused columns never send a queue mutation");
+
+  t.mock.timers.tick(3999);
+  assert.ok(notice("done"), "the reason stays for about four seconds");
+  t.mock.timers.tick(1);
+  assert.equal(notice("done"), null, "the reason clears itself after about four seconds");
+
+  fire(column("queued"), "dragenter");
+  fire(body.querySelector('[data-issue-number="1"]'), "dragend");
+  assert.equal(column("queued").dataset.dropState, undefined, "ending the drag clears every affordance");
+  const css = readFileSync(resolve(here, "../styles/app.css"), "utf8");
+  for (const selector of ['[data-drop-state="accept"]', '[data-drop-state="reject"]', ".issue-queue-column-notice {"]) {
+    const rule = css.split("\n").find(line => line.includes(selector));
+    assert.ok(rule, `${selector} is styled`);
+    assert.match(rule, /var\(--color-state-/, `${selector} uses Operator state tokens`);
+    assert.doesNotMatch(rule, /#[0-9a-f]{3,8}\b|rgb\(/i, `${selector} has no raw colors`);
+  }
 });
 
 test("Issue #4499 queue receipts show accepted changes and exact server refusal reasons", async (t) => {
