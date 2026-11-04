@@ -4221,6 +4221,7 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                     // durable receipt snapshot before ACKing.
                     let mut converged = monitor.clone();
                     if !failure_control {
+                        rebase_daemon_waits(&mut converged, disk, live, retired)?;
                         rebase_issue_monitor_control_candidate(
                             &mut converged,
                             disk,
@@ -4237,7 +4238,7 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                         // and exact-source failures consume their source. Apply
                         // to the pre-commit projection first so receipt recovery
                         // neither counts a failure twice nor loses its source.
-                        converged.rebase_daemon_driver_prefs(disk);
+                        rebase_daemon_waits(&mut converged, disk, live, retired)?;
                     }
                     converged.set_last_control_receipt(receipt.clone());
                     // Authority change is historical receipt evidence; compare
@@ -4539,7 +4540,6 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
             IssueMonitorControlCommit::ConfigConflict
         }
         Err(error) => {
-            refresh_monitor_after_wait_error(monitor, &error);
             tracing::warn!(
                 error = %error,
                 "issue monitor control prefs transaction failed; volatile mutation revoked"
@@ -4565,6 +4565,9 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
             if renamed_snapshot_is_exact {
                 *monitor = candidate;
             }
+            // A requested durable refresh must also discard transient markers
+            // that serialized snapshot equality cannot observe.
+            refresh_monitor_after_wait_error(monitor, &error);
             monitor.record_control_commit_error(format!(
                 "issue monitor control commit failed at prefs-lock stage: {error}"
             ));
@@ -5231,6 +5234,116 @@ fn issue_5876_runtime_only_wait_survives_stale_writer_for_exact_native_holder() 
     assert!(committed.last_control_receipt.is_some());
     assert!(committed.launched_issues.is_empty());
     assert_eq!(session.linked_issue_number, Some(3809));
+    // Receipt recovery must retain imported typed waits and committed launch
+    // ends without counting a failure again after an unavailable confirmation.
+    for (name, control, is_failure) in [
+        (
+            "heartbeat",
+            IssueMonitorControl::Heartbeat {
+                issue_number: 3809,
+                at: now.clone(),
+                agent_id: None,
+            },
+            false,
+        ),
+        (
+            "launch-failed",
+            IssueMonitorControl::LaunchFailed {
+                issue_number: 3809,
+                message: "receipt recovery failure".into(),
+                retryable: true,
+                delivery_id: None,
+                materializer_id: None,
+                failure: None,
+            },
+            true,
+        ),
+    ] {
+        let receipt_path = repo.path().join(format!("{name}-receipt.json"));
+        crate::save_issue_monitor_prefs(&receipt_path, &committed).unwrap();
+        let stale_before_control = stale.clone();
+        let mut receipt_monitor = stale_before_control.clone();
+        let accepted = AcceptedIssueMonitorControl::new(control);
+        fs::write(
+            receipt_path.with_extension("parent-sync-fail-once"),
+            b"fail once",
+        )
+        .unwrap();
+        let _failure = gwt_core::test_support::ScopedEnvVar::set(
+            "GWT_TEST_FAIL_ISSUE_MONITOR_PREFS_PARENT_SYNC_ONCE",
+            &receipt_path,
+        );
+        assert_eq!(
+            try_apply_accepted_issue_monitor_control_with_disk_migration(
+                &receipt_path,
+                &mut receipt_monitor,
+                accepted.clone(),
+            ),
+            IssueMonitorControlCommit::RetryableFailure
+        );
+        let visible = crate::load_issue_monitor_prefs(&receipt_path).unwrap();
+        assert_eq!(
+            visible
+                .last_control_receipt
+                .as_ref()
+                .map(|receipt| receipt.control_id.as_str()),
+            Some(accepted.control_id.as_str())
+        );
+        let visible_record = visible
+            .autonomous_records
+            .iter()
+            .find(|record| record.issue_number == 3809)
+            .unwrap();
+        assert_eq!(
+            visible_record.wait.as_ref(),
+            (!is_failure).then_some(&waiting)
+        );
+        let visible_control = visible_record.wait_control.as_ref().unwrap();
+        assert_eq!(visible_control.ended, is_failure);
+        assert_eq!(
+            visible_control.subject,
+            monitor
+                .autonomous_record(3809)
+                .unwrap()
+                .wait_control
+                .as_ref()
+                .unwrap()
+                .subject
+        );
+        assert_eq!(
+            visible_record.attempts,
+            stale.attempt_count(3809) + u32::from(is_failure)
+        );
+        // Model the unavailable confirmation reread, as in the existing
+        // ambiguous-receipt regression, while retaining the exact admission.
+        receipt_monitor = stale_before_control;
+        let before_replay = fs::read(&receipt_path).unwrap();
+        let mut retry = try_apply_accepted_issue_monitor_control_with_disk_migration(
+            &receipt_path,
+            &mut receipt_monitor,
+            accepted.clone(),
+        );
+        if is_failure {
+            assert_eq!(retry, IssueMonitorControlCommit::RetryableFailure);
+            assert_eq!(receipt_monitor.prefs(), visible);
+            assert_eq!(fs::read(&receipt_path).unwrap(), before_replay);
+            retry = try_apply_accepted_issue_monitor_control_with_disk_migration(
+                &receipt_path,
+                &mut receipt_monitor,
+                accepted,
+            );
+        }
+        assert!(
+            matches!(retry, IssueMonitorControlCommit::Committed { .. }),
+            "{name}: retry={retry:?}, last_error={:?}",
+            receipt_monitor.status_view().last_error
+        );
+        assert_eq!(receipt_monitor.prefs(), visible);
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&receipt_path).unwrap(),
+            visible
+        );
+    }
     unbound_end.record_closed(3809, Some(now.clone()));
     let before_ambiguous = fs::read(&prefs_path).unwrap();
     assert!(!persist_daemon_issue_monitor_state(
