@@ -684,6 +684,9 @@ pub struct WindowRuntime {
     pub(crate) screen: String,
     pub(crate) screen_ansi: Vec<u8>,
     pub(crate) screen_seq: u64,
+    // Only a final owner ACK makes the cached frame a reusable history snapshot.
+    pub(crate) has_final_snapshot: bool,
+    pending_snapshot: Option<PendingOwnerSnapshot>,
     pub(crate) has_unsent_user_input: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) input_observation: Option<gwt::project_runtime::events::OwnerInputObservation>,
     pub(crate) last_human_input_at: Option<Instant>,
@@ -695,6 +698,11 @@ pub struct WindowRuntime {
     pub(crate) child_pid: Option<u32>,
     pub(crate) exit_confirmed: bool,
     pub(crate) exit_code: Option<u32>,
+}
+
+struct PendingOwnerSnapshot {
+    connection_id: u64,
+    targets: Vec<Option<ClientId>>,
 }
 
 impl WindowRuntime {
@@ -714,6 +722,8 @@ impl WindowRuntime {
             screen: String::new(),
             screen_ansi: Vec::new(),
             screen_seq: 0,
+            has_final_snapshot: false,
+            pending_snapshot: None,
             has_unsent_user_input: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             input_observation: None,
             last_human_input_at: None,
@@ -12714,27 +12724,21 @@ impl AppRuntime {
             .filter(|(id, _)| self.project_key_for_window(id) == Some(&context.project_key))
             .map(|(id, text)| (id.clone(), text.clone()))
             .collect();
-        let mut terminal_snapshots = self
+        let runtime_snapshot_ids = self
             .runtimes
             .iter()
             .filter(|(id, _)| self.project_key_for_window(id) == Some(&context.project_key))
-            .filter_map(|(id, runtime)| {
-                // SPEC-1919 FR-001a / SPEC-2008 Phase 26.F: snapshot replay
-                // must preserve the current formatted screen and enough
-                // scrollback history for a fresh xterm.js instance to scroll
-                // immediately after reconnect.
+            .map(|(id, runtime)| {
                 terminal_previews.insert(
                     id.clone(),
                     runtime_events::terminal_preview_text(&runtime.screen),
                 );
-                let (snapshot, seq) = (runtime.screen_ansi.clone(), runtime.screen_seq);
-                (!snapshot.is_empty()).then_some((id.clone(), snapshot, Some(seq)))
+                id.clone()
             })
-            .collect::<Vec<_>>();
-        let runtime_snapshot_ids = terminal_snapshots
-            .iter()
-            .map(|(id, _, _)| id.clone())
             .collect::<std::collections::HashSet<_>>();
+        // Live projections contain only the visible grid. Request the owner's
+        // semantic history instead of replacing xterm's scrollback with it.
+        let mut terminal_snapshots = Vec::new();
         for (id, detail) in &self.launch_error_terminal_details {
             if self.project_key_for_window(id) == Some(&context.project_key)
                 && !runtime_snapshot_ids.contains(id)
@@ -12811,6 +12815,9 @@ impl AppRuntime {
         // every live cleanup here instead, or it would see nothing until the
         // worker happens to emit again.
         events.extend(self.live_branch_cleanup_replies(context, client_id));
+        for id in runtime_snapshot_ids {
+            events.extend(self.request_owner_snapshot(&id, Some(client_id.to_string())));
+        }
         events.insert(
             0,
             OutboundEvent::reply(
@@ -14105,7 +14112,7 @@ impl AppRuntime {
     }
 
     pub(crate) fn request_owner_snapshot(
-        &self,
+        &mut self,
         id: &str,
         client_id: Option<ClientId>,
     ) -> Vec<OutboundEvent> {
@@ -14122,6 +14129,18 @@ impl AppRuntime {
         let Some(state) = self.project_state(&context) else {
             return Vec::new();
         };
+        if runtime.has_final_snapshot {
+            let event = BackendEvent::TerminalSnapshot {
+                id: id.to_string(),
+                data_base64: base64::engine::general_purpose::STANDARD.encode(&runtime.screen_ansi),
+            };
+            let event = if let Some(client_id) = client_id {
+                OutboundEvent::reply(client_id, event)
+            } else {
+                OutboundEvent::project(context.project_key.clone(), event)
+            };
+            return vec![event.with_terminal_stream_seq(Some(runtime.screen_seq))];
+        }
         if state.project_owner_identity.as_ref() != Some(&runtime.owner_identity) {
             return Vec::new();
         }
@@ -14134,7 +14153,29 @@ impl AppRuntime {
         if owner_pane_id.is_empty() {
             return Vec::new();
         }
+        let runtime = self.runtimes.get_mut(id).expect("snapshot runtime");
+        if let Some(pending) = &mut runtime.pending_snapshot {
+            if pending.connection_id == connection_id {
+                if !pending.targets.contains(&client_id) {
+                    pending.targets.push(client_id);
+                }
+                return Vec::new();
+            }
+        }
+        let mut targets = runtime
+            .pending_snapshot
+            .take()
+            .map(|pending| pending.targets)
+            .unwrap_or_default();
+        if !targets.contains(&client_id) {
+            targets.push(client_id.clone());
+        }
+        runtime.pending_snapshot = Some(PendingOwnerSnapshot {
+            connection_id,
+            targets,
+        });
         let id = id.to_string();
+        let pending_id = id.clone();
         let proxy = self.proxy.clone();
         if let Err(error) = self.blocking_tasks.try_spawn(move || {
             let result = tokio::runtime::Builder::new_current_thread()
@@ -14168,6 +14209,10 @@ impl AppRuntime {
                 },
             )));
         }) {
+            self.runtimes
+                .get_mut(&pending_id)
+                .expect("snapshot runtime")
+                .pending_snapshot = None;
             tracing::warn!(%error, "could not enqueue project snapshot");
         }
         Vec::new()
@@ -14195,21 +14240,28 @@ impl AppRuntime {
         {
             return Vec::new();
         }
+        let runtime = self.runtimes.get_mut(id).expect("fenced remote runtime");
+        let targets = runtime
+            .pending_snapshot
+            .take()
+            .map(|pending| pending.targets)
+            .unwrap_or_else(|| vec![client_id]);
         let snapshot = match result {
             Ok(snapshot)
-                if self
-                    .runtimes
-                    .get(id)
-                    .is_some_and(|runtime| runtime.owner_pane_id == snapshot.id)
-                    && snapshot.incarnation == incarnation =>
+                if runtime.owner_pane_id == snapshot.id && snapshot.incarnation == incarnation =>
             {
                 snapshot
             }
             _ => return Vec::new(),
         };
-        let runtime = self.runtimes.get_mut(id).expect("fenced remote runtime");
         if snapshot.screen_seq < runtime.screen_seq {
-            return Vec::new();
+            // Output can overtake the worker. Keep every waiting client and
+            // converge with one new owner request instead of losing hydration.
+            let mut events = Vec::new();
+            for target in targets {
+                events.extend(self.request_owner_snapshot(id, target));
+            }
+            return events;
         }
         self.pending_runtime_outputs.remove(id);
         runtime.screen = snapshot.screen;
@@ -14233,17 +14285,26 @@ impl AppRuntime {
         let data_base64 = base64::engine::general_purpose::STANDARD.encode(&runtime.screen_ansi);
         let status = runtime.status;
         let detail = runtime.detail.clone();
-        let event = BackendEvent::TerminalSnapshot {
+        let snapshot_event = BackendEvent::TerminalSnapshot {
             id: id.to_string(),
             data_base64,
         };
-        let event = if let Some(client_id) = client_id {
-            OutboundEvent::reply(client_id, event)
-        } else {
-            OutboundEvent::project(context.project_key.clone(), event)
-        };
-        let mut events = vec![event.with_terminal_stream_seq(Some(snapshot.screen_seq))];
-        events.extend(self.apply_owner_status_projection(id, status, detail));
+        let status_events = self.apply_owner_status_projection(id, status, detail);
+        let mut events = Vec::new();
+        for target in targets {
+            let event = if let Some(client_id) = &target {
+                OutboundEvent::reply(client_id, snapshot_event.clone())
+            } else {
+                OutboundEvent::project(context.project_key.clone(), snapshot_event.clone())
+            };
+            events.push(event.with_terminal_stream_seq(Some(snapshot.screen_seq)));
+            for mut event in status_events.clone() {
+                if let Some(client_id) = &target {
+                    event.target = DispatchTarget::Client(client_id.clone());
+                }
+                events.push(event);
+            }
+        }
         events
     }
 
@@ -14391,6 +14452,7 @@ impl AppRuntime {
                 if seq <= runtime.output_seq {
                     return Vec::new();
                 }
+                runtime.has_final_snapshot = false;
                 // Positions are process-wide, so another pane may legitimately
                 // occupy every numerical position between these two outputs.
                 let gap = previous_seq != Some(runtime.output_seq);
@@ -14408,51 +14470,24 @@ impl AppRuntime {
                         previous_seq = ?previous_seq,
                         seq,
                         screen_seq,
-                        repair = if screen_seq.max(runtime.screen_seq) < seq {
-                            "request_snapshot"
-                        } else {
-                            "inline_snapshot"
-                        },
+                        repair = "request_snapshot",
                         "owner output predecessor requires snapshot repair"
                     );
                 }
-                // Coalescing may omit deltas, but the owner carries its full
-                // parsed screen with every output event. Never forward a
-                // surviving delta across a gap as though it were contiguous.
-                if gap && screen_seq.max(runtime.screen_seq) < seq {
-                    self.pending_runtime_outputs.remove(&id);
-                    return self.request_owner_snapshot(&id, None);
-                }
-                runtime.output_seq = seq;
                 if screen_seq >= runtime.screen_seq {
                     runtime.screen = screen;
                     runtime.screen_ansi = screen_ansi;
                     runtime.screen_seq = screen_seq;
                 }
-                let screen = runtime.screen.clone();
-                let repair = gap.then(|| {
-                    runtime.output_seq = runtime.output_seq.max(runtime.screen_seq);
-                    OutboundEvent::project(
-                        context.project_key.clone(),
-                        BackendEvent::TerminalSnapshot {
-                            id: id.clone(),
-                            data_base64: base64::engine::general_purpose::STANDARD
-                                .encode(&runtime.screen_ansi),
-                        },
-                    )
-                    .with_terminal_stream_seq(Some(runtime.screen_seq))
-                });
-                if repair.is_some() {
+                // A conflated output's visible grid cannot restore scrollback.
+                // Never forward a surviving delta across a predecessor gap.
+                if gap {
                     self.pending_runtime_outputs.remove(&id);
+                    return self.request_owner_snapshot(&id, None);
                 }
-                let mut events = self.handle_owner_runtime_output(id, data, seq, screen);
-                if let Some(repair) = repair {
-                    events.retain(|event| {
-                        !matches!(event.event, BackendEvent::TerminalOutput { .. })
-                    });
-                    events.insert(0, repair);
-                }
-                events
+                runtime.output_seq = seq;
+                let screen = runtime.screen.clone();
+                self.handle_owner_runtime_output(id, data, seq, screen)
             }
             OwnerEvent::Status {
                 id,
@@ -14572,6 +14607,7 @@ impl AppRuntime {
                         runtime.screen = frame.screen;
                         runtime.screen_ansi = frame.screen_ansi;
                         runtime.screen_seq = frame.screen_seq;
+                        runtime.has_final_snapshot = true;
                         runtime.output_seq = runtime.output_seq.max(frame.screen_seq);
                         OutboundEvent::project(
                             context.project_key.clone(),

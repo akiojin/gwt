@@ -106,7 +106,7 @@ test.describe("Agent window scrollback lifecycle", () => {
       await prepareClipboard(page);
       const errors = await openAgentsFixture(page, info.project.name);
       await setActiveAgentTab(page, id);
-      await emitTerminalText(page, id, numberedLines(provider, 240) + tracking);
+      await emitTerminalText(page, id, numberedLines(provider, 1200) + tracking);
       if (tracking) {
         const inputs = await terminalInputs(page, id);
         await agentTile(page, id).locator(".xterm-screen").click();
@@ -116,15 +116,22 @@ test.describe("Agent window scrollback lifecycle", () => {
 
       const check = async (phase: string) => {
         await waitForScrollableTerminal(page, id);
+        const metrics = await terminalScrollMetrics(page, id);
+        expect(metrics.bufferLength - metrics.rows, `${provider} ${phase} retains 1,000 history rows`)
+          .toBeGreaterThanOrEqual(1000);
         const container = id === "shell-1" ? agentTile(page, id).locator(".terminal-root") : agentTile(page, id);
         await expect(container, `${provider} ${phase} explains how to select text`).toHaveAttribute("title", /Shift\+drag.*Option\+drag/);
-        await expectWheelMovesScrollback(page, id, true);
+        await expectWheelMovesScrollback(page, id, true, 1000);
         await expectDragCopiesRenderedRows(page, info, `${id}-${phase}`, id, Boolean(tracking));
       };
       await check("initial");
       await setActiveAgentTab(page, id === "agent-1" ? "agent-2" : "agent-1");
       await setActiveAgentTab(page, id);
       await check("tab-switch");
+
+      await page.setViewportSize({ width: 1280, height: 820 });
+      await check("resize");
+      await page.setViewportSize({ width: 1440, height: 900 });
 
       await page.getByRole("button", { name: "Split view", exact: true }).click();
       const right = page.getByRole("region", { name: "Right pane", exact: true });
@@ -143,9 +150,9 @@ test.describe("Agent window scrollback lifecycle", () => {
         await setActiveAgentTab(page, id);
       }
       await check("remount");
-      await emitTerminalSnapshot(page, id, numberedLines(`${provider} replay`, 240) + tracking);
+      await emitTerminalSnapshot(page, id, numberedLines(`${provider} replay`, 1200) + tracking);
       await expect.poll(() => page.evaluate(windowId => window.__gwtTerminalTestApi!.bufferText(windowId), id))
-        .toContain(`${provider} replay 240`);
+        .toContain(`${provider} replay 1200`);
       await check("snapshot");
 
       // The fixture backend persists the latest raw screen and replays it on a
@@ -153,7 +160,7 @@ test.describe("Agent window scrollback lifecycle", () => {
       await page.reload();
       await setActiveAgentTab(page, id);
       await expect.poll(() => page.evaluate(windowId => window.__gwtTerminalTestApi!.bufferText(windowId), id))
-        .toContain(`${provider} replay 240`);
+        .toContain(`${provider} replay 1200`);
       await check("reload");
       expect(errors, "zero console/page errors across host changes and reload").toEqual([]);
     });
@@ -279,7 +286,7 @@ async function expectPendingRefresh(
     .toBe(expected);
 }
 
-async function expectWheelMovesScrollback(page: Page, windowId: string, noApplicationInput = false): Promise<void> {
+async function expectWheelMovesScrollback(page: Page, windowId: string, noApplicationInput = false, minimumLines = 1): Promise<void> {
   await expect
     .poll(async () => {
       // A host move can finish fitting after the first reset. Establish the
@@ -297,14 +304,14 @@ async function expectWheelMovesScrollback(page: Page, windowId: string, noApplic
   expect(box).not.toBeNull();
   await page.mouse.move(Math.round(box!.x + box!.width / 2), Math.round(box!.y + box!.height / 2));
   const inputsBefore = noApplicationInput ? await terminalInputs(page, windowId) : [];
-  await page.mouse.wheel(0, -900);
+  await page.mouse.wheel(0, -Math.max(900, minimumLines * 32));
 
   await expect
     .poll(async () => {
       const after = await terminalScrollMetrics(page, windowId);
       return after.viewportY;
     })
-    .toBeLessThan(before.viewportY);
+    .toBeLessThanOrEqual(before.viewportY - minimumLines);
   if (noApplicationInput) {
     expect(await terminalInputs(page, windowId), "history wheel must not send mouse reports or PageUp/PageDown").toEqual(inputsBefore);
   }
