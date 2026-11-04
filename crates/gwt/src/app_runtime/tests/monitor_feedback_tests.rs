@@ -148,9 +148,13 @@ fn pm_wakes_exclude_terminal_and_superseded_escalations() {
     active
         .save(&gwt_core::paths::gwt_sessions_dir())
         .expect("stop last active subject");
-    assert!(runtime
+    let periodic = runtime
         .pm_periodic_wake_decision_at(&repo, "2026-08-18T01:10:00Z")
-        .is_none());
+        .expect("periodic supervision continues without active escalation subjects");
+    let prompt = periodic.delivery_prompt();
+    for subject in ["ACTIVE-SUBJECT", "STOPPED-SUBJECT", "SUPERSEDED-SUBJECT"] {
+        assert!(!prompt.contains(subject), "{prompt}");
+    }
     assert_eq!(
         gwt_core::coordination::load_escalation_store(&repo)
             .unwrap()
