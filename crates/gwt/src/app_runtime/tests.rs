@@ -10832,7 +10832,8 @@ fn issue_6722_periodic_wake_delivers_with_monitor_off_and_no_queue() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().unwrap();
-    let home = temp.path().canonicalize().unwrap();
+    let home =
+        gwt_core::paths::normalize_windows_child_process_path(&temp.path().canonicalize().unwrap());
     let _home = ScopedGwtHome::set(&home);
     let _native_home = ScopedEnvVar::set("HOME", &home);
     let _native_userprofile = ScopedEnvVar::set("USERPROFILE", &home);
@@ -10860,7 +10861,8 @@ fn issue_6722_periodic_wake_delivers_after_automatic_turn_and_interval() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().unwrap();
-    let home = temp.path().canonicalize().unwrap();
+    let home =
+        gwt_core::paths::normalize_windows_child_process_path(&temp.path().canonicalize().unwrap());
     let _home = ScopedGwtHome::set(&home);
     let _native_home = ScopedEnvVar::set("HOME", &home);
     let _native_userprofile = ScopedEnvVar::set("USERPROFILE", &home);
