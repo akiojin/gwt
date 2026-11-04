@@ -583,6 +583,7 @@ fn project_owner_health_is_project_scoped_and_rejects_stale_context() {
         exit_confirmed: false,
         exit_code: None,
         session_id: None,
+        pm_registration: None,
         agent_id: None,
         agent_name: None,
         display_name: None,

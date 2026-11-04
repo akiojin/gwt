@@ -975,6 +975,8 @@ pub(crate) struct RemoteRuntimeSnapshot {
     pub(crate) exit_code: Option<u32>,
     #[serde(default)]
     pub(crate) session_id: Option<String>,
+    #[serde(skip)]
+    pub(crate) pm_registration: Option<Box<gwt::pm_registry::PmRegistration>>,
     #[serde(default)]
     pub(crate) agent_id: Option<String>,
     #[serde(default)]
@@ -1688,8 +1690,8 @@ pub(crate) struct ProjectRuntimeState {
 
     /// SPEC-3431 FR-001: window ids of in-flight PM launches, mapped to the
     /// project root whose `pm.json` must record the resulting session. The
-    /// entry is consumed by `handle_launch_complete`, which writes the PM
-    /// registration once the session id exists.
+    /// entry is consumed by native launch completion to project the owner's
+    /// durable PM registration into the GUI's read-only cache.
     pub(crate) pending_pm_launches: HashMap<String, PathBuf>,
     /// Repositories whose explicit PM-capable pane close has been accepted but
     /// whose durable deregistration is still running. Automatic ensure must
@@ -15119,13 +15121,15 @@ impl AppRuntime {
             let mut restore_refusal = None;
             let mut launch_sent = false;
             let result = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|error| error.to_string()).and_then(|executor| executor.block_on(async {
+                let mut _gui_presence = None;
                 let attempt = async {
                 if command.is_none() && !current.load(std::sync::atomic::Ordering::Acquire) {
                     return Err("launch cancelled".into());
                 }
                 let connected = gwt::project_runtime::client::ProjectRuntimeClient::connect_for_gui(context.project_root.clone(), supervisor).await;
-                *client_cell.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(connected.clone());
-                let client = connected?;
+                *client_cell.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(connected.as_ref().map(|(client, _)| client.clone()).map_err(Clone::clone));
+                let (client, presence) = connected?;
+                _gui_presence = Some(presence);
                 if !current.load(std::sync::atomic::Ordering::Acquire) {
                     return Err("launch cancelled".into());
                 }
@@ -15260,8 +15264,13 @@ impl AppRuntime {
                         return Err(snapshot_error);
                     }
                 };
-                let snapshot: RemoteRuntimeSnapshot = serde_json::from_value(value).map_err(|error| error.to_string())?;
+                let mut snapshot: RemoteRuntimeSnapshot = serde_json::from_value(value).map_err(|error| error.to_string())?;
                 if snapshot.id != owner_pane_id || snapshot.incarnation != incarnation || snapshot.session_id.as_deref() != receipt["session_id"].as_str() { return Err("owner launch snapshot identity changed".into()); }
+                snapshot.pm_registration = gwt::pm_registry::load_pm_prefs(
+                    &gwt::pm_registry::pm_prefs_path_for_repo_path(&context.project_root),
+                ).ok().and_then(|prefs| prefs.registration).filter(|registration| {
+                    snapshot.session_id.as_deref() == Some(registration.session_id.as_str())
+                }).map(Box::new);
                 let session = read_owner_session(&snapshot, &sessions_dir);
                 Ok(RemoteOwnerLaunchOutcome::Runtime(snapshot, session))
                 }.await;
@@ -15509,6 +15518,32 @@ impl AppRuntime {
                             Some("owner connection is unavailable".into()),
                         );
                     };
+                    let Some(identity) = client.identity() else {
+                        return Vec::new();
+                    };
+                    if self
+                        .project_state(&context)
+                        .and_then(|state| state.project_owner_identity.as_ref())
+                        .is_some_and(|accepted| accepted != identity)
+                    {
+                        return Vec::new();
+                    }
+                    let pm_root = self
+                        .project_state_mut(&context)
+                        .and_then(|state| state.pending_pm_launches.remove(&window_id));
+                    let pm_cache_changed = match (pm_root, snapshot.pm_registration.as_ref()) {
+                        (Some(root), Some(registration))
+                            if root == context.project_root
+                                && snapshot.session_id.as_deref()
+                                    == Some(registration.session_id.as_str()) =>
+                        {
+                            let changed =
+                                self.pm_session_for_root(&root) != Some(&registration.session_id);
+                            self.sync_pm_session_cache(&root, Some(registration));
+                            changed
+                        }
+                        _ => false,
+                    };
                     if self.runtimes.get(&window_id).is_some_and(|runtime| {
                         runtime.owner_pane_id == snapshot.id
                             && runtime.incarnation == snapshot.incarnation
@@ -15516,7 +15551,12 @@ impl AppRuntime {
                     }) {
                         // Inventory may have installed this same owner before the HTTP launch reply.
                         // A fresh post-install snapshot repairs it without replaying older status/data.
-                        return self.request_owner_snapshot(&window_id, None);
+                        let mut events = Vec::new();
+                        if pm_cache_changed {
+                            events.push(self.workspace_state_broadcast(&context));
+                        }
+                        events.extend(self.request_owner_snapshot(&window_id, None));
+                        return events;
                     }
                     self.record_restore_window_outcome(&window_id, Ok(()));
                     self.restore_launch_windows.remove(&window_id);
@@ -16025,7 +16065,7 @@ impl AppRuntime {
                 .map_err(|error| error.to_string())
                 .and_then(|executor| {
                     executor.block_on(async {
-                        let client =
+                        let (client, _gui_presence) =
                             gwt::project_runtime::client::ProjectRuntimeClient::connect_for_gui(
                                 context.project_root.clone(),
                                 supervisor,

@@ -1129,6 +1129,9 @@ impl OwnerState {
         handle
     }
     fn run(mut self, receiver: mpsc::Receiver<OwnerMessage>) -> Vec<oneshot::Sender<()>> {
+        // Startup recovery and name migration may outlast the attach budget.
+        // Begin the unchanged GUI grace only when attachment can be served.
+        self.gui_presence = GuiPresence::new(self.gui_presence.intent(), std::time::Instant::now());
         loop {
             if !self.stopping && self.gui_presence.expired(std::time::Instant::now()) {
                 self.begin_shutdown(None);
@@ -1533,7 +1536,9 @@ impl OwnerState {
                     if self.stopping
                         && matches!(
                             request.command,
-                            OwnerCommand::Health | OwnerCommand::Close { .. }
+                            OwnerCommand::Health
+                                | OwnerCommand::Close { .. }
+                                | OwnerCommand::PendingCancelExact { .. }
                         ) =>
                 {
                     if let OwnerMessage::Request(request, reply) = message {
@@ -11349,6 +11354,86 @@ mod tests {
         assert_eq!(closed.agent_name, edited.agent_name);
         assert_eq!(closed.status, gwt_agent::AgentStatus::Stopped);
         assert!(!closed.restore_window_on_startup);
+    }
+
+    #[tokio::test]
+    async fn initial_gui_attach_grace_starts_when_owner_serves_requests() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut state, receiver, handle) = owner_fixture(root.path());
+        // Model startup recovery consuming the initial grace without waiting.
+        state.gui_presence = GuiPresence::new(
+            gwt_core::daemon::DaemonStartIntent::GuiManaged,
+            // test-hygiene: allow-wall-clock-deadline Injects an expired startup timestamp; no wall-clock wait or elapsed-time verdict.
+            std::time::Instant::now() - std::time::Duration::from_secs(60),
+        );
+        let actor = thread::spawn(move || run_fixture_owner(state, receiver));
+        let attached = handle.attach_gui().await;
+        handle.shutdown().await;
+        actor.join().unwrap();
+        assert!(
+            attached.is_ok(),
+            "startup recovery must not consume the first GUI attachment budget: {attached:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stopping_owner_accepts_only_original_exact_launch_cancellation() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut state, receiver, handle) = owner_fixture(root.path());
+        // Keep the real mailbox available until the captured completion arrives.
+        state.stopping = true;
+        state.input_jobs = 1;
+        let id = format!("{}::cancel-before-admission", state.project_key);
+        let operation_id = "shutdown-launch-race".to_string();
+        let launch = OwnerCommand::LaunchAgent {
+            id: id.clone(),
+            operation_id: operation_id.clone(),
+            tab_id: "project".into(),
+            config: Box::new(
+                gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Custom("fixture".into()))
+                    .working_dir(root.path())
+                    .build(),
+            ),
+            metadata: Box::default(),
+            cols: 80,
+            rows: 24,
+        };
+        let expected_request = serde_json::to_value(&launch).unwrap();
+        let actor = thread::spawn(move || run_fixture_owner(state, receiver));
+        let refused_launch = handle.request(request(launch)).await;
+        let invalid = handle
+            .request(request(OwnerCommand::PendingCancelExact {
+                id: id.clone(),
+                operation_id: "another-operation".into(),
+                expected_request: expected_request.clone(),
+            }))
+            .await;
+        let cancelled = handle
+            .request(request(OwnerCommand::PendingCancelExact {
+                id: id.clone(),
+                operation_id: operation_id.clone(),
+                expected_request,
+            }))
+            .await;
+        let (reply, _) = oneshot::channel();
+        handle
+            .sender
+            .send(OwnerMessage::InputWritten {
+                reply,
+                result: Ok(None),
+            })
+            .ok()
+            .unwrap();
+        actor.join().unwrap();
+        assert!(
+            refused_launch.is_err(),
+            "shutdown cannot admit a new launch"
+        );
+        assert!(invalid.is_err(), "exact request identity must still match");
+        let receipt = cancelled.expect("draining owner must acknowledge exact cleanup");
+        assert_eq!(receipt["cancelled"], true);
+        assert_eq!(receipt["id"], id);
+        assert_eq!(receipt["operation_id"], operation_id);
     }
 
     #[tokio::test]

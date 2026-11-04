@@ -10799,7 +10799,7 @@ fn assert_pm_ensure_spawns_from_default_branch(default_branch: &str, cached_defa
         "actual PM launch: {:?}",
         completion.result.as_ref().err()
     );
-    runtime.handle_remote_owner_launch_complete(completion);
+    let completion_events = runtime.handle_remote_owner_launch_complete(completion);
     assert!(
         runtime
             .tab("tab-1")
@@ -10881,6 +10881,25 @@ fn assert_pm_ensure_spawns_from_default_branch(default_branch: &str, cached_defa
     )
     .unwrap();
     assert!(physical.pty.tree_exit_confirmed());
+    let workspace = completion_events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::WorkspaceState { workspace } => Some(workspace),
+            _ => None,
+        })
+        .expect("the completed PM launch publishes its workspace");
+    let pm_windows: Vec<_> = workspace
+        .tabs
+        .iter()
+        .flat_map(|tab| &tab.workspace.windows)
+        .filter(|window| window.is_pm)
+        .map(|window| window.id.as_str())
+        .collect();
+    assert_eq!(
+        pm_windows,
+        [window_id.as_str()],
+        "the first completed workspace marks the durably registered PM"
+    );
 }
 
 /// Issue #4375: run the completion of the PM worktree preparation the runtime
