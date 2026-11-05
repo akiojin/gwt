@@ -674,6 +674,49 @@ Use this wire through the existing operation; do not attach legacy `body`,
   diagnostic as missing evidence, not an empty instruction list. Existing
   `memory.add` work-note lessons remain separate from these records.
 
+## Request task reconciliation
+
+- Follow the existing `pm.status` worktree freshness contract first; stale or
+  unknown freshness keeps code-derived decisions degraded.
+  On PM startup, on a new human turn, and in every resident cycle, read
+  `pm.request_tasks.read` without a selector. This is saved request tracking,
+  separate from Reports, standing instructions and the Monitor queue. An empty
+  queue or a temporary recovery does not complete the original request.
+- For `state:"ready"`, enumerate `pending` and `tasks` ID selectors with a
+  limit of 1-100 (default 50). Pin both first pages and every `after`
+  continuation to that `expected_revision`, using the summary's revision and
+  each page's exact `next_after` until null. Do not apply mutations while
+  enumerating pages. Follow the existing bounded/background operation rules;
+  incomplete enumeration remains degraded, never an all-clear result.
+- Read selected `source` and `task` details by `id`; verify their project and
+  revision still match. On a conflict or changed revision, discard the cursors
+  and stale decisions and restart from the summary. Keep completed/cancelled
+  tasks distinct from unfinished tasks and tasks with `review_required:true`.
+  Compare the original purpose and current completion conditions with fresh
+  owner progress, wait reasons and evidence before choosing the next action.
+- Use `pm.request_tasks.apply` only for a justified tracking change, with
+  `operation_id`, `expected_revision`, `reason` and the existing typed `action`.
+  Before `reassess` or `complete`, read the current `condition_revision` and
+  `review_generation`; reassessment needs a fresh assessment and next action.
+  Never recheck a reopened task using old completion evidence, replace only
+  the revision on a stale request, or write an unchanged-cycle keepalive.
+  After an uncertain write, read its `receipt` selector by `operation_id`;
+  retry only the exact same operation ID and payload after authoritative
+  reconciliation. An unreadable or missing receipt does not prove no effect.
+- `absent` does not prove zero requests or completion. A read error, missing
+  detail or partial collection is degraded evidence. Keep known unfinished
+  tasks and reassessment requirements, record the diagnostic and recovery
+  operation, and continue safe supervision without claiming the gap resolved.
+- Pending sources are unclassified: read their original before `decompose`
+  or justified `classify_non_task`; questions, chat and automatic ticks are
+  not execution tasks. Never use `Capture` or claim an Intake actor to
+  initialize storage or manufacture provenance. Automatic intake, legacy
+  import, user mutation and the Tasks UI are not connected by these operations.
+  Do not infer a continuing-policy classification from `standing` or
+  `superseded_by:null` alone; use the existing instruction rules separately.
+  Tracking changes grant no Issue, Monitor, CI or approval authority and never
+  launch or requeue an Issue by themselves.
+
 ## Current PM status
 
 - Maintain the current-status card separately from Reports with
@@ -1744,6 +1787,9 @@ Keep the PM turn responsive even when gwtd or its endpoint is slow.
   Until freshness is `fresh`, the PM must not claim it is
   observing current code or the current specification; all code-derived
   claims are degraded.
+- Reconcile saved requests using [Request task reconciliation](role-and-boundaries.md#request-task-reconciliation),
+  including pending sources, unfinished tasks and fresh reassessment needs.
+  A temporary recovery or unreadable tracking must not erase the original goal.
 - Periodic wakeups (FR-108): if your harness has a native scheduler
   (Claude Code exposes a wakeup-scheduling tool), register a periodic
   wakeup job for your loop interval at the start of residency, and
@@ -2763,6 +2809,24 @@ mod tests {
                 "universal input boundary must be read at startup"
             );
             assert!(startup.contains("never alter acceptance-criteria snapshots"));
+            let reconciliation = startup
+                .split_once("## Request task reconciliation")
+                .expect("request tracking must be part of the startup reference")
+                .1;
+            let reconciliation = unwrapped(reconciliation);
+            for required in [
+                "On PM startup, on a new human turn, and in every resident cycle",
+                "`pm.request_tasks.read`",
+                "Pin both first pages and every `after` continuation to that `expected_revision`",
+                "`absent` does not prove zero requests or completion",
+                "Keep known unfinished tasks and reassessment requirements",
+                "Never use `Capture` or claim an Intake actor",
+            ] {
+                assert!(reconciliation.contains(required), "missing {required}");
+            }
+            let resident =
+                std::fs::read_to_string(leaf.join("references/resident-loop.md")).unwrap();
+            assert!(resident.contains("role-and-boundaries.md#request-task-reconciliation"));
             let mut contract = String::new();
             for link in root.split("](references/").skip(1) {
                 let relative = link.split(')').next().expect("reference target");
