@@ -5275,6 +5275,10 @@ fn mutate_monitor_wait_with_subject<T>(
     let original = record
         .and_then(|record| record.wait_control.as_ref())
         .map(|control| control.subject.clone());
+    let original_wait = (
+        record.and_then(|record| record.wait_control.as_ref()),
+        record.and_then(|record| record.wait.as_ref()),
+    );
     let legacy_wait =
         record.is_some_and(|record| record.wait.is_some() && record.wait_control.is_none());
     let subject = if declare && !legacy_wait {
@@ -5302,12 +5306,13 @@ fn mutate_monitor_wait_with_subject<T>(
             ));
         }
         crate::try_mutate_issue_monitor_prefs_without_authority_fence(prefs_path, |prefs| {
-            let control = prefs
+            let record = prefs
                 .autonomous_records
                 .iter()
-                .find(|record| record.issue_number == number)
-                .and_then(|record| record.wait_control.as_ref());
-            if control.map(|control| &control.subject) != original.as_ref()
+                .find(|record| record.issue_number == number);
+            let control = record.and_then(|record| record.wait_control.as_ref());
+            let wait = record.and_then(|record| record.wait.as_ref());
+            if (control, wait) != original_wait
                 || (declare
                     && control.is_some_and(|control| {
                         control.ended && Some(&control.subject) == subject.as_ref()
@@ -5315,7 +5320,7 @@ fn mutate_monitor_wait_with_subject<T>(
             {
                 return Err(io::Error::new(
                     io::ErrorKind::WouldBlock,
-                    "wait control subject changed before fallback commit",
+                    "wait state changed before fallback commit",
                 ));
             }
             gwt_core::operation_deadline::ensure_remaining("wait fallback commit")?;
@@ -16561,6 +16566,49 @@ command = "my-agent-cli"
             .unwrap();
         assert_eq!(&record.wait_control.as_ref().unwrap().subject, &subject);
         assert!(record.wait.as_ref().unwrap().invalidated.is_some());
+        let since = record.wait.as_ref().unwrap().since.clone();
+        let heartbeat_at = (chrono::DateTime::parse_from_rfc3339(&now).unwrap()
+            + chrono::Duration::seconds(1))
+        .to_rfc3339();
+        let declaration_at = (chrono::DateTime::parse_from_rfc3339(&now).unwrap()
+            + chrono::Duration::seconds(2))
+        .to_rfc3339();
+        let heartbeat_path = path.clone();
+        crate::cli::trusted_store::set_write_lease_acquired_hook(move || {
+            crate::try_mutate_issue_monitor_prefs_without_authority_fence(
+                &heartbeat_path,
+                |prefs| {
+                    let record = prefs
+                        .autonomous_records
+                        .iter_mut()
+                        .find(|record| record.issue_number == 3809)
+                        .unwrap();
+                    crate::issue_monitor::record_heartbeat_on_record(record, &heartbeat_at);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        });
+        record_monitor_wait_in_prefs(
+            repo.path(),
+            3809,
+            "fresh wait",
+            "new checks finish",
+            false,
+            &declaration_at,
+        )
+        .expect("a fresh re-declaration permits an unrelated heartbeat after its snapshot");
+        let redeclared = crate::load_issue_monitor_prefs(&path).unwrap();
+        let wait = redeclared
+            .autonomous_records
+            .iter()
+            .find(|record| record.issue_number == 3809)
+            .unwrap()
+            .wait
+            .as_ref()
+            .unwrap();
+        assert!(wait.invalidated.is_none());
+        assert_eq!(wait.since, since);
         record_monitor_wait_in_prefs(repo.path(), 3809, "", "", true, &now).unwrap();
         let cleared = crate::load_issue_monitor_prefs(&path).unwrap();
         let record = cleared
@@ -16588,6 +16636,75 @@ command = "my-agent-cli"
             before,
             "unknown canonical runtime cannot downgrade a typed wait to legacy"
         );
+    }
+
+    #[test]
+    fn issue_5876_wait_fallback_rejects_same_subject_changes_after_snapshot() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let repo = tempfile::tempdir().unwrap();
+        let (_, monitor, now) =
+            crate::issue_monitor_worker::tests::issue_3809_bound_activity_fixture(repo.path());
+        let path = crate::issue_monitor_prefs_path_for_repo_path(repo.path());
+        crate::save_issue_monitor_prefs(&path, &monitor.prefs()).unwrap();
+        for clear in [false, true] {
+            record_monitor_wait_in_prefs(repo.path(), 3809, "CI", "checks finish", false, &now)
+                .unwrap();
+            let committed = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let committed_in_hook = std::rc::Rc::clone(&committed);
+            let changed_path = path.clone();
+            let changed_at = now.clone();
+            // This owner lease is acquired after the fallback's prefs snapshot.
+            // Commit the intervening control before it observes the same native subject.
+            crate::cli::trusted_store::set_write_lease_acquired_hook(move || {
+                crate::try_mutate_issue_monitor_prefs_without_authority_fence(
+                    &changed_path,
+                    |prefs| {
+                        let record = prefs
+                            .autonomous_records
+                            .iter_mut()
+                            .find(|record| record.issue_number == 3809)
+                            .unwrap();
+                        let control = record.wait_control.clone();
+                        if clear {
+                            crate::clear_wait_on_record(record, &changed_at);
+                        } else {
+                            crate::invalidate_wait_on_record(record, "pm", "finished", &changed_at);
+                        }
+                        assert_eq!(record.wait_control, control, "the subject did not change");
+                        Ok(())
+                    },
+                )
+                .unwrap();
+                *committed_in_hook.borrow_mut() = std::fs::read(&changed_path).unwrap();
+            });
+            assert!(
+                record_monitor_wait_in_prefs(
+                    repo.path(),
+                    3809,
+                    "stale declaration",
+                    "old checks finish",
+                    false,
+                    &now,
+                )
+                .is_err(),
+                "a same-subject {} after the snapshot must refuse the stale declaration",
+                if clear { "clear" } else { "PM invalidation" }
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), *committed.borrow());
+            record_monitor_wait_in_prefs(
+                repo.path(),
+                3809,
+                "fresh wait",
+                "new checks",
+                false,
+                &now,
+            )
+            .expect("a fresh snapshot can re-declare after either control");
+        }
     }
 
     #[test]
