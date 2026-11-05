@@ -20,6 +20,22 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
     fn release_policy_context(&mut self) -> io::Result<crate::cli::ReleasePolicyContext> {
         self.inner.release_policy_context()
     }
+    fn diagnostic_workflow_context(&mut self) -> io::Result<serde_json::Value> {
+        self.inner.diagnostic_workflow_context()
+    }
+    fn diagnostic_run_snapshot(&mut self, run_id: u64) -> io::Result<serde_json::Value> {
+        self.inner.diagnostic_run_snapshot(run_id)
+    }
+    fn diagnostic_artifact(&mut self, run_id: u64, artifact_id: u64) -> io::Result<Vec<u8>> {
+        self.inner.diagnostic_artifact(run_id, artifact_id)
+    }
+    fn dispatch_diagnostic_workflow(
+        &mut self,
+        git_ref: &str,
+        inputs: &serde_json::Map<String, serde_json::Value>,
+    ) -> io::Result<gwt_github::client::http::DiagnosticDispatchAck> {
+        self.inner.dispatch_diagnostic_workflow(git_ref, inputs)
+    }
     fn pm_settings_snapshot(
         &mut self,
         operation: &str,

@@ -147,6 +147,12 @@ pub(super) fn active_monitor_wait(
                         && row.waiting.as_ref().is_some_and(|wait| {
                             wait.in_force
                                 && wait.invalidated.is_none()
+                                && wait_subject_is_current(
+                                    &resolved,
+                                    session,
+                                    owner,
+                                    wait.wait_control.as_ref(),
+                                )
                                 && chrono::DateTime::parse_from_rfc3339(&wait.expires_at)
                                     .is_ok_and(|expires| expires > now)
                         })
@@ -160,12 +166,53 @@ pub(super) fn active_monitor_wait(
             let monitor =
                 crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
             monitor.active_issue_numbers().contains(&owner)
+                && wait_subject_is_current(
+                    &resolved,
+                    session,
+                    owner,
+                    monitor
+                        .autonomous_record(owner)
+                        .and_then(|record| record.wait_control.as_ref()),
+                )
                 && monitor.autonomous_wait(owner).is_some_and(|wait| {
                     crate::issue_monitor::wait_declaration_in_force(wait, &now.to_rfc3339())
                 })
         }
         Err(_) => false,
     }
+}
+
+fn wait_subject_is_current(
+    project_root: &Path,
+    session: &str,
+    owner: u64,
+    control: Option<&crate::issue_monitor::IssueMonitorWaitControl>,
+) -> bool {
+    let Some(control) = control else {
+        return true;
+    };
+    if control.ended
+        || control.subject.execution_identity.session_id != session
+        || control
+            .subject
+            .execution_identity
+            .execution_binding
+            .owner_number
+            != owner
+        || control.subject.execution_identity.linked_issue_number != Some(owner)
+        || dunce::canonicalize(&control.subject.execution_identity.worktree_path)
+            .ok()
+            .as_deref()
+            != Some(project_root)
+    {
+        return false;
+    }
+    execution_state::with_wait_subject_leases(
+        project_root,
+        std::slice::from_ref(&control.subject),
+        |live, _| Ok(live.contains(&control.subject)),
+    )
+    .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -179,6 +226,165 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join(".gwt")).unwrap();
         dir
+    }
+
+    #[test]
+    fn typed_monitor_wait_requires_the_same_owner_session_and_native_runtime() {
+        use crate::cli::daemon::transport::IpcListener;
+        use gwt_core::daemon::{
+            persist_endpoint, ClientFrame, DaemonEndpoint, DaemonFrame, DaemonStatus,
+            IpcHandshakeRequest, IpcHandshakeResponse, RuntimeScope, RuntimeTarget,
+            DAEMON_PROTOCOL_VERSION,
+        };
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = gwt_core::test_support::socket_tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = tempfile::tempdir().unwrap();
+        let (session, mut monitor, now) =
+            crate::issue_monitor_worker::tests::issue_3809_bound_activity_fixture(repo.path());
+        let subject = execution_state::capture_current_wait_subject(repo.path(), 3809)
+            .unwrap()
+            .unwrap();
+        assert!(monitor.apply_autonomous_wait_subject(3809, &subject));
+        monitor.declare_autonomous_wait(3809, "CI", "checks finish", &now);
+        let path = crate::issue_monitor_prefs_path_for_repo_path(repo.path());
+        crate::save_issue_monitor_prefs(&path, &monitor.prefs()).unwrap();
+        assert!(active_monitor_wait(
+            repo.path(),
+            Some(&session.id),
+            Some(3809)
+        ));
+        let control = monitor
+            .autonomous_record(3809)
+            .unwrap()
+            .wait_control
+            .clone()
+            .unwrap();
+        assert!(!wait_subject_is_current(
+            repo.path(),
+            &session.id,
+            3810,
+            Some(&control)
+        ));
+        assert!(!wait_subject_is_current(
+            repo.path(),
+            "successor",
+            3809,
+            Some(&control)
+        ));
+        let mut ended = control.clone();
+        ended.ended = true;
+        assert!(!wait_subject_is_current(
+            repo.path(),
+            &session.id,
+            3809,
+            Some(&ended)
+        ));
+        let mut replaced = control;
+        replaced.subject.runtime_incarnation += 1;
+        assert!(!wait_subject_is_current(
+            repo.path(),
+            &session.id,
+            3809,
+            Some(&replaced)
+        ));
+
+        let status = monitor.agent_status();
+        let mut ended_status = status.clone();
+        let waiting = ended_status
+            .inbox
+            .iter_mut()
+            .find(|row| row.issue_number == 3809)
+            .unwrap()
+            .waiting
+            .as_mut()
+            .unwrap();
+        // Preserve a stale in-force projection so only the reader's subject
+        // validation can reject the ended control.
+        assert!(waiting.in_force);
+        waiting.wait_control.as_mut().unwrap().ended = true;
+        let scope = RuntimeScope::from_project_root(repo.path(), RuntimeTarget::Host).unwrap();
+        let bind = home.path().join("stop-wait.sock").display().to_string();
+        #[cfg(windows)]
+        let bind = gwt_core::daemon::windows_pipe_name_for(&bind);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut listener = {
+            let _entered = runtime.enter();
+            IpcListener::bind(gwt_core::test_support::checked_socket_path(Path::new(
+                &bind,
+            )))
+            .unwrap()
+        };
+        let endpoint = DaemonEndpoint::new(
+            scope.clone(),
+            std::process::id(),
+            bind,
+            "stop-wait-token".into(),
+            "test-daemon".into(),
+        );
+        persist_endpoint(
+            &scope.endpoint_path(&gwt_core::paths::gwt_home()),
+            &endpoint,
+        )
+        .unwrap();
+        let server = std::thread::spawn(move || {
+            runtime.block_on(async move {
+                // test-hygiene: allow-wall-clock-deadline Hang guard for the real IPC fixture server; assertions use response events, not elapsed time.
+                tokio::time::timeout(std::time::Duration::from_secs(10), async move {
+                    for status in [status, ended_status] {
+                        let stream = listener.accept().await.unwrap();
+                        let (reader, mut writer) = stream.into_split();
+                        let mut reader = BufReader::new(reader);
+                        let mut line = String::new();
+                        reader.read_line(&mut line).await.unwrap();
+                        let handshake: IpcHandshakeRequest =
+                            serde_json::from_str(line.trim()).unwrap();
+                        assert_eq!(handshake.scope, scope);
+                        let handshake = IpcHandshakeResponse {
+                            protocol_version: DAEMON_PROTOCOL_VERSION,
+                            daemon_version: "test-daemon".into(),
+                            accepted: true,
+                            rejection_reason: None,
+                        };
+                        let mut response = serde_json::to_vec(&handshake).unwrap();
+                        response.push(b'\n');
+                        writer.write_all(&response).await.unwrap();
+                        line.clear();
+                        reader.read_line(&mut line).await.unwrap();
+                        assert!(matches!(
+                            serde_json::from_str::<ClientFrame>(line.trim()).unwrap(),
+                            ClientFrame::Status
+                        ));
+                        let response = DaemonFrame::Status(DaemonStatus {
+                            protocol_version: DAEMON_PROTOCOL_VERSION,
+                            daemon_version: "test-daemon".into(),
+                            uptime_seconds: 0,
+                            broadcast_channels: 0,
+                            connections: 1,
+                            issue_monitor: Some(serde_json::to_value(status).unwrap()),
+                        });
+                        let mut response = serde_json::to_vec(&response).unwrap();
+                        response.push(b'\n');
+                        writer.write_all(&response).await.unwrap();
+                    }
+                })
+                .await
+                .expect("Stop wait status daemon hang guard")
+            });
+        });
+        let observed = [
+            active_monitor_wait(repo.path(), Some(&session.id), Some(3809)),
+            active_monitor_wait(repo.path(), Some(&session.id), Some(3809)),
+        ];
+        server.join().unwrap();
+        assert_eq!(observed, [true, false]);
     }
 
     // T-108: an active launch-written record blocks Stop even though
