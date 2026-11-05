@@ -1061,6 +1061,14 @@ Monitor queue do not complete the original request. This guidance covers saved
 tracking; automatic intake, legacy import, user mutation and the Tasks UI remain
 separate work. Tracking itself does not launch Issues or change delivery gates.
 
+Incoming prompts in the registered PM are preserved before the latest Q&A receipt
+is replaced, including repeated text and questions. These are unverified input
+candidates, not authenticated human sources, Tasks or instruction authority. The
+reporting diagnostic exposes only the current candidate ID. Candidates survive
+later prompts and PM replacement; a storage failure is returned as an error.
+Native identity reconciliation and an inventory of earlier candidates remain
+separate work, so this preservation does not yet provide automatic Task intake.
+
 `policy.dependency_observations` retains every supplied Monitor inbox row, including
 repeated Issues, with its state and canonical dependency blockers, cycle flag and bundle
 references. Absent typed status stays null with `dependency_status` named as missing.

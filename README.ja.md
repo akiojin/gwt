@@ -965,6 +965,13 @@ source ID、`{"selector":{"kind":"tasks","limit":50}}` は完了・取消を含�
 依頼の取込み・ユーザー操作・Tasks UI は別の作業として残ります。追跡自体は Issue の
 起動や配信ゲートの変更を行いません。
 
+登録済み PM への入力は、最新の Q&A receipt を置き換える前に保存されます。同じ本文の
+再入力や質問も保持しますが、未認証の入力候補であり、人間の source・Task・指示権限
+とは区別されます。reporting 診断には現在の候補 ID だけを表示します。後続入力や PM の
+交代で以前の候補を消さず、保存に失敗した場合はエラーを返します。native identity の
+照合と過去候補の一覧取得は後続作業のため、この保全だけでは Task の自動受付は
+成立しません。
+
 `policy.dependency_observations` は供給された Monitor inbox の全行を、同じ Issue の
 重複も含めて保持し、状態と正本の blocker・cycle・bundle 参照を返します。
 型付き診断がなければ null とし、`dependency_status` を不足情報として示します。

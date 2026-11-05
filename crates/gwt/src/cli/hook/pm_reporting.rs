@@ -25,6 +25,8 @@ struct TurnReceipt {
     prompt_sha256: Option<String>,
     #[serde(default)]
     stop_reminder_sent: bool,
+    #[serde(default)]
+    unverified_intake_candidate_id: Option<String>,
 }
 
 fn project_store(repo: &Path) -> PathBuf {
@@ -61,6 +63,49 @@ fn read_receipt(repo: &Path, session: &str) -> io::Result<Option<TurnReceipt>> {
 fn write_receipt(repo: &Path, receipt: &TurnReceipt) -> io::Result<()> {
     let bytes = serde_json::to_vec(receipt).map_err(io::Error::other)?;
     gwt_github::cache::write_atomic(&receipt_path(repo, &receipt.identity.session_id), &bytes)
+}
+
+/// Hook text is an observation, never proof of human authorship. Preserve it
+/// before replacing the latest QA receipt, without selecting a native turn.
+fn write_unverified_intake_candidate(
+    repo: &Path,
+    receipt: &TurnReceipt,
+    original: &str,
+) -> io::Result<()> {
+    let project = project_store(repo);
+    let project_key = project
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| io::Error::other("PM intake project identity is unavailable"))?;
+    let directory = project
+        .join("project-state/pm-reporting/intake-candidates")
+        .join(crate::pm_registry::pm_delivery_prompt_sha256(
+            &receipt.identity.session_id,
+        ));
+    gwt_config::atomic::create_dir_all_durable(&directory).map_err(io::Error::other)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Protect the raw bytes before the shared writer creates its temp file.
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
+    }
+    let path = directory.join(format!("{}.json", receipt.identity.turn_id));
+    let bytes = serde_json::to_string(&serde_json::json!({
+        "schema_version": 1,
+        "state": "unverified",
+        "project_key": project_key,
+        "observation": receipt.identity,
+        "original": original,
+        "prompt_sha256": receipt.prompt_sha256,
+    }))
+    .map_err(io::Error::other)?;
+    gwt_config::atomic::write_atomic(&path, &bytes).map_err(io::Error::other)?;
+    if fs::read(&path)? != bytes.as_bytes() {
+        return Err(io::Error::other(
+            "PM intake candidate persistence unconfirmed; retain the native input for recovery",
+        ));
+    }
+    Ok(())
 }
 
 fn with_receipt_lock<T>(
@@ -112,22 +157,25 @@ pub(crate) fn handle_user_prompt_submit(worktree: &Path, input: &str) -> io::Res
         !text.trim().is_empty() && !crate::pm_conversation::internal_prompt(text)
     });
     with_receipt_lock(worktree, &session_id, || {
-        write_receipt(
-            worktree,
-            &TurnReceipt {
-                identity: QaTurn {
-                    session_id: session_id.clone(),
-                    turn_id: uuid::Uuid::new_v4().to_string(),
-                },
-                requires_qa,
-                qa_report_id: None,
-                stop_reminder_sent: false,
-                prompt_sha256: prompt
-                    .as_deref()
-                    .filter(|_| requires_qa)
-                    .map(|text| gwt_core::pm_authorization::digest(text.as_bytes())),
-            },
-        )
+        let identity = QaTurn {
+            session_id: session_id.clone(),
+            turn_id: uuid::Uuid::new_v4().to_string(),
+        };
+        let receipt = TurnReceipt {
+            unverified_intake_candidate_id: requires_qa.then(|| identity.turn_id.clone()),
+            identity,
+            requires_qa,
+            qa_report_id: None,
+            stop_reminder_sent: false,
+            prompt_sha256: prompt
+                .as_deref()
+                .filter(|_| requires_qa)
+                .map(|text| gwt_core::pm_authorization::digest(text.as_bytes())),
+        };
+        if let Some(original) = prompt.as_deref().filter(|_| requires_qa) {
+            write_unverified_intake_candidate(worktree, &receipt, original)?;
+        }
+        write_receipt(worktree, &receipt)
     })
 }
 
@@ -157,6 +205,7 @@ pub(crate) fn capture_qa_turn(repo: &Path) -> io::Result<Option<QaTurn>> {
                         qa_report_id: None,
                         prompt_sha256: None,
                         stop_reminder_sent: false,
+                        unverified_intake_candidate_id: None,
                     };
                     write_receipt(repo, &receipt)?;
                     receipt
@@ -261,6 +310,7 @@ pub(crate) fn reporting_diagnostic(repo: &Path, session_id: &str) -> serde_json:
             "requires_qa": receipt.requires_qa,
             "qa_report_id": receipt.qa_report_id,
             "stop_reminder_sent": receipt.stop_reminder_sent,
+            "unverified_intake_candidate_id": receipt.unverified_intake_candidate_id,
         }),
         Ok(None) => serde_json::json!({
             "turn_id": null, "requires_qa": false, "qa_report_id": null,
@@ -358,6 +408,137 @@ mod tests {
             "message":{"role":"user","content":original}
         }))).unwrap();
         native
+    }
+
+    #[test]
+    fn intake_candidates_preserve_unverified_inputs_before_native_arrival() {
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-session");
+        let worktree = fixture(home.path());
+        let directory = project_store(&worktree)
+            .join("project-state/pm-reporting/intake-candidates")
+            .join(crate::pm_registry::pm_delivery_prompt_sha256("pm-session"));
+        let prompt = "元の依頼を直して\n条件を保持してください";
+        let mut saved = Vec::new();
+        let mut _native = None;
+        for _ in 0..2 {
+            handle_user_prompt_submit(&worktree, &serde_json::json!({"prompt":prompt}).to_string())
+                .unwrap();
+            let receipt = read_receipt(&worktree, "pm-session").unwrap().unwrap();
+            let path = directory.join(format!("{}.json", receipt.identity.turn_id));
+            let bytes =
+                fs::read(&path).expect("retain each unverified observation before answering");
+            let candidate: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(candidate["state"], "unverified");
+            assert_eq!(candidate["schema_version"], 1);
+            assert_eq!(candidate["observation"]["session_id"], "pm-session");
+            assert_eq!(candidate["original"], prompt);
+            assert_eq!(
+                candidate["prompt_sha256"],
+                gwt_core::pm_authorization::digest(prompt.as_bytes())
+            );
+            assert!(candidate.get("authority").is_none());
+            assert!(candidate.get("source_id").is_none());
+            assert_eq!(
+                candidate["project_key"],
+                project_store(&worktree)
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+                assert_eq!(
+                    fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+                    0o700,
+                    "make raw input private before the atomic writer creates its temp file"
+                );
+            }
+            assert_eq!(
+                reporting_diagnostic(&worktree, "pm-session")["unverified_intake_candidate_id"],
+                receipt.identity.turn_id
+            );
+            saved.push((path, bytes));
+            // The second observation sees only the prior identical native ID.
+            if _native.is_none() {
+                _native = Some(native_human_fixture(home.path(), &worktree, prompt));
+            }
+        }
+        assert_ne!(saved[0].0, saved[1].0);
+        for input in [r#"{"prompt":"$gwt-pm"}"#, r#"{"prompt":" "}"#, "{}"] {
+            handle_user_prompt_submit(&worktree, input).unwrap();
+        }
+        {
+            let _foreign = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "ordinary");
+            handle_user_prompt_submit(&worktree, r#"{"prompt":"foreign"}"#).unwrap();
+        }
+        handle_user_prompt_submit(home.path(), r#"{"prompt":"ordinary"}"#).unwrap();
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 2);
+        assert_eq!(
+            fs::read_dir(directory.parent().unwrap()).unwrap().count(),
+            1
+        );
+        // Registration replacement cannot erase the previous PM's candidates.
+        let prefs_path = project_store(&worktree).join("project-state/pm.json");
+        let mut prefs = crate::pm_registry::load_pm_prefs(&prefs_path).unwrap();
+        prefs.registration.as_mut().unwrap().session_id = "next-pm".into();
+        crate::pm_registry::save_pm_prefs(&prefs_path, &prefs).unwrap();
+        let _next = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "next-pm");
+        handle_user_prompt_submit(&worktree, r#"{"prompt":"状況は？"}"#).unwrap();
+        for (path, bytes) in saved {
+            assert_eq!(fs::read(path).unwrap(), bytes);
+        }
+        assert!(!project_store(&worktree)
+            .join("project-state/request-tasks")
+            .exists());
+    }
+
+    #[test]
+    fn intake_candidates_fail_honestly_before_and_after_receipt_publication() {
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-session");
+        let worktree = fixture(home.path());
+        handle_user_prompt_submit(&worktree, r#"{"prompt":"$gwt-pm"}"#).unwrap();
+        let receipt = receipt_path(&worktree, "pm-session");
+        let before = fs::read(&receipt).unwrap();
+        let directory = project_store(&worktree)
+            .join("project-state/pm-reporting/intake-candidates")
+            .join(crate::pm_registry::pm_delivery_prompt_sha256("pm-session"));
+        fs::create_dir_all(directory.parent().unwrap()).unwrap();
+        fs::write(&directory, b"blocked candidate directory").unwrap();
+        assert!(handle_user_prompt_submit(&worktree, r#"{"prompt":"保全して"}"#).is_err());
+        assert_eq!(fs::read(&receipt).unwrap(), before);
+        fs::remove_file(&directory).unwrap();
+        fs::remove_file(&receipt).unwrap();
+        fs::create_dir(&receipt).unwrap();
+        assert!(handle_user_prompt_submit(&worktree, r#"{"prompt":"保全して"}"#).is_err());
+        let candidates: Vec<_> = fs::read_dir(directory).unwrap().collect();
+        assert_eq!(candidates.len(), 1, "candidate precedes the latest receipt");
+        let candidate: serde_json::Value =
+            serde_json::from_slice(&fs::read(candidates[0].as_ref().unwrap().path()).unwrap())
+                .unwrap();
+        assert_eq!(candidate["original"], "保全して");
+        assert_eq!(candidate["state"], "unverified");
     }
 
     #[test]
