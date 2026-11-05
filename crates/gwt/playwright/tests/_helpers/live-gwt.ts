@@ -97,9 +97,8 @@ export async function withLiveGwtBackendLock<T>(
   }
 }
 
-export async function gotoLiveGwt(
-  page: Page,
-  base: string,
+export async function installLiveGwtInitScript(
+  page: Pick<Page, "addInitScript">,
   options: LiveGwtOptions = {},
 ): Promise<void> {
   await page.addInitScript(({ enableTestBridge, suppressUpdateApplyStart }) => {
@@ -155,7 +154,14 @@ export async function gotoLiveGwt(
     enableTestBridge: Boolean(options.enableTestBridge),
     suppressUpdateApplyStart: Boolean(options.suppressUpdateApplyStart),
   });
+}
 
+export async function gotoLiveGwt(
+  page: Page,
+  base: string,
+  options: LiveGwtOptions = {},
+): Promise<void> {
+  await installLiveGwtInitScript(page, options);
   liveGwtPageOptions.set(page, options);
   await page.goto(await liveGwtRouteUrl(page, base, options));
   await prepareLiveGwtPage(page, options);
