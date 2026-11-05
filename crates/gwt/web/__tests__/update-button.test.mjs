@@ -19,6 +19,123 @@ const indexHtml = readFileSync(resolve(here, "../index.html"), "utf8");
 const appCss = readFileSync(resolve(here, "../styles/app.css"), "utf8");
 const componentsCss = readFileSync(resolve(here, "../styles/components.css"), "utf8");
 
+function createManualCheckFixture() {
+  const fixture = createFixture();
+  const { document } = parseHTML(indexHtml);
+  fixture.document = document;
+  fixture.options.document = document;
+  fixture.controller = createUpdateCtaController(fixture.options);
+  return fixture;
+}
+
+test("manual update check sits beside the version and coalesces clicks until the result", () => {
+  const fixture = createManualCheckFixture();
+  const button = fixture.document.getElementById("update-check-button");
+  assert.ok(button);
+  assert.equal(fixture.document.getElementById("app-version").nextElementSibling.id, "update-check");
+  const status = fixture.document.getElementById("update-check-status");
+  assert.equal(status.getAttribute("role"), "status");
+  assert.equal(status.getAttribute("aria-live"), "polite");
+  assert.match(appSource, /case "update_check_result":/);
+  assert.match(appSource, /handleUpdateCheckResult\(event\)/);
+  const style = appCss.match(/\.update-check-status\s*\{[^}]+\}/)?.[0];
+  assert.ok(style);
+  assert.match(style, /var\(--color-text-muted\)/);
+  assert.doesNotMatch(style, /#[0-9a-f]{3,8}\b|rgba?\(/i);
+  assert.match(style, /white-space:\s*nowrap/);
+  assert.match(style, /text-overflow:\s*ellipsis/);
+  const detail = fixture.document.getElementById("update-check-detail");
+  assert.ok(detail, "full update details need their own notice card");
+  assert.equal(detail.parentElement.id, "operator-notice-stack");
+  assert.equal(detail.hidden, true);
+  const detailStyle = appCss.match(/\.update-check-detail\s*\{[^}]+\}/)?.[0];
+  assert.ok(detailStyle);
+  assert.match(detailStyle, /pointer-events:\s*auto/);
+  assert.match(detailStyle, /var\(--color-surface-elevated\)/);
+  assert.doesNotMatch(detailStyle, /position:\s*(?:fixed|absolute)|#[0-9a-f]{3,8}\b|rgba?\(/i);
+
+  button.click();
+  button.click();
+  assert.deepEqual(fixture.sent, [{ kind: "check_for_updates" }]);
+  assert.equal(button.disabled, true);
+  assert.equal(status.textContent, "Checking…");
+  fixture.controller.handleUpdateCheckResult({ checking: false, result: { state: "up_to_date" } });
+  assert.equal(button.disabled, false);
+  assert.equal(status.textContent, "Up to date");
+  button.click();
+  assert.equal(fixture.sent.length, 2);
+});
+
+test("manual update check displays errors and the rate-limit retry deadline", () => {
+  const fixture = createManualCheckFixture();
+  fixture.controller.handleUpdateCheckResult({
+    checking: false,
+    result: { state: "failed", message: "GitHub rate limit", retry_at: "2026-11-05T10:00:00Z" },
+  });
+  assert.match(fixture.document.getElementById("update-check-status").textContent, /GitHub rate limit.*2026-11-05T10:00:00Z/);
+  const detail = fixture.document.getElementById("update-check-detail");
+  assert.equal(detail.hidden, false);
+  assert.equal(fixture.document.getElementById("update-check-reason").textContent, "Check failed: GitHub rate limit — Retry after 2026-11-05T10:00:00Z");
+  assert.equal(fixture.document.getElementById("update-check-button").disabled, false);
+  fixture.controller.handleUpdateCheckResult({ checking: false, result: { state: "failed", message: "Network unavailable" } });
+  assert.equal(fixture.document.getElementById("update-check-status").textContent, "Check failed: Network unavailable");
+  assert.equal(fixture.document.getElementById("update-check-reason").textContent, "Check failed: Network unavailable");
+  fixture.controller.handleUpdateCheckResult({ checking: false, result: { state: "up_to_date" } });
+  assert.equal(detail.hidden, true);
+});
+
+test("manual update check offers mismatch retry through the existing modal and manual installation", () => {
+  const fixture = createManualCheckFixture();
+  fixture.controller.handleUpdateCheckResult({
+    checking: false,
+    result: { state: "available", current: "9.149.0", latest: "9.150.0", release_url: "https://github.com/akiojin/gwt/releases/tag/v9.150.0", asset_url: "https://github.com/akiojin/gwt/releases/download/v9.150.0/gwt.dmg" },
+    previous_failure: { outcome: "failure", to_version: "9.150.0", observed_version: "9.149.0" },
+  });
+  assert.match(fixture.document.getElementById("update-check-status").textContent, /Update available: v9.150.0/);
+  assert.match(fixture.document.getElementById("update-check-failure").textContent, /expected v9.150.0.*running v9.149.0/);
+  const detail = fixture.document.getElementById("update-check-detail");
+  assert.equal(detail.hidden, false);
+  assert.equal(detail.contains(fixture.document.getElementById("update-check-failure")), true);
+  const install = fixture.document.getElementById("update-check-install");
+  assert.equal(install.hidden, false);
+  assert.equal(detail.contains(install), true);
+  assert.equal(install.href, "https://github.com/akiojin/gwt/releases/tag/v9.150.0");
+  assert.deepEqual(fixture.sent, [], "checking alone must not download or apply");
+  const retry = fixture.document.getElementById("update-check-retry");
+  assert.equal(retry.hidden, false);
+  assert.equal(detail.contains(retry), true);
+  retry.click();
+  assert.equal(fixture.document.getElementById("update-modal").dataset.state, "downloading");
+  assert.deepEqual(fixture.sent, [{ kind: "apply_update_start" }]);
+  fixture.controller.handleUpdateCheckResult({ checking: false, result: { state: "up_to_date" }, previous_failure: null });
+  assert.equal(retry.hidden, true);
+  assert.equal(install.hidden, true);
+  assert.equal(fixture.document.getElementById("update-check-failure").hidden, true);
+});
+
+test("manual discovery during a download keeps the active update identity until another Check", () => {
+  const fixture = createManualCheckFixture();
+  fixture.controller.handleUpdateState({ state: "available", current: "9.149.0", latest: "9.150.0" });
+  fixture.document.getElementById("update-cta").click();
+  const activeModal = fixture.document.getElementById("update-modal");
+
+  fixture.controller.handleUpdateCheckResult({
+    checking: false,
+    offer_update: false,
+    result: { state: "available", current: "9.149.0", latest: "9.151.0", asset_url: "https://github.com/akiojin/gwt/releases/download/v9.151.0/gwt.dmg" },
+    previous_failure: { outcome: "failure", to_version: "9.151.0", observed_version: "9.149.0" },
+  });
+
+  assert.equal(fixture.document.getElementById("update-modal") === activeModal, true, "manual discovery must preserve the active modal");
+  assert.equal(activeModal.dataset.state, "downloading");
+  assert.equal(activeModal.dataset.version, "9.150.0");
+  assert.equal(fixture.document.getElementById("update-cta").dataset.status, "applying");
+  assert.equal(fixture.versionUpdates.at(-1).latest, "9.150.0");
+  assert.match(fixture.document.getElementById("update-check-status").textContent, /Update available: v9.151.0.*Check again after the current download finishes/);
+  assert.equal(fixture.document.getElementById("update-check-retry").hidden, true);
+  assert.deepEqual(fixture.sent, [{ kind: "apply_update_start" }]);
+});
+
 test("update_state renders one reusable update CTA", () => {
   const fixture = createFixture();
   const controller = createUpdateCtaController(fixture.options);

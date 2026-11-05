@@ -1064,6 +1064,8 @@ pub enum FrontendEvent {
         linked_issue_kind: Option<crate::LinkedIssueKind>,
     },
     IssueMonitorConfigureProfile,
+    /// Explicit header discovery, independent of automatic check scheduling.
+    CheckForUpdates,
     /// Legacy Phase 14 entry point. Frontend now sends
     /// [`FrontendEvent::ApplyUpdateStart`] / [`FrontendEvent::ApplyUpdateRestartNow`]
     /// instead. Kept so older clients and unit tests that still drive
@@ -2784,6 +2786,14 @@ pub enum BackendEvent {
         event: RuntimeHookEvent,
     },
     UpdateState(gwt_core::update::UpdateState),
+    /// Shared outcome of an explicit header check. Discovery does not stage an update.
+    UpdateCheckResult {
+        checking: bool,
+        /// False while a download owns the active CTA and candidate.
+        offer_update: bool,
+        result: Option<gwt_core::update::UpdateState>,
+        previous_failure: Option<gwt_core::update::UpdateApplyResult>,
+    },
     /// SPEC-2041 Phase 19 (FR-054): download progress for the current update.
     /// Emitted from `Backend` while a download is active; the `#update-modal`
     /// uses these to drive the progress bar and byte counter.
@@ -3894,6 +3904,7 @@ impl BackendEvent {
             BackendEvent::ProjectIndexStatus { .. } => "project_index_status",
             BackendEvent::RuntimeHookEvent { .. } => "runtime_hook_event",
             BackendEvent::UpdateState(_) => "update_state",
+            BackendEvent::UpdateCheckResult { .. } => "update_check_result",
             BackendEvent::UpdateProgress { .. } => "update_progress",
             BackendEvent::UpdateReady { .. } => "update_ready",
             BackendEvent::UpdateAutoApply { .. } => "update_auto_apply",

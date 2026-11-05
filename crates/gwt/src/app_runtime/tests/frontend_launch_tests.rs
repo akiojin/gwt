@@ -2048,6 +2048,70 @@ fn app_runtime_frontend_ready_replies_launch_wizard_tombstone_when_closed() {
 }
 
 #[test]
+fn manual_update_check_coalesces_and_publishes_without_staging() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, queued) = sample_runtime_with_events(temp.path(), vec![], None);
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::CheckForUpdates);
+    let checking =
+        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::CheckForUpdates);
+    assert!(checking.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::UpdateCheckResult { checking: true, .. }
+    )));
+    assert!(
+        queued.lock().unwrap().is_empty(),
+        "duplicate check must not spawn work"
+    );
+    assert_eq!(tasks.lock().unwrap().len(), 1, "checks share one worker");
+    let state = gwt_core::update::UpdateState::Available {
+        current: "9.150.0".into(),
+        latest: "99.0.0".into(),
+        release_url: "https://github.com/akiojin/gwt/releases/tag/v99.0.0".into(),
+        asset_url: Some("https://example.invalid/gwt.dmg".into()),
+        checked_at: chrono::Utc::now(),
+    };
+    let failure = gwt_core::update::UpdateApplyResult {
+        outcome: gwt_core::update::UpdateApplyOutcome::Failure,
+        from_version: "9.149.0".into(),
+        to_version: "9.150.0".into(),
+        observed_version: "9.149.0".into(),
+        attempt: 1,
+        recorded_at: chrono::Utc::now().to_rfc3339(),
+        message: Some("version mismatch".into()),
+    };
+    let completed = runtime.complete_manual_update_check(state.clone(), Some(failure.clone()));
+    assert!(!runtime.update_check_in_flight);
+    assert_eq!(runtime.pending_update, Some(state.clone()));
+    assert!(completed.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::UpdateCheckResult { checking: false, offer_update: true, result: Some(result), previous_failure: Some(previous) }
+            if result == &state && previous == &failure
+    )));
+    assert!(runtime.update_download_in_flight.is_none());
+    assert!(
+        queued.lock().unwrap().is_empty(),
+        "manual discovery must wait for confirmation"
+    );
+    runtime.update_download_in_flight = Some("client-1".into());
+    let mut newer = state.clone();
+    if let gwt_core::update::UpdateState::Available { latest, .. } = &mut newer {
+        *latest = "100.0.0".into();
+    }
+    let result = runtime.complete_manual_update_check(newer, None);
+    assert_eq!(runtime.pending_update, Some(state));
+    assert!(result.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::UpdateCheckResult {
+            offer_update: false,
+            ..
+        }
+    )));
+}
+
+#[test]
 fn app_runtime_apply_update_uses_pending_available_update_state() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());

@@ -5301,6 +5301,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
               applyUpdateState(event);
             }
             break;
+          case "update_check_result":
+            updateCtaController.handleUpdateCheckResult(event);
+            break;
           case "update_progress":
             applyUpdateProgress({
               downloaded: event.downloaded,

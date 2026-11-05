@@ -2322,6 +2322,7 @@ pub struct AppRuntime {
     pub(crate) issue_client_factory: RuntimeIssueClientFactory,
     /// Cached update state so late-connecting WebView clients get the toast.
     pub(crate) pending_update: Option<gwt_core::update::UpdateState>,
+    pub(crate) update_check_in_flight: bool,
     /// Initiator of the shared download, or None when its worker is idle.
     pub(crate) update_download_in_flight: Option<ClientId>,
     /// Newest discovery to retry if the active download fails.
@@ -5027,6 +5028,7 @@ impl AppRuntime {
             knowledge_monitor_snapshot: Default::default(),
             issue_client_factory: default_issue_client_factory(),
             pending_update: None,
+            update_check_in_flight: false,
             update_download_in_flight: None,
             deferred_update_discovery: None,
             attachment_uploads,
@@ -11257,6 +11259,7 @@ impl AppRuntime {
             FrontendEvent::ReopenRecentProject { path, request_id } => {
                 self.open_project_path_with_request_events(PathBuf::from(path), request_id)
             }
+            FrontendEvent::CheckForUpdates => self.check_for_updates_events(),
             FrontendEvent::ApplyUpdate => self.apply_pending_update_events(&client_id),
             FrontendEvent::ApplyUpdateStart => self.apply_update_start_events(&client_id),
             FrontendEvent::ApplyUpdateToVersion { version } => {
@@ -12448,6 +12451,7 @@ impl AppRuntime {
             FrontendEvent::IssueMonitorConfigureProfile => {
                 self.open_issue_monitor_configure_profile_wizard_events(context, &client_id)
             }
+            FrontendEvent::CheckForUpdates => self.check_for_updates_events(),
             FrontendEvent::ApplyUpdate => self.apply_pending_update_events(&client_id),
             FrontendEvent::ApplyUpdateStart => self.apply_update_start_events(&client_id),
             FrontendEvent::ApplyUpdateToVersion { version } => {
