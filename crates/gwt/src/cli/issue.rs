@@ -7148,18 +7148,6 @@ fn linked_prs_bulk_query_with_cursors(
     query
 }
 
-/// Linked PRs for every issue in `numbers` through the bulk query
-/// (SPEC #4093 FR-005), including every timeline page. First pages cost
-/// `ceil(N / LINKED_PR_BULK_CHUNK)` GraphQL calls instead of one per issue.
-/// An issue GitHub does not return (deleted, no access) is absent from the map.
-pub(crate) fn fetch_linked_prs_bulk_via_gh(
-    owner: &str,
-    repo: &str,
-    numbers: &[u64],
-) -> io::Result<std::collections::BTreeMap<u64, Vec<LinkedPrSummary>>> {
-    fetch_linked_prs_bulk_via_gh_observing(owner, repo, numbers, |_, _| {})
-}
-
 /// Publish only completed Issues, so a later page failure does not erase their
 /// evidence. The return value retains the strict all-pages error contract.
 pub(crate) fn fetch_linked_prs_bulk_via_gh_observing(
@@ -7200,7 +7188,7 @@ pub(crate) fn fetch_linked_prs_bulk_via_gh_observing(
     )
 }
 
-/// Injectable core of [`fetch_linked_prs_bulk_via_gh`]: `run` executes one
+/// Injectable core of [`fetch_linked_prs_bulk_via_gh_observing`]: `run` executes one
 /// bulk query and answers its JSON body.
 #[cfg(test)]
 pub(crate) fn fetch_linked_prs_bulk_via_gh_with<F>(

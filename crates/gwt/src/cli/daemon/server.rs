@@ -8320,8 +8320,8 @@ fn scan_issue_monitor_once_blocking(
             let probe_batch = crate::issue_monitor_worker::LinkedPrProbeBatch::prefetch(
                 &owner,
                 &repo,
-                loaded.issues.iter().filter(|issue| {
-                    queued.contains(&issue.number) || dependencies.contains(&issue.number)
+                queued.iter().chain(&dependencies).filter_map(|number| {
+                    loaded.issues.iter().find(|issue| issue.number == *number)
                 }),
                 &loaded.linked_prs,
             );
@@ -8385,8 +8385,8 @@ fn scan_issue_monitor_once_blocking(
                             crate::issue_monitor::ClaimProbeOutcome::from_completed(completed),
                         ),
                         Err(failure)
-                            if crate::issue_monitor_worker::is_rate_limit_failure(
-                                &failure.detail,
+                            if crate::issue_monitor_worker::completion_probe_should_defer(
+                                &failure,
                             ) =>
                         {
                             record_scan_failure_ledger(
@@ -10514,6 +10514,14 @@ fi
 if [ "$GWT_FAKE_GH_MODE" = "claim_probe_fail" ]; then
   case "$*" in
     *"timelineItems"*)
+      printf '%s\n' 'linked PR readback unavailable' >&2
+      exit 1
+      ;;
+  esac
+fi
+if [ "$GWT_FAKE_GH_MODE" = "claim_probe_timeout" ]; then
+  case "$*" in
+    *"timelineItems"*)
       printf '%s\n' 'operation deadline expired during linked PR readback' >&2
       exit 1
       ;;
@@ -10635,6 +10643,10 @@ if [ "$GWT_FAKE_GH_MODE" = "branch_protection_fail" ]; then
 fi
 if [ "$GWT_FAKE_GH_MODE" = "claim_probe_fail" ] || [ "$GWT_FAKE_GH_MODE" = "claim_probe_rate_limited" ]; then
   printf '%s\n' '[{"number":43,"title":"Live SPEC","body":"Live body","labels":[{"name":"auto-improve"},{"name":"gwt-spec"}],"state":"OPEN","url":"https://example.test/issues/43","updatedAt":"2026-08-15T00:00:00Z"}]'
+  exit 0
+fi
+if [ "$GWT_FAKE_GH_MODE" = "claim_probe_timeout" ]; then
+  printf '%s\n' '[{"number":43,"title":"Live SPEC","body":"Live body","labels":[{"name":"auto-improve"},{"name":"gwt-spec"}],"state":"OPEN","url":"https://example.test/issues/43","updatedAt":"2026-08-15T00:00:00Z"},{"number":44,"title":"Queued issue","body":"Queued body","labels":[{"name":"bug"},{"name":"gwt-queued"}],"state":"OPEN","url":"https://example.test/issues/44","updatedAt":"2026-08-15T00:00:00Z"}]'
   exit 0
 fi
 if [ "$GWT_FAKE_GH_MODE" = "completion_recovery" ]; then
@@ -18370,6 +18382,101 @@ exit 0
         assert!(failure.detail.contains("linked PR readback"), "{failure}");
         assert!(preserved.pending_effects().is_empty());
         assert!(preserved.prefs().launching_issues.is_empty());
+    }
+
+    #[test]
+    fn issue_6746_completion_probe_timeout_defers_only_its_candidate() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let _home = ScopedGwtHome::set(&home);
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "claim_probe_timeout");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        init_git_repo(&repo);
+        commit_initial_branch(&repo);
+        git_remote_add_origin(&repo, "https://github.com/example/repo.git");
+        let cache_root =
+            crate::issue_cache::issue_cache_root_for_repo_path(&repo).expect("repo cache root");
+        gwt_github::Cache::new(cache_root)
+            .write_snapshot(&gwt_github::IssueSnapshot {
+                author_login: None,
+                number: gwt_github::IssueNumber(43),
+                title: "Live SPEC".to_string(),
+                body: "<!-- gwt-spec id=43 version=1 -->\n\
+                       <!-- sections:\n\
+                       spec=body\n\
+                       plan=body\n\
+                       tasks=body\n\
+                       -->\n\n\
+                       <!-- artifact:spec BEGIN -->\nSpec\n<!-- artifact:spec END -->\n\n\
+                       <!-- artifact:plan BEGIN -->\nPlan\n<!-- artifact:plan END -->\n\n\
+                       <!-- artifact:tasks BEGIN -->\n- [x] Complete\n<!-- artifact:tasks END -->"
+                    .to_string(),
+                labels: vec!["gwt-spec".to_string()],
+                state: gwt_github::IssueState::Open,
+                updated_at: gwt_github::UpdatedAt::new("2026-08-15T00:00:00Z"),
+                comments: Vec::new(),
+            })
+            .expect("seed completed SPEC cache generation");
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let prefs = scheduled_issue_monitor_prefs(
+            crate::IssueMonitorPrefs {
+                max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
+                enabled: true,
+                max_active_agents: 1,
+                launch_profile: Some(sample_issue_monitor_profile()),
+                ..crate::IssueMonitorPrefs::default()
+            },
+            &[43, 44],
+        );
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
+            &prefs,
+        )
+        .unwrap();
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        monitor.set_gui_connected(true);
+
+        let scanned = super::scan_issue_monitor_once_blocking(scope, monitor, true)
+            .expect("one completion timeout must not discard the scan");
+
+        let claimed: Vec<_> = scanned
+            .pending_effects()
+            .iter()
+            .filter_map(|effect| match effect.payload {
+                crate::IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } => {
+                    Some(issue_number)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(claimed, vec![44], "the unread SPEC stays unclaimed");
+        assert!(!scanned.agent_status().scan_aborted);
+        let error = scanned
+            .status_view()
+            .last_error
+            .expect("degraded scan reason");
+        for expected in [
+            "claim-completion-readback",
+            "continued_with_deferred_candidates",
+            "#43",
+            "deadline expired",
+        ] {
+            assert!(error.contains(expected), "{expected}: {error}");
+        }
     }
 
     #[test]

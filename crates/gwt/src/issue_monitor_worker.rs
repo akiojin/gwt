@@ -2338,9 +2338,9 @@ pub fn try_issue_completed_by_merged_pr(
 /// bulk query per scan so the completion probe costs a constant number of
 /// GraphQL calls instead of one per candidate.
 ///
-/// A candidate the batch does not hold (the bulk read failed, was refused,
-/// or the issue was not returned) falls back to the single-issue probe, so
-/// a partial batch degrades to today's behaviour instead of a wrong answer.
+/// Complete timelines survive a later bulk failure. Unconfirmed candidates
+/// retain that failure without re-probing the entire queue one Issue at a time.
+/// An Issue omitted from a successful bulk read uses the bounded single probe.
 #[derive(Debug, Default)]
 pub struct LinkedPrProbeBatch {
     linked: BTreeMap<u64, Vec<crate::cli::LinkedPrSummary>>,
@@ -2363,8 +2363,8 @@ impl LinkedPrProbeBatch {
             .filter(|issue| is_spec_candidate(issue))
             .map(|issue| issue.number)
             .collect();
-        Self::prefetch_with(&numbers, linked_prs, |numbers| {
-            crate::cli::issue::fetch_linked_prs_bulk_via_gh(owner, repo, numbers)
+        Self::prefetch_with(&numbers, linked_prs, |numbers, observe| {
+            crate::cli::issue::fetch_linked_prs_bulk_via_gh_observing(owner, repo, numbers, observe)
         })
     }
 
@@ -2375,16 +2375,19 @@ impl LinkedPrProbeBatch {
         fetch: F,
     ) -> Self
     where
-        F: FnOnce(&[u64]) -> std::io::Result<BTreeMap<u64, Vec<crate::cli::LinkedPrSummary>>>,
+        F: FnOnce(
+            &[u64],
+            &mut dyn FnMut(u64, &[crate::cli::LinkedPrSummary]),
+        ) -> std::io::Result<BTreeMap<u64, Vec<crate::cli::LinkedPrSummary>>>,
     {
-        if numbers.is_empty()
-            || ensure_scan_deadline(IssueMonitorScanStage::ClaimCompletionReadback).is_err()
-        {
+        if numbers.is_empty() {
             return Self::default();
         }
         let mut linked = BTreeMap::new();
+        let mut seen = BTreeSet::new();
         let missing: Vec<_> = numbers
             .iter()
+            .filter(|number| seen.insert(**number))
             .filter_map(|number| match linked_prs.get(number) {
                 Some(prs) => {
                     linked.insert(*number, prs.clone());
@@ -2399,7 +2402,15 @@ impl LinkedPrProbeBatch {
                 failure: None,
             };
         }
-        match fetch(&missing) {
+        // Issue #6746: keep the launch reserve and every completed timeline,
+        // even when a later page consumes this readback's own budget.
+        let fetched =
+            run_budgeted_readback_stage(IssueMonitorScanStage::ClaimCompletionReadback, || {
+                fetch(&missing, &mut |number, prs| {
+                    linked.insert(number, prs.to_vec());
+                })
+            });
+        match fetched {
             Ok(fetched) => {
                 linked.extend(fetched);
                 Self {
@@ -2472,6 +2483,8 @@ pub fn try_issue_completed_by_merged_pr_classified_with(
     issue: &IssueMonitorIssue,
     batch: Option<&LinkedPrProbeBatch>,
 ) -> Result<bool, IssueMonitorCompletionProbeFailure> {
+    ensure_scan_deadline(IssueMonitorScanStage::ClaimCompletionReadback)
+        .map_err(IssueMonitorCompletionProbeFailure::Deadline)?;
     if let Some(batch) = batch {
         if let Some(completed) = batch.completed(issue) {
             return Ok(completed);
@@ -2501,6 +2514,18 @@ pub enum IssueMonitorCompletionProbeFailure {
     Operation(IssueMonitorScanFailure),
 }
 
+/// A bounded readback or quota refusal defers its candidate, preserving the
+/// scan's independent launch progress. The outer deadline remains authoritative.
+pub fn completion_probe_should_defer(failure: &IssueMonitorScanFailure) -> bool {
+    is_rate_limit_failure(&failure.detail)
+        || failure
+            .detail
+            .contains(gwt_core::operation_deadline::DEADLINE_EXPIRED_MARKER)
+        || failure
+            .detail
+            .contains("scan budget reserved for the launch stage")
+}
+
 impl IssueMonitorCompletionProbeFailure {
     pub fn into_failure(self) -> IssueMonitorScanFailure {
         match self {
@@ -2525,17 +2550,14 @@ pub fn try_issue_completed_by_merged_pr_classified(
     }
     let stage = IssueMonitorScanStage::ClaimCompletionReadback;
     ensure_scan_deadline(stage).map_err(IssueMonitorCompletionProbeFailure::Deadline)?;
-    let prs = crate::cli::issue::fetch_linked_prs_via_gh(
-        owner,
-        repo,
-        gwt_github::IssueNumber(issue.number),
-    )
-    .map_err(|error| {
-        IssueMonitorCompletionProbeFailure::Operation(IssueMonitorScanFailure::new(
-            stage,
-            error.to_string(),
-        ))
-    })?;
+    let prs = run_budgeted_readback_stage(stage, || {
+        crate::cli::issue::fetch_linked_prs_via_gh(
+            owner,
+            repo,
+            gwt_github::IssueNumber(issue.number),
+        )
+    })
+    .map_err(IssueMonitorCompletionProbeFailure::Operation)?;
     ensure_scan_deadline(stage).map_err(IssueMonitorCompletionProbeFailure::Deadline)?;
     Ok(linked_pr_completion_is_fresh_for_issue(issue, &prs))
 }
@@ -3871,7 +3893,7 @@ mod linked_pr_batch_tests {
         #[cfg(not(windows))]
         let temp = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
-        let batch = LinkedPrProbeBatch::prefetch_with(&[1, 2], &BTreeMap::new(), |_| {
+        let batch = LinkedPrProbeBatch::prefetch_with(&[1, 2], &BTreeMap::new(), |_, _| {
             Err(std::io::Error::other("bulk completion read failed"))
         });
         let error = IssueMonitorScanFailure::new(
@@ -3907,6 +3929,76 @@ mod linked_pr_batch_tests {
         }
     }
 
+    #[test]
+    fn issue_6746_large_batch_timeout_preserves_confirmed_queue_head() {
+        use gwt_core::operation_deadline::{ScopedOperationClock, ScopedOperationDeadline};
+        use std::time::{Duration, Instant};
+
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        crate::machine_agent_settings::set(
+            Some(1),
+            crate::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+            "2026-11-05T00:00:00Z",
+        )
+        .unwrap();
+        let start = Instant::now();
+        let _clock = ScopedOperationClock::set(start);
+        let _scan = ScopedOperationDeadline::enter(start + Duration::from_secs(60));
+        let issues: Vec<_> = (1..=201).map(spec_issue).collect();
+        let numbers: Vec<_> = issues.iter().map(|issue| issue.number).collect();
+        let mut _elapsed = None;
+        let mut reads = 0;
+        let batch =
+            LinkedPrProbeBatch::prefetch_with(&numbers, &BTreeMap::new(), |missing, observe| {
+                reads += 1;
+                assert_eq!(missing.len(), 201);
+                observe(1, &[]);
+                let deadline = gwt_core::operation_deadline::current().unwrap();
+                assert!(deadline <= start + issue_monitor_readback_budget());
+                // Observe expiry deterministically instead of waiting on the wall clock.
+                _elapsed = Some(ScopedOperationClock::set(deadline));
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "process deadline expired",
+                ))
+            });
+        assert_eq!(reads, 1);
+        assert_eq!(batch.completed(&issues[0]), Some(false));
+        assert!(ensure_scan_deadline(IssueMonitorScanStage::ProposalReturn).is_ok());
+        let failure = try_issue_completed_by_merged_pr_with("o", "r", &issues[1], Some(&batch))
+            .expect_err("the timed-out candidate remains unconfirmed without a single retry");
+        assert!(failure.detail.contains("deadline expired"));
+
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+            enabled: true,
+            max_active: 1,
+            ..Default::default()
+        });
+        monitor.set_source_repository(Some(("example", "project")));
+        monitor.set_gui_connected(true);
+        monitor.terminal_queue_push(&numbers, "test", "2026-11-05T00:00:00Z");
+        crate::scan_issue_monitor_candidates(&mut monitor, &issues, "2026-11-05T00:00:00Z");
+        let prepared = monitor
+            .try_prepare_claim_effects_with_probe("host:1", "2026-11-05T00:00:00Z", 1, |number| {
+                try_issue_completed_by_merged_pr_with(
+                    "o",
+                    "r",
+                    &issues[(number - 1) as usize],
+                    Some(&batch),
+                )
+            })
+            .expect("a later probe timeout cannot erase the confirmed head");
+        assert_eq!(prepared, 1);
+        assert!(matches!(
+            monitor.pending_effects()[0].payload,
+            crate::IssueMonitorEffectPayload::AcquireClaim {
+                issue_number: 1,
+                ..
+            }
+        ));
+    }
+
     /// SPEC #4093 AC-7: the batch is one bulk read for the whole candidate
     /// set; every candidate it holds is answered without another call, and a
     /// candidate it does not hold falls back (answered `None` here).
@@ -3914,24 +4006,29 @@ mod linked_pr_batch_tests {
     fn batch_reads_all_spec_candidates_once_and_answers_from_memory() {
         let issues = [spec_issue(1), spec_issue(2), spec_issue(3)];
         let mut reads = 0;
-        let batch = LinkedPrProbeBatch::prefetch_with(&[1, 2, 3], &BTreeMap::new(), |numbers| {
-            reads += 1;
-            assert_eq!(numbers, [1, 2, 3]);
-            let mut linked = BTreeMap::new();
-            linked.insert(
-                1,
-                vec![crate::cli::LinkedPrSummary {
-                    number: 101,
-                    title: "fix #1".to_string(),
-                    state: "MERGED".to_string(),
-                    url: String::new(),
-                    will_close_target: true,
-                    merged_at: Some("2026-09-02T00:00:00Z".to_string()),
-                }],
-            );
-            linked.insert(2, Vec::new());
-            Ok(linked)
-        });
+        let batch =
+            LinkedPrProbeBatch::prefetch_with(&[3, 1, 2, 1], &BTreeMap::new(), |numbers, _| {
+                reads += 1;
+                assert_eq!(
+                    numbers,
+                    [3, 1, 2],
+                    "deduplicate without changing queue order"
+                );
+                let mut linked = BTreeMap::new();
+                linked.insert(
+                    1,
+                    vec![crate::cli::LinkedPrSummary {
+                        number: 101,
+                        title: "fix #1".to_string(),
+                        state: "MERGED".to_string(),
+                        url: String::new(),
+                        will_close_target: true,
+                        merged_at: Some("2026-09-02T00:00:00Z".to_string()),
+                    }],
+                );
+                linked.insert(2, Vec::new());
+                Ok(linked)
+            });
         assert_eq!(reads, 1);
         assert_eq!(batch.len(), 2);
         assert_eq!(batch.completed(&issues[0]), Some(true));
@@ -3945,7 +4042,7 @@ mod linked_pr_batch_tests {
         let mut seed = batch.linked.clone();
         seed.insert(99, Vec::new());
         let mut queried = Vec::new();
-        let reused = LinkedPrProbeBatch::prefetch_with(&[1, 2, 3], &seed, |numbers| {
+        let reused = LinkedPrProbeBatch::prefetch_with(&[1, 2, 3], &seed, |numbers, _| {
             queried.extend_from_slice(numbers);
             Err(std::io::Error::other("missing timeline failed"))
         });
@@ -3960,13 +4057,13 @@ mod linked_pr_batch_tests {
             .into_failure()
             .detail
             .contains("missing timeline failed"));
-        let fully_reused = LinkedPrProbeBatch::prefetch_with(&[1, 2], &seed, |_| {
+        let fully_reused = LinkedPrProbeBatch::prefetch_with(&[1, 2], &seed, |_, _| {
             panic!("complete same-scan timelines need no remote read")
         });
         assert_eq!(fully_reused.len(), 2);
         assert!(fully_reused.failure().is_none());
 
-        let refused = LinkedPrProbeBatch::prefetch_with(&[1], &BTreeMap::new(), |_| {
+        let refused = LinkedPrProbeBatch::prefetch_with(&[1], &BTreeMap::new(), |_, _| {
             Err(std::io::Error::other(
                 "gh api graphql failed: API rate limit already exceeded",
             ))

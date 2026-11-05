@@ -3734,15 +3734,21 @@ enum IssueMonitorScanEnqueueError {
 fn claim_candidate_completion_observations<E>(
     available: usize,
     candidates: Vec<u64>,
-    mut completed_probe: impl FnMut(u64) -> Result<bool, E>,
+    mut completed_probe: impl FnMut(u64) -> Result<gwt::issue_monitor::ClaimProbeOutcome, E>,
 ) -> Result<std::collections::BTreeMap<u64, bool>, E> {
+    use gwt::issue_monitor::ClaimProbeOutcome;
+
     let mut observations = std::collections::BTreeMap::new();
     let mut remaining = available;
     for issue_number in candidates {
         if remaining == 0 {
             break;
         }
-        let completed = completed_probe(issue_number)?;
+        let completed = match completed_probe(issue_number)? {
+            ClaimProbeOutcome::Completed => true,
+            ClaimProbeOutcome::Claimable => false,
+            ClaimProbeOutcome::Deferred => continue,
+        };
         observations.insert(issue_number, completed);
         if !completed {
             remaining -= 1;
@@ -3819,6 +3825,8 @@ fn observe_local_claim_candidates(
     owner: &str,
     repo: &str,
 ) -> Result<Option<LocalClaimObservation>, gwt::issue_monitor_worker::IssueMonitorScanFailure> {
+    use gwt::issue_monitor::ClaimProbeOutcome;
+
     if !loaded.authorizes_remote_effects() {
         return Ok(None);
     }
@@ -3843,10 +3851,10 @@ fn observe_local_claim_candidates(
     let batch = local_probe_batch(
         owner,
         repo,
-        loaded
-            .issues
+        queued
             .iter()
-            .filter(|issue| queued.contains(&issue.number) || dependencies.contains(&issue.number)),
+            .chain(&dependencies)
+            .filter_map(|number| loaded.issues.iter().find(|issue| issue.number == *number)),
         &loaded.linked_prs,
     );
     let mut dependency_observations = std::collections::BTreeMap::new();
@@ -3857,7 +3865,11 @@ fn observe_local_claim_candidates(
             .find(|issue| issue.number == issue_number)
         {
             Some(issue) => {
-                let completed = observe_local_issue_completion(owner, repo, issue, &batch)?;
+                let completed = match observe_local_issue_completion(owner, repo, issue, &batch)? {
+                    Some(ClaimProbeOutcome::Completed) => Some(true),
+                    Some(ClaimProbeOutcome::Claimable) => Some(false),
+                    Some(ClaimProbeOutcome::Deferred) | None => None,
+                };
                 Some(gwt::issue_monitor::IssueMonitorDependencyObservation::new(
                     issue, completed,
                 ))
@@ -3878,14 +3890,17 @@ fn observe_local_claim_candidates(
                 .iter()
                 .find(|issue| issue.number == issue_number)
             else {
-                return Ok(false);
+                return Ok(ClaimProbeOutcome::Claimable);
             };
             observe_local_issue_completion(owner, repo, issue, &batch)
-                .map(|completed| completed.unwrap_or(false))
+                .map(|completed| completed.unwrap_or(ClaimProbeOutcome::Claimable))
         });
     let observations = observations.inspect_err(|failure| {
         tracing::warn!(error = %failure, "issue monitor completion probe expired");
     })?;
+    gwt::issue_monitor_worker::ensure_scan_deadline(
+        gwt::issue_monitor_worker::IssueMonitorScanStage::ClaimCompletionReadback,
+    )?;
     Ok(Some((
         gwt::process::current_claim_owner(),
         observations,
@@ -3897,20 +3912,33 @@ fn observe_local_claim_candidates(
 /// completion probe. An ordinary readback error returned while the observation
 /// deadline is still valid keeps #3165's fail-open compatibility as an explicit
 /// inconclusive outcome. Candidates treat it as negative; dependencies disable
-/// that edge for this scan. An expired deadline discards the whole proposal.
+/// that edge for this scan. A per-readback timeout defers its candidate without
+/// spending a claim slot. An expired scan deadline discards the whole proposal.
 fn observe_local_issue_completion(
     owner: &str,
     repo: &str,
     issue: &gwt::IssueMonitorIssue,
     batch: &gwt::issue_monitor_worker::LinkedPrProbeBatch,
-) -> Result<Option<bool>, gwt::issue_monitor_worker::IssueMonitorScanFailure> {
+) -> Result<
+    Option<gwt::issue_monitor::ClaimProbeOutcome>,
+    gwt::issue_monitor_worker::IssueMonitorScanFailure,
+> {
+    use gwt::issue_monitor::ClaimProbeOutcome;
     use gwt::issue_monitor_worker::IssueMonitorCompletionProbeFailure;
 
     match local_completion_probe(owner, repo, issue, Some(batch)) {
-        Ok(completed) => Ok(Some(completed)),
+        Ok(completed) => Ok(Some(ClaimProbeOutcome::from_completed(completed))),
         Err(IssueMonitorCompletionProbeFailure::Deadline(failure)) => Err(failure),
         Err(IssueMonitorCompletionProbeFailure::Operation(failure)) => {
             gwt::issue_monitor_worker::ensure_scan_deadline(failure.stage)?;
+            if gwt::issue_monitor_worker::completion_probe_should_defer(&failure) {
+                tracing::debug!(
+                    issue = issue.number,
+                    error = %failure,
+                    "issue monitor completion probe deferred within scan budget"
+                );
+                return Ok(Some(ClaimProbeOutcome::Deferred));
+            }
             tracing::debug!(
                 issue = issue.number,
                 error = %failure,
