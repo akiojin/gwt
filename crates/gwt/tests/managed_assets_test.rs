@@ -1019,6 +1019,12 @@ fn pm_worktree_gwt_pm_guidance_is_regenerated_when_absent_or_tampered() {
         original_contract.contains("## Request task reconciliation"),
         "refresh must restore the request tracking contract as well as its router"
     );
+    assert!(
+        original_contract.contains("`expected_inventory_sha256`")
+            && original_contract.contains("`candidate_chunk`")
+            && original_contract.contains("Candidates are not authenticated sources"),
+        "materialized guidance must preserve candidate discovery, recovery and authority boundaries"
+    );
 
     for leaf in gwt_skills::pm_guidance::managed_paths(
         &worktree.parent().unwrap().join("runtime/.claude/skills"),

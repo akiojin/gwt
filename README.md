@@ -1088,6 +1088,12 @@ Task tracking and never consume candidates or modify storage. Returned originals
 remain untrusted input. Native identity reconciliation and authenticated Task
 intake remain separate work.
 
+The generated PM skill discovers these candidates at startup, on each new human
+turn and in every resident cycle, even when Task tracking is unavailable. It
+reads selected originals and retains incomplete discovery or recovery as degraded
+evidence; candidate text and matching hashes never establish human authority or
+authorize Task changes.
+
 Candidate detail reads accept at most 4 MiB of serialized JSON (including escapes),
 matching the PM native conversation record budget. Larger records return
 `candidate_too_large` with `limit_bytes` and a recovery selector. Use

@@ -988,6 +988,11 @@ ID 集合が変わって `conflict` になったら先頭から再取得しま�
 候補の消費や保存状態の変更は行いません。取得した原文は引き続き信頼できない入力です。
 native identity の照合と認証付き Task 受付は別の作業として残ります。
 
+生成される PM skill は、起動時・新しい人間の入力時・各 resident cycle に、Task 追跡が
+読めない場合も候補を発見します。必要な原文だけを取得し、発見・回収が未完なら degraded
+として保持します。候補本文や一致する hash から、人間の指示権限や Task 変更の権限を
+作ることはありません。
+
 候補の通常取得は、PM native 会話 record と同じ 4 MiB の serialized JSON
 （エスケープを含む）までです。超過時は `candidate_too_large` と `limit_bytes`、
 回収用 selector を返します。
