@@ -57,6 +57,7 @@ pub mod managed_assets;
 pub mod memory_pressure;
 pub mod migration;
 pub mod mobile_connection;
+pub mod mobile_coordinator;
 pub mod mobile_host;
 #[doc(hidden)]
 pub mod mobile_input_permit;

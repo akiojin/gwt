@@ -1309,6 +1309,7 @@ dependencies = [
  "serde_json",
  "serde_norway",
  "sha2 0.10.9",
+ "subtle",
  "sysinfo",
  "tao",
  "tempfile",
@@ -4388,6 +4389,7 @@ checksum = "4a0e2d11620c50695fe12bbbfde96b3477fe606e7284c22d505c12ce51214514"
 dependencies = [
  "getrandom 0.4.2",
  "js-sys",
+ "serde_core",
  "wasm-bindgen",
 ]
 
