@@ -17,10 +17,12 @@ use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};
 use semver::Version;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 #[cfg(target_os = "windows")]
@@ -105,7 +107,7 @@ fn default_allow_elevation() -> bool {
     true
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct GitHubRelease {
     tag_name: String,
     html_url: String,
@@ -1005,10 +1007,14 @@ pub struct UpdateManager {
     release_client: Client,
 }
 
+#[derive(Clone)]
 struct ReleaseFetchError {
     message: String,
     retry_at: Option<DateTime<Utc>>,
 }
+
+type ReleaseFlight = Arc<OnceLock<Result<GitHubRelease, ReleaseFetchError>>>;
+static LATEST_RELEASE_FLIGHTS: OnceLock<Mutex<HashMap<String, ReleaseFlight>>> = OnceLock::new();
 
 impl From<String> for ReleaseFetchError {
     fn from(message: String) -> Self {
@@ -1199,6 +1205,18 @@ impl UpdateManager {
     }
 
     pub fn check_for_executable(&self, force: bool, current_exe: Option<&Path>) -> UpdateState {
+        self.check_for_executable_impl(force, current_exe)
+    }
+
+    /// Explicit user discovery bypasses cached outcomes and automatic retry
+    /// policy. It only discovers a candidate; staging still requires the
+    /// existing user-confirmed apply route.
+    pub fn check_manual_for_executable(&self, current_exe: Option<&Path>) -> UpdateState {
+        log_update_event("check_started", &[("source", "manual")]);
+        self.check_for_executable_impl(true, current_exe)
+    }
+
+    fn check_for_executable_impl(&self, force: bool, current_exe: Option<&Path>) -> UpdateState {
         let now = Utc::now();
         let cache = read_cache(&self.cache_path).ok();
 
@@ -1674,7 +1692,29 @@ impl UpdateManager {
             self.owner,
             self.repo
         );
-        self.fetch_release(&url, "latest release")
+        // Managers are created independently by startup/periodic and manual
+        // workers. Share only an active network lookup, never a completed
+        // outcome: a later explicit Check must make a fresh request.
+        let flights = LATEST_RELEASE_FLIGHTS.get_or_init(Mutex::default);
+        let flight = flights
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(url.clone())
+            .or_default()
+            .clone();
+        let result = flight
+            .get_or_init(|| self.fetch_release(&url, "latest release"))
+            .clone();
+        let mut flights = flights
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if flights
+            .get(&url)
+            .is_some_and(|active| Arc::ptr_eq(active, &flight))
+        {
+            flights.remove(&url);
+        }
+        result
     }
 
     /// SPEC #2780 v2 Amendment (FR-011): fetch a release by its tag name so the
@@ -2077,17 +2117,22 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
         .parent()
         .ok_or_else(|| io::Error::other("invalid path"))?;
     let tmp = parent.join(format!(
-        ".{}.tmp",
+        ".{}.{}.tmp",
         path.file_name()
             .and_then(|s| s.to_str())
-            .unwrap_or("update")
+            .unwrap_or("update"),
+        uuid::Uuid::new_v4()
     ));
     gwt_config::home::assert_test_path(&tmp);
     let bytes = serde_json::to_vec(value).map_err(|e| io::Error::other(e.to_string()))?;
-    fs::write(&tmp, bytes)?;
-    let _ = fs::remove_file(path); // Remove existing file first (needed on Windows)
-    fs::rename(&tmp, path)?;
-    Ok(())
+    let result = fs::write(&tmp, bytes).and_then(|()| {
+        let _ = fs::remove_file(path); // Remove existing file first (needed on Windows)
+        fs::rename(&tmp, path)
+    });
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
 }
 
 fn parse_tag_version(tag: &str) -> Option<Version> {
@@ -3239,6 +3284,138 @@ mod tests {
 
         let state = mgr.check(true);
         assert!(matches!(state, UpdateState::Failed { .. }));
+    }
+
+    #[test]
+    fn manual_check_bypasses_fresh_cache_and_offers_failed_newer_release() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::ScopedGwtHome::set(home.path());
+        let base = serve_once(
+            "",
+            "200 OK",
+            "application/json",
+            br#"{"tag_name":"v99.0.0","html_url":"https://example.com/release","assets":[]}"#
+                .to_vec(),
+        );
+        let mgr = UpdateManager::new().with_api_base_url(base);
+        write_cache(
+            mgr.cache_path(),
+            &UpdateCacheFile {
+                checked_at: Utc::now(),
+                latest_version: Some("999.0.0".to_string()),
+                release_url: Some("https://example.com/cached".to_string()),
+                portable_asset_url: None,
+                installer_asset_url: None,
+                asset_url: None,
+            },
+        )
+        .unwrap();
+        persist_update_apply_result(&UpdateApplyResult {
+            outcome: UpdateApplyOutcome::Failure,
+            from_version: mgr.current_version.to_string(),
+            to_version: "99.0.0".to_string(),
+            observed_version: mgr.current_version.to_string(),
+            attempt: 1,
+            recorded_at: Utc::now().to_rfc3339(),
+            message: Some("version mismatch".to_string()),
+        })
+        .unwrap();
+
+        let state = mgr.check_manual_for_executable(None);
+        assert!(matches!(state, UpdateState::Available { latest, .. } if latest == "99.0.0"));
+        // The one-shot server is now closed. A later explicit check must
+        // surface its failure rather than reusing the finished flight/cache.
+        assert!(matches!(
+            mgr.check_manual_for_executable(None),
+            UpdateState::Failed { .. }
+        ));
+        let log = fs::read_to_string(update_log_path()).unwrap();
+        assert!(
+            log.lines().any(|line| {
+                let entry: serde_json::Value = serde_json::from_str(line).unwrap();
+                entry["stage"] == "check_started" && entry["source"] == "manual"
+            }),
+            "{log}"
+        );
+    }
+
+    #[test]
+    fn manual_check_never_offers_current_or_older_release() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::ScopedGwtHome::set(temp.path());
+        for latest in [env!("CARGO_PKG_VERSION"), "0.0.0"] {
+            let base = serve_once(
+                "",
+                "200 OK",
+                "application/json",
+                format!(r#"{{"tag_name":"v{latest}","html_url":"https://example.com/release","assets":[]}}"#)
+                    .into_bytes(),
+            );
+            let mgr = UpdateManager::new()
+                .with_api_base_url(base)
+                .with_cache_path(temp.path().join("update-check.json"));
+            assert!(matches!(
+                mgr.check_manual_for_executable(None),
+                UpdateState::UpToDate { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn manual_and_periodic_checks_share_an_in_flight_release_lookup() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::ScopedGwtHome::set(home.path());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let key = format!("{base}/repos/akiojin/gwt/releases/latest");
+        let (arrived_tx, arrived_rx) = std::sync::mpsc::channel();
+        let (respond_tx, respond_rx) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0u8; 2048];
+            assert!(stream.read(&mut buffer).unwrap() > 0);
+            arrived_tx.send(()).unwrap();
+            respond_rx.recv().unwrap();
+            let body =
+                r#"{"tag_name":"v99.0.0","html_url":"https://example.com/release","assets":[]}"#;
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        });
+        let manager = UpdateManager::new().with_api_base_url(base);
+        let periodic = manager.clone();
+        let periodic = thread::spawn(move || periodic.check_for_executable(true, None));
+        arrived_rx.recv().unwrap();
+        let manual = thread::spawn(move || manager.check_manual_for_executable(None));
+        // Hold the HTTP response until both callers joined this exact flight;
+        // observing ownership avoids a scheduler-dependent sleep/barrier race.
+        loop {
+            let joined = LATEST_RELEASE_FLIGHTS
+                .get()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .get(&key)
+                .is_some_and(|flight| std::sync::Arc::strong_count(flight) >= 3);
+            if joined {
+                break;
+            }
+            assert!(
+                !periodic.is_finished() && !manual.is_finished(),
+                "a check completed without joining the active lookup"
+            );
+            thread::yield_now();
+        }
+        respond_tx.send(()).unwrap();
+        let periodic = periodic.join().unwrap();
+        let manual = manual.join().unwrap();
+        server.join().unwrap();
+        assert!(matches!(&manual, UpdateState::Available { latest, .. } if latest == "99.0.0"));
+        assert!(matches!(periodic, UpdateState::Available { latest, .. } if latest == "99.0.0"));
+        assert!(!LATEST_RELEASE_FLIGHTS
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .contains_key(&key));
     }
 
     #[test]
@@ -4685,6 +4862,45 @@ mod tests {
         let _ = fs::set_permissions(&unreadable, restore_perms);
 
         assert_eq!(found.unwrap(), Some(expected));
+    }
+
+    #[test]
+    fn cache_write_keeps_another_writers_temporary_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("update.json");
+        let other_writer = temp.path().join(".update.json.tmp");
+        fs::write(&other_writer, b"another writer's payload").unwrap();
+        fs::write(&path, b"old cache").unwrap();
+        let value = serde_json::json!({ "latest_version": "99.0.0" });
+
+        write_json_atomic(&path, &value).unwrap();
+
+        assert_eq!(
+            fs::read(&other_writer).unwrap(),
+            b"another writer's payload"
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&fs::read(path).unwrap()).unwrap(),
+            value
+        );
+    }
+
+    #[test]
+    fn failed_cache_write_removes_its_temporary_file_and_preserves_the_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("update.json");
+        fs::create_dir(&path).unwrap();
+        let probe = temp.path().join("rename-probe");
+        fs::write(&probe, b"probe").unwrap();
+        let expected = fs::rename(&probe, &path).unwrap_err();
+        fs::remove_file(probe).unwrap();
+
+        let error =
+            write_json_atomic(&path, &serde_json::json!({ "version": "99.0.0" })).unwrap_err();
+
+        assert_eq!(error.raw_os_error(), expected.raw_os_error());
+        assert!(path.is_dir());
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
     }
 
     #[test]

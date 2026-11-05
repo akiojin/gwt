@@ -1,6 +1,83 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.150.0] - 2026-11-05
+
+### Bug Fixes
+
+- **monitor:** Retain runtime wait controls across stale writers
+- **monitor:** Converge typed waits after interrupted receipts
+- **ui:** Render cold terminals while document is hidden
+- **pm:** Keep periodic supervision moving after automatic turns
+- **ui:** Update related work without waiting for reload
+- **actions:** Mark unobserved diagnostic cleanup uncertain
+- **actions:** Satisfy Windows diagnostic publisher lint
+- **actions:** Report safe Windows self-test failure stages
+- **actions:** Preserve fixed diagnostic observation and CI contracts
+- **actions:** Preserve diagnostic cleanup and workflow identity
+- **actions:** Select one diagnostic application path
+- **actions:** Remove readonly diagnostic self-test fixtures
+
+### Features
+
+- **terminal:** モバイルの縦スワイプで端末履歴をスクロールする
+- **pm:** Add revision-pinned request task inventory
+- **actions:** Add bounded historical Windows diagnostics
+
+### Miscellaneous Tasks
+
+- **work:** PR #6686 の配信記録を確定
+- **work:** Runtime-only 待機消失の因果調査を記録
+- **work:** Runtime-only 待機保持の実装設計を確定
+- **work:** Record issue 5876 update checkpoint
+- **work:** Record cold terminal delivery scope
+- **work:** PM 巡回修正の配信記録を確定
+- **work:** 依頼一覧APIの引継ぎと配信記録を保存
+- **work:** 依頼一覧APIのPR関連付けを保存
+- **work:** Record Windows diagnostic pull request
+- **ci:** Retrigger required checks after GitHub outage
+- **work:** Record diagnostic remediation pull request
+
+### Testing
+
+- **pm:** 定期巡回fixtureのWindows HOMEを正規化
+- **pm:** Windows の実配送テストのパスを正規化
+- **pm:** 対象停止後の巡回とescalation除外を検証
+- **pm:** Expose receipt state on unconfirmed failures
+
+## [9.149.0] - 2026-11-04
+
+### Bug Fixes
+
+- **ui:** Preserve pending renders across hidden transitions
+- **pm:** 依頼タスクstate消失時の再初期化を防ぐ
+- **spec:** Distinguish committed but unverified section edits
+- **ui:** Advance queued terminal work after hidden transitions
+- **runtime:** Retire expected automatic restore refusals
+- **index:** Reclaim orphan artifacts and bound generation retention
+- **index:** Honor refresh deadlines during GC scans
+
+### Documentation
+
+- **perf:** Record bounded coverage timeout investigation
+
+### Features
+
+- **pm:** Add durable request task domain
+- **pm:** Expose protected request task operations
+
+### Miscellaneous Tasks
+
+- **work:** Record hidden transition delivery context
+- **work:** Record request task foundation PR
+- **work:** 依頼タスク保存修正のPR関連付けを記録
+- **work:** Associate request task API PR
+- **work:** Replay pull request synchronization after outage
+
+### Performance
+
+- **issue-monitor:** Release raw PR bodies between timeline pages
+
 ## [9.148.4] - 2026-11-04
 
 ### Bug Fixes

@@ -1876,7 +1876,7 @@ impl OwnerState {
                     if attempted && self.exact(&identity.id, identity.incarnation).is_ok() {
                         self.begin_policy_input(&identity.id, &data);
                     }
-                    self.pm_wake_permits.finish(&identity.operation_id);
+                    self.pm_wake_permits.finish_mobile(&identity, &transaction);
                     transaction.finish(attempted, result, observation);
                 }
                 OwnerMessage::PmWakeWritten {
@@ -2667,7 +2667,7 @@ impl OwnerState {
                 Ok(json!({"startup_intent":self.gui_presence.intent()}))
             }
             OwnerCommand::Health => {
-                let health = json!({"startup_intent":self.gui_presence.intent(),"gui_presence_count":self.gui_presence.count(),"pid":std::process::id(),"host_started_at":crate::process::host_process_start_time(std::process::id()),"host_instance_id":self.host_instance_id,"project_key":self.project_key,"panes":self.runtimes.len(),"pending_transport":self.pending_transport.len(),"draining":self.stopping,"reconciliation_required":self.retirements.values().any(Option::is_some)||self.agent_registry.is_err(),"reconciliation":self.retirements.iter().filter_map(|((id,incarnation),captured)| captured.as_ref().map(|_| json!({"id":id,"incarnation":incarnation}))).collect::<Vec<_>>()});
+                let health = json!({"mobile_input_permit_version":super::events::MOBILE_INPUT_PERMIT_PROTOCOL_VERSION,"startup_intent":self.gui_presence.intent(),"gui_presence_count":self.gui_presence.count(),"pid":std::process::id(),"host_started_at":crate::process::host_process_start_time(std::process::id()),"host_instance_id":self.host_instance_id,"project_key":self.project_key,"panes":self.runtimes.len(),"pending_transport":self.pending_transport.len(),"draining":self.stopping,"reconciliation_required":self.retirements.values().any(Option::is_some)||self.agent_registry.is_err(),"reconciliation":self.retirements.iter().filter_map(|((id,incarnation),captured)| captured.as_ref().map(|_| json!({"id":id,"incarnation":incarnation}))).collect::<Vec<_>>()});
                 #[cfg(any(test, feature = "test-gh-guard"))]
                 let health = {
                     let mut health = health;
@@ -2838,6 +2838,7 @@ impl OwnerState {
                                             "native prepared input is no longer current".into(),
                                         ));
                                     }
+                                    transaction.accept_native().map_err(refused)?;
                                     commit(&mut || attempted = true)
                                 })
                                 .map_err(|error| error.to_string())
@@ -5241,7 +5242,17 @@ impl OwnerState {
                 && input.pending_fresh_execution.is_none()
                 && input.pending_continue_work.is_none();
             let cancelled_cleanup = cancelled_cleanup && !unproved_manual_cleanup;
-            if let Err(error) = &result {
+            if let Some(error) = result.as_ref().err().filter(|_| {
+                restore
+                    .as_ref()
+                    .filter(|restore| {
+                        restore.origin == gwt_agent::SessionLaunchOrigin::AutomaticRestore
+                    })
+                    .and_then(|restore| restore.refusal.as_ref())
+                    .is_none_or(|refusal| {
+                        !super::installation::is_expected_restore_exclusion(&refusal.code)
+                    })
+            }) {
                 let source = restore
                     .as_ref()
                     .map(|restore| &restore.source)

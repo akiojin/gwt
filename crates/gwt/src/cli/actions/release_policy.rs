@@ -1,17 +1,44 @@
-//! Fixed release-workflow policy. This never dispatches a workflow.
+//! Fixed workflow policies. This never dispatches a workflow.
 use std::{
     fs, io,
     path::{Path, PathBuf},
 };
 
-use gwt_config::{settings::ReleasePolicySnapshot, Settings};
+use gwt_config::{
+    settings::{ReleasePolicySnapshot, WorkflowPolicyTarget},
+    Settings,
+};
 use gwt_core::pm_authorization::{self as authority, Authorization, OperationIntent};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::cli::{CliEnv, CliParseError};
 
-const WORKFLOW: &str = "prepare-release.yml";
+fn policy_operation(operation: &str) -> io::Result<(WorkflowPolicyTarget, bool)> {
+    match operation {
+        "actions.release_policy.add" => Ok((WorkflowPolicyTarget::Release, true)),
+        "actions.release_policy.rollback" => Ok((WorkflowPolicyTarget::Release, false)),
+        "actions.diagnostic.policy.add" => Ok((WorkflowPolicyTarget::WindowsDiagnostic, true)),
+        "actions.diagnostic.policy.rollback" => {
+            Ok((WorkflowPolicyTarget::WindowsDiagnostic, false))
+        }
+        _ => Err(invalid("unsupported fixed workflow policy operation")),
+    }
+}
+
+fn add_operation(target: WorkflowPolicyTarget) -> &'static str {
+    match target {
+        WorkflowPolicyTarget::Release => "actions.release_policy.add",
+        WorkflowPolicyTarget::WindowsDiagnostic => "actions.diagnostic.policy.add",
+    }
+}
+
+fn status_operation(target: WorkflowPolicyTarget) -> &'static str {
+    match target {
+        WorkflowPolicyTarget::Release => "actions.release_policy.status",
+        WorkflowPolicyTarget::WindowsDiagnostic => "actions.diagnostic.policy.status",
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -36,8 +63,9 @@ fn canonical_uuid(value: &str) -> bool {
 }
 
 pub(crate) fn validate(intent: &OperationIntent) -> io::Result<()> {
+    let (_, allow) = policy_operation(&intent.operation)?;
     let p: Input = serde_json::from_value(intent.params.clone())
-        .map_err(|_| invalid("invalid release policy parameters"))?;
+        .map_err(|_| invalid("invalid workflow policy parameters"))?;
     if !canonical_uuid(&p.request_id)
         || p.expected_token.len() != 64
         || !p
@@ -47,16 +75,15 @@ pub(crate) fn validate(intent: &OperationIntent) -> io::Result<()> {
         || p.reason.trim().is_empty()
         || p.reason.len() > 4096
         || p.reason.chars().any(char::is_control)
-        || match intent.operation.as_str() {
-            "actions.release_policy.add" => p.added_by.is_some(),
-            "actions.release_policy.rollback" => p
-                .added_by
+        || if allow {
+            p.added_by.is_some()
+        } else {
+            p.added_by
                 .as_deref()
-                .is_none_or(|id| !canonical_uuid(id) || id == p.request_id),
-            _ => true,
+                .is_none_or(|id| !canonical_uuid(id) || id == p.request_id)
         }
     {
-        return Err(invalid("release policy requires a UUID request_id, current expected_token and reason; rollback also requires the original added_by request_id"));
+        return Err(invalid("workflow policy requires a UUID request_id, current expected_token and reason; rollback also requires the original added_by request_id"));
     }
     Ok(())
 }
@@ -67,8 +94,8 @@ fn invalid(message: &str) -> io::Error {
 fn refused(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, message)
 }
-fn safe_config_error(_: impl std::fmt::Display) -> io::Error {
-    io::Error::other("release policy configuration is unreadable or could not be persisted; inspect actions.release_policy.status before retrying")
+fn safe_config_error(target: WorkflowPolicyTarget, _: impl std::fmt::Display) -> io::Error {
+    io::Error::other(format!("workflow policy configuration is unreadable or could not be persisted; inspect {} before retrying", status_operation(target)))
 }
 
 /// Inspection PMs deliberately have capability generation zero. This proof
@@ -148,8 +175,11 @@ fn snapshot(repository: &str, value: &ReleasePolicySnapshot) -> Snapshot {
     }
 }
 
-fn receipts_dir(repo: &Path) -> PathBuf {
-    gwt_core::paths::gwt_project_dir_for_repo_path(repo).join("project-state/release-policy")
+fn receipts_dir(repo: &Path, target: WorkflowPolicyTarget) -> PathBuf {
+    gwt_core::paths::gwt_project_dir_for_repo_path(repo).join(match target {
+        WorkflowPolicyTarget::Release => "project-state/release-policy",
+        WorkflowPolicyTarget::WindowsDiagnostic => "project-state/diagnostic-workflow-policy",
+    })
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -191,18 +221,18 @@ fn save_receipt(path: &Path, receipt: &Receipt) -> io::Result<()> {
     gwt_config::atomic::write_atomic(path, &serde_json::to_string(receipt)?)
         .map_err(|_| io::Error::other("release policy outcome is UNKNOWN: receipt persistence failed; inspect status without resending"))
 }
-fn public_receipt(receipt: &Receipt) -> Value {
+fn public_receipt(receipt: &Receipt, target: WorkflowPolicyTarget) -> Value {
     let succeeded = receipt.outcome == "succeeded";
     let outcome = if receipt.outcome == "pending" {
         "unknown"
     } else {
         &receipt.outcome
     };
-    json!({"request_id":receipt.request_id,"repository":receipt.repository,"workflow":WORKFLOW,
+    json!({"request_id":receipt.request_id,"repository":receipt.repository,"workflow":target.filename(),
         "outcome":outcome,"before":receipt.before,"after":succeeded.then_some(&receipt.after),
         "proposed_after":receipt.after,
         "attempt_id":receipt.attempt.as_ref().map(|attempt| &attempt.id),
-        "rollback_added_by":(succeeded && receipt.scope.operation == "actions.release_policy.add" && !receipt.before.allowed && receipt.after.allowed).then_some(&receipt.request_id)})
+        "rollback_added_by":(succeeded && receipt.scope.operation == add_operation(target) && !receipt.before.allowed && receipt.after.allowed).then_some(&receipt.request_id)})
 }
 
 fn record_failure(
@@ -231,23 +261,37 @@ fn record_failure(
 }
 
 pub(crate) fn status<E: CliEnv>(env: &mut E) -> io::Result<Value> {
+    status_for(env, WorkflowPolicyTarget::Release)
+}
+
+pub(crate) fn diagnostic_status<E: CliEnv>(env: &mut E) -> io::Result<Value> {
+    status_for(env, WorkflowPolicyTarget::WindowsDiagnostic)
+}
+
+fn status_for<E: CliEnv>(env: &mut E, target: WorkflowPolicyTarget) -> io::Result<Value> {
     let (owner, name) = env.github_repository()?;
     let repository = format!("{owner}/{name}");
     let path = gwt_core::paths::gwt_config_path();
     let current = snapshot(
         &repository,
-        &Settings::release_policy_snapshot(&path, &repository).map_err(safe_config_error)?,
+        &Settings::workflow_policy_snapshot(&path, &repository, target)
+            .map_err(|error| safe_config_error(target, error))?,
     );
     let identity = env.release_policy_context();
     let mut receipts = Vec::new();
-    match fs::read_dir(receipts_dir(env.repo_path())) {
+    match fs::read_dir(receipts_dir(env.repo_path(), target)) {
         Ok(entries) => {
             for entry in entries {
                 let entry = entry
                     .map_err(|_| io::Error::other("release policy receipts are unreadable"))?;
                 if entry.path().extension().is_some_and(|ext| ext == "json") {
                     if let Some(receipt) = read_receipt(&entry.path())? {
-                        receipts.push(public_receipt(&receipt));
+                        if receipt.repository != repository
+                            || policy_operation(&receipt.scope.operation)?.0 != target
+                        {
+                            return Err(refused("workflow policy receipt belongs to a different target or repository"));
+                        }
+                        receipts.push(public_receipt(&receipt, target));
                     }
                 }
             }
@@ -256,13 +300,13 @@ pub(crate) fn status<E: CliEnv>(env: &mut E) -> io::Result<Value> {
         Err(_) => return Err(io::Error::other("release policy receipts are unreadable")),
     }
     Ok(
-        json!({"schema_version":1,"repository":repository,"workflow":WORKFLOW,
+        json!({"schema_version":1,"repository":repository,"workflow":target.filename(),
         "allowed":current.allowed,"token":current.token,"runtime_version":env!("CARGO_PKG_VERSION"),
         "build_commit":option_env!("GWT_BUILD_COMMIT"),"build_epoch":option_env!("GWT_BUILD_EPOCH"),
         "requirement":{"registered_pm":true,"permission_stage":"instruction_or_approval","exact_scope":true,"host_proof":"fresh_same_issuer_session_generation"},
         "current":{"registered_pm":super::super::pm::caller_is_registered_pm(env.repo_path()),"host_verified":identity.is_ok(),"context":identity.ok()},
         "recovery":{"authority":"pm.approval.request or a new scoped human instruction; existing QA scopes are immutable",
-            "stale_token":"actions.release_policy.status, then use the fresh token and exact scoped authority",
+            "stale_token":format!("{}, then use the fresh token and exact scoped authority", status_operation(target)),
             "unknown":"read the request receipt and current token; do not resend an unknown request",
             "runtime":"use the verified checkout CLI with the existing registered PM Host bridge; never create replacement credentials"},
         "requests":receipts}),
@@ -274,7 +318,7 @@ pub(crate) fn parse_status(params: &Value) -> Result<(), CliParseError> {
         Ok(())
     } else {
         Err(CliParseError::InvalidJson(
-            "actions.release_policy.status accepts no parameters".into(),
+            "workflow policy status operations accept no parameters".into(),
         ))
     }
 }
@@ -286,19 +330,20 @@ pub(crate) fn execute<E: CliEnv>(
     authorization: &Authorization,
 ) -> io::Result<Value> {
     validate(intent)?;
+    let (target, allow) = policy_operation(&intent.operation)?;
     let input: Input = serde_json::from_value(intent.params.clone()).map_err(io::Error::other)?;
     let (owner, name) = env.github_repository()?;
     let repository = format!("{owner}/{name}");
     let initial_context = env.release_policy_context()?;
     let scope = intent.scope()?;
-    let path = receipts_dir(repo).join(format!("{}.json", input.request_id));
+    let path = receipts_dir(repo, target).join(format!("{}.json", input.request_id));
     let mut receipt: Option<Receipt> = None;
     let mut replay = None;
     let mut refusal = None;
-    let allow = intent.operation == "actions.release_policy.add";
-    let result = Settings::with_locked_release_policy(
+    let result = Settings::with_locked_workflow_policy(
         &gwt_core::paths::gwt_config_path(),
         &repository,
+        target,
         allow,
         |raw_before, raw_after| {
             let accepted = (|| -> io::Result<()> {
@@ -333,19 +378,19 @@ pub(crate) fn execute<E: CliEnv>(
                             refused("release policy receipt has no accepted authority")
                         })?;
                     authority::authorize_replay(repo, intent, authorization, attempt)?;
-                    replay = Some(public_receipt(&previous));
+                    replay = Some(public_receipt(&previous, target));
                     // Abort the writer even if later settings changed: replay must
                     // never reapply a historical request's effect.
                     return Err(io::Error::other("release policy request already completed"));
                 }
                 if before.token != input.expected_token {
-                    return Err(refused("stale release policy expected_token; read actions.release_policy.status and obtain authority for the fresh request"));
+                    return Err(refused(&format!("stale workflow policy expected_token; read {} and obtain authority for the fresh request", status_operation(target))));
                 }
                 if let Some(original_id) = &input.added_by {
-                    let original = read_receipt(&receipts_dir(repo).join(format!("{original_id}.json")))?
+                    let original = read_receipt(&receipts_dir(repo, target).join(format!("{original_id}.json")))?
                         .filter(|r| r.schema_version == 1 && r.request_id == *original_id
                             && r.repository == repository && r.outcome == "succeeded"
-                            && r.scope.operation == "actions.release_policy.add"
+                            && r.scope.operation == add_operation(target)
                             && !r.before.allowed && r.after.allowed
                             && r.after.token == before.token
                             && r.attempt.as_ref().is_some_and(|a| a.scope == r.scope))
@@ -380,7 +425,7 @@ pub(crate) fn execute<E: CliEnv>(
                     &normalized,
                     Some(&initial_context.session_id),
                     json!({
-                        "request_id":input.request_id,"repository":repository,"workflow":WORKFLOW,
+                        "request_id":input.request_id,"repository":repository,"workflow":target.filename(),
                         "reason":pending.reason,"policy":pending.before,"actor":pending.actor,
                     }),
                 )?);
@@ -406,18 +451,21 @@ pub(crate) fn execute<E: CliEnv>(
         return Err(error);
     }
     let Some(mut receipt) = receipt else {
-        return Err(safe_config_error("no receipt"));
+        return Err(safe_config_error(target, "no receipt"));
     };
     if result.is_err() {
-        let readback =
-            Settings::release_policy_snapshot(&gwt_core::paths::gwt_config_path(), &repository)
-                .ok()
-                .map(|raw| snapshot(&repository, &raw));
+        let readback = Settings::workflow_policy_snapshot(
+            &gwt_core::paths::gwt_config_path(),
+            &repository,
+            target,
+        )
+        .ok()
+        .map(|raw| snapshot(&repository, &raw));
         // A later readback cannot prove that no rename happened: another
         // writer may already have restored the old bytes. Keep it diagnostic.
         receipt.outcome = "unknown".into();
         record_failure(repo, &path, &mut receipt, json!(readback))?;
-        return Err(io::Error::other("release policy persistence did not confirm success; inspect actions.release_policy.status without resending this request"));
+        return Err(io::Error::other(format!("workflow policy persistence did not confirm success; inspect {} without resending this request", status_operation(target))));
     }
     let attempt = receipt.attempt.as_ref().expect("authorized receipt");
     if attempt
@@ -434,7 +482,7 @@ pub(crate) fn execute<E: CliEnv>(
     }
     receipt.outcome = "succeeded".into();
     save_receipt(&path, &receipt)?;
-    Ok(public_receipt(&receipt))
+    Ok(public_receipt(&receipt, target))
 }
 
 #[cfg(test)]
@@ -495,6 +543,135 @@ mod tests {
     fn proofs(env: &mut crate::cli::TestEnv) {
         env.release_policy_contexts
             .extend([Ok(proof()), Ok(proof())]);
+    }
+
+    #[test]
+    fn diagnostic_policy_validates_only_the_named_fixed_effect_contracts() {
+        let mut intent = OperationIntent {
+            operation: "actions.diagnostic.policy.add".into(),
+            params: json!({
+                "request_id":"d7c21b88-9ed4-47ef-a86f-53bb8ec58b92",
+                "expected_token":"a".repeat(64), "reason":"Enable the fixed diagnostic"
+            }),
+        };
+        assert!(validate(&intent).is_ok());
+        intent.operation = "actions.diagnostic.policy.rollback".into();
+        assert!(validate(&intent).is_err());
+        intent.params["added_by"] = json!("81ba15f0-3889-4bb8-a49b-dfc587f1170d");
+        assert!(validate(&intent).is_ok());
+        intent.params["workflow"] = json!("another.yml");
+        assert!(validate(&intent).is_err());
+    }
+
+    #[test]
+    fn diagnostic_policy_uses_its_own_authority_receipts_and_rollback() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let _session = pm(&repo);
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        env.diagnostic_repository = Some(("akiojin".into(), "gwt".into()));
+        let current = status(&mut env).unwrap();
+        let (release, release_auth) = approve(
+            &repo,
+            "actions.release_policy.add",
+            json!({
+                "request_id":"d7c21b88-9ed4-47ef-a86f-53bb8ec58b92",
+                "expected_token":current["token"], "reason":"Preserve release permission"
+            }),
+        );
+        proofs(&mut env);
+        let released = execute(&mut env, &repo, &release, &release_auth).unwrap();
+        let params = json!({
+            "request_id":"81ba15f0-3889-4bb8-a49b-dfc587f1170d",
+            "expected_token":released["after"]["token"], "reason":"Enable the fixed diagnostic"
+        });
+        let (_, old_auth) = approve(&repo, "actions.release_policy.add", params.clone());
+        let intent = OperationIntent {
+            operation: "actions.diagnostic.policy.add".into(),
+            params: params.clone(),
+        };
+        proofs(&mut env);
+        assert!(execute(&mut env, &repo, &intent, &old_auth).is_err());
+        assert!(
+            !authority::approvals(&repo)
+                .unwrap()
+                .iter()
+                .find(|approval| Some(&approval.id) == old_auth.approval_id.as_ref())
+                .unwrap()
+                .consumed
+        );
+        let (intent, auth) = approve(&repo, "actions.diagnostic.policy.add", params);
+        proofs(&mut env);
+        let added = execute(&mut env, &repo, &intent, &auth).unwrap();
+        assert_eq!(added["workflow"], "windows-diagnostic.yml");
+        assert_eq!(added["after"]["allowed"], true);
+        let diagnostic = diagnostic_status(&mut env).unwrap();
+        assert_eq!(diagnostic["workflow"], "windows-diagnostic.yml");
+        assert_eq!(diagnostic["allowed"], true);
+        assert!(diagnostic["recovery"]["stale_token"]
+            .as_str()
+            .unwrap()
+            .starts_with("actions.diagnostic.policy.status"));
+        assert_eq!(diagnostic["requests"].as_array().unwrap().len(), 1);
+        let config = fs::read(gwt_core::paths::gwt_config_path()).unwrap();
+        let audit = fs::read(authority::audit_path(&repo)).unwrap();
+        proofs(&mut env);
+        assert_eq!(execute(&mut env, &repo, &intent, &auth).unwrap(), added);
+        assert_eq!(
+            fs::read(gwt_core::paths::gwt_config_path()).unwrap(),
+            config
+        );
+        assert_eq!(fs::read(authority::audit_path(&repo)).unwrap(), audit);
+        let (foreign_rollback, foreign_auth) = approve(
+            &repo,
+            "actions.diagnostic.policy.rollback",
+            json!({
+                "request_id":"d8426bdb-2c0f-4fa7-b191-9d58a3600f61",
+                "expected_token":added["after"]["token"], "reason":"Reject a release receipt",
+                "added_by":release.params["request_id"]
+            }),
+        );
+        proofs(&mut env);
+        assert!(execute(&mut env, &repo, &foreign_rollback, &foreign_auth).is_err());
+        assert_eq!(
+            fs::read(gwt_core::paths::gwt_config_path()).unwrap(),
+            config
+        );
+        let (rollback, rollback_auth) = approve(
+            &repo,
+            "actions.diagnostic.policy.rollback",
+            json!({
+                "request_id":"0c7c7873-3f0c-4ad7-a303-ffbc25d05d62",
+                "expected_token":added["after"]["token"], "reason":"Undo this diagnostic permission",
+                "added_by":intent.params["request_id"]
+            }),
+        );
+        proofs(&mut env);
+        assert_eq!(
+            execute(&mut env, &repo, &rollback, &rollback_auth).unwrap()["after"]["allowed"],
+            false
+        );
+        let release_status = status(&mut env).unwrap();
+        assert_eq!(release_status["allowed"], true);
+        assert_eq!(release_status["requests"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            release_status["requests"][0]["workflow"],
+            "prepare-release.yml"
+        );
+        let config = fs::read(gwt_core::paths::gwt_config_path()).unwrap();
+        env.diagnostic_repository = Some(("foreign".into(), "repo".into()));
+        proofs(&mut env);
+        assert!(execute(&mut env, &repo, &intent, &auth).is_err());
+        assert!(diagnostic_status(&mut env).is_err());
+        assert_eq!(
+            fs::read(gwt_core::paths::gwt_config_path()).unwrap(),
+            config
+        );
     }
 
     #[test]
@@ -619,7 +796,7 @@ mod tests {
             .extend([Ok(proof()), Ok(changed)]);
         assert!(execute(&mut env, &repo, &intent, &authorization).is_err());
         assert!(!gwt_core::paths::gwt_config_path().exists());
-        assert!(!receipts_dir(&repo).exists());
+        assert!(!receipts_dir(&repo, WorkflowPolicyTarget::Release).exists());
         assert!(!authority::approvals(&repo).unwrap()[0].consumed);
 
         Settings::update_global(|settings| {
@@ -635,7 +812,7 @@ mod tests {
             before
         );
         assert!(!authority::approvals(&repo).unwrap()[0].consumed);
-        assert!(!receipts_dir(&repo).exists());
+        assert!(!receipts_dir(&repo, WorkflowPolicyTarget::Release).exists());
     }
 
     #[test]
@@ -719,7 +896,7 @@ mod tests {
             json!({}),
         )
         .unwrap();
-        let path = receipts_dir(&repo).join(format!(
+        let path = receipts_dir(&repo, WorkflowPolicyTarget::Release).join(format!(
             "{}.json",
             intent.params["request_id"].as_str().unwrap()
         ));
@@ -756,6 +933,9 @@ mod tests {
         receipt.outcome = "failed".into();
         assert!(record_failure(&repo, &path, &mut receipt, json!({"effect":"none"})).is_err());
         assert_eq!(read_receipt(&path).unwrap().unwrap().outcome, "unknown");
-        assert_eq!(public_receipt(&receipt)["after"], Value::Null);
+        assert_eq!(
+            public_receipt(&receipt, WorkflowPolicyTarget::Release)["after"],
+            Value::Null
+        );
     }
 }

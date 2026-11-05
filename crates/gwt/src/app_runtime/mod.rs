@@ -2333,6 +2333,7 @@ pub struct AppRuntime {
     pub(crate) issue_client_factory: RuntimeIssueClientFactory,
     /// Cached update state so late-connecting WebView clients get the toast.
     pub(crate) pending_update: Option<gwt_core::update::UpdateState>,
+    pub(crate) update_check_in_flight: bool,
     /// Initiator of the shared download, or None when its worker is idle.
     pub(crate) update_download_in_flight: Option<ClientId>,
     /// Newest discovery to retry if the active download fails.
@@ -5038,6 +5039,7 @@ impl AppRuntime {
             knowledge_monitor_snapshot: Default::default(),
             issue_client_factory: default_issue_client_factory(),
             pending_update: None,
+            update_check_in_flight: false,
             update_download_in_flight: None,
             deferred_update_discovery: None,
             attachment_uploads,
@@ -10566,7 +10568,17 @@ impl AppRuntime {
             return Vec::new();
         };
         if drain.automatic.unwrap_or(prefs.autonomous_mode) && !self.automatic_updates_enabled() {
-            return self.release_update_auto_apply_for_project(context, &drain.version);
+            return self
+                .release_update_auto_apply_for_project(context, &drain.version)
+                .unwrap_or_else(|error| {
+                    self.issue_monitor_control_error_events(
+                        Some(&context.project_root),
+                        None,
+                        error,
+                        "update-drain",
+                        None,
+                    )
+                });
         }
         let outcome = gwt::update_drain::update_quiescence(&observation.snapshot);
         let wait_reason = match &outcome {
@@ -10811,13 +10823,35 @@ impl AppRuntime {
         version: &str,
         release: UpdateAutoApplyRelease,
     ) -> Vec<OutboundEvent> {
+        self.try_release_update_auto_apply_events(version, release)
+            .unwrap_or_else(|(_, events)| events)
+    }
+
+    fn try_release_update_auto_apply_events(
+        &mut self,
+        version: &str,
+        release: UpdateAutoApplyRelease,
+    ) -> Result<Vec<OutboundEvent>, (String, Vec<OutboundEvent>)> {
         let mut events = Vec::new();
         for context in self.project_contexts() {
             if self
                 .project_auto_update_drain(&context)
                 .is_some_and(|(_, drain)| drain.version == version)
             {
-                events.extend(self.release_update_auto_apply_for_project(&context, version));
+                match self.release_update_auto_apply_for_project(&context, version) {
+                    Ok(released) => events.extend(released),
+                    Err(error) => {
+                        let message = error.to_string();
+                        events.extend(self.issue_monitor_control_error_events(
+                            Some(&context.project_root),
+                            None,
+                            error,
+                            "update-drain",
+                            None,
+                        ));
+                        return Err((message, events));
+                    }
+                }
             }
         }
         let (level, message) = match release {
@@ -10835,7 +10869,7 @@ impl AppRuntime {
             ),
             UpdateAutoApplyRelease::Superseded => (
                 "info",
-                format!("Update v{version} was replaced by a newer release; its automatic apply was cancelled."),
+                format!("Update v{version} automatic apply was cancelled because a newer release is available."),
             ),
             UpdateAutoApplyRelease::RequiresElevation => (
                 "warn",
@@ -10867,50 +10901,37 @@ impl AppRuntime {
             },
             grace_secs: None,
         }));
-        Self::deduplicate_update_host_events(events)
+        Ok(Self::deduplicate_update_host_events(events))
     }
 
     fn release_update_auto_apply_for_project(
         &mut self,
         context: &ProjectContext,
         version: &str,
-    ) -> Vec<OutboundEvent> {
-        let Some(state) = self.project_state_mut(context) else {
-            return Vec::new();
-        };
-        state.update_auto_apply.cancel(version);
+    ) -> Result<Vec<OutboundEvent>, gwt::runtime_daemon_events::IssueMonitorControlPublishError>
+    {
+        if self.project_state(context).is_none() {
+            return Ok(Vec::new());
+        }
         let publication = self.publish_project_issue_monitor_control(
             context,
             serde_json::json!({ "config_set": { "update_drain": false } }),
         );
-        match publication {
+        let events = match publication {
             Ok(()) => Vec::new(),
             Err(error) if error.allows_local_fallback() => {
-                match self.commit_local_issue_monitor_control(context, |monitor| {
-                    monitor.clear_update_drain()
-                }) {
-                    Ok((monitor, ())) => self.issue_monitor_snapshot_events_for(
-                        None,
-                        Some(&context.project_root),
-                        monitor,
-                    ),
-                    Err(local_error) => self.issue_monitor_control_error_events(
-                        Some(&context.project_root),
-                        None,
-                        local_error,
-                        "update-drain",
-                        None,
-                    ),
-                }
+                let (monitor, ()) = self
+                    .commit_local_issue_monitor_control(context, |monitor| {
+                        monitor.clear_update_drain()
+                    })?;
+                self.issue_monitor_snapshot_events_for(None, Some(&context.project_root), monitor)
             }
-            Err(error) => self.issue_monitor_control_error_events(
-                Some(&context.project_root),
-                None,
-                error,
-                "update-drain",
-                None,
-            ),
+            Err(error) => return Err(error),
+        };
+        if let Some(state) = self.project_state_mut(context) {
+            state.update_auto_apply.cancel(version);
         }
+        Ok(events)
     }
 
     fn deduplicate_update_host_events(mut events: Vec<OutboundEvent>) -> Vec<OutboundEvent> {
@@ -11268,6 +11289,7 @@ impl AppRuntime {
             FrontendEvent::ReopenRecentProject { path, request_id } => {
                 self.open_project_path_with_request_events(PathBuf::from(path), request_id)
             }
+            FrontendEvent::CheckForUpdates => self.check_for_updates_events(),
             FrontendEvent::ApplyUpdate => self.apply_pending_update_events(&client_id),
             FrontendEvent::ApplyUpdateStart => self.apply_update_start_events(&client_id),
             FrontendEvent::ApplyUpdateToVersion { version } => {
@@ -12459,6 +12481,7 @@ impl AppRuntime {
             FrontendEvent::IssueMonitorConfigureProfile => {
                 self.open_issue_monitor_configure_profile_wizard_events(context, &client_id)
             }
+            FrontendEvent::CheckForUpdates => self.check_for_updates_events(),
             FrontendEvent::ApplyUpdate => self.apply_pending_update_events(&client_id),
             FrontendEvent::ApplyUpdateStart => self.apply_update_start_events(&client_id),
             FrontendEvent::ApplyUpdateToVersion { version } => {
@@ -12638,6 +12661,15 @@ impl AppRuntime {
             ));
         }
         events.extend(self.staged_update_sync_events(client_id));
+        events.push(OutboundEvent::reply(
+            client_id,
+            BackendEvent::UpdateCheckResult {
+                checking: self.update_check_in_flight,
+                offer_update: false,
+                result: None,
+                previous_failure: None,
+            },
+        ));
         events
     }
 
@@ -12765,6 +12797,15 @@ impl AppRuntime {
             self.pending_update.clone(),
         );
         events.extend(self.staged_update_sync_events(client_id));
+        events.push(OutboundEvent::reply(
+            client_id,
+            BackendEvent::UpdateCheckResult {
+                checking: self.update_check_in_flight,
+                offer_update: false,
+                result: None,
+                previous_failure: None,
+            },
+        ));
         events.splice(
             1..1,
             terminal_previews.into_iter().map(|(id, text)| {
@@ -15593,10 +15634,22 @@ impl AppRuntime {
                     )
                 }
                 Err(error) => {
-                    let mut notification = if restore_refusal
-                        .as_ref()
-                        .is_none_or(|refusal| refusal.code == "restore_launch_failed")
-                    {
+                    // A refusal receipt is complete only after its readback and
+                    // exact cleanup succeed. A later RPC failure remains actionable.
+                    let pure_owner_refusal = restore_refusal.as_ref().is_some_and(|refusal| {
+                        !matches!(
+                            refusal.code.as_str(),
+                            "restore_launch_failed"
+                                | "source_unreadable"
+                                | "session_unreadable"
+                                | "monitor_unreadable"
+                                | "execution_unreadable"
+                                | "work_authority_unreadable"
+                        ) && refusal.canonical_rows.is_some()
+                            && refusal.message == error
+                    });
+                    let genuine_restore_failure = !pure_owner_refusal;
+                    let mut notification = if genuine_restore_failure {
                         restore_feedback
                             .as_ref()
                             .and_then(|feedback| {
@@ -15621,6 +15674,35 @@ impl AppRuntime {
                         .unwrap_or(startup::RestoreRefusal::LaunchNotStarted);
                     self.record_restore_window_outcome(&window_id, Err(refusal_reason));
                     self.restore_launch_windows.remove(&window_id);
+                    // A policy refusal is not a failed process launch. Retain its
+                    // diagnostic window without manufacturing an Error transition.
+                    // Only an authenticated, fully read-back owner refusal qualifies;
+                    // I/O failures while reading that receipt still take the error path.
+                    let expected_automatic_refusal =
+                        restore_feedback.as_ref().is_some_and(|feedback| {
+                            feedback.origin == startup::RestoreOrigin::Automatic
+                        }) && pure_owner_refusal
+                            && restore_refusal.as_ref().is_some_and(|refusal| {
+                                gwt::project_runtime::installation::is_expected_restore_exclusion(
+                                    &refusal.code,
+                                )
+                            });
+                    if expected_automatic_refusal {
+                        let refusal = restore_refusal.as_ref().expect("owner refusal");
+                        notification.push(OutboundEvent::project(
+                            context.project_key.clone(),
+                            BackendEvent::IssueMonitorToast {
+                                notification_transition: None,
+                                notification_transition_id: None,
+                                level: "info".into(),
+                                message: format!("Automatic restore skipped: {}", refusal.code),
+                                issue_number: restore_feedback
+                                    .as_ref()
+                                    .and_then(|feedback| feedback.source.as_ref())
+                                    .and_then(|source| source.linked_issue_number),
+                            },
+                        ));
+                    }
                     if restore_feedback.as_ref().is_some_and(|feedback| {
                         self.window_lookup
                             .get(&window_id)
@@ -15724,7 +15806,9 @@ impl AppRuntime {
                                             .is_some_and(|detail| !detail.trim().is_empty())
                                     }))
                     });
-                    if retained_diagnostic {
+                    if expected_automatic_refusal
+                        || (retained_diagnostic && !genuine_restore_failure)
+                    {
                         return notification;
                     }
                     let session_id = self
@@ -15735,15 +15819,16 @@ impl AppRuntime {
                                 .and_then(|tab| tab.workspace.window(&address.raw_id))
                         })
                         .and_then(|window| window.session_id.clone());
-                    let (status, detail) =
-                        if refusal_reason == startup::RestoreRefusal::NoResumeSession {
-                            (
-                                WindowProcessStatus::Stopped,
-                                Self::EXACT_SESSION_RESTORE_UNAVAILABLE_DETAIL.to_string(),
-                            )
-                        } else {
-                            (WindowProcessStatus::Error, error)
-                        };
+                    let (status, detail) = if pure_owner_refusal
+                        && refusal_reason == startup::RestoreRefusal::NoResumeSession
+                    {
+                        (
+                            WindowProcessStatus::Stopped,
+                            Self::EXACT_SESSION_RESTORE_UNAVAILABLE_DETAIL.to_string(),
+                        )
+                    } else {
+                        (WindowProcessStatus::Error, error)
+                    };
                     notification.extend(self.apply_owner_terminal_launch_projection(
                         &context,
                         &window_id,

@@ -44,9 +44,21 @@ const projectShellSurfaceSource = readFileSync(
 const appCssSource = readFileSync(resolve(here, "../styles/app.css"), "utf8");
 
 test("initial fit runs once without frames and can be cancelled on runtime removal", (t) => {
-  const frames = new Map(), timers = new Map();
+  const frames = new Map(), timers = new Map(), tasks = new Map(), listeners = new Set();
   let nextId = 0, fits = 0;
+  const visibility = { hidden: false,
+    addEventListener: (_, listener) => listeners.add(listener),
+    removeEventListener: (_, listener) => listeners.delete(listener),
+  };
   for (const [key, value] of Object.entries({
+    document: visibility,
+    MessageChannel: class {
+      port1 = { onmessage: null, close: () => tasks.delete(this.id) };
+      port2 = { close() {}, postMessage: () => {
+        this.id = ++nextId;
+        tasks.set(this.id, () => this.port1.onmessage?.());
+      } };
+    },
     requestAnimationFrame: callback => { frames.set(++nextId, callback); return nextId; },
     cancelAnimationFrame: id => frames.delete(id),
   })) {
@@ -63,18 +75,32 @@ test("initial fit runs once without frames and can be cancelled on runtime remov
     return nextId;
   });
   t.mock.method(globalThis, "clearTimeout", id => timers.delete(id));
-  for (const winner of ["timer", "frame", "cancel"]) {
+  for (const winner of ["timer", "frame", "cancel", "hidden", "transition"]) {
+    visibility.hidden = winner === "hidden";
     const before = fits;
     const cancel = terminalViewportReflow.scheduleTerminalInitialFit(() => { fits += 1; });
-    assert.equal(frames.size, 1);
-    assert.equal(timers.size, 1);
+    if (!visibility.hidden) {
+      assert.equal(frames.size, 1);
+      assert.equal(timers.size, 1);
+    }
     const frame = frames.values().next().value;
     const timer = timers.values().next().value;
-    ({ timer, frame, cancel })[winner]();
+    if (winner === "transition") {
+      visibility.hidden = true;
+      for (const listener of [...listeners]) listener();
+    }
+    const task = tasks.values().next().value;
+    if (visibility.hidden) {
+      assert.equal(tasks.size, 1, "hidden initial fit escapes suspended frames and timers");
+      task();
+    } else ({ timer, frame, cancel })[winner]();
     assert.equal(frames.size, 0);
     assert.equal(timers.size, 0);
-    frame();
-    timer();
+    assert.equal(tasks.size, 0);
+    assert.equal(listeners.size, 0);
+    frame?.();
+    timer?.();
+    task?.();
     assert.equal(fits - before, winner === "cancel" ? 0 : 1, "stale callbacks cannot fit a removed or already fitted runtime");
   }
 });

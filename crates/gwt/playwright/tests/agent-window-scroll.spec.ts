@@ -167,6 +167,92 @@ test.describe("Agent window scrollback lifecycle", () => {
   }
 });
 
+// SPEC #6476 T-005 (FR-002, AC-2 automated part): on a phone the terminal is
+// scrolled with a finger, not a wheel. A fullscreen agent has no scrollback for
+// xterm's native touch scrolling to move, so a vertical swipe must reach the
+// application exactly as the wheel does — PageUp/PageDown for agents that do
+// not track the mouse, wheel mouse reports for agents that do — while retained
+// history keeps xterm's own touch scrolling with no application input.
+test.describe("Agent window touch scroll on a phone viewport", () => {
+  test.use({
+    deviceScaleFactor: 1,
+    hasTouch: true,
+    viewport: { width: 390, height: 844 },
+  });
+
+  test("swipe sends PageUp/PageDown to a fullscreen agent that does not track the mouse", async ({ page }, info) => {
+    const errors = await openAgentsFixture(page, info.project.name);
+    await setActiveAgentTab(page, "agent-2");
+    await emitTerminalText(page, "agent-2", "\x1b[?1049h\x1b[Hfullscreen claude\r\n");
+    await expect.poll(() => terminalScrollMetrics(page, "agent-2")).toMatchObject({ hidden: false, baseY: 0 });
+
+    await page.evaluate(() => (document.activeElement as HTMLElement)?.blur());
+    const before = (await terminalInputs(page, "agent-2")).length;
+    await swipeTerminal(page, "agent-2", "down");
+    await expect.poll(async () => (await terminalInputs(page, "agent-2")).slice(before))
+      .toContain("\x1b[5~");
+    const afterUp = (await terminalInputs(page, "agent-2")).length;
+    await swipeTerminal(page, "agent-2", "up");
+    await expect.poll(async () => (await terminalInputs(page, "agent-2")).slice(afterUp))
+      .toContain("\x1b[6~");
+    await expect(page.locator(".xterm-helper-textarea:focus"),
+      "a swipe must not focus terminal input and summon the software keyboard").toHaveCount(0);
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+
+  test("swipe reaches a mouse-tracking fullscreen agent as wheel reports, never PageUp", async ({ page }, info) => {
+    const errors = await openAgentsFixture(page, info.project.name);
+    await emitTerminalText(page, "agent-1", "\x1b[?1049h\x1b[?1003h\x1b[?1006h\x1b[Hfullscreen codex\r\n");
+    await expect.poll(() => terminalScrollMetrics(page, "agent-1")).toMatchObject({ hidden: false, baseY: 0 });
+
+    const before = (await terminalInputs(page, "agent-1")).length;
+    await swipeTerminal(page, "agent-1", "down");
+    await expect.poll(async () => (await terminalInputs(page, "agent-1")).slice(before).join(""))
+      .toMatch(/\x1b\[<64;\d+;\d+M/);
+    expect((await terminalInputs(page, "agent-1")).slice(before), "mouse-tracking agents must not get PageUp")
+      .not.toContain("\x1b[5~");
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+
+  test("swipe over retained history scrolls the viewport without application input", async ({ page }, info) => {
+    const errors = await openAgentsFixture(page, info.project.name);
+    await setActiveAgentTab(page, "agent-2");
+    await emitTerminalText(page, "agent-2", numberedLines("touch-history", 240));
+    await waitForScrollableTerminal(page, "agent-2");
+    await scrollTerminalToBottom(page, "agent-2");
+    const before = await terminalScrollMetrics(page, "agent-2");
+    const inputsBefore = await terminalInputs(page, "agent-2");
+
+    await swipeTerminal(page, "agent-2", "down");
+    await expect.poll(async () => (await terminalScrollMetrics(page, "agent-2")).viewportY)
+      .toBeLessThan(before.viewportY);
+    expect(await terminalInputs(page, "agent-2"), "history swipe must not send PageUp or mouse reports")
+      .toEqual(inputsBefore);
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+});
+
+// A real (trusted) single-finger swipe through Chromium's input pipeline.
+// "down" moves the finger toward the bottom of the screen, which reveals
+// earlier output, like a wheel scrolled up.
+async function swipeTerminal(page: Page, windowId: string, direction: "up" | "down"): Promise<void> {
+  const box = await agentTile(page, windowId).locator(".xterm-screen").boundingBox();
+  expect(box).not.toBeNull();
+  const x = Math.round(box!.x + box!.width / 2);
+  const top = Math.round(box!.y + box!.height * 0.25);
+  const bottom = Math.round(box!.y + box!.height * 0.75);
+  const [from, to] = direction === "down" ? [top, bottom] : [bottom, top];
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y: from }] });
+  const steps = 10;
+  for (let step = 1; step <= steps; step += 1) {
+    const y = Math.round(from + ((to - from) * step) / steps);
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y }] });
+  }
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await cdp.detach();
+}
+
 async function prepareClipboard(page: Page): Promise<void> {
   if (liveBase) await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
   else await page.addInitScript(() => {

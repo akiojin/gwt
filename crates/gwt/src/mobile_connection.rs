@@ -13,10 +13,11 @@ use std::{
     path::Path,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Condvar, Mutex, RwLock,
+        Arc, Condvar, Mutex, RwLock, Weak,
     },
 };
 
+use crate::mobile_input_permit::NativeInputPermit;
 use gwt_core::repo_hash::ProjectKey;
 use ring::signature::{UnparsedPublicKey, ECDSA_P256_SHA256_FIXED};
 use serde::{Deserialize, Serialize};
@@ -32,10 +33,83 @@ const MAX_CHALLENGES_PER_DEVICE: usize = 4;
 const MAX_DEVICES: usize = 64;
 const MAX_SNAPSHOT_BYTES: u64 = 128 * 1024;
 
+/// Non-secret identity of the Host and its trusted HTTPS coordinator origin.
+/// Credential rotation preserves this binding; changing either part requires
+/// new pairing rather than transplanting existing approvals.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "StoredHostBinding")]
+pub struct HostBinding {
+    host_id: String,
+    coordinator_origin: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredHostBinding {
+    host_id: String,
+    coordinator_origin: String,
+}
+
+impl HostBinding {
+    pub fn new(host_id: &str, coordinator_origin: &str) -> io::Result<Self> {
+        let host_id = Uuid::parse_str(host_id)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid mobile Host ID"))?;
+        let origin = reqwest::Url::parse(coordinator_origin)
+            .ok()
+            .filter(|url| {
+                url.scheme() == "https"
+                    && url.host_str().is_some()
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && url.path() == "/"
+                    && url.query().is_none()
+                    && url.fragment().is_none()
+                    // URL parsing removes empty userinfo and dot segments.
+                    // An origin must contain only its original authority.
+                    && coordinator_origin.split_once("://").is_some_and(|(_, rest)| {
+                        !rest.strip_suffix('/').unwrap_or(rest).contains(['@', '/', '\\'])
+                    })
+                    && coordinator_origin.trim() == coordinator_origin
+                    && !coordinator_origin.chars().any(char::is_control)
+            })
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid mobile coordinator origin",
+                )
+            })?;
+        Ok(Self {
+            host_id: host_id.to_string(),
+            coordinator_origin: origin.origin().ascii_serialization(),
+        })
+    }
+}
+
+impl TryFrom<StoredHostBinding> for HostBinding {
+    type Error = io::Error;
+
+    fn try_from(stored: StoredHostBinding) -> Result<Self, Self::Error> {
+        Self::new(&stored.host_id, &stored.coordinator_origin)
+    }
+}
+
+fn deserialize_host_binding<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<HostBinding>, D::Error> {
+    // Missing is legacy schema1; an explicitly present null is never a binding.
+    HostBinding::deserialize(deserializer).map(Some)
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredDevices {
     schema_version: u32,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_host_binding"
+    )]
+    host_binding: Option<HostBinding>,
     devices: Vec<DeviceRecord>,
 }
 
@@ -67,6 +141,10 @@ pub enum AuthorizationError {
     Replay,
     #[error("mobile authorization synchronization is unavailable")]
     Unavailable,
+    #[error("mobile input was abandoned with an unknown physical outcome; do not retry")]
+    AbandonedUnknown,
+    #[error("native owner does not support revocable mobile input; reconnect after the project owner restarts with the current gwt")]
+    UnsupportedNativeOwner,
 }
 
 /// Authorization rejection does not write; a storage error disables access.
@@ -171,6 +249,42 @@ pub struct MobileConnection {
     current_turn: Mutex<u64>,
     turns_changed: Condvar,
     order_failed: AtomicBool,
+    native_revocation: Arc<NativeRevocation>,
+}
+
+#[derive(Default)]
+struct NativeRevocation {
+    revoked: AtomicBool,
+    permits: Mutex<Vec<Weak<NativeInputPermit>>>,
+}
+
+impl NativeRevocation {
+    fn register(&self, permit: &Arc<NativeInputPermit>) -> Result<(), AuthorizationError> {
+        let mut permits = self
+            .permits
+            .lock()
+            .map_err(|_| AuthorizationError::Unavailable)?;
+        if self.revoked.load(Ordering::Acquire) {
+            permit.revoke();
+            return Err(AuthorizationError::Revoked);
+        }
+        permits.retain(|permit| permit.strong_count() != 0);
+        permits.push(Arc::downgrade(permit));
+        Ok(())
+    }
+
+    fn revoke(&self) {
+        self.revoked.store(true, Ordering::Release);
+        // Only short registration code takes this mutex, never a native worker
+        // or an RPC. Poisoning must also revoke every retained permit.
+        let mut permits = self
+            .permits
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        for permit in permits.drain(..).filter_map(|permit| permit.upgrade()) {
+            permit.revoke();
+        }
+    }
 }
 
 impl MobileConnection {
@@ -181,6 +295,29 @@ impl MobileConnection {
         authorization: Arc<RwLock<MobileAuthorization>>,
         session: AuthenticatedSession,
     ) -> Self {
+        let native_revocation = Arc::new(NativeRevocation::default());
+        if let Ok(authority) = authorization.read() {
+            if !authority.enabled
+                || authority.host_epoch != session.host_epoch
+                || authority
+                    .devices
+                    .get(&session.device_id)
+                    .is_none_or(|device| device.revoked)
+            {
+                native_revocation.revoke();
+            }
+            let mut connections = authority
+                .native_connections
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            connections.retain(|(_, connection)| connection.strong_count() != 0);
+            connections.push((
+                session.device_id.clone(),
+                Arc::downgrade(&native_revocation),
+            ));
+        } else {
+            native_revocation.revoke();
+        }
         Self {
             authorization,
             session: Mutex::new(session),
@@ -188,6 +325,7 @@ impl MobileConnection {
             current_turn: Mutex::new(0),
             turns_changed: Condvar::new(),
             order_failed: AtomicBool::new(false),
+            native_revocation,
         }
     }
 
@@ -196,6 +334,8 @@ impl MobileConnection {
     /// Neither callback may reenter this connection or mutate its authority;
     /// never call dispatch while holding that authority's write lock.
     /// The adapter must also recheck the live client and current Project binding.
+    /// Native owner RPC must instead use `MobileInputRequest::authorize_native_with`
+    /// and the shared permit, never retain this synchronous fence while waiting.
     pub fn dispatch<T>(
         &self,
         project: &ProjectKey,
@@ -366,6 +506,76 @@ impl MobileInputRequest {
         &self.data
     }
 
+    /// Create an unarmed native permit. Registration grants no input authority,
+    /// but lets revoke interrupt even a preparation whose owner never replies.
+    #[doc(hidden)]
+    pub fn native_permit(&self) -> Result<Arc<NativeInputPermit>, AuthorizationError> {
+        let permit = NativeInputPermit::new().map_err(|_| AuthorizationError::Unavailable)?;
+        self.connection.native_revocation.register(&permit)?;
+        Ok(permit)
+    }
+
+    /// An unknown result ends this connection's input stream. Recovery needs a
+    /// fresh authenticated connection, never a replay of the abandoned request.
+    #[doc(hidden)]
+    pub fn abandon_native(&self) {
+        self.connection.order_failed.store(true, Ordering::Release);
+        self.connection.native_revocation.revoke();
+        self.connection.turns_changed.notify_all();
+    }
+
+    /// Consume the sequence and arm one immutable native input under the short
+    /// Host/session fence. The physical owner accepts it using its shared CAS;
+    /// no network wait or physical write belongs in this authorization callback.
+    #[doc(hidden)]
+    pub fn authorize_native(
+        &self,
+        permit: &NativeInputPermit,
+        current_project: impl FnOnce() -> Option<ProjectKey>,
+        now: impl FnOnce() -> u64,
+    ) -> Result<(), AuthorizationError> {
+        self.authorize_native_with(current_project, now, |issued, expires, time| {
+            permit
+                .arm(issued, expires, time)
+                .map_err(|_| AuthorizationError::Unavailable)
+        })
+    }
+
+    /// A trusted adapter can add its short client-binding fence around arming.
+    /// Lock order remains session, Host authority, client binding, atomic arm.
+    #[doc(hidden)]
+    pub fn authorize_native_with<T>(
+        &self,
+        current_project: impl FnOnce() -> Option<ProjectKey>,
+        now: impl FnOnce() -> u64,
+        arm: impl FnOnce(u64, u64, u64) -> Result<T, AuthorizationError>,
+    ) -> Result<T, AuthorizationError> {
+        let mut session = self
+            .connection
+            .session
+            .lock()
+            .map_err(|_| AuthorizationError::Unavailable)?;
+        let authority = self
+            .connection
+            .authorization
+            .read()
+            .map_err(|_| AuthorizationError::Unavailable)?;
+        let time = now();
+        let issued_at = session.issued_at;
+        let expires_at = session.expires_at.min(
+            authority
+                .devices
+                .get(&session.device_id)
+                .map_or(0, |device| device.expires_at),
+        );
+        authority.dispatch(&mut session, &self.project, self.sequence, time, || {
+            if current_project().as_ref() != Some(&self.project) {
+                return Err(AuthorizationError::WrongProject);
+            }
+            arm(issued_at, expires_at, time)
+        })?
+    }
+
     /// Accept an operation at final synchronous dispatch, using current time
     /// after the authorization locks. Retain those locks until the effect ends.
     /// Recheck the live client here, and the current window owner in `effect`.
@@ -392,9 +602,11 @@ impl MobileInputRequest {
 pub struct MobileAuthorization {
     enabled: bool,
     host_epoch: Uuid,
+    host_binding: Option<HostBinding>,
     devices: HashMap<String, DeviceRecord>,
     pending: HashMap<String, Pairing>,
     challenges: HashMap<String, Challenge>,
+    native_connections: Mutex<Vec<(String, Weak<NativeRevocation>)>>,
 }
 
 impl Default for MobileAuthorization {
@@ -402,9 +614,11 @@ impl Default for MobileAuthorization {
         Self {
             enabled: false,
             host_epoch: Uuid::new_v4(),
+            host_binding: None,
             devices: HashMap::new(),
             pending: HashMap::new(),
             challenges: HashMap::new(),
+            native_connections: Mutex::default(),
         }
     }
 }
@@ -416,6 +630,7 @@ impl MobileAuthorization {
     }
 
     pub fn disable(&mut self) {
+        self.revoke_native_connections(None);
         self.enabled = false;
         self.host_epoch = Uuid::new_v4();
         self.pending.clear();
@@ -502,9 +717,26 @@ impl MobileAuthorization {
             .get_mut(device_id)
             .ok_or(AuthorizationError::UnknownDevice)?
             .revoked = true;
+        self.revoke_native_connections(Some(device_id));
         self.challenges
             .retain(|_, challenge| challenge.device_id != device_id);
         Ok(())
+    }
+
+    fn revoke_native_connections(&self, device_id: Option<&str>) {
+        let mut connections = self
+            .native_connections
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        connections.retain(|(device, connection)| {
+            let Some(connection) = connection.upgrade() else {
+                return false;
+            };
+            if device_id.is_none_or(|id| id == device) {
+                connection.revoke();
+            }
+            true
+        });
     }
 
     /// Approve on the trusted PC control plane, returning success only after save.
@@ -672,14 +904,53 @@ impl MobileAuthorization {
         self.devices().into_iter().cloned().collect()
     }
 
-    /// Load public device records, disabled and with a fresh Host epoch.
+    /// Load legacy schema1 records, disabled and with a fresh Host epoch.
     /// Only a missing file starts empty; corrupt or unreadable state fails closed.
-    /// The owner supplies a path in its private, trusted directory.
+    /// Bound snapshots require [`Self::load_bound`], never a binding-free fallback.
+    /// The owner supplies a path in its private, trusted directory and holds its
+    /// single-writer fence for all snapshot operations.
     pub fn load(path: &Path) -> io::Result<Self> {
+        Self::load_snapshot(path, None)
+    }
+
+    /// Restore only schema2 with the expected Host/origin. A missing snapshot
+    /// starts empty and bound, without writing or implicitly enabling access.
+    /// Legacy records require an explicit trusted-PC migration first.
+    pub fn load_bound(path: &Path, expected: &HostBinding) -> io::Result<Self> {
+        Self::load_snapshot(path, Some(expected))
+    }
+
+    /// Explicit trusted-PC binding of an existing schema1 snapshot in place.
+    /// Never rebind schema2, create a missing snapshot, or enable access. The
+    /// caller must hold the same private-path/single-writer fence as `save`.
+    pub fn bind_legacy_snapshot(path: &Path, binding: &HostBinding) -> io::Result<Self> {
+        let stored = Self::read_snapshot(path)?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "legacy mobile snapshot does not exist",
+            )
+        })?;
+        let mut authority = Self::restore_stored(stored, None)?;
+        authority.host_binding = Some(binding.clone());
+        authority.save(path)?;
+        Ok(authority)
+    }
+
+    fn load_snapshot(path: &Path, expected: Option<&HostBinding>) -> io::Result<Self> {
+        match Self::read_snapshot(path)? {
+            Some(stored) => Self::restore_stored(stored, expected),
+            None => Ok(Self {
+                host_binding: expected.cloned(),
+                ..Self::default()
+            }),
+        }
+    }
+
+    fn read_snapshot(path: &Path) -> io::Result<Option<StoredDevices>> {
         gwt_config::home::assert_test_path(path);
         let file = match File::open(path) {
             Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
         };
         let mut bytes = Vec::new();
@@ -690,16 +961,31 @@ impl MobileAuthorization {
                 "mobile device snapshot exceeds size limit",
             ));
         }
-        let stored: StoredDevices = serde_json::from_slice(&bytes)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        if stored.schema_version != 1 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "unsupported mobile device snapshot schema",
-            ));
-        }
-        Self::restore(stored.devices)
+        serde_json::from_slice(&bytes)
+            .map(Some)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+    }
+
+    fn restore_stored(stored: StoredDevices, expected: Option<&HostBinding>) -> io::Result<Self> {
+        let problem = match (
+            stored.schema_version,
+            stored.host_binding.as_ref(),
+            expected,
+        ) {
+            (1, None, None) => None,
+            (1, None, Some(_)) => Some("legacy mobile snapshot requires explicit PC binding"),
+            (2, Some(binding), Some(expected)) if binding == expected => None,
+            (2, Some(_), Some(_)) => Some("mobile snapshot Host/origin binding mismatch"),
+            (2, Some(_), None) => Some("mobile snapshot requires an expected Host/origin binding"),
+            _ => Some("invalid or unsupported mobile device snapshot schema"),
+        };
+        if let Some(problem) = problem {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, problem));
+        }
+        let mut authority = Self::restore(stored.devices)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        authority.host_binding = stored.host_binding;
+        Ok(authority)
     }
 
     /// Atomically replace the public device snapshot, including revoked records.
@@ -721,11 +1007,18 @@ impl MobileAuthorization {
         serde_json::to_writer(
             &mut temp,
             &StoredDevices {
-                schema_version: 1,
+                schema_version: if self.host_binding.is_some() { 2 } else { 1 },
+                host_binding: self.host_binding.clone(),
                 devices: self.snapshot(),
             },
         )
         .map_err(io::Error::other)?;
+        if temp.as_file().metadata()?.len() > MAX_SNAPSHOT_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "mobile device snapshot exceeds size limit",
+            ));
+        }
         temp.as_file().sync_all()?;
         temp.persist(path).map_err(|error| error.error)?;
         #[cfg(unix)]
@@ -1003,6 +1296,40 @@ mod tests {
         let queued = || connection.dispatch(&project(), 0, || NOW, || panic!("revoked effect"));
         auth.write().unwrap().revoke(device.id()).unwrap();
         assert_eq!(queued(), Err(AuthorizationError::Revoked));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_permits_are_revoked_without_waiting_for_the_session_or_owner() {
+        let mut authority = MobileAuthorization::default();
+        authority.enable();
+        let key = key();
+        let device = paired(&mut authority, &key);
+        let session = session(&mut authority, &device, &key);
+        let authority = Arc::new(RwLock::new(authority));
+        let connection = Arc::new(MobileConnection::new(authority.clone(), session));
+        let request = MobileInputRequest::new(
+            connection.clone(),
+            "phone".into(),
+            project(),
+            0,
+            "pane".into(),
+            "input".into(),
+        );
+        let permit = request.native_permit().unwrap();
+        request
+            .authorize_native(&permit, || Some(project()), || NOW)
+            .unwrap();
+        // A native RPC may hold the connection's session on its own worker;
+        // PC revocation must depend only on the short Host writer operation.
+        let _session = connection.session.lock().unwrap();
+        authority
+            .try_write()
+            .expect("native authorization releases the Host fence")
+            .revoke(device.id())
+            .unwrap();
+        assert!(permit.is_revoked());
+        assert!(permit.arm(NOW, NOW + SESSION_TTL_SECS, NOW).is_err());
     }
 
     #[test]
@@ -1341,6 +1668,180 @@ mod tests {
             MobileAuthorization::restore(vec![invalid_key]),
             Err(AuthorizationError::InvalidDevice)
         ));
+    }
+
+    #[test]
+    fn host_bound_snapshot_requires_explicit_migration_and_preserves_device_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("devices.json");
+        let binding =
+            HostBinding::new(&Uuid::new_v4().to_string(), "https://EXAMPLE.com:443/").unwrap();
+        let mut auth = MobileAuthorization::default();
+        auth.enable();
+        let key = key();
+        let device = paired(&mut auth, &key);
+        let revoked = paired(&mut auth, &self::key());
+        auth.revoke(&revoked.id).unwrap();
+        let mut old = session(&mut auth, &device, &key);
+        auth.save(&path).unwrap();
+        let legacy = std::fs::read(&path).unwrap();
+        assert!(MobileAuthorization::load_bound(&path, &binding).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), legacy);
+
+        let migrated = MobileAuthorization::bind_legacy_snapshot(&path, &binding).unwrap();
+        assert_eq!(migrated.check_enabled(), Err(AuthorizationError::Disabled));
+        assert_eq!(migrated.snapshot().len(), 2);
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["schema_version"], 2);
+        let legacy: serde_json::Value = serde_json::from_slice(&legacy).unwrap();
+        assert_eq!(saved["devices"], legacy["devices"]);
+        assert_eq!(
+            saved["host_binding"]["coordinator_origin"],
+            "https://example.com"
+        );
+        assert!(MobileAuthorization::load(&path).is_err());
+        let mut restored = MobileAuthorization::load_bound(&path, &binding).unwrap();
+        assert_eq!(restored.check_enabled(), Err(AuthorizationError::Disabled));
+        restored.enable();
+        assert_eq!(
+            restored.dispatch(&mut old, &project(), 0, NOW, || ()),
+            Err(AuthorizationError::StaleSession)
+        );
+        assert_eq!(
+            restored
+                .challenge(&revoked.id, &project(), NOW)
+                .unwrap_err(),
+            AuthorizationError::Revoked
+        );
+        let pending = restored
+            .request_pairing("Tablet", self::key().public_key().as_ref(), project(), NOW)
+            .unwrap();
+        let added = restored.approve_and_save(&pending.id, NOW, &path).unwrap();
+        let missing = dir.path().join("missing/devices.json");
+        assert!(matches!(
+            restored.revoke_and_save(&added.id, &missing),
+            Err(DeviceUpdateError::Storage(_))
+        ));
+        assert_eq!(restored.check_enabled(), Err(AuthorizationError::Disabled));
+        restored.save(&path).unwrap();
+        let recovered = MobileAuthorization::load_bound(&path, &binding).unwrap();
+        assert_eq!(recovered.snapshot().len(), 3);
+        assert!(recovered
+            .devices()
+            .iter()
+            .find(|d| d.id() == added.id)
+            .unwrap()
+            .is_revoked());
+        assert_eq!(recovered.check_enabled(), Err(AuthorizationError::Disabled));
+    }
+
+    #[test]
+    fn host_bound_snapshot_rejects_mismatch_rebinding_and_invalid_envelopes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("devices.json");
+        let id = Uuid::new_v4().to_string();
+        let binding = HostBinding::new(&id, "https://example.com").unwrap();
+        assert!(MobileAuthorization::bind_legacy_snapshot(&path, &binding).is_err());
+        let fresh = MobileAuthorization::load_bound(&path, &binding).unwrap();
+        assert!(!path.exists());
+        assert_eq!(fresh.check_enabled(), Err(AuthorizationError::Disabled));
+        fresh.save(&path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        for other in [
+            HostBinding::new(&Uuid::new_v4().to_string(), "https://example.com").unwrap(),
+            HostBinding::new(&id, "https://other.example.com").unwrap(),
+            HostBinding::new(&id, "https://example.com:8443").unwrap(),
+        ] {
+            assert!(MobileAuthorization::load_bound(&path, &other).is_err());
+            assert!(MobileAuthorization::bind_legacy_snapshot(&path, &other).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        }
+        assert!(MobileAuthorization::bind_legacy_snapshot(&path, &binding).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let valid: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        for (field, value) in [
+            ("schema_version", serde_json::json!(1)),
+            ("schema_version", serde_json::json!(3)),
+            ("host_binding", serde_json::Value::Null),
+            (
+                "host_binding",
+                serde_json::json!({"host_id": "invalid", "coordinator_origin": "https://example.com"}),
+            ),
+            (
+                "host_binding",
+                serde_json::json!({"host_id": id, "coordinator_origin": "http://example.com"}),
+            ),
+            ("unexpected", serde_json::json!(true)),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = value;
+            let encoded = serde_json::to_vec(&invalid).unwrap();
+            std::fs::write(&path, &encoded).unwrap();
+            assert!(MobileAuthorization::load_bound(&path, &binding).is_err());
+            assert!(MobileAuthorization::load(&path).is_err());
+            assert!(MobileAuthorization::bind_legacy_snapshot(&path, &binding).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), encoded);
+        }
+        std::fs::write(&path, br#"{"schema_version":2,"devices":[]}"#).unwrap();
+        assert!(MobileAuthorization::load_bound(&path, &binding).is_err());
+    }
+
+    #[test]
+    fn host_bound_snapshot_oversize_migration_preserves_legacy_and_can_recover() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("devices.json");
+        let mut auth = MobileAuthorization::default();
+        auth.enable();
+        paired(&mut auth, &key());
+        auth.save(&path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let id = Uuid::new_v4().to_string();
+        let oversized =
+            HostBinding::new(&id, &format!("https://{}.example", "a".repeat(128 * 1024))).unwrap();
+        assert!(MobileAuthorization::bind_legacy_snapshot(&path, &oversized).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let binding = HostBinding::new(&id, "https://example.com").unwrap();
+        MobileAuthorization::bind_legacy_snapshot(&path, &binding).unwrap();
+        assert_eq!(
+            MobileAuthorization::load_bound(&path, &binding)
+                .unwrap()
+                .devices()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn host_binding_validates_origins_and_normalizes_identity_on_deserialization() {
+        let id = Uuid::new_v4().to_string();
+        let expected = HostBinding::new(&id, "https://example.com").unwrap();
+        let encoded = serde_json::json!({"host_id": id.to_uppercase(), "coordinator_origin": "https://EXAMPLE.com:443/"});
+        assert_eq!(
+            serde_json::from_value::<HostBinding>(encoded).unwrap(),
+            expected
+        );
+        assert!(HostBinding::new("invalid", "https://example.com").is_err());
+        assert!(serde_json::from_value::<HostBinding>(serde_json::json!({
+            "host_id": "invalid", "coordinator_origin": "https://example.com"
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<HostBinding>(serde_json::json!({
+            "host_id": id, "coordinator_origin": "http://example.com"
+        }))
+        .is_err());
+        for origin in [
+            "http://example.com",
+            "https://@example.com",
+            "https://user:password@example.com",
+            "https://example.com/mobile/",
+            "https://example.com/mobile/..",
+            "https://example.com?secret=x",
+            "https://example.com#secret",
+            "https://example.com\n",
+        ] {
+            assert!(HostBinding::new(&id, origin).is_err(), "{origin:?}");
+        }
     }
 
     #[test]
