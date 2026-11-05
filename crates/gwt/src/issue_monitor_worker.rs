@@ -2360,7 +2360,7 @@ impl LinkedPrProbeBatch {
     ) -> Self {
         let numbers: Vec<u64> = issues
             .into_iter()
-            .filter(|issue| is_spec_candidate(issue))
+            .filter(|issue| is_spec_candidate(issue) && spec_completion_is_possible(issue))
             .map(|issue| issue.number)
             .collect();
         Self::prefetch_with(&numbers, linked_prs, |numbers, observe| {
@@ -2441,6 +2441,9 @@ impl LinkedPrProbeBatch {
         if !is_spec_candidate(issue) {
             return Some(issue.state == IssueMonitorIssueState::Closed);
         }
+        if !spec_completion_is_possible(issue) {
+            return Some(false);
+        }
         self.linked
             .get(&issue.number)
             .map(|prs| linked_pr_completion_is_fresh_for_issue(issue, prs))
@@ -2461,6 +2464,15 @@ fn is_spec_candidate(issue: &IssueMonitorIssue) -> bool {
         .labels
         .iter()
         .any(|label| label.eq_ignore_ascii_case("gwt-spec"))
+}
+
+fn spec_completion_is_possible(issue: &IssueMonitorIssue) -> bool {
+    issue.readiness == IssueMonitorReadiness::ReadyWithCompletedTasks
+        && issue
+            .updated_at
+            .as_deref()
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .is_some()
 }
 
 /// [`try_issue_completed_by_merged_pr`] answered from `batch` when it holds
@@ -2550,6 +2562,9 @@ pub fn try_issue_completed_by_merged_pr_classified(
     }
     let stage = IssueMonitorScanStage::ClaimCompletionReadback;
     ensure_scan_deadline(stage).map_err(IssueMonitorCompletionProbeFailure::Deadline)?;
+    if !spec_completion_is_possible(issue) {
+        return Ok(false);
+    }
     let prs = run_budgeted_readback_stage(stage, || {
         crate::cli::issue::fetch_linked_prs_via_gh(
             owner,
@@ -2573,13 +2588,7 @@ pub fn linked_pr_completion_is_fresh_for_issue(
     if !is_spec {
         return issue.state == IssueMonitorIssueState::Closed;
     }
-    if issue
-        .updated_at
-        .as_deref()
-        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-        .is_none()
-        || issue.readiness != IssueMonitorReadiness::ReadyWithCompletedTasks
-    {
+    if !spec_completion_is_possible(issue) {
         return false;
     }
     let closing_merged = prs
@@ -3926,6 +3935,41 @@ mod linked_pr_batch_tests {
             url: None,
             readiness: IssueMonitorReadiness::ReadyWithCompletedTasks,
             updated_at: Some("2026-09-01T00:00:00Z".to_string()),
+        }
+    }
+
+    #[test]
+    fn issue_6746_incomplete_specs_need_no_completion_readback() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let mut pending = spec_issue(1);
+        pending.readiness = IssueMonitorReadiness::ReadyWithOpenTasks;
+        let mut missing_revision = spec_issue(2);
+        missing_revision.updated_at = None;
+        let mut invalid_revision = spec_issue(3);
+        invalid_revision.updated_at = Some("invalid".to_string());
+        let issues = [pending, missing_revision, invalid_revision];
+        let batch = LinkedPrProbeBatch::prefetch("o", "r", &issues, &BTreeMap::new());
+        assert!(batch.is_empty());
+        assert!(
+            batch.failure().is_none(),
+            "no remote completion read is needed"
+        );
+        let failed = LinkedPrProbeBatch {
+            linked: BTreeMap::new(),
+            failure: Some("process deadline expired".to_string()),
+        };
+        for issue in &issues {
+            assert_eq!(batch.completed(issue), Some(false));
+            assert_eq!(
+                try_issue_completed_by_merged_pr_classified_with("o", "r", issue, Some(&failed)),
+                Ok(false),
+                "an irrelevant bulk timeout cannot defer this candidate"
+            );
+            assert_eq!(
+                try_issue_completed_by_merged_pr_classified("o", "r", issue),
+                Ok(false)
+            );
         }
     }
 
