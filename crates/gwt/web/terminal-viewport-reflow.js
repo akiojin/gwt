@@ -56,24 +56,6 @@ export function decodeTerminalSnapshotBoundary(
 }
 
 /**
- * Mark receipt of a terminal snapshot by discarding every live-output queue
- * that predates it. Output arriving after this synchronous boundary is left
- * alone and will therefore be replayed after the snapshot is applied.
- */
-export function clearTerminalOutputBeforeSnapshot({
-  windowId,
-  runtime,
-  pendingOutputMap,
-  clearBatchedOutput,
-}) {
-  clearBatchedOutput(windowId);
-  pendingOutputMap.delete(windowId);
-  if (runtime) {
-    runtime.deferredWrites = [];
-  }
-}
-
-/**
  * Serialize replacement snapshots behind xterm's asynchronous write queue.
  *
  * xterm writes that were already issued cannot be cancelled. The first empty

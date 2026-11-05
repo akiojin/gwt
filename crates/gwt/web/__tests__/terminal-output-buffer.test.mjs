@@ -69,12 +69,116 @@ function cursorScheduler() {
   };
 }
 
+test("RAW retention stops an oversized pane before decoding, including blocked output", () => {
+  const scheduler = manualScheduler(), writes = [], failures = [];
+  const batcher = createTerminalOutputBatcher({
+    schedule: scheduler.schedule,
+    maxPendingBytesPerWindow: 6,
+    projectForWindow: () => "cold-project",
+    canWrite: () => false,
+    write: (id, text) => writes.push([id, text]),
+    onError: (error, id, project) => failures.push([id, project]),
+  });
+  assert.equal(batcher.enqueue("cold", "abcdef"), true);
+  assert.equal(batcher.enqueue("cold", "g"), false);
+  assert.equal(batcher.enqueue("cold", "discarded suffix"), false);
+  scheduler.runAll();
+  assert.deepEqual(writes, []);
+  assert.deepEqual(failures, [["cold", "cold-project"]]);
+  assert.equal(batcher.pendingCount(), 0);
+});
+
+test("RAW project capacity includes issued writes until their own callback completes", () => {
+  const scheduler = manualScheduler(), callbacks = [], writes = [], failures = [];
+  const batcher = createTerminalOutputBatcher({
+    schedule: scheduler.schedule,
+    maxPendingBytesPerWindow: 6,
+    maxPendingBytesPerProject: 8,
+    projectForWindow: id => id === "other" ? "other-project" : "project",
+    write: (id, text, done) => { writes.push([id, text]); callbacks.push(done); },
+    onError: (error, id) => failures.push(id),
+  });
+  batcher.enqueue("one", "12345");
+  scheduler.runAll(); // Moving bytes to xterm is not releasing capacity.
+  assert.equal(batcher.enqueue("two", "6789"), false);
+  assert.equal(batcher.enqueue("other", "ABCDE"), true);
+  assert.deepEqual(failures, ["two"]);
+  callbacks[0]();
+  callbacks[0](); // A duplicate/late completion cannot release another write.
+  batcher.clear("two");
+  assert.equal(batcher.enqueue("two", "6789"), true);
+  scheduler.runAll();
+  assert.deepEqual(writes, [["one", "12345"], ["other", "ABCDE"], ["two", "6789"]]);
+  batcher.clear("one");
+  batcher.enqueue("one", "1234");
+  scheduler.runAll();
+  callbacks[0]();
+  assert.equal(batcher.enqueue("two", "X"), false, "old callbacks must not free newer bytes");
+  batcher.clear("two");
+  batcher.enqueue("two", "6789");
+  scheduler.runAll();
+  callbacks[2](); // This write was still in flight when clear invalidated it.
+  assert.equal(batcher.enqueue("one", "X"), false, "disposed write callbacks cannot free a new account");
+});
+
+test("catalog pruning reclaims unmounted output without touching retained panes", () => {
+  const scheduler = manualScheduler();
+  const batcher = createTerminalOutputBatcher({
+    schedule: scheduler.schedule,
+    maxPendingBytesPerWindow: 6,
+    maxPendingBytesPerProject: 8,
+    canWrite: () => false,
+    write() { assert.fail("unmounted output must not be written"); },
+  });
+  batcher.enqueue("orphan", "12345");
+  batcher.enqueue("kept", "ab");
+  assert.deepEqual(batcher.prune(new Set(["kept"])), ["orphan"]);
+  assert.equal(batcher.enqueue("kept", "cdef"), true);
+  assert.equal(batcher.pendingCount("kept"), 2);
+  assert.equal(batcher.pendingCount("orphan"), 0);
+  assert.deepEqual(batcher.prune(new Set(["kept"])), []);
+});
+
+test("a recovery snapshot retains its bounded suffix until success and drops a failed suffix", () => {
+  const scheduler = manualScheduler(), writes = [];
+  const batcher = createTerminalOutputBatcher({
+    schedule: scheduler.schedule,
+    maxPendingBytesPerWindow: 6,
+    write: (id, text, done) => { writes.push(text); done(); },
+  });
+  batcher.invalidate("pane", new Error("torn stream"));
+  batcher.beginSnapshot("pane");
+  assert.equal(batcher.enqueue("pane", "new"), true);
+  scheduler.runAll();
+  assert.deepEqual(writes, []);
+  batcher.beginSnapshot("pane"); // A newer snapshot supersedes the suffix.
+  batcher.enqueue("pane", "latest");
+  batcher.finishSnapshot("pane");
+  scheduler.runAll();
+  assert.deepEqual(writes, ["latest"]);
+  batcher.beginSnapshot("pane");
+  batcher.enqueue("pane", "broken");
+  batcher.invalidate("pane", new Error("snapshot decode failed"));
+  assert.equal(batcher.enqueue("pane", "suffix"), false);
+  batcher.beginSnapshot("pane");
+  batcher.enqueue("pane", "ok");
+  batcher.finishSnapshot("pane");
+  scheduler.runAll();
+  assert.deepEqual(writes, ["latest", "ok"]);
+  batcher.beginSnapshot("pane");
+  batcher.enqueue("pane", "held");
+  assert.equal(batcher.enqueue("pane", "overflow"), false);
+  batcher.finishSnapshot("pane"); // Old completion follows suffix overflow.
+  assert.equal(batcher.enqueue("pane", "gap"), false);
+});
+
 for (const stage of ["merge", "write"]) {
   test(`${stage} failure stops the torn stream until snapshot clear`, (t) => {
     t.mock.method(console, "warn", () => {});
     const scheduler = manualScheduler();
     const writes = [], failures = [];
     const fault = new Error(`one-shot ${stage} failure`);
+    let project = "source-project";
     let armed = true;
     const failOnce = (at, windowId) => {
       if (armed && stage === at && windowId === "pm") {
@@ -85,10 +189,11 @@ for (const stage of ["merge", "write"]) {
     const batcher = createTerminalOutputBatcher({
       schedule: scheduler.schedule,
       maxCharsPerFlush: 3,
+      projectForWindow: () => project,
       mergeChunks: (chunks, id) => { failOnce("merge", id); return chunks.join(""); },
       write: (id, text) => { failOnce("write", id); writes.push([id, text]); },
-      onError: (error, id) => {
-        failures.push([error, id, batcher.enqueue(id, "REENTRANT")]);
+      onError: (error, id, origin) => {
+        failures.push([error, id, batcher.enqueue(id, "REENTRANT"), origin]);
         throw new Error("recovery callback failed");
       },
     });
@@ -97,7 +202,7 @@ for (const stage of ["merge", "write"]) {
     batcher.enqueue("peer", "OK");
     scheduler.runAll();
     assert.deepEqual(writes, [["peer", "OK"]]);
-    assert.deepEqual(failures, [[fault, "pm", false]]);
+    assert.deepEqual(failures, [[fault, "pm", false, "source-project"]]);
     assert.equal(batcher.pendingCount(), 0);
     assert.equal(batcher.enqueue("pm", "INTERVENING"), false);
     assert.equal(batcher.schedulePending("pm"), false);
@@ -106,12 +211,18 @@ for (const stage of ["merge", "write"]) {
     assert.equal(batcher.enqueue("pm", "AFTER FAILED SNAPSHOT"), false);
     const snapshotFault = new Error("replacement snapshot failed");
     batcher.invalidate("pm", snapshotFault);
-    assert.deepEqual(failures.at(-1), [snapshotFault, "pm", false]);
+    assert.deepEqual(failures.at(-1), [snapshotFault, "pm", false, "source-project"]);
     batcher.clear("pm"); // Successful replacement releases the stop.
     assert.equal(batcher.enqueue("pm", "RECOVERED"), true);
     scheduler.runAll();
     assert.deepEqual(writes, [["peer", "OK"], ["pm", "RECOVERED"]]);
     assert.equal(failures.length, 2);
+    batcher.clear("pm");
+    batcher.enqueue("pm", "BAD");
+    project = "other-project";
+    armed = true;
+    scheduler.runAll();
+    assert.equal(failures.at(-1)[3], "source-project", "a delayed fault retains its allocation's project after dequeue");
   });
 }
 
