@@ -262,7 +262,10 @@ mod tests {
             ("projects", json!([])),
             ("projects", json!(["0123456789abcdef", "0123456789abcdef"])),
             ("projects", json!(["0123456789abcdeF"])),
-            ("projects", json!(vec!["0123456789abcdef"; 17])),
+            (
+                "projects",
+                json!((0..17).map(|id| format!("{id:016x}")).collect::<Vec<_>>()),
+            ),
             ("secret", json!("00")),
             ("secret", json!("x".repeat(64))),
             ("issued_at", json!(200)),
@@ -294,7 +297,10 @@ mod tests {
         malformed.push(duplicate.into_bytes());
         for bytes in malformed {
             std::fs::write(&path, &bytes).unwrap();
-            assert!(load_host_credential(&path, &binding, &project(), 100).is_err());
+            assert!(matches!(
+                load_host_credential(&path, &binding, &project(), 100),
+                Err(CredentialLoadError::InvalidCredential)
+            ));
             assert_eq!(std::fs::read(&path).unwrap(), bytes);
         }
         let mut oversized = original.clone();
