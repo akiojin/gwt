@@ -3013,11 +3013,16 @@ fn refresh_monitor_after_wait_error(monitor: &mut crate::IssueMonitorState, erro
     // Discard the ambiguous proposal. The ordinary scan lane recomputes from
     // committed state; retrying its already-consumed FnOnce would guess an end.
     let project_root = monitor.wait_project_root().map(Path::to_path_buf);
-    *monitor =
+    let mut refreshed =
         crate::IssueMonitorState::with_prefs(monitor.config.clone(), *refresh.snapshot.clone());
+    refreshed.inherit_source_repository(monitor);
+    // This request was already acknowledged; a wait refresh must leave it
+    // available for the ordinary scan without retaining the ambiguous end.
+    refreshed.inherit_pending_idle_release(monitor);
     if let Some(root) = project_root.as_deref() {
-        monitor.set_wait_project_root(root);
+        refreshed.set_wait_project_root(root);
     }
+    *monitor = refreshed;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5053,6 +5058,76 @@ async fn issue_5524_wait_rejection_preserves_the_not_launched_reason() {
             assert!(monitor.last_control_receipt().is_none());
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn wait_refresh_preserves_an_accepted_idle_release() {
+    let _lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+    let _prefs_budget = pin_prefs_hang_guard();
+    let now = "2026-09-07T04:00:00Z";
+    let window = "tab-1::review-42";
+    let mut monitor = test_monitor_with_prefs(Default::default(), Default::default());
+    monitor.complete_active_launch_at(42, window, "2026-09-07T03:59:00Z");
+    monitor.begin_review(42, 420, "sha42");
+    monitor.record_review_verdict(42, true);
+    monitor.set_autonomous_mode(false);
+    let path = home.path().join("monitor.json");
+    crate::save_issue_monitor_prefs(&path, &monitor.prefs()).unwrap();
+    assert!(matches!(
+        try_apply_accepted_issue_monitor_control_with_disk_migration(
+            &path,
+            &mut monitor,
+            AcceptedIssueMonitorControl::new(IssueMonitorControl::IdleRelease {
+                number: Some(42),
+                reason: "operator release".into(),
+            }),
+        ),
+        IssueMonitorControlCommit::Committed { .. }
+    ));
+    let mut baseline = monitor.clone();
+    let error = io::Error::new(
+        io::ErrorKind::WouldBlock,
+        WaitProjectionRefreshRequired {
+            snapshot: Box::new(monitor.prefs()),
+            detail: "ambiguous launch end".into(),
+        },
+    );
+    refresh_monitor_after_wait_error(&mut monitor, &error);
+    for state in [&mut baseline, &mut monitor] {
+        state.record_window_snapshot(crate::issue_monitor::IssueMonitorWindowSnapshot {
+            project_tab_id: "tab-1".into(),
+            observed_at: now.into(),
+            windows: vec![crate::issue_monitor::IssueMonitorWindowObservation {
+                monitor_owned: true,
+                window_id: window.into(),
+                issue_number: Some(42),
+                status: crate::WindowState::Idle,
+                review_dispatch: true,
+                hold_reason: None,
+                last_output_at: None,
+                session_id: None,
+            }],
+        });
+    }
+    assert_eq!(
+        baseline
+            .reconcile_idle_windows(&Default::default(), now)
+            .released,
+        vec![42],
+        "the accepted request releases a review pane in manual mode"
+    );
+    assert_eq!(
+        monitor
+            .reconcile_idle_windows(&Default::default(), now)
+            .released,
+        vec![42],
+        "refresh must preserve the acknowledged request for the next scan"
+    );
 }
 
 #[cfg(test)]

@@ -5823,6 +5823,16 @@ pub(crate) fn capture_current_wait_subject(
     };
     with_wait_subject_owner_leases(std::slice::from_ref(&context), &mut || {
         let Some(ledger) = wait_subject_owner_ledger(&context.owner_dir, owner_number)? else {
+            if context
+                .worktree_trusted_dir
+                .join(GENERATION_POINTER_FILE)
+                .try_exists()?
+                || generation_pointer_path(&context.worktree).try_exists()?
+            {
+                return Err(generation_conflict(
+                    "wait subject owner ledger is missing while generation pointer exists",
+                ));
+            }
             return Ok(None);
         };
         let current = ledger.current_generation().ok_or_else(|| {
@@ -23460,6 +23470,44 @@ mod tests {
         capture_current_wait_subject(worktree, generation_owner().number)
             .unwrap()
             .expect("the canonical holder has exact native runtime proof")
+    }
+
+    #[test]
+    fn issue_5876_wait_capture_rejects_pointer_without_owner_ledger() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        issue_5876_wait_subject_fixture(worktree.path());
+        let owner = generation_owner();
+        fs::remove_file(generation_ledger_path(worktree.path(), owner).unwrap()).unwrap();
+        let mirror = generation_pointer_path(worktree.path());
+        let pointer = fs::read(&mirror).unwrap();
+        let trusted = crate::cli::trusted_store::trusted_dir_for_worktree(worktree.path())
+            .unwrap()
+            .join(GENERATION_POINTER_FILE);
+
+        fs::remove_file(&mirror).unwrap();
+        assert!(
+            capture_current_wait_subject(worktree.path(), owner.number).is_err(),
+            "a trusted-only generation pointer without its ledger is damaged authority, not legacy"
+        );
+        fs::remove_file(&trusted).unwrap();
+        fs::write(&mirror, pointer).unwrap();
+        assert!(
+            capture_current_wait_subject(worktree.path(), owner.number).is_err(),
+            "a mirror-only generation pointer without its ledger cannot admit an identity-less wait"
+        );
+        fs::remove_file(&mirror).unwrap();
+        assert_eq!(
+            capture_current_wait_subject(worktree.path(), owner.number).unwrap(),
+            None,
+            "absent generation authority preserves legacy wait admission"
+        );
     }
 
     #[test]

@@ -230,10 +230,18 @@ mod tests {
 
     #[test]
     fn typed_monitor_wait_requires_the_same_owner_session_and_native_runtime() {
+        use crate::cli::daemon::transport::IpcListener;
+        use gwt_core::daemon::{
+            persist_endpoint, ClientFrame, DaemonEndpoint, DaemonFrame, DaemonStatus,
+            IpcHandshakeRequest, IpcHandshakeResponse, RuntimeScope, RuntimeTarget,
+            DAEMON_PROTOCOL_VERSION,
+        };
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
         let _lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let home = tempfile::tempdir().unwrap();
+        let home = gwt_core::test_support::socket_tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
         let repo = tempfile::tempdir().unwrap();
         let (session, mut monitor, now) =
@@ -284,6 +292,99 @@ mod tests {
             3809,
             Some(&replaced)
         ));
+
+        let status = monitor.agent_status();
+        let mut ended_status = status.clone();
+        let waiting = ended_status
+            .inbox
+            .iter_mut()
+            .find(|row| row.issue_number == 3809)
+            .unwrap()
+            .waiting
+            .as_mut()
+            .unwrap();
+        // Preserve a stale in-force projection so only the reader's subject
+        // validation can reject the ended control.
+        assert!(waiting.in_force);
+        waiting.wait_control.as_mut().unwrap().ended = true;
+        let scope = RuntimeScope::from_project_root(repo.path(), RuntimeTarget::Host).unwrap();
+        let bind = home.path().join("stop-wait.sock").display().to_string();
+        #[cfg(windows)]
+        let bind = gwt_core::daemon::windows_pipe_name_for(&bind);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut listener = {
+            let _entered = runtime.enter();
+            IpcListener::bind(gwt_core::test_support::checked_socket_path(Path::new(
+                &bind,
+            )))
+            .unwrap()
+        };
+        let endpoint = DaemonEndpoint::new(
+            scope.clone(),
+            std::process::id(),
+            bind,
+            "stop-wait-token".into(),
+            "test-daemon".into(),
+        );
+        persist_endpoint(
+            &scope.endpoint_path(&gwt_core::paths::gwt_home()),
+            &endpoint,
+        )
+        .unwrap();
+        let server = std::thread::spawn(move || {
+            runtime.block_on(async move {
+                // test-hygiene: allow-wall-clock-deadline Hang guard for the real IPC fixture server; assertions use response events, not elapsed time.
+                tokio::time::timeout(std::time::Duration::from_secs(10), async move {
+                    for status in [status, ended_status] {
+                        let stream = listener.accept().await.unwrap();
+                        let (reader, mut writer) = stream.into_split();
+                        let mut reader = BufReader::new(reader);
+                        let mut line = String::new();
+                        reader.read_line(&mut line).await.unwrap();
+                        let handshake: IpcHandshakeRequest =
+                            serde_json::from_str(line.trim()).unwrap();
+                        assert_eq!(handshake.scope, scope);
+                        let handshake = IpcHandshakeResponse {
+                            protocol_version: DAEMON_PROTOCOL_VERSION,
+                            daemon_version: "test-daemon".into(),
+                            accepted: true,
+                            rejection_reason: None,
+                        };
+                        let mut response = serde_json::to_vec(&handshake).unwrap();
+                        response.push(b'\n');
+                        writer.write_all(&response).await.unwrap();
+                        line.clear();
+                        reader.read_line(&mut line).await.unwrap();
+                        assert!(matches!(
+                            serde_json::from_str::<ClientFrame>(line.trim()).unwrap(),
+                            ClientFrame::Status
+                        ));
+                        let response = DaemonFrame::Status(DaemonStatus {
+                            protocol_version: DAEMON_PROTOCOL_VERSION,
+                            daemon_version: "test-daemon".into(),
+                            uptime_seconds: 0,
+                            broadcast_channels: 0,
+                            connections: 1,
+                            issue_monitor: Some(serde_json::to_value(status).unwrap()),
+                        });
+                        let mut response = serde_json::to_vec(&response).unwrap();
+                        response.push(b'\n');
+                        writer.write_all(&response).await.unwrap();
+                    }
+                })
+                .await
+                .expect("Stop wait status daemon hang guard")
+            });
+        });
+        let observed = [
+            active_monitor_wait(repo.path(), Some(&session.id), Some(3809)),
+            active_monitor_wait(repo.path(), Some(&session.id), Some(3809)),
+        ];
+        server.join().unwrap();
+        assert_eq!(observed, [true, false]);
     }
 
     // T-108: an active launch-written record blocks Stop even though
