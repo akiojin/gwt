@@ -724,28 +724,55 @@ impl AppRuntime {
 
     pub(crate) fn complete_manual_update_check(
         &mut self,
-        result: gwt_core::update::UpdateState,
+        mut result: gwt_core::update::UpdateState,
         previous_failure: Option<gwt_core::update::UpdateApplyResult>,
     ) -> Vec<OutboundEvent> {
         self.update_check_in_flight = false;
-        let offer_update = self.update_download_in_flight.is_none();
-        // Keep an active download's identity intact. Checking never starts or
-        // replaces a payload; explicit Update still uses shared stage admission.
+        let mut offer_update = self.update_download_in_flight.is_none();
+        let mut events = Vec::new();
+        // Keep an active download's identity intact. Discovery can discard an
+        // obsolete stage, but explicit Update still owns download admission.
         if offer_update {
             match &result {
-                gwt_core::update::UpdateState::Available { .. } => {
-                    self.pending_update = Some(result.clone());
+                gwt_core::update::UpdateState::Available { latest, .. } => {
+                    match crate::update_front_door::discard_superseded_pending_update(latest) {
+                        Ok(superseded) => {
+                            if let Some(version) = superseded {
+                                events.extend(self.release_update_auto_apply_events(
+                                    &version,
+                                    super::UpdateAutoApplyRelease::Superseded,
+                                ));
+                            }
+                            self.pending_update = Some(result.clone());
+                        }
+                        Err(error) => {
+                            events.push(crate::update_download_failure(
+                                "Replace staged update",
+                                error.clone(),
+                                gwt_core::update::update_log_path()
+                                    .to_string_lossy()
+                                    .into_owned(),
+                            ));
+                            offer_update = false;
+                            result = gwt_core::update::UpdateState::Failed {
+                                message: error,
+                                failed_at: chrono::Utc::now(),
+                                retry_at: None,
+                            };
+                        }
+                    }
                 }
                 gwt_core::update::UpdateState::UpToDate { .. } => self.pending_update = None,
                 gwt_core::update::UpdateState::Failed { .. } => {}
             }
         }
-        vec![OutboundEvent::broadcast(BackendEvent::UpdateCheckResult {
+        events.push(OutboundEvent::broadcast(BackendEvent::UpdateCheckResult {
             checking: false,
             offer_update,
             result: Some(result),
             previous_failure,
-        })]
+        }));
+        events
     }
 
     pub(super) fn apply_pending_update_events(&self, client_id: &str) -> Vec<OutboundEvent> {

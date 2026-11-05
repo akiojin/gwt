@@ -2117,10 +2117,11 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
         .parent()
         .ok_or_else(|| io::Error::other("invalid path"))?;
     let tmp = parent.join(format!(
-        ".{}.tmp",
+        ".{}.{}.tmp",
         path.file_name()
             .and_then(|s| s.to_str())
-            .unwrap_or("update")
+            .unwrap_or("update"),
+        uuid::Uuid::new_v4()
     ));
     gwt_config::home::assert_test_path(&tmp);
     let bytes = serde_json::to_vec(value).map_err(|e| io::Error::other(e.to_string()))?;
@@ -4857,6 +4858,27 @@ mod tests {
         let _ = fs::set_permissions(&unreadable, restore_perms);
 
         assert_eq!(found.unwrap(), Some(expected));
+    }
+
+    #[test]
+    fn cache_write_keeps_another_writers_temporary_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("update.json");
+        let other_writer = temp.path().join(".update.json.tmp");
+        fs::write(&other_writer, b"another writer's payload").unwrap();
+        fs::write(&path, b"old cache").unwrap();
+        let value = serde_json::json!({ "latest_version": "99.0.0" });
+
+        write_json_atomic(&path, &value).unwrap();
+
+        assert_eq!(
+            fs::read(&other_writer).unwrap(),
+            b"another writer's payload"
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&fs::read(path).unwrap()).unwrap(),
+            value
+        );
     }
 
     #[test]

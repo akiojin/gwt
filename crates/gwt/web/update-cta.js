@@ -84,7 +84,22 @@ export function createUpdateCtaController({
     handleUpdateCheckResult({ checking: true });
     send({ kind: "check_for_updates" });
   });
-  checkRetry?.addEventListener("click", handleClick);
+  checkRetry?.addEventListener("click", () => {
+    if (checking || checkRetry.hidden || status === "scheduled") return;
+    handleClick();
+  });
+
+  function retractIdleManualOffer() {
+    if (status !== "available") return;
+    latestVersion = null;
+    pendingVersion = null;
+    pendingReadyReason = null;
+    availabilityModel.update(() => null);
+    document.getElementById(shellId)?.remove();
+    status = "idle";
+    setVersionState(null, null);
+    announceUpdateDismissed();
+  }
 
   function handleUpdateCheckResult(payload) {
     if (!payload) return;
@@ -96,29 +111,42 @@ export function createUpdateCtaController({
     let label = "Checking…";
     if (!checking) {
       switch (result?.state) {
-        case "available":
+        case "available": {
           label = `Update available: v${result.latest}`;
-          if (offerUpdate) handleUpdateState(result);
-          else label += " — Check again after the current download finishes.";
+          if (!offerUpdate) {
+            label += " — Check again after the current download finishes.";
+          } else if (!result.asset_url) {
+            label += " — No applicable asset for this platform.";
+            retractIdleManualOffer();
+          } else {
+            const sameActiveTarget = (pendingVersion || latestVersion) === result.latest
+              && ["applying", "ready", "draining", "scheduled"].includes(status);
+            if (!sameActiveTarget) handleUpdateState(result);
+          }
           break;
+        }
         case "failed":
           label = `Check failed: ${result.message}`;
           if (result.retry_at) label += ` — Retry after ${result.retry_at}`;
           break;
-        default:
+        case "up_to_date":
           label = "Up to date";
+          if (offerUpdate) retractIdleManualOffer();
+          break;
+        default:
+          label = "";
       }
     }
     if (checkStatus) {
       checkStatus.textContent = label;
       checkStatus.title = label;
-      checkStatus.dataset.state = checking ? "checking" : result?.state || "up_to_date";
+      checkStatus.dataset.state = checking ? "checking" : result?.state || "idle";
     }
     if (checking) return;
     const failure = payload.previous_failure;
     const mismatch = failure?.outcome === "failure"
       && failure.to_version !== failure.observed_version;
-    const detailReason = result?.state === "failed" || (result?.state === "available" && !offerUpdate)
+    const detailReason = result?.state === "failed" || (result?.state === "available" && (!offerUpdate || !result.asset_url))
       ? label : "";
     if (checkDetail) checkDetail.hidden = !mismatch && !detailReason;
     if (checkReason) {
@@ -128,10 +156,10 @@ export function createUpdateCtaController({
     if (checkFailure) {
       checkFailure.hidden = !mismatch;
       checkFailure.textContent = mismatch
-        ? `Previous update failed: expected v${failure.to_version}, running v${failure.observed_version}.`
+        ? `Previous update failed: expected v${failure.to_version}, observed v${failure.observed_version} after restart.`
         : "";
     }
-    if (checkRetry) checkRetry.hidden = !offerUpdate || !mismatch || result?.state !== "available" || !result.asset_url;
+    if (checkRetry) checkRetry.hidden = status === "scheduled" || !offerUpdate || !mismatch || result?.state !== "available" || !result.asset_url;
     if (checkInstall) {
       checkInstall.hidden = !mismatch;
       if (mismatch) {
@@ -453,6 +481,7 @@ export function createUpdateCtaController({
       case "scheduled": {
         removeLegacyUpdateSurfaces();
         closeModal();
+        if (checkRetry) checkRetry.hidden = true;
         pendingVersion = version;
         const grace = Number.isFinite(payload.grace_secs) ? payload.grace_secs : 60;
         renderCta("scheduled", `Update v${version} applies in ${grace} s — click to cancel`);

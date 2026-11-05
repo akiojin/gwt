@@ -12631,6 +12631,15 @@ impl AppRuntime {
             ));
         }
         events.extend(self.staged_update_sync_events(client_id));
+        events.push(OutboundEvent::reply(
+            client_id,
+            BackendEvent::UpdateCheckResult {
+                checking: self.update_check_in_flight,
+                offer_update: false,
+                result: None,
+                previous_failure: None,
+            },
+        ));
         events
     }
 
@@ -12764,6 +12773,15 @@ impl AppRuntime {
             self.pending_update.clone(),
         );
         events.extend(self.staged_update_sync_events(client_id));
+        events.push(OutboundEvent::reply(
+            client_id,
+            BackendEvent::UpdateCheckResult {
+                checking: self.update_check_in_flight,
+                offer_update: false,
+                result: None,
+                previous_failure: None,
+            },
+        ));
         events.splice(
             1..1,
             terminal_previews.into_iter().map(|(id, text)| {

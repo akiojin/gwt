@@ -2168,8 +2168,9 @@ present with no processes and no warning on platforms without Spotlight.
 Click **Check** beside the version in the header to query the latest release
 immediately. The result shows whether an update is available or why the check
 failed, including a retry time for rate limits. If a previous update restarted
-into the wrong version, the result names the expected and running versions and
-offers **Retry update** through the usual update dialog or **Manual install**.
+into the wrong version, the result names the expected version and the version
+recorded after that restart. It offers **Retry update** through the usual update
+dialog or **Manual install**.
 
 A downloaded update can remain staged while agents finish their work. The
 existing drain evaluates safety on the 15-second terminal convergence tick:

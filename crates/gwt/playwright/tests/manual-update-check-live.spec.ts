@@ -7,6 +7,7 @@ test.describe("Header manual update check", () => {
   test.skip(!process.env.GWT_PLAYWRIGHT_BASE_URL, "no GWT_PLAYWRIGHT_BASE_URL set");
 
   test("a real Check request reports its network failure and enables retry", async ({ page }, testInfo) => {
+    test.skip(process.env.GWT_PLAYWRIGHT_UNREACHABLE_UPDATE_API !== "1", "requires the isolated unreachable release API fixture");
     const errors: string[] = [];
     page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
     page.on("pageerror", error => errors.push(error.message));
@@ -95,7 +96,7 @@ test.describe("Header manual update check", () => {
     });
     await expect(status).toHaveText("Update available: v9.150.0");
     await expect(page.locator("#update-check-detail")).toBeVisible();
-    await expect(page.locator("#update-check-failure")).toHaveText("Previous update failed: expected v9.150.0, running v9.149.0.");
+    await expect(page.locator("#update-check-failure")).toHaveText("Previous update failed: expected v9.150.0, observed v9.149.0 after restart.");
     await expect(page.locator("#update-check-retry")).toBeVisible();
     await expect(page.locator("#update-check-install")).toBeVisible();
     await expect(page.locator("#update-check-install")).toHaveAttribute("href", "https://github.com/akiojin/gwt/releases/tag/v9.150.0");
