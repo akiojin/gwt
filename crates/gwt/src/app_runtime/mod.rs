@@ -14582,10 +14582,15 @@ impl AppRuntime {
                 {
                     return Vec::new();
                 }
+                let operation = status
+                    .operation_outcome
+                    .as_ref()
+                    .map(|receipt| receipt.operation_id.clone());
                 self.project_state_mut(context)
                     .expect("fenced owner")
                     .project_owner_execution_status = Some(status);
-                vec![
+                let mut events = self.reconcile_project_choice(context, operation.as_deref());
+                events.extend([
                     OutboundEvent::project(
                         context.project_key.clone(),
                         BackendEvent::ProjectExecutionStatus {
@@ -14593,7 +14598,8 @@ impl AppRuntime {
                         },
                     ),
                     self.hub_state_broadcast(),
-                ]
+                ]);
+                events
             }
             OwnerEvent::Output {
                 id: owner_pane_id,

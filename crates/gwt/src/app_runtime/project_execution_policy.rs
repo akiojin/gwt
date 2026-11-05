@@ -547,6 +547,12 @@ impl AppRuntime {
             None if state.project_views.views.contains_key(client) => vec![client.to_string()],
             None => Vec::new(),
         };
+        if closing.is_empty()
+            && completed_operation
+                .is_some_and(|operation| !state.project_views.close_intents.contains_key(operation))
+        {
+            return Vec::new();
+        }
         let removed_views: HashMap<_, _> = closing
             .iter()
             .filter_map(|client| {

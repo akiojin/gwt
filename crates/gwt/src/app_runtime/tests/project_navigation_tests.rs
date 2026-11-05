@@ -3168,13 +3168,27 @@ fn issue6682_unconfirmed_stop_retains_views_and_reconciliation_intent() {
         .close_intents
         .contains_key(&operation_id));
     store::record_effect(temp.path(), &operation_id, EffectState::Confirmed, None).unwrap();
-    let events = runtime.handle_frontend_event_in_scope(
-        "a".into(),
-        FrontendEvent::GetProjectExecutionStatus {
-            project_key: Some(context.project_key.to_string()),
-            operation_id: Some(operation_id),
+    let identity = gwt::daemon_subscriber::ProjectOwnerIdentity {
+        pid: std::process::id(),
+        host_started_at: gwt::process::host_process_start_time(std::process::id()).unwrap(),
+        host_instance_id: "fixture-owner".into(),
+    };
+    runtime.handle_project_owner_health(
+        &context,
+        1,
+        Some(identity.clone()),
+        gwt::protocol::ProjectOwnerHealthView {
+            project_key: context.project_key.to_string(),
+            state: gwt::protocol::ProjectOwnerHealthState::Healthy,
+            detail: None,
         },
-        &ClientScope::Hub,
+    );
+    let status = runtime.project_execution_status(&context, Some(&operation_id));
+    let events = runtime.handle_project_owner_event(
+        &context,
+        1,
+        &identity,
+        gwt::project_runtime::events::OwnerEvent::ProjectExecutionStatus { status },
     );
     assert_eq!(
         runtime
@@ -3187,6 +3201,25 @@ fn issue6682_unconfirmed_stop_retains_views_and_reconciliation_intent() {
     assert!(events
         .iter()
         .any(|event| matches!(event.event, BackendEvent::ProjectViewClosed { .. })));
+    let revision = runtime
+        .project_execution_status(&context, None)
+        .view_set_revision;
+    let status = runtime.project_execution_status(&context, Some(&operation_id));
+    runtime.project_execution_choice_completed(
+        super::super::project_execution_policy::ProjectExecutionChoiceCompleted {
+            context: context.clone(),
+            client_id: "a".into(),
+            operation_id,
+            closing_receipts: Default::default(),
+            result: Ok(serde_json::json!({"status":status})),
+        },
+    );
+    assert_eq!(
+        runtime
+            .project_execution_status(&context, None)
+            .view_set_revision,
+        revision
+    );
 }
 
 #[test]

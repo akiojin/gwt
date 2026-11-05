@@ -127,6 +127,21 @@ fn complete_close_choice(
     );
     // This unit covers scope/nonce handling. Owner tests and headed E2E cover
     // the actual transaction; drive its correlated completion without a daemon.
+    let observed = gwt::project_execution_policy::observation(&context.project_root)
+        .unwrap()
+        .unwrap();
+    gwt_core::project_execution_policy::choose(
+        &context.project_root,
+        &observed.close_intents[&operation_id].request,
+    )
+    .unwrap();
+    gwt_core::project_execution_policy::record_effect(
+        &context.project_root,
+        &operation_id,
+        gwt_core::project_execution_policy::EffectState::Confirmed,
+        None,
+    )
+    .unwrap();
     let status = runtime.project_execution_status(context, None);
     runtime.project_execution_choice_completed(
         super::project_execution_policy::ProjectExecutionChoiceCompleted {
