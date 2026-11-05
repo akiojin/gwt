@@ -1,6 +1,6 @@
-//! Private, offline coordinator storage. No executable or network route uses
-//! this foundation yet. The caller supplies a trusted directory in private gwt
-//! home and must keep its ancestors trusted and non-replaceable. The separate
+//! Private, offline coordinator storage. The offline admin executable supplies
+//! a validated fixed directory in private gwt home and must keep its ancestors
+//! trusted and non-replaceable. The separate
 //! lock file must never be renamed/unlinked; a future server must retain this
 //! same guard for its entire lifetime. macOS extended ACL entries are rejected;
 //! Windows requires a later ACL adapter.
@@ -324,7 +324,7 @@ pub(crate) fn read_private_credential(_: &Path) -> Result<Vec<u8>, StoreError> {
 }
 
 #[cfg(unix)]
-fn open_directory(path: &Path) -> Result<File, StoreError> {
+pub(super) fn open_directory(path: &Path) -> Result<File, StoreError> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let directory = OpenOptions::new()
         .read(true)
@@ -421,7 +421,7 @@ mod macos_acl {
 }
 
 #[cfg(unix)]
-fn same_file(left: &File, right: &File) -> Result<bool, StoreError> {
+pub(super) fn same_file(left: &File, right: &File) -> Result<bool, StoreError> {
     use std::os::unix::fs::MetadataExt;
     let left = left.metadata()?;
     let right = right.metadata()?;
@@ -429,7 +429,7 @@ fn same_file(left: &File, right: &File) -> Result<bool, StoreError> {
 }
 
 #[cfg(not(unix))]
-fn open_directory(_: &Path) -> Result<File, StoreError> {
+pub(super) fn open_directory(_: &Path) -> Result<File, StoreError> {
     Err(StoreError::UnsupportedPrivateStorage)
 }
 #[cfg(not(unix))]
@@ -437,7 +437,7 @@ fn open_private_file(_: &Path, _: bool) -> Result<File, StoreError> {
     Err(StoreError::UnsupportedPrivateStorage)
 }
 #[cfg(not(unix))]
-fn same_file(_: &File, _: &File) -> Result<bool, StoreError> {
+pub(super) fn same_file(_: &File, _: &File) -> Result<bool, StoreError> {
     Err(StoreError::UnsupportedPrivateStorage)
 }
 

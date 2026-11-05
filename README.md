@@ -289,6 +289,51 @@ The SPEC records the planned deployment, HTTPS bootstrap, network conditions,
 and failure behavior. Runnable mobile setup instructions will follow transport
 integration and validation; the existing LAN bind example is not that setup.
 
+#### Offline Host credential administration (Unix, from source)
+
+`cargo build -p gwt --bin gwt-mobile-coordinator` builds the offline registry
+administrator. It provides no listener or phone connection. Use a trusted user
+home outside repositories, with non-replaceable ancestors. Provision
+`$HOME/.gwt`, `$HOME/.gwt/mobile`, and `$HOME/.gwt/mobile/coordinator` as directories
+owned by your OS user with mode `0700`. Symlinks and macOS extended ACL entries
+are rejected. Inspect existing permissions and explicitly repair them when
+needed; the command does not create directories or change permissions.
+Windows private storage is not supported yet.
+
+Send one JSON request, at most 16 KiB, on stdin:
+
+```sh
+printf '%s\n' '{"schema_version":1,"command":{"operation":"initialize"}}' |
+  target/debug/gwt-mobile-coordinator
+printf '%s\n' '{"schema_version":1,"command":{"operation":"status"}}' |
+  target/debug/gwt-mobile-coordinator
+```
+
+`initialize` creates a registry once; it never replaces one. `status` shows
+public identities, project scopes, expiry, and revocation records. Other commands
+use the same envelope and these `command` fields:
+
+| `operation` | Required fields |
+| --- | --- |
+| `issue` | `origin` (HTTPS origin), `host_id` (non-nil UUID), `projects` (1–16 unique canonical project keys), `expires_at` (future Unix seconds) |
+| `rotate` | `origin`, `credential_id` (non-nil UUID), `expires_at` |
+| `revoke` | `credential_id` |
+
+Project keys are the canonical 16-character lowercase hex identifiers. Unknown
+fields and operations are rejected. Paths, secrets, and clock overrides are not
+request fields. Successful issuance returns only the public identity and private
+credential file path; the bearer stays in that file. Keep it out of Git, logs,
+URLs, and shell arguments. These credentials authorize future Host registration,
+not device approval or terminal input. Host import and online registration are
+not available yet.
+
+Administration holds a separate registry lock. For `busy`, stop the coordinator
+or other administrator and retry. For `commit_uncertain`, run `status` to inspect
+current records before deciding what to do; do not automatically repeat issuance.
+For private-storage or clock errors, repair the reported prerequisite and retry
+without deleting the registry or its revocation records. `--help` lists the
+supported request fields and storage requirements.
+
 ### `gwt serve` removal
 
 The legacy `gwt serve` / `gwt --headless` verbs were removed in
