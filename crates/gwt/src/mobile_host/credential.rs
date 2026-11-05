@@ -166,7 +166,7 @@ pub struct ImportedHostCredential {
     pub path: std::path::PathBuf,
 }
 
-/// Explicitly copy one credential to HOME/.gwt/mobile/host/host-<UUID>.json.
+/// Explicitly copy one credential to `HOME/.gwt/mobile/host/host-<UUID>.json`.
 /// The caller supplies the canonical user home, trusted/non-replaceable source
 /// and home ancestors, and independently selected Host/origin/Project scope.
 /// Existing private directories are required; permissions are never repaired.
