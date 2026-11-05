@@ -387,6 +387,27 @@ status を読み、要求を保全して再送しないでください。
 request_id を `added_by` に指定します。その要求が追加し、記録した変更後の状態が
 維持されている許可だけを取り消せます。許可設定と workflow の送信は別操作です。
 
+固定した過去ソースの Windows 診断は、`actions.diagnostic.observe` に
+`profile_id: "windows-4777-restore-f351-v1"` を渡して確認できます。応答には
+公開済み profile の digest、必要な PM 権限、リポジトリの許可状態、回復手順が含まれます。
+`actions.diagnostic.request` はその profile、`expected_profile_digest`、UUID の
+`request_id` を受け付け、任意のソース・パッチ・コマンドは選べません。
+専用 workflow の明示的な許可が必要です。`akiojin/gwt` では
+`actions.diagnostic.policy.status` を読み、`actions.diagnostic.policy.add` に
+新しい UUID の `request_id`、現在の `expected_token`、短い `reason`、exact scope の
+`instruction_id` または native `approval_id` を指定します。`windows-diagnostic.yml`
+だけを許可し、既存設定を保持します。`.rollback` は同じパラメータに加え、成功した
+add receipt の ID を `added_by` に指定します。リリース用の承認は流用できません。
+許可設定では診断を送信しません。
+
+送信後は `request_id` で照会します。送信結果が不明でも再送せず、確実な実行開始前の
+結果を検証できた場合だけ、`preexecution_of` と `expected_predecessor_revision` による
+訂正を一度受け付けます。`actions.diagnostic.cancel` は正確な `expected_run_id` と
+現在の `expected_revision` を要求し、取消受付を cleanup 完了とは扱いません。
+診断結果には失敗・cleanup 未観測をそのまま残し、Ready の検証証拠には使用しません。
+各ケースの終了コードは provider ごとの共有テストプロセスの実測値で、個別ケースの
+プロセス終了値ではありません。バイナリ情報には Cargo の `test` profile と実測 hash を記録します。
+
 ```bash
 gwtd <<'JSON'
 {"schema_version":1,"operation":"actions.dispatch","params":{"workflow":"prepare-release.yml","ref":"develop","inputs":{"bump":"auto"}}}
@@ -922,6 +943,19 @@ harness の空き枠が不明な場合は、自身の補助枠が空いている
 診断を返します。Monitor の観測には取得元とスキャン時刻が付き、取得不能・不完全な
 観測から全件の確認済みとは判断しません。記入済みの health / confidence も、裏付け
 証拠が接続されるまでは検証済みとして扱いません。
+
+登録済み PM は `pm.request_tasks.read` で保存済みの依頼追跡状態を参照できます。
+`selector` の省略時は件数を返し、`{"selector":{"kind":"pending"}}` は未分類の
+source ID、`{"selector":{"kind":"tasks","limit":50}}` は完了・取消を含む全 Task ID
+を返します。ページは ID のみを原 ID の辞書順で返し、件数は 1〜100（既定 50）です。
+`next_after` が null でなければ、その値を `after`、返却 revision を
+`expected_revision` に指定して続きを取得します。revision が競合したら `after`
+なしで読み直してください。ストアの読取不能はエラー、未初期化は `absent` です。
+原文・Task 詳細・操作履歴は `source` / `task` / `receipt` selector に対応する
+`id` / `operation_id` を指定して 1 件ずつ取得します。対象 project の登録済み PM
+だけが使用でき、Issue・Monitor・CI・承認の権限は付与しません。この参照 API に
+自動受付や Tasks UI は接続されていません。
+
 `policy.dependency_observations` は供給された Monitor inbox の全行を、同じ Issue の
 重複も含めて保持し、状態と正本の blocker・cycle・bundle 参照を返します。
 型付き診断がなければ null とし、`dependency_status` を不足情報として示します。
@@ -1958,6 +1992,11 @@ Spotlight のインデックス処理そのものは Issue Monitor の snapshot 
 
 ## アプリ更新の適用待ち
 
+ヘッダのバージョン表示の隣にある **Check** を押すと、その場で最新リリースを問い合わせます。
+更新の有無や失敗理由を表示し、rate limit の場合は再試行可能時刻も案内します。
+前回の更新で期待した版と異なる版が起動した場合は、期待版と、その再起動後に記録した版を表示し、
+通常の更新ダイアログを使う **Retry update** と **Manual install** の導線を示します。
+
 ダウンロード済みの更新は、エージェントの作業が終わるまで適用待ちになることがあります。
 既存の drain は terminal convergence の15秒周期で安全条件を評価し、2回連続で静止を
 確認した後、60秒の猶予を置いて適用します。
@@ -2251,7 +2290,13 @@ canonical な headed E2E コマンドは計測環境も記録します。ブラ�
 Windows では、検証を含む gwt pane Job の CPU hard cap が解除されたことを確認してから
 計測します。canonical の全 slot と旧 verification lane が対象で、holder がいなくなると
 設定された上限を復元します。プロセス優先度と pane 終了時の回収は維持します。
-古い GUI の Job 祖先を検査できない場合は、更新後の runtime で gwt を再起動してください。
+
+祖先 GUI の Job 登録がない場合、`verify.run` は GUI を再起動せず、同じ計測要求を
+非表示の worker で自動的に再実行します。Windows が worker の起動時にすべての Job 外で
+あることを確認してから、専用の終了時回収 Job に収容します。同じ Session・環境変数・
+作業ディレクトリ・検証行列全体を保持し、一時的な文脈は現在の Windows ユーザー向けに
+暗号化して転送後に削除します。この実行環境を確保できない場合は復旧を拒否し、理由を
+表示します。別途指定した計測対象 GUI 自身の Job も、読み取り可能で上限がない必要があります。
 
 コマンドの `measurement` 証跡には、対象 PID と開始時刻、観測した Job cap、
 サンプリングした CPU 時間・使用率、admission 待ち時間、cap 解除待ち時間を記録します。

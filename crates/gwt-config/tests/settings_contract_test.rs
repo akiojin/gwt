@@ -10,6 +10,7 @@ use std::num::NonZeroU16;
 #[cfg(unix)]
 use std::path::Path;
 
+use gwt_config::settings::WorkflowPolicyTarget;
 use gwt_config::{ConfigError, Settings};
 
 #[test]
@@ -419,4 +420,127 @@ fn release_policy_missing_snapshot_and_rejected_precommit_do_not_write_config() 
     ] {
         assert!(Settings::release_policy_snapshot(&path, repository).is_err());
     }
+}
+
+#[test]
+fn diagnostic_workflow_policy_add_replay_and_remove_preserve_release_and_other_settings() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    let original = "# operator comment\ndebug = true\nfuture_unknown_key = { mode = \"new\" }\n\n[allowed_workflows]\n\"akiojin/gwt\" = [\"prepare-release.yml\", \"build.yml\"] # existing workflows\n\"other/repo\" = [\"other.yml\"]\n";
+    std::fs::write(&path, original).unwrap();
+    let target = WorkflowPolicyTarget::WindowsDiagnostic;
+    assert_eq!(target.filename(), "windows-diagnostic.yml");
+    assert_eq!(
+        WorkflowPolicyTarget::Release.filename(),
+        "prepare-release.yml"
+    );
+    let before = Settings::workflow_policy_snapshot(&path, "akiojin/gwt", target).unwrap();
+    assert!(!before.allowed);
+    let (receipt, added) = Settings::with_locked_workflow_policy(
+        &path,
+        "akiojin/gwt",
+        target,
+        true,
+        |actual, proposed| {
+            assert_eq!(actual, &before);
+            assert!(!actual.allowed && proposed.allowed);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+            Ok(17)
+        },
+    )
+    .unwrap();
+    assert_eq!(receipt, 17);
+    assert!(added.allowed);
+    assert_eq!(
+        Settings::workflow_policy_snapshot(&path, "akiojin/gwt", target).unwrap(),
+        added
+    );
+    let (_, replayed) = Settings::with_locked_workflow_policy(
+        &path,
+        "akiojin/gwt",
+        target,
+        true,
+        |actual, proposed| {
+            assert_eq!(actual, &added);
+            assert_eq!(actual, proposed);
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(replayed, added);
+    assert_eq!(
+        Settings::load_from_path(&path).unwrap().allowed_workflows["akiojin/gwt"],
+        ["prepare-release.yml", "build.yml", "windows-diagnostic.yml"]
+    );
+    let (_, removed) = Settings::with_locked_workflow_policy(
+        &path,
+        "akiojin/gwt",
+        target,
+        false,
+        |actual, proposed| {
+            assert_eq!(actual, &added);
+            assert!(actual.allowed && !proposed.allowed);
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert!(!removed.allowed);
+    assert!(
+        Settings::release_policy_snapshot(&path, "akiojin/gwt")
+            .unwrap()
+            .allowed
+    );
+    let settings = Settings::load_from_path(&path).unwrap();
+    assert_eq!(
+        settings.allowed_workflows["akiojin/gwt"],
+        ["prepare-release.yml", "build.yml"]
+    );
+    assert_eq!(settings.allowed_workflows["other/repo"], ["other.yml"]);
+    assert!(settings.debug);
+    for preserved in [
+        "# operator comment",
+        "# existing workflows",
+        "future_unknown_key = { mode = \"new\" }",
+    ] {
+        assert!(removed.content.contains(preserved));
+    }
+}
+
+#[test]
+fn diagnostic_workflow_policy_refuses_foreign_repositories_and_rejected_callbacks() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("missing/config.toml");
+    let target = WorkflowPolicyTarget::WindowsDiagnostic;
+    assert!(Settings::workflow_policy_snapshot(&path, "other/repo", target).is_err());
+    assert!(Settings::with_locked_workflow_policy(
+        &path,
+        "other/repo",
+        target,
+        true,
+        |_, _| -> Result<(), ConfigError> {
+            panic!("foreign policy must be rejected before the callback")
+        }
+    )
+    .is_err());
+    assert!(
+        !path.parent().unwrap().exists(),
+        "foreign target must not create a lock or directory"
+    );
+    assert!(Settings::with_locked_workflow_policy(
+        &path,
+        "akiojin/gwt",
+        target,
+        true,
+        |before, after| -> Result<(), ConfigError> {
+            assert!(!before.allowed && after.allowed);
+            Err(ConfigError::ValidationError {
+                reason: "stale CAS token".into(),
+            })
+        }
+    )
+    .is_err());
+    assert!(
+        !path.exists(),
+        "rejected callback must not write configuration"
+    );
 }

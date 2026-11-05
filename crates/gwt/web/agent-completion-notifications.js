@@ -151,32 +151,92 @@ function attentionNoticeForFlavor({ flavor, windowData, windowId, statusDetail =
 
 export function createAgentAttentionToaster({
   showToast = () => {},
+  dismissToast = () => {},
   now = () => Date.now(),
 } = {}) {
-  // Last toasted flavor per window. We only fire when the flavor CHANGES, so a
-  // string of waiting status frames does not spam the operator. Leaving the
-  // attention set (e.g. back to running/idle) clears the entry so the next
-  // entry into the same flavor toasts again.
+  // Track flavors per window and retire superseded Issue windows until catalog
+  // removal. Late frames/reconnects from an old window cannot replace or clear
+  // its successor's attention. Non-error flavors retain transition-only dedupe.
   const lastFlavor = new Map();
+  const errors = new Map();
+  // Page-lifetime high-water marks: closing a successful successor must not
+  // revive a retained older diagnostic on the next replay.
+  const latestRuntimes = new Map();
+
+  function retireErrorWindow(key, successor) {
+    const previous = errors.get(key)?.windowId;
+    if (previous && previous !== successor) lastFlavor.set(previous, `superseded:${key}`);
+  }
+
+  function resolveError(key, successor) {
+    if (!errors.has(key)) return;
+    if (successor) retireErrorWindow(key, successor);
+    errors.delete(key);
+    dismissToast(key);
+  }
 
   function handleRuntimeState({
     windowId,
     runtimeState,
     windowData = null,
     statusDetail = "",
+    projectKey = "",
+    source = "terminal_status",
+    retryable = false,
   }) {
     if (!windowId) {
       return null;
     }
     const state = normalizeState(runtimeState);
     const flavor = ATTENTION_STATES[state] || null;
+    const issue = windowData?.linked_issue_number;
+    const groupedIssue = projectKey && Number.isSafeInteger(issue) && issue > 0;
+    const errorKey = groupedIssue
+      ? `attention-${projectKey}-issue-${issue}` : `attention-${windowId}`;
+    // These timestamps are wire-only local runtime facts, including retained
+    // diagnostic panes. Learn them from snapshots before diagnostic replay so
+    // a full page reload cannot resurrect a provably older Issue window.
+    const startedAt = windowData?.runtime_started_at_ms;
+    if (groupedIssue && Number.isSafeInteger(startedAt) && startedAt > 0) {
+      const latest = latestRuntimes.get(errorKey);
+      if (latest && latest.startedAt > startedAt) return null;
+      if (!latest || startedAt > latest.startedAt) {
+        latestRuntimes.set(errorKey, { windowId, startedAt });
+        lastFlavor.delete(windowId);
+        const previousStart = errors.get(errorKey)?.startedAt;
+        if (Number.isSafeInteger(previousStart) && previousStart > 0 && previousStart < startedAt) {
+          resolveError(errorKey, windowId);
+        }
+      }
+    }
+    if (lastFlavor.get(windowId) === `superseded:${errorKey}`) return null;
+
+    // Workspace/WindowState frames project persisted status, including errors
+    // from other machines. Only the local runtime diagnostic (also replayed on
+    // reconnect) can create error attention. Do not consume its dedupe early.
+    if (flavor === "error" && source !== "terminal_status") return null;
+    if (flavor !== "error" || retryable) {
+      if (source === "terminal_status" || errors.get(errorKey)?.windowId === windowId) {
+        resolveError(errorKey, windowId);
+      }
+    }
+    if (flavor === "error") {
+      if (retryable) {
+        lastFlavor.delete(windowId);
+        return null;
+      }
+      const previous = errors.get(errorKey);
+      if (previous?.windowId === windowId && previous.detail === statusDetail) return null;
+      retireErrorWindow(errorKey, windowId);
+      errors.set(errorKey, { windowId, detail: statusDetail, startedAt });
+    }
 
     if (!flavor) {
       lastFlavor.delete(windowId);
       return null;
     }
 
-    if (lastFlavor.get(windowId) === flavor) {
+    if (flavor !== "error" && lastFlavor.get(windowId) === flavor) {
       return null;
     }
     lastFlavor.set(windowId, flavor);
@@ -190,6 +250,7 @@ export function createAgentAttentionToaster({
     if (!notice) {
       return null;
     }
+    notice.id = flavor === "error" ? errorKey : `attention-${windowId}`;
     notice.createdAt = now();
     showToast(notice);
     return notice;
@@ -197,6 +258,9 @@ export function createAgentAttentionToaster({
 
   function forgetWindow(windowId) {
     lastFlavor.delete(windowId);
+    for (const [key, error] of errors) {
+      if (error.windowId === windowId) resolveError(key);
+    }
   }
 
   return {

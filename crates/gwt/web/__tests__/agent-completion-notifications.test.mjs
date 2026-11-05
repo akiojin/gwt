@@ -106,11 +106,13 @@ test("unsupported OS constructor failures are logged safely once and remain dedu
 // SPEC-2356 Anshin Addendum (FR-040) — in-app attention toaster.
 function collectAttentionToaster() {
   const toasts = [];
+  const dismissed = [];
   const toaster = createAgentAttentionToaster({
     showToast: (notice) => toasts.push(notice),
+    dismissToast: id => dismissed.push(id),
     now: () => 1000,
   });
-  return { toaster, toasts };
+  return { toaster, toasts, dismissed };
 }
 
 test("FR-040: needs_input (waiting) fires an in-app toast even while present", () => {
@@ -195,6 +197,89 @@ test("FR-040: missing windowId yields no toast", () => {
   const notice = toaster.handleRuntimeState({ windowId: "", runtimeState: "waiting" });
   assert.equal(notice, null);
   assert.equal(toasts.length, 0);
+});
+
+test("Issue #6729: status projections cannot turn persisted errors or stale launch details into attention", () => {
+  const { toaster, toasts } = collectAttentionToaster();
+  const input = { windowId: "foreign", runtimeState: "error", windowData: { title: "agent" } };
+  toaster.handleRuntimeState({ ...input, source: "snapshot" });
+  toaster.handleRuntimeState({ ...input, source: "window_state", statusDetail: "Launching..." });
+  assert.deepEqual(toasts, []);
+  toaster.handleRuntimeState({ ...input, source: "terminal_status", statusDetail: "Process exited with status 1" });
+  assert.equal(toasts.length, 1, "a real local diagnostic must still notify, including after reconnect");
+  assert.match(toasts[0].body, /Process exited with status 1/);
+  assert.doesNotMatch(toasts[0].body, /Launching/);
+});
+
+test("Issue #6729: retryable failure and successful retry resolve sticky errors", () => {
+  const shown = [], dismissed = [];
+  const toaster = createAgentAttentionToaster({ showToast: n => shown.push(n), dismissToast: id => dismissed.push(id) });
+  const input = { windowId: "retry", runtimeState: "error", statusDetail: "Launch timed out" };
+  toaster.handleRuntimeState(input);
+  toaster.handleRuntimeState({ ...input, retryable: true });
+  assert.deepEqual(dismissed, [shown[0].id]);
+  assert.equal(shown.length, 1);
+  toaster.handleRuntimeState(input);
+  toaster.handleRuntimeState({ ...input, runtimeState: "running" });
+  assert.deepEqual(dismissed, [shown[0].id, shown[1].id]);
+});
+
+test("Issue #6729: errors share one project/Issue key across windows and recover on the successor", () => {
+  const shown = [], dismissed = [];
+  const toaster = createAgentAttentionToaster({ showToast: n => shown.push(n), dismissToast: id => dismissed.push(id) });
+  const input = { projectKey: "project-a", windowId: "old", runtimeState: "error", windowData: { linked_issue_number: 6729 } };
+  toaster.handleRuntimeState(input);
+  toaster.handleRuntimeState({ ...input, windowId: "new" });
+  assert.equal(shown[0].id, shown[1].id);
+  assert.equal(shown[1].windowId, "new", "the toast must target the current failed window");
+  toaster.forgetWindow("old");
+  assert.deepEqual(dismissed, [], "removing an old window cannot dismiss the successor's error");
+  toaster.handleRuntimeState({ ...input, projectKey: "project-b", windowId: "other-project" });
+  toaster.handleRuntimeState({ ...input, windowId: "other-issue", windowData: { linked_issue_number: 6730 } });
+  assert.equal(new Set(shown.map(n => n.id)).size, 3);
+  toaster.handleRuntimeState({ ...input, windowId: "recovered", runtimeState: "starting" });
+  assert.deepEqual(dismissed, [shown[0].id]);
+});
+
+test("Issue #6729: superseded windows cannot clear current errors or replay recovered errors", () => {
+  const shown = [], dismissed = [];
+  const toaster = createAgentAttentionToaster({ showToast: n => shown.push(n), dismissToast: id => dismissed.push(id) });
+  const input = { projectKey: "project", windowId: "old", runtimeState: "error", windowData: { linked_issue_number: 6729 } };
+  toaster.handleRuntimeState(input);
+  toaster.handleRuntimeState({ ...input, windowId: "new" });
+  toaster.handleRuntimeState({ ...input, runtimeState: "stopped" });
+  toaster.handleRuntimeState({ ...input, runtimeState: "running" });
+  assert.deepEqual(dismissed, [], "late old frames must leave the latest error unresolved");
+  toaster.handleRuntimeState({ ...input, windowId: "recovered", runtimeState: "starting" });
+  toaster.handleRuntimeState(input);
+  toaster.handleRuntimeState({ ...input, windowId: "new" });
+  assert.equal(shown.length, 2, "reconnect must not replay either superseded diagnostic");
+  assert.deepEqual(dismissed, [shown[1].id]);
+});
+
+test("Issue #6729: reload uses known local runtime start times without hiding unknown pre-spawn failures", () => {
+  for (const reverse of [false, true]) {
+    const { toaster, toasts, dismissed } = collectAttentionToaster();
+    const input = { projectKey: "project", windowId: "old", runtimeState: "error",
+      windowData: { linked_issue_number: 6729, runtime_started_at_ms: 1000 } };
+    const current = { ...input, windowId: "current", runtimeState: "running",
+      windowData: { linked_issue_number: 6729, runtime_started_at_ms: 2000 } };
+    const snapshot = [input, current];
+    if (reverse) snapshot.reverse();
+    for (const frame of snapshot) toaster.handleRuntimeState({ ...frame, source: "snapshot" });
+    toaster.handleRuntimeState(input);
+    assert.deepEqual(toasts, [], "older retained diagnostics must stay resolved after a full reload");
+    toaster.forgetWindow("current");
+    toaster.handleRuntimeState(input);
+    assert.deepEqual(toasts, [], "closing the successful successor must not revive retained diagnostics");
+    toaster.handleRuntimeState({ ...input, windowId: "pre-spawn", windowData: { linked_issue_number: 6729 } });
+    assert.equal(toasts.length, 1, "missing start time must not be treated as older than a known runtime");
+    toaster.handleRuntimeState({ ...input, windowId: "null-start",
+      windowData: { linked_issue_number: 6729, runtime_started_at_ms: null } });
+    toaster.handleRuntimeState({ ...current, source: "snapshot",
+      windowData: { linked_issue_number: 6729, runtime_started_at_ms: 3000 } });
+    assert.deepEqual(dismissed, [], "a newer known start cannot order an unknown/null failure");
+  }
 });
 
 

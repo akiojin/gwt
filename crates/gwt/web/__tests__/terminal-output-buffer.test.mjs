@@ -181,6 +181,56 @@ test("vendored xterm coalesces hidden redraws and cancels disposed work without 
   assert.deepEqual(draws, [[0, 3], [1, 2]]);
 });
 
+test("vendored xterm refreshes a laid-out hidden terminal after stale nonintersection", () => {
+  const source = readFileSync(new URL("../vendor/xterm/xterm.mjs", import.meta.url), "utf8");
+  const start = source.indexOf("sr=class extends Ie{") + 3;
+  const end = source.indexOf(";sr=B(", start);
+  assert.ok(start > 3 && end > start, "pinned xterm RenderService is present");
+  const RenderService = new Function("Ie", `return (${source.slice(start, end)});`)(class {});
+  const events = [];
+  const host = { clientWidth: 800, clientHeight: 400 };
+  const service = {
+    _isPaused: true, _needsFullRefresh: true, _rowCount: 4,
+    // The self-sized xterm root alone cannot prove its host has layout.
+    _screenElement: { isConnected: true, parentElement: { clientWidth: 800, clientHeight: 400, parentElement: host } },
+    _charSizeService: { hasValidSize: true },
+    _coreBrowserService: { window: { document: { hidden: true } } },
+    _coreService: { decPrivateModes: { synchronizedOutput: false } },
+    _pausedResizeTask: { flush: () => events.push("resize") },
+    _syncOutputHandler: { flush() {}, bufferRows: (first, last) => events.push(["buffer", first, last]) },
+    _renderDebouncer: { refresh: (first, last, rows) => events.push(["render", first, last, rows]) },
+    refreshRows: RenderService.prototype.refreshRows,
+  };
+  service.refreshRows(1, 1, true);
+  assert.deepEqual(events, ["resize", ["render", 0, 3, 4]], "recover the full viewport through the existing debouncer");
+  assert.equal(service._isPaused, true, "native intersection state stays unchanged");
+  assert.equal(service._needsFullRefresh, false);
+  assert.equal(service._isNextRenderRedrawOnly, false);
+
+  events.length = 0;
+  service._coreService.decPrivateModes.synchronizedOutput = true;
+  RenderService.prototype._fullRefresh.call(service);
+  assert.deepEqual(events, [["buffer", 0, 3]], "resize can draw, so synchronized output must defer it too");
+  service._coreService.decPrivateModes.synchronizedOutput = false;
+  RenderService.prototype._fullRefresh.call(service);
+  assert.deepEqual(events, [["buffer", 0, 3], "resize", ["render", 0, 3, 4]]);
+
+  events.length = 0;
+  host.clientHeight = 0;
+  RenderService.prototype._fullRefresh.call(service);
+  host.clientHeight = 400;
+  service._coreBrowserService.window.document.hidden = false;
+  RenderService.prototype._fullRefresh.call(service);
+  service._coreBrowserService.window.document.hidden = true;
+  service._charSizeService.hasValidSize = false;
+  RenderService.prototype._fullRefresh.call(service);
+  service._charSizeService.hasValidSize = true;
+  service._screenElement.isConnected = false;
+  RenderService.prototype._fullRefresh.call(service);
+  assert.deepEqual(events, [], "zero-size, visible offscreen, invalid-size and detached terminals remain paused");
+  assert.equal(service._needsFullRefresh, true);
+});
+
 test("vendored xterm parser starts and yields hidden tasks at its existing budget", (t) => {
   const { tasks, stalled, listeners, hide } = hiddenTasks(t);
   const source = readFileSync(new URL("../vendor/xterm/xterm.mjs", import.meta.url), "utf8");

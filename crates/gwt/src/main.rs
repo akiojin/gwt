@@ -1946,6 +1946,7 @@ fn hub_frontend_event_allowed(event: &FrontendEvent) -> bool {
             | FrontendEvent::DeleteAgentBackend { .. }
             | FrontendEvent::TestAgentBackendConnection { .. }
             | FrontendEvent::ApplyUpdate
+            | FrontendEvent::CheckForUpdates
             | FrontendEvent::ApplyUpdateStart
             | FrontendEvent::CancelUpdateDownload
             | FrontendEvent::ApplyUpdateLater
@@ -2390,6 +2391,10 @@ enum UserEvent {
         candidates: Vec<String>,
     },
     UpdateAvailable(gwt_core::update::UpdateState),
+    ManualUpdateChecked {
+        result: gwt_core::update::UpdateState,
+        previous_failure: Option<gwt_core::update::UpdateApplyResult>,
+    },
     ApplyUpdate {
         state: gwt_core::update::UpdateState,
         client_id: ClientId,
@@ -4904,6 +4909,7 @@ mod tests {
             knowledge_monitor_snapshot: Default::default(),
             issue_client_factory: crate::app_runtime::default_issue_client_factory(),
             pending_update: None,
+            update_check_in_flight: false,
             update_download_in_flight: None,
             deferred_update_discovery: None,
             attachment_uploads: AttachmentUploadStore::new(temp_root.join("attachment-uploads")),
@@ -11572,6 +11578,9 @@ fn main() -> std::io::Result<()> {
                 candidates,
             }) => {
                 clients.dispatch(app.apply_launch_wizard_branch_candidates(wizard_id, candidates));
+            }
+            Event::UserEvent(UserEvent::ManualUpdateChecked { result, previous_failure }) => {
+                clients.dispatch(app.complete_manual_update_check(result, previous_failure));
             }
             Event::UserEvent(UserEvent::UpdateAvailable(state))
                 if update_apply_admission.accepts_discovery() =>

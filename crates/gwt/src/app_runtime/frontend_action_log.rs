@@ -503,6 +503,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             }
             log
         }
+        FrontendEvent::CheckForUpdates => FrontendUserActionLog::new("check_for_updates", "update"),
         FrontendEvent::ApplyUpdate => FrontendUserActionLog::new("apply_update", "update"),
         FrontendEvent::ApplyUpdateStart => {
             FrontendUserActionLog::new("apply_update_start", "update")

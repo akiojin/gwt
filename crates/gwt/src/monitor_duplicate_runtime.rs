@@ -703,6 +703,29 @@ mod prefs_io_tests {
         let _env = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        const CHILD: &str = "GWT_TEST_MONITOR_PREFS_IO_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // Other tests may legitimately evict entries from the bounded
+            // process-wide cache. Measure this cadence in its own process.
+            let output = gwt_core::process::hidden_command(
+                std::env::current_exe().expect("test binary"),
+            )
+            .args([
+                "--exact",
+                "monitor_duplicate_runtime::prefs_io_tests::prefs_cache_five_second_io_counts",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .expect("preferences I/O fixture");
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
         let home = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
         let _profile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());

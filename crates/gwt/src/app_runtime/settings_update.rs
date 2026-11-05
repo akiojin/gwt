@@ -696,6 +696,111 @@ impl AppRuntime {
         });
     }
 
+    pub(super) fn check_for_updates_events(&mut self) -> Vec<OutboundEvent> {
+        if !self.update_check_in_flight {
+            self.update_check_in_flight = true;
+            let proxy = self.proxy.clone();
+            self.blocking_tasks.spawn(move || {
+                let current_exe = std::env::current_exe().ok();
+                let result = gwt_core::update::UpdateManager::new()
+                    .check_manual_for_executable(current_exe.as_deref());
+                let previous_failure =
+                    gwt_core::update::load_update_apply_result().filter(|result| {
+                        result.outcome == gwt_core::update::UpdateApplyOutcome::Failure
+                    });
+                proxy.send(UserEvent::ManualUpdateChecked {
+                    result,
+                    previous_failure,
+                });
+            });
+        }
+        vec![OutboundEvent::broadcast(BackendEvent::UpdateCheckResult {
+            checking: true,
+            offer_update: false,
+            result: None,
+            previous_failure: None,
+        })]
+    }
+
+    fn supersede_manual_update_stage(
+        &mut self,
+        latest: &str,
+    ) -> Result<Vec<OutboundEvent>, (String, Vec<OutboundEvent>)> {
+        let released = match gwt_core::update::load_pending_update_manifest().filter(|manifest| {
+            gwt_core::update::pending_version_is_newer(latest, &manifest.version)
+        }) {
+            Some(manifest) => self.try_release_update_auto_apply_events(
+                &manifest.version,
+                super::UpdateAutoApplyRelease::Superseded,
+            )?,
+            None => Vec::new(),
+        };
+        // Clear the durable hold before deleting the only usable payload.
+        // Publish successful hold release even if payload cleanup then fails.
+        match crate::update_front_door::discard_superseded_pending_update(latest) {
+            Ok(_) => Ok(released),
+            Err(error) => Err((error, released)),
+        }
+    }
+
+    pub(crate) fn complete_manual_update_check(
+        &mut self,
+        mut result: gwt_core::update::UpdateState,
+        previous_failure: Option<gwt_core::update::UpdateApplyResult>,
+    ) -> Vec<OutboundEvent> {
+        self.update_check_in_flight = false;
+        let mut offer_update = self.update_download_in_flight.is_none();
+        let mut events = Vec::new();
+        // Keep an active download's identity intact. Discovery can discard an
+        // obsolete stage, but explicit Update still owns download admission.
+        if offer_update {
+            match &result {
+                gwt_core::update::UpdateState::Available {
+                    latest,
+                    asset_url: Some(_),
+                    ..
+                } => match self.supersede_manual_update_stage(latest) {
+                    Ok(released) => {
+                        events.extend(released);
+                        self.pending_update = Some(result.clone());
+                    }
+                    Err((error, refused)) => {
+                        events.extend(refused);
+                        events.push(crate::update_download_failure(
+                            "Replace staged update",
+                            error.clone(),
+                            gwt_core::update::update_log_path()
+                                .to_string_lossy()
+                                .into_owned(),
+                        ));
+                        offer_update = false;
+                        result = gwt_core::update::UpdateState::Failed {
+                            message: error,
+                            failed_at: chrono::Utc::now(),
+                            retry_at: None,
+                        };
+                    }
+                },
+                gwt_core::update::UpdateState::Available {
+                    asset_url: None, ..
+                } => {
+                    if gwt_core::update::load_pending_update_manifest().is_none() {
+                        self.pending_update = None;
+                    }
+                }
+                gwt_core::update::UpdateState::UpToDate { .. } => self.pending_update = None,
+                gwt_core::update::UpdateState::Failed { .. } => {}
+            }
+        }
+        events.push(OutboundEvent::broadcast(BackendEvent::UpdateCheckResult {
+            checking: false,
+            offer_update,
+            result: Some(result),
+            previous_failure,
+        }));
+        events
+    }
+
     pub(super) fn apply_pending_update_events(&self, client_id: &str) -> Vec<OutboundEvent> {
         match self.pending_update.clone() {
             Some(
@@ -864,7 +969,16 @@ impl AppRuntime {
                 if let Some((prefs, drain)) = self.project_auto_update_drain(&context) {
                     if drain.automatic.unwrap_or(prefs.autonomous_mode) {
                         events.extend(
-                            self.release_update_auto_apply_for_project(&context, &drain.version),
+                            self.release_update_auto_apply_for_project(&context, &drain.version)
+                                .unwrap_or_else(|error| {
+                                    self.issue_monitor_control_error_events(
+                                        Some(&context.project_root),
+                                        None,
+                                        error,
+                                        "update-drain",
+                                        None,
+                                    )
+                                }),
                         );
                     }
                 }
