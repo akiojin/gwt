@@ -189,6 +189,16 @@ if [ -z "$CHECK_HOOK_BIN" ]; then
 fi
 # browser-check-hook-authority-end
 
+# These suites audit their own ordinary managed Source before/after UI checks.
+# A canonical daemon runner is not a descendant of the caller's managed pane.
+# Other suites retain the current-caller preflight below.
+CHECK_SUITE_SOURCE=0
+case "${GWT_PLAYWRIGHT_LIVE_SPEC:-}" in
+  crates/gwt/playwright/tests/project-close-detach.spec.ts|\
+  crates/gwt/playwright/tests/project-open-surfaces.spec.ts|\
+  crates/gwt/playwright/tests/project-per-browser-tab.spec.ts) CHECK_SUITE_SOURCE=1 ;;
+esac
+
 # Audit the managed hook fallback with the real HOME, as required by browser-check.
 assert_hook_health() {
   local health_json
@@ -211,6 +221,7 @@ assert_hook_health() {
   fi
 }
 # browser-check-hook-repair-begin
+if [ "$CHECK_SUITE_SOURCE" = 0 ]; then
 HOOK_DOCTOR_ENVELOPE="$(
   jq -n --arg expected_hook_bin "$CHECK_HOOK_BIN" \
     '{schema_version:1,operation:"hook.doctor",params:{purpose:"managed_browser",repair:true,expected_hook_bin:$expected_hook_bin}}' \
@@ -218,6 +229,7 @@ HOOK_DOCTOR_ENVELOPE="$(
 )"
 HOOK_DOCTOR_HEALTH_JSON="$(printf '%s' "$HOOK_DOCTOR_ENVELOPE" | jq -er 'select(.ok == true) | .output | fromjson')"
 printf '%s' "$HOOK_DOCTOR_HEALTH_JSON" | assert_hook_health
+fi
 # browser-check-hook-repair-end
 
 CHECK_GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
@@ -286,6 +298,7 @@ fi
 printf '%s\n' "$CHECK_URL" > "$URL_FILE"
 
 # browser-check-hook-audit-begin
+if [ "$CHECK_SUITE_SOURCE" = 0 ]; then
 HOOK_HEALTH_ENVELOPE="$(
   jq -n --arg expected_hook_bin "$CHECK_HOOK_BIN" \
     '{schema_version:1,operation:"hook.doctor",params:{purpose:"managed_browser",expected_hook_bin:$expected_hook_bin}}' \
@@ -293,6 +306,7 @@ HOOK_HEALTH_ENVELOPE="$(
 )"
 HOOK_HEALTH_JSON="$(printf '%s' "$HOOK_HEALTH_ENVELOPE" | jq -er 'select(.ok == true) | .output | fromjson')"
 printf '%s' "$HOOK_HEALTH_JSON" | assert_hook_health
+fi
 # browser-check-hook-audit-end
 
 # Issue #5219: fixture-only tests leave no live browser connected. Retain

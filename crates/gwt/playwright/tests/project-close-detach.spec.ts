@@ -2,10 +2,13 @@
  * A custom shell Agent supplies a real runtime/PTY without contacting an
  * external provider. The detach test requires the /bin/sh -i fixture. */
 import { expect, test, type Page } from "@playwright/test";
+import { useManagedBrowserSource } from "./_helpers/managed-browser-source";
 import {
   focusLiveWindow, gotoLiveGwt, liveGwtProjectUrl,
   readLiveHubCatalog, sendLiveGwtEvent, withLiveGwtBackendLock,
 } from "./_helpers/live-gwt";
+
+useManagedBrowserSource(test);
 
 function capture(page: Page) {
   const errors: string[] = [];

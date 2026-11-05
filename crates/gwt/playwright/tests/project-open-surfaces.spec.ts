@@ -1,6 +1,9 @@
 import { expect, test, type Page } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 import { gotoLiveGwt } from "./_helpers/live-gwt";
+import { useManagedBrowserSource } from "./_helpers/managed-browser-source";
+
+useManagedBrowserSource(test);
 
 type FixtureTab = {
   id: string;

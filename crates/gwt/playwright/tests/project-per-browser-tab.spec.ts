@@ -17,6 +17,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
+import { useManagedBrowserSource } from "./_helpers/managed-browser-source";
 import {
   focusLiveWindow,
   gotoLiveGwt,
@@ -25,6 +26,8 @@ import {
   sendLiveGwtEvent,
   withLiveGwtBackendLock,
 } from "./_helpers/live-gwt";
+
+useManagedBrowserSource(test);
 
 type Frame = { kind: string; scope: string | null; payload: any };
 
