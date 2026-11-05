@@ -69,6 +69,47 @@ function cursorScheduler() {
   };
 }
 
+for (const stage of ["merge", "write"]) {
+  test(`${stage} failure stops the torn stream until snapshot clear`, (t) => {
+    t.mock.method(console, "warn", () => {});
+    const scheduler = manualScheduler();
+    const writes = [], failures = [];
+    const fault = new Error(`one-shot ${stage} failure`);
+    let armed = true;
+    const failOnce = (at, windowId) => {
+      if (armed && stage === at && windowId === "pm") {
+        armed = false;
+        throw fault;
+      }
+    };
+    const batcher = createTerminalOutputBatcher({
+      schedule: scheduler.schedule,
+      maxCharsPerFlush: 3,
+      mergeChunks: (chunks, id) => { failOnce("merge", id); return chunks.join(""); },
+      write: (id, text) => { failOnce("write", id); writes.push([id, text]); },
+      onError: (error, id) => {
+        failures.push([error, id, batcher.enqueue(id, "REENTRANT")]);
+        throw new Error("recovery callback failed");
+      },
+    });
+    batcher.enqueue("pm", "BAD");
+    batcher.enqueue("pm", "TORN SUFFIX");
+    batcher.enqueue("peer", "OK");
+    scheduler.runAll();
+    assert.deepEqual(writes, [["peer", "OK"]]);
+    assert.deepEqual(failures, [[fault, "pm", false]]);
+    assert.equal(batcher.pendingCount(), 0);
+    assert.equal(batcher.enqueue("pm", "INTERVENING"), false);
+    assert.equal(batcher.schedulePending("pm"), false);
+    assert.equal(batcher.flushNow("pm"), false);
+    batcher.clear("pm"); // The existing snapshot replacement releases the stop.
+    assert.equal(batcher.enqueue("pm", "RECOVERED"), true);
+    scheduler.runAll();
+    assert.deepEqual(writes, [["peer", "OK"], ["pm", "RECOVERED"]]);
+    assert.equal(failures.length, 1);
+  });
+}
+
 function hiddenTasks(t, hidden = true) {
   const tasks = manualScheduler();
   const listeners = new Set(), stalled = [];

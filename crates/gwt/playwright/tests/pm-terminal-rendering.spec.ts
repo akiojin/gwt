@@ -24,7 +24,23 @@ test("PM terminal keeps redraw, grid and input consistent across view changes", 
   // fixture WebSocket/dispatcher path. No fault hook ships in the product.
   await page.route("**/app.js", async route => {
     const response = liveBase ? await route.fetch() : undefined;
-    const source = response ? await response.text() : readFileSync("crates/gwt/web/app.js", "utf8");
+    let source = response ? await response.text() : readFileSync("crates/gwt/web/app.js", "utf8");
+    for (const [stage, signature, bytes] of [
+      ["merge", "mergeChunks: (chunks, windowId) => {", 'chunks.map(chunk => atob(chunk)).join("")'],
+      ["write", "write: (windowId, text, onWritten) => {", "text"],
+    ]) {
+      expect(source.split(signature)).toHaveLength(2);
+      source = source.replace(signature, `${signature}
+        const fault = window.__terminalBatchFault;
+        if (fault && windowId === "pm-terminal") {
+          const bytes = ${bytes};
+          fault.seen.push({ stage: "${stage}", bytes });
+          if (fault.armed && fault.stage === "${stage}" && bytes.includes("FAILED BATCH")) {
+            fault.armed = false;
+            throw new Error("one-shot terminal ${stage} failure");
+          }
+        }`);
+    }
     const needle = "const packet = state.terminal;";
     expect(source.split(needle)).toHaveLength(2);
     await route.fulfill({ response, contentType: "text/javascript", body: source.replace(needle, `${needle}
@@ -143,6 +159,21 @@ test("PM terminal keeps redraw, grid and input consistent across view changes", 
       .some((packet: any) => atob(packet.dataBase64).includes("TORN SUFFIX")))).toBe(false);
     await emit(page, "terminal_output", `\r\nRecovered ${kind}`);
     await expect.poll(() => text(page)).toContain(`Recovered ${kind}`);
+  }
+  for (const stage of ["merge", "write"]) {
+    const before = await page.evaluate(stage => {
+      (window as any).__terminalBatchFault = { stage, armed: true, seen: [] };
+      const fixture = (window as any).__pmTerminalFixture;
+      const connections = fixture.connections();
+      fixture.emit({ kind: "terminal_output", id: "pm-terminal", data_base64: btoa("FAILED BATCH") });
+      fixture.emit({ kind: "terminal_output", id: "pm-terminal", data_base64: btoa("TORN BATCH SUFFIX") });
+      return connections;
+    }, stage);
+    await expect.poll(() => page.evaluate(() => (window as any).__pmTerminalFixture.connections())).toBe(before + 1);
+    await expect.poll(async () => (await text(page)).trim()).toBe("Reconnected status");
+    await emit(page, "terminal_output", `\r\nRecovered batch ${stage}`);
+    await expect.poll(() => text(page)).toContain(`Recovered batch ${stage}`);
+    expect(await page.evaluate(() => (window as any).__pmTerminalFixture.connections())).toBe(before + 1);
   }
   await expect(page.locator(".render-degradation-banner")).toBeVisible();
 

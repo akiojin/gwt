@@ -104,6 +104,7 @@ export function createTerminalOutputBatcher({
   schedule = defaultSchedule,
   write,
   onFlush,
+  onError,
   maxCharsPerFlush = DEFAULT_MAX_CHARS_PER_FLUSH,
   maxWindowsPerFlush = DEFAULT_MAX_WINDOWS_PER_FLUSH,
   maxTotalCharsPerFlush = DEFAULT_MAX_TOTAL_CHARS_PER_FLUSH,
@@ -123,6 +124,7 @@ export function createTerminalOutputBatcher({
   const canWriteImpl = typeof canWrite === "function" ? canWrite : () => true;
   const pendingByWindow = new Map();
   const quiescedWindows = new Set();
+  const failedWindows = new Set();
   let scheduled = false;
 
   function entryFor(windowId) {
@@ -143,7 +145,7 @@ export function createTerminalOutputBatcher({
   }
 
   function enqueue(windowId, text) {
-    if (windowId === null || windowId === undefined || text === "") {
+    if (windowId === null || windowId === undefined || text === "" || failedWindows.has(windowId)) {
       return false;
     }
     const normalized = String(text);
@@ -190,6 +192,19 @@ export function createTerminalOutputBatcher({
     } catch (_) {
       // Refresh callbacks are best-effort UI maintenance and must not break
       // the terminal output drain.
+    }
+  }
+
+  function failWindow(windowId, error) {
+    // A decoder/write may have consumed only part of an ANSI stream. Discard
+    // its suffix and reject new output until snapshot replacement calls clear.
+    pendingByWindow.delete(windowId);
+    quiescedWindows.delete(windowId);
+    failedWindows.add(windowId);
+    try {
+      onError?.(error, windowId);
+    } catch (recoveryError) {
+      console.warn("[terminal-output-buffer] recovery failed for %s", windowId, recoveryError);
     }
   }
 
@@ -262,6 +277,7 @@ export function createTerminalOutputBatcher({
       text = mergeChunksImpl(chunks, windowId);
     } catch (error) {
       console.warn("[terminal-output-buffer] merge failed for %s", windowId, error);
+      failWindow(windowId, error);
       return { flushed: false, chars: 0 };
     }
     if (!text) {
@@ -271,6 +287,8 @@ export function createTerminalOutputBatcher({
       write(windowId, text, () => notifyFlushed(windowId));
     } catch (error) {
       console.warn("[terminal-output-buffer] write failed for %s", windowId, error);
+      failWindow(windowId, error);
+      return { flushed: false, chars: 0 };
     }
     return { flushed: true, chars: text.length };
   }
@@ -289,6 +307,7 @@ export function createTerminalOutputBatcher({
   }
 
   function clear(windowId) {
+    failedWindows.delete(windowId);
     quiescedWindows.delete(windowId);
     return pendingByWindow.delete(windowId);
   }
