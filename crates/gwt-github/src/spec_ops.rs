@@ -59,8 +59,9 @@ pub enum SpecOpsError {
 
 /// Receipt for a committed [`SpecOps::write_section`] call (SPEC-3248 P7C /
 /// #3284): canonical content size, comment part count (`0` when the section
-/// is body-resident), and the SHA-256 of the canonical content that the
-/// post-write readback verified against the remote copy.
+/// is body-resident), and the SHA-256 of the canonical content. A failure
+/// after the commit point is reported in `verification_error`, not as a
+/// failed write that a caller might blindly retry (Issue #4838).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteReceipt {
     pub bytes: usize,
@@ -74,6 +75,9 @@ pub struct WriteReceipt {
     pub comment_ids: Vec<u64>,
     /// Largest single part payload in bytes (== `bytes` when unsplit).
     pub largest_part_bytes: usize,
+    /// Cleanup or final readback failed after the write committed. The
+    /// content hash describes the intended write, not a final confirmation.
+    pub verification_error: Option<String>,
 }
 
 /// High-level SPEC operations backed by an [`IssueClient`] and a [`Cache`].
@@ -285,12 +289,17 @@ impl<C: IssueClient> SpecOps<C> {
             // A later verification failure must never restore their old index.
             rollback_body = false;
             // Recheck the live index before cleanup; never delete a referenced part.
-            self.delete_unreferenced(number, &stale_ids)?;
-            if !self.readback_section(number, name, &canonical)? {
-                return Err(SpecOpsError::ReadbackMismatch {
-                    section: name.0.clone(),
-                });
-            }
+            let verification_error = (|| -> Result<(), SpecOpsError> {
+                self.delete_unreferenced(number, &stale_ids)?;
+                if !self.readback_section(number, name, &canonical)? {
+                    return Err(SpecOpsError::ReadbackMismatch {
+                        section: name.0.clone(),
+                    });
+                }
+                Ok(())
+            })()
+            .err()
+            .map(|error| error.to_string());
 
             let (location, comment_ids) = match new_sections_index.0.get(name) {
                 Some(SectionLocation::Comments(ids)) => ("comments".to_string(), ids.clone()),
@@ -303,6 +312,7 @@ impl<C: IssueClient> SpecOps<C> {
                 location,
                 comment_ids,
                 largest_part_bytes,
+                verification_error,
             })
         })();
         if result.is_err() {
@@ -448,7 +458,7 @@ impl<C: IssueClient> SpecOps<C> {
             if !index.0.values().any(
                 |location| matches!(location, SectionLocation::Comments(refs) if refs.contains(id)),
             ) {
-                let _ = self.client.delete_comment(CommentId(*id));
+                self.client.delete_comment(CommentId(*id))?;
             }
         }
         Ok(())

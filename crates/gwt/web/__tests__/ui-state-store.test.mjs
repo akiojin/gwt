@@ -186,3 +186,45 @@ test('hidden frame views coalesce and cancel without waiting for timers or anima
     Object.assign(globalThis, original);
   }
 });
+
+test('pending visible frame views keep progressing when the document becomes hidden', () => {
+  const original = Object.fromEntries(['document', 'MessageChannel', 'requestAnimationFrame', 'cancelAnimationFrame', 'setTimeout', 'clearTimeout']
+    .map(key => [key, globalThis[key]]));
+  const listeners = new Set(), tasks = [], values = [], stalled = [];
+  globalThis.document = { hidden: false,
+    addEventListener: (type, listener) => { assert.equal(type, 'visibilitychange'); listeners.add(listener); },
+    removeEventListener: (type, listener) => { assert.equal(type, 'visibilitychange'); listeners.delete(listener); },
+  };
+  globalThis.requestAnimationFrame = globalThis.setTimeout = callback => { stalled.push(callback); return 0; };
+  globalThis.cancelAnimationFrame = globalThis.clearTimeout = () => {};
+  globalThis.MessageChannel = class {
+    constructor() {
+      this.closed = 0;
+      this.port1 = { onmessage: null, close: () => this.closed++ };
+      this.port2 = { postMessage() {}, close: () => this.closed++ };
+      tasks.push(this);
+    }
+  };
+  const store = createUiStateStore(0);
+  try {
+    store.subscribeFrame(state => state, value => values.push(value));
+    store.update(() => 1);
+    assert.equal(stalled.length, 2, 'visible views retain the timer/frame race');
+    globalThis.document.hidden = true;
+    for (const listener of [...listeners]) listener();
+    assert.equal(tasks.length, 1, 'a pending visible batch must escape background timer/frame throttling');
+    store.update(() => 2);
+    tasks[0].port1.onmessage();
+    for (const callback of stalled) callback();
+    assert.deepEqual(values, [0, 2], 'the latest model renders once without another update or focus');
+    assert.equal(tasks[0].closed, 2);
+    assert.equal(listeners.size, 0, 'completed batches release their visibility listener');
+    globalThis.document.hidden = false;
+    store.update(() => 3);
+    store.dispose();
+    assert.equal(listeners.size, 0, 'cancelled batches release their visibility listener');
+  } finally {
+    store.dispose();
+    Object.assign(globalThis, original);
+  }
+});

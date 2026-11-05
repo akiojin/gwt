@@ -407,6 +407,29 @@ authority, plus `added_by` naming the successful add request. It removes only
 permission added by that request while its recorded post-state remains current.
 These operations configure permission; workflow submission remains separate.
 
+For the fixed historical Windows diagnostic, inspect `actions.diagnostic.observe`
+with `profile_id: "windows-4777-restore-f351-v1"`. The response reports the
+published profile digest, required PM authority, repository permission and recovery.
+`actions.diagnostic.request` accepts that profile, its `expected_profile_digest`
+and a UUID `request_id`; it cannot select another source, patch or command.
+The dedicated workflow must already be explicitly permitted. For `akiojin/gwt`,
+read `actions.diagnostic.policy.status`, then use `actions.diagnostic.policy.add`
+with a fresh UUID `request_id`, its current `expected_token`, a short `reason`,
+and an exact scoped `instruction_id` or native `approval_id`. This permits only
+`windows-diagnostic.yml` and retains existing settings. Its `.rollback` operation
+uses the same parameters plus `added_by` naming its successful add receipt.
+Release policy approval cannot authorize this operation. Configuring permission
+does not submit the diagnostic.
+
+Observe a submitted request by `request_id`. An unknown submission is retained
+without resending. Only a verified preexecution result permits one correction
+using `preexecution_of` and `expected_predecessor_revision`.
+`actions.diagnostic.cancel` requires its exact `expected_run_id` and current
+`expected_revision`; cancellation acknowledgement does not prove cleanup.
+Results retain failures and unknown cleanup, and do not count as Ready evidence.
+Each case's exit code is the shared provider test process exit, not a separate
+case process. Binary metadata records Cargo's `test` profile and actual hashes.
+
 ```bash
 gwtd <<'JSON'
 {"schema_version":1,"operation":"actions.dispatch","params":{"workflow":"prepare-release.yml","ref":"develop","inputs":{"bump":"auto"}}}
@@ -1023,6 +1046,20 @@ missing milestone information. Monitor observations include their source and
 scan time; unavailable or incomplete observations do not prove full coverage.
 Reported milestone health and confidence remain unverified until supporting
 evidence is connected.
+
+The registered PM can inspect saved request tracking with `pm.request_tasks.read`.
+Omitting `selector` returns counts; `{"selector":{"kind":"pending"}}` lists
+unclassified source IDs, and `{"selector":{"kind":"tasks","limit":50}}` lists
+all task IDs, including completed and cancelled tasks. Pages contain only IDs,
+use exact lexical ordering, and accept a limit of 1–100 (default 50). If
+`next_after` is non-null, pass it as `after` together with the returned revision
+as `expected_revision`. A revision conflict requires restarting without `after`;
+an unreadable store is an error, while an uninitialized store reports `absent`.
+Use `source`, `task`, or `receipt` selectors with the corresponding `id` or
+`operation_id` to read one detail. These operations require the current project's
+registered PM and grant no Issue, Monitor, CI or approval authority. Automatic
+intake and the Tasks UI are not connected by this read API.
+
 `policy.dependency_observations` retains every supplied Monitor inbox row, including
 repeated Issues, with its state and canonical dependency blockers, cycle flag and bundle
 references. Absent typed status stays null with `dependency_status` named as missing.
@@ -1331,6 +1368,9 @@ The design lives in SPEC
 gwt keeps project knowledge close to the agent workspace:
 
 - JSON operation `issue.spec.read` reads GitHub Issue-backed SPECs from the local cache.
+- `issue.spec.edit` reports `outcome: committed_unverified` when the write committed
+  but cleanup or final confirmation failed. Read the section before retrying; this
+  outcome does not confirm a verified write.
 - JSON operations `issue.view` and `issue.comments` provide cache-backed Issue
   access through the gwt CLI surface.
 - `gwt-search` searches SPECs, Issues, source files, docs, and PM Reports through the shared

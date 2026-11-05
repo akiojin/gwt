@@ -2903,6 +2903,7 @@ fn migration_preserves_windows_needs_human_and_all_unrelated_prefs() {
         reviewed_sha: None,
         review_passed: None,
         wait: None,
+        wait_control: None,
         needs_human_kind: None,
         steering: None,
         review_dispatch_hold: None,

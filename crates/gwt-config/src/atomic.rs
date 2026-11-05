@@ -81,7 +81,9 @@ pub fn write_atomic(path: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
-fn create_dir_all_durable(path: &Path) -> Result<()> {
+/// Create directories durably, rechecking the existing boundary after a failed
+/// sync. Call before opening a stable lock file in a newly created directory.
+pub fn create_dir_all_durable(path: &Path) -> Result<()> {
     let mut missing = Vec::new();
     let mut existing = path;
     while !existing.as_os_str().is_empty() && !existing.is_dir() {

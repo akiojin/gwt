@@ -103,6 +103,8 @@ fn seed_view_closure(
     fs::create_dir_all(&view).unwrap();
     fs::write(base.join("sentinel"), b"base").unwrap();
     fs::write(overlay.join("sentinel"), b"overlay").unwrap();
+    fs::write(base.join("descriptor.json"), "{}").unwrap();
+    fs::write(overlay.join("descriptor.json"), "{}").unwrap();
     fs::write(
         view.join("descriptor.json"),
         serde_json::to_vec(&descriptor).unwrap(),
@@ -620,14 +622,6 @@ fn removed_worktree_waits_for_grace_and_reader_pin_but_keeps_shared_base() {
         "live-overlay",
         "live-snapshot",
     );
-    let reader_only = seed_view_closure(
-        &v2_root,
-        repo.as_str(),
-        removed_hash,
-        "reader-base",
-        "reader-overlay",
-        "reader-snapshot",
-    );
     let reader_cas = v2_root.join("cas").join("reader-cas");
     fs::create_dir_all(&reader_cas).unwrap();
     fs::write(reader_cas.join("sentinel"), b"cas").unwrap();
@@ -671,6 +665,14 @@ fn removed_worktree_waits_for_grace_and_reader_pin_but_keeps_shared_base() {
     sweep_file_index_v2(&before_grace).unwrap();
     assert!(removed.view.is_dir(), "worktree grace is inclusive");
 
+    let reader_only = seed_view_closure(
+        &v2_root,
+        repo.as_str(),
+        removed_hash,
+        "reader-base",
+        "reader-overlay",
+        "reader-snapshot",
+    );
     let reader = FileIndexGcPin::acquire(
         &v2_root,
         FileIndexGcPinKind::Reader,
@@ -733,7 +735,7 @@ fn removed_worktree_waits_for_grace_and_reader_pin_but_keeps_shared_base() {
 }
 
 #[test]
-fn gc_deletes_only_expired_unreferenced_staging_and_quarantine() {
+fn gc_reclaims_dead_staging_immediately_and_quarantine_after_ttl() {
     let tmp = tempfile::tempdir().unwrap();
     let index_root = tmp.path().join("index");
     let repo = compute_repo_hash("https://github.com/akiojin/gwt.git");
@@ -763,8 +765,82 @@ fn gc_deletes_only_expired_unreferenced_staging_and_quarantine() {
 
     assert!(!old_staging.exists());
     assert!(!old_quarantine.exists());
-    assert!(fresh_staging.is_dir());
+    assert!(!fresh_staging.exists());
     assert!(fresh_quarantine.is_dir());
+}
+
+#[test]
+fn reconciliation_sweeps_abandoned_v2_staging_and_unreferenced_completed_artifacts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let index_root = tmp.path().join("index");
+    let repo = compute_repo_hash("https://github.com/akiojin/gwt.git");
+    let worktree = tmp.path().join("live");
+    fs::create_dir(&worktree).unwrap();
+    let worktree_hash = compute_worktree_hash(&worktree).unwrap();
+    let v2_root = index_root.join(repo.as_str()).join("file-index-v2");
+    let live = seed_view_closure(
+        &v2_root,
+        repo.as_str(),
+        worktree_hash.as_str(),
+        "live-base",
+        "live-overlay",
+        "live-snapshot",
+    );
+    let obsolete = seed_view_closure(
+        &v2_root,
+        repo.as_str(),
+        worktree_hash.as_str(),
+        "obsolete-base",
+        "obsolete-overlay",
+        "obsolete-snapshot",
+    );
+    write_head(
+        &v2_root
+            .join("worktrees")
+            .join(worktree_hash.as_str())
+            .join("head.json"),
+        &live.view_id,
+        None,
+        1,
+    );
+    let staging = v2_root.join("bases/.abandoned.staging-1-77");
+    fs::create_dir_all(&staging).unwrap();
+    // A directory inside a live Chroma store must never be interpreted as an artifact.
+    let nested = live.base.join("store/.nested.staging-1-77");
+    fs::create_dir_all(&nested).unwrap();
+    let options = ReconcileOptions {
+        index_root,
+        repo_hash: repo,
+        active_worktree_paths: vec![worktree],
+        legacy_worktree_dirs: vec![],
+    };
+    reconcile_repo(&options).unwrap();
+    assert!(
+        !staging.exists(),
+        "production reconciliation must invoke v2 GC"
+    );
+    for artifact in [&obsolete.base, &obsolete.overlay, &obsolete.view] {
+        assert!(
+            !artifact.exists(),
+            "unreferenced artifact was retained: {artifact:?}"
+        );
+    }
+    for artifact in [&live.base, &live.overlay, &live.view, &nested] {
+        assert!(
+            artifact.exists(),
+            "reachable artifact was removed: {artifact:?}"
+        );
+    }
+    // A corrupt serving head must stop deletion, while allowing the existing
+    // refresh path to continue into its repair logic.
+    let head = v2_root
+        .join("worktrees")
+        .join(worktree_hash.as_str())
+        .join("head.json");
+    fs::write(head, "invalid head").unwrap();
+    fs::create_dir_all(&staging).unwrap();
+    reconcile_repo(&options).unwrap();
+    assert!(staging.is_dir(), "unknown reachability must fail closed");
 }
 
 #[test]
@@ -781,7 +857,15 @@ fn delete_failure_is_left_for_the_next_sweep() {
     let mut deny_once = true;
 
     let first = sweep_file_index_v2_with_remover(&options, |path| {
-        if path == quarantine && deny_once {
+        let registry = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(v2_root.join("leases/.lock"))
+            .unwrap();
+        FileExt::try_lock_shared(&registry)
+            .expect("recursive deletion must not block reader pin admission");
+        FileExt::unlock(&registry).unwrap();
+        if deny_once {
             deny_once = false;
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -791,11 +875,17 @@ fn delete_failure_is_left_for_the_next_sweep() {
         fs::remove_dir_all(path)
     })
     .unwrap();
-    assert!(quarantine.is_dir());
-    assert_eq!(first.retry_pending, vec![quarantine.clone()]);
+    assert!(
+        !quarantine.exists(),
+        "unreferenced data is retired before deletion"
+    );
+    assert_eq!(first.retry_pending.len(), 1);
+    let retired = &first.retry_pending[0];
+    assert!(retired.starts_with(v2_root.join(".gc-retired")));
+    assert!(retired.is_dir(), "failed deletion must remain retryable");
 
     let second = sweep_file_index_v2_with_remover(&options, fs::remove_dir_all).unwrap();
-    assert!(!quarantine.exists());
+    assert!(!retired.exists());
     assert!(second.retry_pending.is_empty());
-    assert!(second.deleted.contains(&quarantine));
+    assert!(second.deleted.contains(retired));
 }

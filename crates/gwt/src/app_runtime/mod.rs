@@ -15610,10 +15610,22 @@ impl AppRuntime {
                     )
                 }
                 Err(error) => {
-                    let mut notification = if restore_refusal
-                        .as_ref()
-                        .is_none_or(|refusal| refusal.code == "restore_launch_failed")
-                    {
+                    // A refusal receipt is complete only after its readback and
+                    // exact cleanup succeed. A later RPC failure remains actionable.
+                    let pure_owner_refusal = restore_refusal.as_ref().is_some_and(|refusal| {
+                        !matches!(
+                            refusal.code.as_str(),
+                            "restore_launch_failed"
+                                | "source_unreadable"
+                                | "session_unreadable"
+                                | "monitor_unreadable"
+                                | "execution_unreadable"
+                                | "work_authority_unreadable"
+                        ) && refusal.canonical_rows.is_some()
+                            && refusal.message == error
+                    });
+                    let genuine_restore_failure = !pure_owner_refusal;
+                    let mut notification = if genuine_restore_failure {
                         restore_feedback
                             .as_ref()
                             .and_then(|feedback| {
@@ -15638,6 +15650,39 @@ impl AppRuntime {
                         .unwrap_or(startup::RestoreRefusal::LaunchNotStarted);
                     self.record_restore_window_outcome(&window_id, Err(refusal_reason));
                     self.restore_launch_windows.remove(&window_id);
+                    // A policy refusal is not a failed process launch. Retain its
+                    // diagnostic window without manufacturing an Error transition.
+                    // Only an authenticated, fully read-back owner refusal qualifies;
+                    // I/O failures while reading that receipt still take the error path.
+                    let expected_automatic_refusal =
+                        restore_feedback.as_ref().is_some_and(|feedback| {
+                            feedback.origin == startup::RestoreOrigin::Automatic
+                        }) && pure_owner_refusal
+                            && matches!(
+                                refusal_reason,
+                                startup::RestoreRefusal::TerminalWork(_)
+                                    | startup::RestoreRefusal::ClosedWorkDiagnostic
+                                    | startup::RestoreRefusal::CompletedWork
+                                    | startup::RestoreRefusal::LandedWorktree
+                                    | startup::RestoreRefusal::EmptyLandedWorktree
+                                    | startup::RestoreRefusal::MonitorHold("launch_revoked")
+                            );
+                    if expected_automatic_refusal {
+                        let refusal = restore_refusal.as_ref().expect("owner refusal");
+                        notification.push(OutboundEvent::project(
+                            context.project_key.clone(),
+                            BackendEvent::IssueMonitorToast {
+                                notification_transition: None,
+                                notification_transition_id: None,
+                                level: "info".into(),
+                                message: format!("Automatic restore skipped: {}", refusal.code),
+                                issue_number: restore_feedback
+                                    .as_ref()
+                                    .and_then(|feedback| feedback.source.as_ref())
+                                    .and_then(|source| source.linked_issue_number),
+                            },
+                        ));
+                    }
                     if restore_feedback.as_ref().is_some_and(|feedback| {
                         self.window_lookup
                             .get(&window_id)
@@ -15741,7 +15786,9 @@ impl AppRuntime {
                                             .is_some_and(|detail| !detail.trim().is_empty())
                                     }))
                     });
-                    if retained_diagnostic {
+                    if expected_automatic_refusal
+                        || (retained_diagnostic && !genuine_restore_failure)
+                    {
                         return notification;
                     }
                     let session_id = self
@@ -15752,15 +15799,16 @@ impl AppRuntime {
                                 .and_then(|tab| tab.workspace.window(&address.raw_id))
                         })
                         .and_then(|window| window.session_id.clone());
-                    let (status, detail) =
-                        if refusal_reason == startup::RestoreRefusal::NoResumeSession {
-                            (
-                                WindowProcessStatus::Stopped,
-                                Self::EXACT_SESSION_RESTORE_UNAVAILABLE_DETAIL.to_string(),
-                            )
-                        } else {
-                            (WindowProcessStatus::Error, error)
-                        };
+                    let (status, detail) = if pure_owner_refusal
+                        && refusal_reason == startup::RestoreRefusal::NoResumeSession
+                    {
+                        (
+                            WindowProcessStatus::Stopped,
+                            Self::EXACT_SESSION_RESTORE_UNAVAILABLE_DETAIL.to_string(),
+                        )
+                    } else {
+                        (WindowProcessStatus::Error, error)
+                    };
                     notification.extend(self.apply_owner_terminal_launch_projection(
                         &context,
                         &window_id,

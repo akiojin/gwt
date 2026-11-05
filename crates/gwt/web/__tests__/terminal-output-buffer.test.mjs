@@ -69,17 +69,25 @@ function cursorScheduler() {
   };
 }
 
-function hiddenTasks(t) {
+function hiddenTasks(t, hidden = true) {
   const tasks = manualScheduler();
+  const listeners = new Set(), stalled = [];
+  const visibility = { hidden,
+    addEventListener: (type, listener) => { assert.equal(type, "visibilitychange"); listeners.add(listener); },
+    removeEventListener: (type, listener) => { assert.equal(type, "visibilitychange"); listeners.delete(listener); },
+  };
   let closed = 0;
   for (const [key, value] of Object.entries({
-    document: { hidden: true },
+    document: visibility,
     MessageChannel: class {
       port1 = { onmessage: null, close: () => { closed += 1; } };
       port2 = { close: () => { closed += 1; },
         postMessage: () => tasks.schedule(() => this.port1.onmessage?.()) };
     },
-    requestAnimationFrame: () => assert.fail("hidden work must not wait for an animation frame"),
+    requestAnimationFrame: callback => {
+      assert.equal(visibility.hidden, false, "hidden work must not wait for an animation frame");
+      stalled.push(callback); return stalled.length;
+    },
     cancelAnimationFrame: () => {},
   })) {
     const descriptor = Object.getOwnPropertyDescriptor(globalThis, key);
@@ -90,10 +98,27 @@ function hiddenTasks(t) {
     });
   }
   // Native background timers may be clamped; do not advance them in this test.
-  t.mock.method(globalThis, "setTimeout", () => 1);
+  t.mock.method(globalThis, "setTimeout", callback => { stalled.push(callback); return stalled.length; });
   t.mock.method(globalThis, "clearTimeout", () => {});
-  return { tasks, closed: () => closed };
+  return { tasks, stalled, closed: () => closed, listeners,
+    hide() { visibility.hidden = true; for (const listener of [...listeners]) listener(); },
+  };
 }
+
+test("output queued while visible drains once after the document becomes hidden", (t) => {
+  const { tasks, stalled, closed, listeners, hide } = hiddenTasks(t, false);
+  const writes = [];
+  const batcher = createTerminalOutputBatcher({ write: (id, text) => writes.push([id, text]) });
+  batcher.enqueue("agent", "a");
+  batcher.enqueue("agent", "b");
+  hide();
+  assert.equal(tasks.pendingCount(), 1, "pending output must escape suspended frames and timers");
+  tasks.runAll();
+  for (const callback of stalled) callback();
+  assert.deepEqual(writes, [["agent", "ab"]]);
+  assert.equal(closed(), 2);
+  assert.equal(listeners.size, 0);
+});
 
 test("hidden output batches advance by tasks while preserving order and window budgets", (t) => {
   const { tasks, closed } = hiddenTasks(t);
@@ -114,13 +139,13 @@ test("hidden output batches advance by tasks while preserving order and window b
 });
 
 test("vendored xterm coalesces hidden redraws and cancels disposed work without frames", (t) => {
-  const { tasks } = hiddenTasks(t);
+  const { tasks, stalled, listeners, hide } = hiddenTasks(t);
   const source = readFileSync(new URL("../vendor/xterm/xterm.mjs", import.meta.url), "utf8");
   const start = source.indexOf("Ws=class{") + 3;
   const end = source.indexOf(",zs={}", start);
   assert.ok(start > 3 && end > start, "pinned xterm RenderDebouncer is present");
   const Debouncer = new Function("gwtScheduleTerminalTask", `return (${source.slice(start, end)});`)(
-    callback => terminalOutput.scheduleTerminalTask(callback));
+    (...args) => terminalOutput.scheduleTerminalTask(...args));
   const draws = [], callbacks = [];
   const debouncer = new Debouncer((first, last) => draws.push([first, last]), { window: globalThis });
   debouncer.refresh(0, 1, 4);
@@ -136,10 +161,78 @@ test("vendored xterm coalesces hidden redraws and cancels disposed work without 
   debouncer.dispose();
   tasks.runAll();
   assert.deepEqual(draws, [[0, 3]], "disposed terminal must not redraw");
+
+  globalThis.document.hidden = false;
+  const pending = new Debouncer((first, last) => draws.push([first, last]), { window: globalThis });
+  pending.refresh(1, 2, 4);
+  hide();
+  assert.equal(tasks.pendingCount(), 1, "a visible redraw must survive a hidden transition");
+  tasks.runAll();
+  for (const callback of stalled) callback();
+  assert.deepEqual(draws, [[0, 3], [1, 2]]);
+  assert.equal(listeners.size, 0);
+  globalThis.document.hidden = false;
+  pending.refresh(0, 1, 4);
+  pending.dispose();
+  hide();
+  tasks.runAll();
+  for (const callback of stalled) callback();
+  assert.equal(listeners.size, 0, "disposed redraws release the pending visibility listener");
+  assert.deepEqual(draws, [[0, 3], [1, 2]]);
+});
+
+test("vendored xterm refreshes a laid-out hidden terminal after stale nonintersection", () => {
+  const source = readFileSync(new URL("../vendor/xterm/xterm.mjs", import.meta.url), "utf8");
+  const start = source.indexOf("sr=class extends Ie{") + 3;
+  const end = source.indexOf(";sr=B(", start);
+  assert.ok(start > 3 && end > start, "pinned xterm RenderService is present");
+  const RenderService = new Function("Ie", `return (${source.slice(start, end)});`)(class {});
+  const events = [];
+  const host = { clientWidth: 800, clientHeight: 400 };
+  const service = {
+    _isPaused: true, _needsFullRefresh: true, _rowCount: 4,
+    // The self-sized xterm root alone cannot prove its host has layout.
+    _screenElement: { isConnected: true, parentElement: { clientWidth: 800, clientHeight: 400, parentElement: host } },
+    _charSizeService: { hasValidSize: true },
+    _coreBrowserService: { window: { document: { hidden: true } } },
+    _coreService: { decPrivateModes: { synchronizedOutput: false } },
+    _pausedResizeTask: { flush: () => events.push("resize") },
+    _syncOutputHandler: { flush() {}, bufferRows: (first, last) => events.push(["buffer", first, last]) },
+    _renderDebouncer: { refresh: (first, last, rows) => events.push(["render", first, last, rows]) },
+    refreshRows: RenderService.prototype.refreshRows,
+  };
+  service.refreshRows(1, 1, true);
+  assert.deepEqual(events, ["resize", ["render", 0, 3, 4]], "recover the full viewport through the existing debouncer");
+  assert.equal(service._isPaused, true, "native intersection state stays unchanged");
+  assert.equal(service._needsFullRefresh, false);
+  assert.equal(service._isNextRenderRedrawOnly, false);
+
+  events.length = 0;
+  service._coreService.decPrivateModes.synchronizedOutput = true;
+  RenderService.prototype._fullRefresh.call(service);
+  assert.deepEqual(events, [["buffer", 0, 3]], "resize can draw, so synchronized output must defer it too");
+  service._coreService.decPrivateModes.synchronizedOutput = false;
+  RenderService.prototype._fullRefresh.call(service);
+  assert.deepEqual(events, [["buffer", 0, 3], "resize", ["render", 0, 3, 4]]);
+
+  events.length = 0;
+  host.clientHeight = 0;
+  RenderService.prototype._fullRefresh.call(service);
+  host.clientHeight = 400;
+  service._coreBrowserService.window.document.hidden = false;
+  RenderService.prototype._fullRefresh.call(service);
+  service._coreBrowserService.window.document.hidden = true;
+  service._charSizeService.hasValidSize = false;
+  RenderService.prototype._fullRefresh.call(service);
+  service._charSizeService.hasValidSize = true;
+  service._screenElement.isConnected = false;
+  RenderService.prototype._fullRefresh.call(service);
+  assert.deepEqual(events, [], "zero-size, visible offscreen, invalid-size and detached terminals remain paused");
+  assert.equal(service._needsFullRefresh, true);
 });
 
 test("vendored xterm parser starts and yields hidden tasks at its existing budget", (t) => {
-  const { tasks } = hiddenTasks(t);
+  const { tasks, stalled, listeners, hide } = hiddenTasks(t);
   const source = readFileSync(new URL("../vendor/xterm/xterm.mjs", import.meta.url), "utf8");
   const start = source.indexOf("In=class extends Ie{") + 3;
   const end = source.indexOf(",Nn=class", start);
@@ -163,6 +256,15 @@ test("vendored xterm parser starts and yields hidden tasks at its existing budge
   assert.deepEqual(parsed, ["a", "b"]);
   assert.deepEqual(done, ["a", "b"]);
   assert.equal(tasks.pendingCount(), 0);
+  globalThis.document.hidden = false;
+  parser.write("c", () => done.push("c"));
+  hide();
+  assert.equal(tasks.pendingCount(), 1, "a visible parser task must survive a hidden transition");
+  tasks.runAll();
+  for (const callback of stalled) callback();
+  assert.deepEqual(parsed, ["a", "b", "c"]);
+  assert.deepEqual(done, ["a", "b", "c"]);
+  assert.equal(listeners.size, 0);
 });
 
 test("default output scheduler drains without animation frames and ignores the losing callback", (t) => {

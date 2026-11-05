@@ -163,6 +163,7 @@ mod tests {
                 location: "comments".to_string(),
                 comment_ids: vec![1, 2],
                 largest_part_bytes: 60_000,
+                verification_error: None,
             },
         )
         .unwrap();

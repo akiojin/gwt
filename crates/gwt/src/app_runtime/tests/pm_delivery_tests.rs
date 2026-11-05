@@ -486,13 +486,15 @@ fn authenticated_pm_send_reports_unconfirmed_without_target_hook_ack() {
         ),
         "missing acknowledgement must not claim delivery: {result:?}"
     );
-    assert!(gwt::pm_registry::load_pm_delivery_receipts(&receipt_path)
-        .expect("delivery receipts")
-        .iter()
-        .any(|receipt| {
+    let receipts =
+        gwt::pm_registry::load_pm_delivery_receipts(&receipt_path).expect("delivery receipts");
+    assert!(
+        receipts.iter().any(|receipt| {
             receipt.operation_id == operation_id
                 && receipt.status == gwt::pm_registry::PmDeliveryReceiptStatus::Unconfirmed
-        }));
+        }),
+        "unconfirmed response must retain its durable receipt: result={result:?}, receipts={receipts:?}"
+    );
 
     // An intervening human draft revokes submit recovery, even if the old
     // operation has a full-body guard. No new input transaction may start.

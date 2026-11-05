@@ -1295,9 +1295,8 @@ impl AppRuntime {
 
     /// FR-108(b) (T-201, Issue #3505): the periodic wake — re-arm a quiet
     /// resident PM on the scheduled tick even when no new monitor signal
-    /// arrived, as long as there is standing supervision work (running
-    /// launches or a non-empty queue). The delta wake (T-093) covers "new
-    /// things happened"; this covers "old things still need watching".
+    /// arrived. PM loop pause/quiet/interval settings own this cadence;
+    /// Monitor Off and an empty queue do not stop PM reconciliation.
     ///
     /// The same quiet gate as the delta wake keeps the two from double-firing:
     /// an actively-looping or freshly-prompted PM is never interrupted, and a
@@ -1335,9 +1334,9 @@ impl AppRuntime {
     fn pm_periodic_wake_decision_for_monitor_with_standing_work_at(
         &mut self,
         project_root: &Path,
-        monitor: &gwt::IssueMonitorState,
+        _monitor: &gwt::IssueMonitorState,
         now: &str,
-        standing_durable_work: Option<bool>,
+        _standing_durable_work: Option<bool>,
     ) -> Option<PmWakeDecision> {
         if self
             .project_state_for_root(project_root)?
@@ -1347,33 +1346,12 @@ impl AppRuntime {
         {
             return None;
         }
-        if !monitor.config.enabled {
-            return None;
-        }
         let prefs_path = pm_registry::pm_prefs_path_for_repo_path(project_root);
         let prefs = pm_registry::load_pm_prefs(&prefs_path).ok()?;
         if prefs.settings.paused {
             return None;
         }
-        let status = monitor.agent_status();
         if self.retry_held_pm_wake(project_root) {
-            return None;
-        }
-        // Issue #3655 AC-5: a standing unblock request is supervision work in
-        // its own right. Without this the worst case parks itself — the queue
-        // empties precisely because every agent stopped, so the tick that
-        // should raise the alarm decides there is nothing to supervise.
-        if status.active_launches.is_empty()
-            && status.queue.is_empty()
-            && status.needs_human.is_empty()
-            && !monitor.inbox.iter().any(|item| {
-                matches!(
-                    item.state,
-                    gwt::MonitorInboxState::LaunchFailed | gwt::MonitorInboxState::AgentFailed
-                )
-            })
-            && !standing_durable_work.unwrap_or_else(|| pm_has_standing_durable_work(project_root))
-        {
             return None;
         }
         let registration = prefs.registration?;

@@ -90,6 +90,32 @@ pub fn reconcile_repo(opts: &ReconcileOptions) -> Result<()> {
         }
     }
 
+    // Reconcile on the existing refresh/startup path, before a new writer pins
+    // its artifacts. The sweep was previously only called by tests.
+    let sweep = sweep_file_index_v2(&FileIndexGcOptions {
+        index_root: opts.index_root.clone(),
+        repo_hash: opts.repo_hash.clone(),
+        active_worktree_hashes: valid_hashes.into_iter().collect(),
+        now_unix_nanos: Utc::now().timestamp_nanos_opt().unwrap_or(i64::MAX).max(0) as u64,
+        artifact_ttl: Duration::from_secs(24 * 60 * 60),
+        worktree_grace: Duration::from_secs(24 * 60 * 60),
+    });
+    match sweep {
+        Ok(report) if !report.deleted.is_empty() || !report.retry_pending.is_empty() => {
+            tracing::info!(
+                deleted = report.deleted.len(),
+                retry_pending = report.retry_pending.len(),
+                "file-index artifact reconciliation"
+            );
+        }
+        Err(error) => {
+            // Reachability validation fails closed for GC, but housekeeping
+            // must not prevent the refresh path from repairing a corrupt head.
+            tracing::warn!(%error, "file-index artifact reconciliation skipped");
+        }
+        Ok(_) => {}
+    }
+
     Ok(())
 }
 
@@ -142,6 +168,7 @@ const GC_LEASES_DIR: &str = "leases";
 const GC_LOCK_FILE: &str = ".lock";
 const GC_PIN_FILE: &str = "pin.json";
 const GC_ORPHAN_MARKER: &str = ".gc-orphaned.json";
+const GC_RETIRED_DIR: &str = ".gc-retired";
 
 /// Deterministic inputs for one repository-scoped file-index v2 sweep.
 #[derive(Debug, Clone)]
@@ -298,7 +325,7 @@ where
     fs::create_dir_all(&leases_root)?;
     let setup_lock_path = leases_root.join(GC_LOCK_FILE);
     let setup_lock = open_gc_lock(&setup_lock_path)?;
-    FileExt::lock_exclusive(&setup_lock).map_err(|error| {
+    crate::operation_deadline::lock_exclusive(&setup_lock).map_err(|error| {
         GwtError::Other(format!(
             "lock file-index GC lease registry {}: {error}",
             setup_lock_path.display()
@@ -322,6 +349,7 @@ where
             &mut candidates,
         )?;
 
+        crate::operation_deadline::ensure_remaining("file-index GC candidate sort")?;
         candidates.sort_by(|left, right| {
             left.components()
                 .count()
@@ -331,20 +359,47 @@ where
         candidates.dedup();
 
         let mut report = FileIndexGcReport::default();
+        let retirement_root = v2_root.join(GC_RETIRED_DIR);
+        let mut retired = Vec::new();
         for candidate in candidates {
+            if crate::operation_deadline::ensure_remaining("file-index GC retirement").is_err() {
+                report.retry_pending.push(candidate);
+                break;
+            }
             if !candidate.exists() || gc_paths_intersect(&candidate, &protected) {
                 continue;
             }
-            match remover(candidate.clone()) {
-                Ok(()) => report.deleted.push(candidate),
+            if candidate.starts_with(&retirement_root) {
+                retired.push((candidate.clone(), candidate));
+                continue;
+            }
+            fs::create_dir_all(&retirement_root)?;
+            let destination = retirement_root.join(uuid::Uuid::new_v4().to_string());
+            // Atomically retire while new pins are excluded. Once the registry
+            // is released, a new writer can rebuild but cannot reuse this path.
+            match fs::rename(&candidate, &destination) {
+                Ok(()) => retired.push((candidate, destination)),
                 Err(_) => report.retry_pending.push(candidate),
             }
         }
-        Ok(report)
+        Ok::<_, GwtError>((report, retired))
     })();
 
     let _ = FileExt::unlock(&setup_lock);
-    sweep_result
+    let (mut report, retired) = sweep_result?;
+    for (original, path) in retired {
+        // Recursive disk I/O must not hold up new readers, nor drain an entire
+        // backlog after the refresh operation's existing deadline has expired.
+        if crate::operation_deadline::ensure_remaining("file-index GC deletion").is_err() {
+            report.retry_pending.push(path);
+            continue;
+        }
+        match remover(path.clone()) {
+            Ok(()) => report.deleted.push(original),
+            Err(_) => report.retry_pending.push(path),
+        }
+    }
+    Ok(report)
 }
 
 fn open_gc_lock(path: &Path) -> io::Result<File> {
@@ -443,9 +498,9 @@ fn collect_gc_pin_roots(
     candidates: &mut Vec<PathBuf>,
 ) -> Result<()> {
     let leases_root = v2_root.join(GC_LEASES_DIR);
-    let mut entries = fs::read_dir(&leases_root)?.collect::<io::Result<Vec<_>>>()?;
-    entries.sort_by_key(|entry| entry.file_name());
-    for entry in entries {
+    for entry in fs::read_dir(&leases_root)? {
+        crate::operation_deadline::ensure_remaining("file-index GC pin scan")?;
+        let entry = entry?;
         if entry.file_name() == GC_LOCK_FILE || !entry.file_type()?.is_dir() {
             continue;
         }
@@ -510,9 +565,9 @@ fn collect_worktree_roots(
         .iter()
         .map(String::as_str)
         .collect::<HashSet<_>>();
-    let mut entries = fs::read_dir(&worktrees_root)?.collect::<io::Result<Vec<_>>>()?;
-    entries.sort_by_key(|entry| entry.file_name());
-    for entry in entries {
+    for entry in fs::read_dir(&worktrees_root)? {
+        crate::operation_deadline::ensure_remaining("file-index GC worktree scan")?;
+        let entry = entry?;
         if !entry.file_type()?.is_dir() {
             continue;
         }
@@ -587,6 +642,7 @@ fn collect_head_file_closure(
     head_path: &Path,
     protected: &mut HashSet<PathBuf>,
 ) -> Result<()> {
+    crate::operation_deadline::ensure_remaining("file-index GC head scan")?;
     if !head_path.is_file() {
         return Ok(());
     }
@@ -602,6 +658,7 @@ fn collect_head_file_closure(
         view_ids.push(previous);
     }
     for view_id in view_ids {
+        crate::operation_deadline::ensure_remaining("file-index GC view scan")?;
         let view_dir = v2_root
             .join("worktrees")
             .join(expected_worktree_hash)
@@ -649,9 +706,56 @@ fn collect_expired_gc_artifacts(
     ttl: Duration,
     candidates: &mut Vec<PathBuf>,
 ) -> Result<()> {
-    let mut entries = fs::read_dir(root)?.collect::<io::Result<Vec<_>>>()?;
-    entries.sort_by_key(|entry| entry.file_name());
-    for entry in entries {
+    // Only inspect layout containers, never recurse into immutable Chroma
+    // stores or the embedding CAS. Cache size must not make every refresh a
+    // full recursive filesystem walk.
+    collect_gc_artifact_container(&root.join("bases"), now_unix_nanos, ttl, true, candidates)?;
+    collect_gc_artifact_container(&root.join("cas"), now_unix_nanos, ttl, false, candidates)?;
+    let retired = root.join(GC_RETIRED_DIR);
+    if retired.is_dir() {
+        for entry in fs::read_dir(retired)? {
+            crate::operation_deadline::ensure_remaining("file-index GC retired scan")?;
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                candidates.push(entry.path());
+            }
+        }
+    }
+    let worktrees = root.join("worktrees");
+    if worktrees.is_dir() {
+        for entry in fs::read_dir(worktrees)? {
+            crate::operation_deadline::ensure_remaining("file-index GC container scan")?;
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                for container in ["overlays", "views"] {
+                    collect_gc_artifact_container(
+                        &entry.path().join(container),
+                        now_unix_nanos,
+                        ttl,
+                        true,
+                        candidates,
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn collect_gc_artifact_container(
+    root: &Path,
+    now_unix_nanos: u64,
+    ttl: Duration,
+    completed_artifacts: bool,
+    candidates: &mut Vec<PathBuf>,
+) -> Result<()> {
+    crate::operation_deadline::ensure_remaining("file-index GC artifact scan")?;
+    if !root.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(root)? {
+        crate::operation_deadline::ensure_remaining("file-index GC artifact scan")?;
+        let entry = entry?;
         if !entry.file_type()?.is_dir() {
             continue;
         }
@@ -659,12 +763,20 @@ fn collect_expired_gc_artifacts(
         let name = entry.file_name().to_string_lossy().to_string();
         if let Some(created_at) = gc_artifact_created_at(&name) {
             let elapsed = now_unix_nanos.saturating_sub(created_at) as u128;
-            if elapsed > ttl.as_nanos() {
+            // The mark set already protects all live writers/continuations.
+            // A dead writer's staging has nothing to resume; don't retain it
+            // for another day after each interrupted background build.
+            if name.contains(".staging-") || elapsed > ttl.as_nanos() {
                 candidates.push(path);
-                continue;
             }
+        } else if completed_artifacts
+            && !name.starts_with('.')
+            && path.join("descriptor.json").is_file()
+        {
+            // Completed artifacts have a zero unreferenced-cache budget.
+            // Active/previous closures and live pins are filtered at deletion.
+            candidates.push(path);
         }
-        collect_expired_gc_artifacts(&path, now_unix_nanos, ttl, candidates)?;
     }
     Ok(())
 }
@@ -1281,6 +1393,40 @@ mod tests {
     #[test]
     fn gc_recognizes_the_platform_lock_contention_error() {
         assert!(is_gc_lock_contended(&fs2::lock_contended_error()));
+    }
+
+    #[test]
+    fn gc_scan_stops_at_the_operation_deadline_without_selecting_artifacts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let artifact = tmp.path().join("obsolete");
+        fs::create_dir(&artifact).unwrap();
+        fs::write(artifact.join("descriptor.json"), "{}").unwrap();
+        let _clock =
+            crate::operation_deadline::ScopedOperationClock::set(std::time::Instant::now());
+        let deadline = crate::operation_deadline::ScopedOperationDeadline::enter(
+            crate::operation_deadline::now(),
+        );
+        let mut candidates = vec![];
+        assert!(collect_gc_artifact_container(
+            tmp.path(),
+            0,
+            Duration::from_secs(3600),
+            true,
+            &mut candidates,
+        )
+        .is_err());
+        assert!(candidates.is_empty());
+        assert!(artifact.is_dir());
+        drop(deadline);
+        collect_gc_artifact_container(
+            tmp.path(),
+            0,
+            Duration::from_secs(3600),
+            true,
+            &mut candidates,
+        )
+        .unwrap();
+        assert_eq!(candidates, vec![artifact]);
     }
 
     #[derive(Default, Clone)]

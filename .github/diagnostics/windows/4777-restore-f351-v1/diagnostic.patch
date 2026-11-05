@@ -1,0 +1,118 @@
+--- a/crates/gwt/tests/windows_agent_launch_e2e.rs
++++ b/crates/gwt/tests/windows_agent_launch_e2e.rs
+@@ -1520,6 +1520,115 @@
+             &survivor_runtime,
+         ))
+         .unwrap_or_else(|error| {
++            // Failure-only, non-atomic observations; never recovery/cleanup authority.
++            let running = |process: &RestoreProcess| {
++                // SAFETY: query only the fixture's retained exact process object.
++                match unsafe {
++                    windows::Win32::System::Threading::WaitForSingleObject(process.handle, 0)
++                } {
++                    windows::Win32::Foundation::WAIT_TIMEOUT => Some(true),
++                    windows::Win32::Foundation::WAIT_OBJECT_0 => Some(false),
++                    _ => None,
++                }
++            };
++            // Same FILETIME epoch/tick scale as cli/fleet_disposition.rs; keep
++            // the 100ns remainder rather than admit an earlier same-second row.
++            let restart_after = (|| {
++                let ticks = restored_app.root.created;
++                let seconds = i64::try_from((ticks / 10_000_000).checked_sub(11_644_473_600)?).ok()?;
++                let nanos = u32::try_from((ticks % 10_000_000).checked_mul(100)?).ok()?;
++                chrono::DateTime::<chrono::Utc>::from_timestamp(seconds, nanos)
++            })();
++            let saved_path = sessions_dir.join(format!("{}.toml", original.id));
++            // Unlike Session::load, quiet decoding adds no path/parse-error log.
++            let saved = std::fs::read_to_string(&saved_path).ok()
++                .and_then(|text| toml::from_str::<Session>(&text).ok());
++            let mut log_dirs = vec![home.join(".gwt/logs")];
++            if let Some(key) = original.repo_hash.as_deref()
++                .and_then(|key| gwt_core::repo_hash::ProjectKey::parse(key).ok())
++            {
++                log_dirs.push(home.join(".gwt/projects").join(key.as_str()).join("logs"));
++            }
++            let mut parsed_logs = 0usize;
++            let mut scan_complete = true;
++            let mut reasons = std::collections::BTreeMap::<String, usize>::new();
++            let mut spawn_failures = 0usize;
++            let mut latest_summary = None;
++            for dir in log_dirs {
++                let Ok(files) = std::fs::read_dir(dir) else {
++                    scan_complete = false;
++                    continue;
++                };
++                for file in files {
++                    let Ok(file) = file else { scan_complete = false; continue; };
++                    match file.file_type() {
++                        Ok(kind) if kind.is_file() => {}
++                        Ok(_) => continue,
++                        Err(_) => { scan_complete = false; continue; }
++                    }
++                    let Ok(log) = gwt_core::logging::read_log_file(&file.path()) else {
++                        scan_complete = false;
++                        continue;
++                    };
++                    parsed_logs += 1;
++                    scan_complete &= log.diagnostics.skipped == 0;
++                    for event in log.entries {
++                        let Some(after) = restart_after.as_ref() else { continue; };
++                        if event.timestamp < *after { continue; }
++                        // Time-window correlation, not a claimed PID/process match.
++                        let same_source = event.fields.get("session_id")
++                            .and_then(serde_json::Value::as_str) == Some(original.id.as_str());
++                        if same_source && event.message == "failed to spawn restored agent window" {
++                            spawn_failures += 1;
++                        }
++                        if event.source != "gwt.restore.admission" { continue; }
++                        if same_source && event.message == "session restore refused" {
++                            if let Some(reason) = event.fields.get("reason").and_then(serde_json::Value::as_str) {
++                                let label = match reason {
++                                    "intake_pruned" | "worktree_missing" | "launch_not_started"
++                                    | "window_closed" | "window_not_open" | "not_auto_resume_candidate"
++                                    | "stale" | "no_resume_session" | "duplicate_resume_session"
++                                    | "duplicate_owner_issue" | "landed_worktree" | "empty_landed_worktree"
++                                    | "diagnostic_window_retained" | "worktree_already_restoring"
++                                    | "closed_work_diagnostic_retained" | "completed_work_retained"
++                                    | "fresh_session_required" | "already_running" | "no_project_tab"
++                                    | "tab_not_restorable" => reason,
++                                    _ if reason.starts_with("terminal_work:") => "terminal_work",
++                                    _ if reason.starts_with("monitor_hold:") => "monitor_hold",
++                                    _ if reason.starts_with("terminal_facts_unreadable:") => "terminal_facts_unreadable",
++                                    _ => "unrecognized_reason",
++                                };
++                                *reasons.entry(label.to_string()).or_default() += 1;
++                            }
++                        }
++                        if event.message == "session restore admission summary"
++                            && latest_summary.as_ref().is_none_or(|(at, _)| event.timestamp > *at)
++                        {
++                            latest_summary = Some((event.timestamp, serde_json::json!({
++                                "restored": event.fields.get("restored").and_then(serde_json::Value::as_u64),
++                                "skipped": event.fields.get("skipped").and_then(serde_json::Value::as_u64),
++                            })));
++                        }
++                    }
++                }
++            }
++            let correlated = restart_after.is_some() && parsed_logs > 0;
++            eprintln!("windows_restore_failure_diagnostic {}", serde_json::json!({
++                "provider": provider.agent_id().command(),
++                "receipt_missing_failure": error == "startup restore never invoked the provider",
++                "gui_running": running(&restored_app.root),
++                "previous_owner_running": running(&first.owner),
++                "provider_receipt_present": capture.try_exists().ok(),
++                "provider_tree_receipt_present": capture.with_extension("tree.json").try_exists().ok(),
++                "saved_session_exists": saved_path.try_exists().ok(),
++                "saved_session_restore_requested": saved.as_ref().map(|saved| saved.restore_window_on_startup),
++                "post_gui_birth_time_boundary_available": restart_after.is_some(),
++                "parsed_log_files": parsed_logs,
++                "log_scan_complete": scan_complete,
++                "observed_post_gui_birth_source_refusal_counts": correlated.then_some(reasons),
++                "observed_post_gui_birth_source_spawn_failure_count": correlated.then_some(spawn_failures),
++                "latest_observed_post_gui_birth_sweep_summary": latest_summary.map(|(_, summary)| summary),
++            }));
+             panic!(
+                 "real startup restore/public close failed: {error}\n{}",
+                 restored_app.stderr()
