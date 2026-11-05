@@ -265,6 +265,15 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           }
           runtime.terminal.write(text, onWritten);
         },
+        onError: (error, windowId) => {
+          const context = projectWindowContextById(windowId);
+          if (!socketProjectKey || context?.tab.project_key !== socketProjectKey
+            || !terminalMap.has(windowId) || socket?.readyState !== WebSocket.OPEN) return;
+          // The batch runs after receive() returns, so recover here rather than
+          // letting the dispatcher continue an already torn terminal stream.
+          connectSocket(true);
+          renderDegradationBanner.report({ source: "terminal:output", error });
+        },
         // Reports hides the PM renderer, but its VT buffer must keep consuming
         // output at the current grid. Replaying it only after reveal can apply
         // old-width wraps and relative erases to an already resized terminal.
