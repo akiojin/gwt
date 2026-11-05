@@ -555,14 +555,59 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         WindowsJobObject::configure_suspended(&mut command);
-        let mut child = command.spawn().unwrap();
         let mut job = WindowsJobObject::new().unwrap();
-        job.assign_and_resume(child.id()).unwrap();
+        let mut child = command.spawn().unwrap();
+        if let Err(error) = job.assign_and_resume(child.id()) {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("assign nominated fixture Job: {error}");
+        }
+        let registered = WindowsJobObject::attach_running(child.id()).unwrap();
         let caps = gwt_core::process_tree::job_cpu::observe(child.id()).unwrap();
-        assert!(caps.is_empty(), "private Job is intentionally unregistered");
-        assert!(required_target_has_unregistered_job(child.id(), &caps).unwrap());
+        assert_eq!(caps.len(), 1);
+        assert!(caps[0].hard_cap_percent.is_none());
+        assert!(gwt_core::process_tree::job_cpu::is_in_job(child.id()).unwrap());
+        assert_eq!(
+            required_target_has_unregistered_job(child.id(), &caps),
+            Ok(false)
+        );
+        for entry in
+            std::fs::read_dir(gwt_core::paths::gwt_runtime_dir().join("windows-pane-jobs")).unwrap()
+        {
+            std::fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+        assert!(gwt_core::process_tree::job_cpu::observe(child.id())
+            .unwrap()
+            .is_empty());
+        let mut evidence = Evidence {
+            status: "ready".into(),
+            reason: None,
+            admission_wait_ms: 0,
+            cap_relief_wait_ms: 0,
+            raw_exit_code: None,
+            targets: Vec::new(),
+        };
+        let reason = sample(&mut evidence, &[child.id()], Duration::ZERO, true).unwrap_err();
+        let target = evidence
+            .targets
+            .iter()
+            .find(|target| target.pid == child.id())
+            .unwrap();
+        assert!(target.required_uncapped);
+        assert!(target.job_caps.is_empty());
+        assert!(reason.contains(&format!("PID {}", child.id())), "{reason}");
+        assert!(reason.contains("unregistered Job ancestry"), "{reason}");
+        assert!(reason.contains("rerun the registered matrix"), "{reason}");
+        drop(registered);
         drop(job);
         child.wait().unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn nominated_target_fails_closed_on_native_query_error() {
+        let reason = required_target_has_unregistered_job(0, &[]).unwrap_err();
+        assert!(reason.starts_with("query required target 0:"), "{reason}");
     }
 
     #[test]

@@ -127,6 +127,7 @@ impl OutboundEvent {
                     | BackendEvent::SupportedAgentList { .. }
                     | BackendEvent::SupportedAgentMaintenance { .. }
                     | BackendEvent::UpdateState(_)
+                    | BackendEvent::UpdateCheckResult { .. }
                     | BackendEvent::UpdateProgress { .. }
                     | BackendEvent::UpdateReady { .. }
                     | BackendEvent::UpdateAutoApply { .. }
@@ -685,6 +686,8 @@ pub struct ClientQueue {
     notify: tokio::sync::Notify,
     input_liveness: std::sync::RwLock<bool>,
     input_close_requested: std::sync::atomic::AtomicBool,
+    native_input_permits:
+        Mutex<Vec<std::sync::Weak<crate::mobile_input_permit::NativeInputPermit>>>,
 }
 
 impl Default for ClientQueue {
@@ -694,6 +697,7 @@ impl Default for ClientQueue {
             notify: tokio::sync::Notify::new(),
             input_liveness: std::sync::RwLock::new(true),
             input_close_requested: std::sync::atomic::AtomicBool::new(false),
+            native_input_permits: Mutex::default(),
         }
     }
 }
@@ -909,6 +913,16 @@ impl ClientQueue {
 
     fn close_with_frame(&self, close_frame: Option<ClientCloseFrame>) {
         self.input_close_requested.store(true, Ordering::Release);
+        // Native effects do not hold the client lease across RPC. Closing the
+        // registration instead invalidates each input's shared final permit.
+        let mut permits = self
+            .native_input_permits
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for permit in permits.drain(..).filter_map(|permit| permit.upgrade()) {
+            permit.revoke();
+        }
+        drop(permits);
         let mut state = self
             .state
             .lock()
@@ -1025,6 +1039,30 @@ pub struct ClientProjectBinding {
 }
 
 impl ClientProjectBinding {
+    /// The callback may only perform short local authorization/permit arming;
+    /// never retain this lease through an RPC or physical write.
+    pub fn with_native_permit<T>(
+        &self,
+        project: &gwt_core::repo_hash::ProjectKey,
+        permit: &Arc<crate::mobile_input_permit::NativeInputPermit>,
+        effect: impl FnOnce() -> T,
+    ) -> Option<T> {
+        self.while_current(project, || {
+            let mut permits = self.queue.native_input_permits.lock().ok()?;
+            // Pair this check/registration with close's mutex. A concurrent
+            // close either precedes registration or revokes the registered gate.
+            if self.queue.input_close_requested.load(Ordering::Acquire) {
+                return None;
+            }
+            permits.retain(|permit| permit.strong_count() != 0);
+            let weak = Arc::downgrade(permit);
+            if !permits.iter().any(|existing| existing.ptr_eq(&weak)) {
+                permits.push(weak);
+            }
+            Some(effect())
+        })?
+    }
+
     pub fn while_current<T>(
         &self,
         project: &gwt_core::repo_hash::ProjectKey,
@@ -3146,6 +3184,32 @@ pub async fn send_agent_self_close_acceptance_for_test<S>(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn closing_a_client_revokes_its_native_input_permit_without_a_writer_wait() {
+        use super::{ClientHub, ClientScope};
+        use crate::mobile_input_permit::NativeInputPermit;
+        let project = gwt_core::paths::project_scope_hash(std::path::Path::new("/mobile-fixture"));
+        let clients = ClientHub::default();
+        clients.register_scoped("phone".into(), ClientScope::Project(project.clone()));
+        let binding = clients.capture_project_binding("phone").unwrap();
+        let permit = NativeInputPermit::new().unwrap();
+        assert_eq!(binding.with_native_permit(&project, &permit, || 1), Some(1));
+        clients.unregister("phone");
+        assert!(permit.is_revoked());
+        assert_eq!(binding.with_native_permit(&project, &permit, || 2), None);
+        clients.register_scoped("phone".into(), ClientScope::Project(project.clone()));
+        let fresh = NativeInputPermit::new().unwrap();
+        assert_eq!(
+            clients
+                .capture_project_binding("phone")
+                .unwrap()
+                .with_native_permit(&project, &fresh, || 3),
+            Some(3)
+        );
+        assert!(!fresh.is_revoked());
+    }
+
     #[test]
     fn issue_3713_direct_self_close_refusal_crosses_the_origin_socket_with_recovery() {
         use futures_util::{SinkExt, StreamExt};

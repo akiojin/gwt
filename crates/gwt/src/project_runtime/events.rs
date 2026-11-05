@@ -1,6 +1,9 @@
 //! Private project-owner wire data. Never contains capability or GUI authority.
 use serde::{Deserialize, Serialize};
 
+/// Private mobile input capability advertised before sending any input frame.
+pub const MOBILE_INPUT_PERMIT_PROTOCOL_VERSION: u64 = 1;
+
 /// Read-only physical input facts; consumers cannot grant input with this snapshot.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct OwnerInputObservation {
@@ -39,6 +42,7 @@ pub struct OwnerMobileInputIdentity {
     pub incarnation: u64,
     pub session_id: Option<String>,
     pub data_sha256: String,
+    pub permit: crate::mobile_input_permit::NativeInputPermitRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

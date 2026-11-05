@@ -2322,6 +2322,7 @@ pub struct AppRuntime {
     pub(crate) issue_client_factory: RuntimeIssueClientFactory,
     /// Cached update state so late-connecting WebView clients get the toast.
     pub(crate) pending_update: Option<gwt_core::update::UpdateState>,
+    pub(crate) update_check_in_flight: bool,
     /// Initiator of the shared download, or None when its worker is idle.
     pub(crate) update_download_in_flight: Option<ClientId>,
     /// Newest discovery to retry if the active download fails.
@@ -5027,6 +5028,7 @@ impl AppRuntime {
             knowledge_monitor_snapshot: Default::default(),
             issue_client_factory: default_issue_client_factory(),
             pending_update: None,
+            update_check_in_flight: false,
             update_download_in_flight: None,
             deferred_update_discovery: None,
             attachment_uploads,
@@ -10555,7 +10557,17 @@ impl AppRuntime {
             return Vec::new();
         };
         if drain.automatic.unwrap_or(prefs.autonomous_mode) && !self.automatic_updates_enabled() {
-            return self.release_update_auto_apply_for_project(context, &drain.version);
+            return self
+                .release_update_auto_apply_for_project(context, &drain.version)
+                .unwrap_or_else(|error| {
+                    self.issue_monitor_control_error_events(
+                        Some(&context.project_root),
+                        None,
+                        error,
+                        "update-drain",
+                        None,
+                    )
+                });
         }
         let outcome = gwt::update_drain::update_quiescence(&observation.snapshot);
         let wait_reason = match &outcome {
@@ -10800,13 +10812,35 @@ impl AppRuntime {
         version: &str,
         release: UpdateAutoApplyRelease,
     ) -> Vec<OutboundEvent> {
+        self.try_release_update_auto_apply_events(version, release)
+            .unwrap_or_else(|(_, events)| events)
+    }
+
+    fn try_release_update_auto_apply_events(
+        &mut self,
+        version: &str,
+        release: UpdateAutoApplyRelease,
+    ) -> Result<Vec<OutboundEvent>, (String, Vec<OutboundEvent>)> {
         let mut events = Vec::new();
         for context in self.project_contexts() {
             if self
                 .project_auto_update_drain(&context)
                 .is_some_and(|(_, drain)| drain.version == version)
             {
-                events.extend(self.release_update_auto_apply_for_project(&context, version));
+                match self.release_update_auto_apply_for_project(&context, version) {
+                    Ok(released) => events.extend(released),
+                    Err(error) => {
+                        let message = error.to_string();
+                        events.extend(self.issue_monitor_control_error_events(
+                            Some(&context.project_root),
+                            None,
+                            error,
+                            "update-drain",
+                            None,
+                        ));
+                        return Err((message, events));
+                    }
+                }
             }
         }
         let (level, message) = match release {
@@ -10824,7 +10858,7 @@ impl AppRuntime {
             ),
             UpdateAutoApplyRelease::Superseded => (
                 "info",
-                format!("Update v{version} was replaced by a newer release; its automatic apply was cancelled."),
+                format!("Update v{version} automatic apply was cancelled because a newer release is available."),
             ),
             UpdateAutoApplyRelease::RequiresElevation => (
                 "warn",
@@ -10862,50 +10896,37 @@ impl AppRuntime {
             },
             grace_secs: None,
         }));
-        Self::deduplicate_update_host_events(events)
+        Ok(Self::deduplicate_update_host_events(events))
     }
 
     fn release_update_auto_apply_for_project(
         &mut self,
         context: &ProjectContext,
         version: &str,
-    ) -> Vec<OutboundEvent> {
-        let Some(state) = self.project_state_mut(context) else {
-            return Vec::new();
-        };
-        state.update_auto_apply.cancel(version);
+    ) -> Result<Vec<OutboundEvent>, gwt::runtime_daemon_events::IssueMonitorControlPublishError>
+    {
+        if self.project_state(context).is_none() {
+            return Ok(Vec::new());
+        }
         let publication = self.publish_project_issue_monitor_control(
             context,
             serde_json::json!({ "config_set": { "update_drain": false } }),
         );
-        match publication {
+        let events = match publication {
             Ok(()) => Vec::new(),
             Err(error) if error.allows_local_fallback() => {
-                match self.commit_local_issue_monitor_control(context, |monitor| {
-                    monitor.clear_update_drain()
-                }) {
-                    Ok((monitor, ())) => self.issue_monitor_snapshot_events_for(
-                        None,
-                        Some(&context.project_root),
-                        monitor,
-                    ),
-                    Err(local_error) => self.issue_monitor_control_error_events(
-                        Some(&context.project_root),
-                        None,
-                        local_error,
-                        "update-drain",
-                        None,
-                    ),
-                }
+                let (monitor, ()) = self
+                    .commit_local_issue_monitor_control(context, |monitor| {
+                        monitor.clear_update_drain()
+                    })?;
+                self.issue_monitor_snapshot_events_for(None, Some(&context.project_root), monitor)
             }
-            Err(error) => self.issue_monitor_control_error_events(
-                Some(&context.project_root),
-                None,
-                error,
-                "update-drain",
-                None,
-            ),
+            Err(error) => return Err(error),
+        };
+        if let Some(state) = self.project_state_mut(context) {
+            state.update_auto_apply.cancel(version);
         }
+        Ok(events)
     }
 
     fn deduplicate_update_host_events(mut events: Vec<OutboundEvent>) -> Vec<OutboundEvent> {
@@ -11263,6 +11284,7 @@ impl AppRuntime {
             FrontendEvent::ReopenRecentProject { path, request_id } => {
                 self.open_project_path_with_request_events(PathBuf::from(path), request_id)
             }
+            FrontendEvent::CheckForUpdates => self.check_for_updates_events(),
             FrontendEvent::ApplyUpdate => self.apply_pending_update_events(&client_id),
             FrontendEvent::ApplyUpdateStart => self.apply_update_start_events(&client_id),
             FrontendEvent::ApplyUpdateToVersion { version } => {
@@ -12454,6 +12476,7 @@ impl AppRuntime {
             FrontendEvent::IssueMonitorConfigureProfile => {
                 self.open_issue_monitor_configure_profile_wizard_events(context, &client_id)
             }
+            FrontendEvent::CheckForUpdates => self.check_for_updates_events(),
             FrontendEvent::ApplyUpdate => self.apply_pending_update_events(&client_id),
             FrontendEvent::ApplyUpdateStart => self.apply_update_start_events(&client_id),
             FrontendEvent::ApplyUpdateToVersion { version } => {
@@ -12633,6 +12656,15 @@ impl AppRuntime {
             ));
         }
         events.extend(self.staged_update_sync_events(client_id));
+        events.push(OutboundEvent::reply(
+            client_id,
+            BackendEvent::UpdateCheckResult {
+                checking: self.update_check_in_flight,
+                offer_update: false,
+                result: None,
+                previous_failure: None,
+            },
+        ));
         events
     }
 
@@ -12766,6 +12798,15 @@ impl AppRuntime {
             self.pending_update.clone(),
         );
         events.extend(self.staged_update_sync_events(client_id));
+        events.push(OutboundEvent::reply(
+            client_id,
+            BackendEvent::UpdateCheckResult {
+                checking: self.update_check_in_flight,
+                offer_update: false,
+                result: None,
+                previous_failure: None,
+            },
+        ));
         events.splice(
             1..1,
             terminal_previews.into_iter().map(|(id, text)| {
