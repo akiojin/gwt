@@ -2125,10 +2125,14 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
     ));
     gwt_config::home::assert_test_path(&tmp);
     let bytes = serde_json::to_vec(value).map_err(|e| io::Error::other(e.to_string()))?;
-    fs::write(&tmp, bytes)?;
-    let _ = fs::remove_file(path); // Remove existing file first (needed on Windows)
-    fs::rename(&tmp, path)?;
-    Ok(())
+    let result = fs::write(&tmp, bytes).and_then(|()| {
+        let _ = fs::remove_file(path); // Remove existing file first (needed on Windows)
+        fs::rename(&tmp, path)
+    });
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
 }
 
 fn parse_tag_version(tag: &str) -> Option<Version> {
@@ -4879,6 +4883,24 @@ mod tests {
             serde_json::from_slice::<serde_json::Value>(&fs::read(path).unwrap()).unwrap(),
             value
         );
+    }
+
+    #[test]
+    fn failed_cache_write_removes_its_temporary_file_and_preserves_the_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("update.json");
+        fs::create_dir(&path).unwrap();
+        let probe = temp.path().join("rename-probe");
+        fs::write(&probe, b"probe").unwrap();
+        let expected = fs::rename(&probe, &path).unwrap_err();
+        fs::remove_file(probe).unwrap();
+
+        let error =
+            write_json_atomic(&path, &serde_json::json!({ "version": "99.0.0" })).unwrap_err();
+
+        assert_eq!(error.raw_os_error(), expected.raw_os_error());
+        assert!(path.is_dir());
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
     }
 
     #[test]

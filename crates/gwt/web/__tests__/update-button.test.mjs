@@ -186,6 +186,12 @@ test("manual rediscovery preserves the active phase and scheduled Retry never ca
   const retry = fixture.document.getElementById("update-check-retry");
   assert.equal(retry.hidden, false);
   controller.handleUpdateApplyPendingPersisted({ version: "9.150.0" });
+  const stagedCta = fixture.document.getElementById("update-cta");
+  controller.handleUpdateCheckResult({ ...manual, result: { ...result, latest: "9.151.0", asset_url: null } });
+  assert.equal(fixture.document.getElementById("update-cta") === stagedCta, true);
+  assert.equal(stagedCta.dataset.status, "ready");
+  assert.equal(stagedCta.textContent, "Update v9.150.0 ready — Restart now");
+  assert.deepEqual(fixture.sent, [], "assetless discovery must preserve the staged offer without a new download");
   controller.handleUpdateCheckResult(manual);
   assert.equal(fixture.document.getElementById("update-cta").dataset.status, "ready");
   controller.handleUpdateAutoApply({ version: "9.150.0", phase: "scheduled", grace_secs: 60 });

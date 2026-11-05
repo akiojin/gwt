@@ -2049,6 +2049,9 @@ fn app_runtime_frontend_ready_replies_launch_wizard_tombstone_when_closed() {
 
 #[test]
 fn manual_update_check_coalesces_and_publishes_without_staging() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let _api = ScopedEnvVar::set("GWT_UPDATE_API_BASE_URL", "http://127.0.0.1:1");
@@ -2111,6 +2114,16 @@ fn manual_update_check_coalesces_and_publishes_without_staging() {
         queued.lock().unwrap().is_empty(),
         "manual discovery must wait for confirmation"
     );
+    let mut without_asset = state.clone();
+    if let gwt_core::update::UpdateState::Available { asset_url, .. } = &mut without_asset {
+        *asset_url = None;
+    }
+    runtime.complete_manual_update_check(without_asset, None);
+    assert!(
+        runtime.pending_update.is_none(),
+        "an idle offer must not return on reconnect"
+    );
+    runtime.pending_update = Some(state.clone());
     runtime.update_download_in_flight = Some("client-1".into());
     let mut newer = state.clone();
     if let gwt_core::update::UpdateState::Available { latest, .. } = &mut newer {
@@ -2189,6 +2202,54 @@ fn manual_update_check_replaces_staged_release_and_releases_its_drain() {
         asset_url: Some(manifest.asset_url.clone()),
         checked_at: chrono::Utc::now(),
     };
+    let mut old = replacement.clone();
+    if let gwt_core::update::UpdateState::Available { latest, .. } = &mut old {
+        *latest = manifest.version.clone();
+    }
+    runtime.pending_update = Some(old.clone());
+    let original_prefs = fs::read(&prefs_path).unwrap();
+    let mut without_asset = replacement.clone();
+    if let gwt_core::update::UpdateState::Available { asset_url, .. } = &mut without_asset {
+        *asset_url = None;
+    }
+    let unavailable = runtime.complete_manual_update_check(without_asset.clone(), None);
+    assert_eq!(runtime.pending_update, Some(old.clone()));
+    assert_eq!(
+        gwt_core::update::load_pending_update_manifest(),
+        Some(manifest.clone())
+    );
+    assert_eq!(fs::read(&prefs_path).unwrap(), original_prefs);
+    assert!(unavailable.iter().any(|event| matches!(
+        &event.event, BackendEvent::UpdateCheckResult { offer_update: true, result: Some(state), .. }
+            if state == &without_asset
+    )));
+
+    let timeout = runtime.issue_monitor_fallback_commit_timeout;
+    runtime.issue_monitor_fallback_commit_timeout = Duration::ZERO;
+    let failed = runtime.complete_manual_update_check(replacement.clone(), None);
+    assert_eq!(
+        gwt_core::update::load_pending_update_manifest(),
+        Some(manifest)
+    );
+    assert_eq!(runtime.pending_update, Some(old));
+    assert_eq!(fs::read(&prefs_path).unwrap(), original_prefs);
+    assert!(!runtime
+        .project_state(&runtime.test_context())
+        .unwrap()
+        .update_auto_apply
+        .is_cancelled("99.0.0"));
+    assert!(!failed
+        .iter()
+        .any(|event| matches!(&event.event, BackendEvent::UpdateAutoApply { .. })));
+    assert!(failed.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::UpdateCheckResult {
+            offer_update: false,
+            result: Some(gwt_core::update::UpdateState::Failed { .. }),
+            ..
+        }
+    )));
+    runtime.issue_monitor_fallback_commit_timeout = timeout;
     let events = runtime.complete_manual_update_check(replacement.clone(), None);
     assert_eq!(runtime.pending_update, Some(replacement));
     assert!(gwt_core::update::load_pending_update_manifest().is_none());
@@ -2247,6 +2308,11 @@ fn manual_update_check_preserves_pending_release_when_cleanup_fails() {
         gwt_core::update::load_pending_update_manifest(),
         Some(manifest)
     );
+    assert!(events.iter().any(|event| matches!(
+        &event.event, BackendEvent::UpdateAutoApply { version,
+            phase: gwt::protocol::UpdateAutoApplyPhase::Cancelled, .. }
+            if version == "99.0.0"
+    )));
     assert!(events.iter().any(|event| matches!(
         &event.event,
         BackendEvent::UpdateCheckResult { checking: false, offer_update: false,
