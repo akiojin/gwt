@@ -1537,7 +1537,8 @@ test("bulk drag and reorder wait for confirmation, forbidden and rejected change
   const before=(await messages(page)).length;
   for(const phase of ["active","done"]) {
     await drag(page,2,column(page,phase).locator("h3"));
-    await expect(page.locator(".issue-queue-feedback")).toContainText("controlled by the monitor");
+    await expect(column(page,phase).locator(".issue-queue-column-notice"))
+      .toContainText(phase==="active" ? "The system controls issues" : "Landed issues cannot be moved");
   }
   expect((await messages(page)).length).toBe(before);
   await drag(page,2,column(page,"queued").locator("h3"));
@@ -1547,6 +1548,32 @@ test("bulk drag and reorder wait for confirmation, forbidden and rejected change
   await expect(page.locator(".issue-queue-feedback")).toHaveText("Issue #2: Queue change rejected: queue is unavailable");
   await confirm(page,[3,4,1]);
   await expect(page.locator(".issue-queue-feedback")).toContainText("queue is unavailable");
+});
+
+test("Issue #4499 drag response: accepting columns light up, Active/Done refuse with a column-top reason that clears", async ({ page }, info) => {
+  const card = row(page, 1);
+  await card.scrollIntoViewIfNeeded();
+  const start = await card.boundingBox();
+  await page.mouse.move(start!.x + 20, start!.y + 10);
+  await page.mouse.down();
+  for (const phase of ["queued", "active"]) {
+    const heading = await column(page, phase).locator("h3").boundingBox();
+    await page.mouse.move(heading!.x + 20, heading!.y + 5, { steps: 8 });
+    await expect(column(page, phase)).toHaveAttribute("data-drop-state", phase === "queued" ? "accept" : "reject");
+  }
+  await expect(column(page, "queued")).not.toHaveAttribute("data-drop-state", /.+/);
+  const refusing = await column(page, "active").evaluate(element => getComputedStyle(element).borderTopColor);
+  const idle = await column(page, "done").evaluate(element => getComputedStyle(element).borderTopColor);
+  expect(refusing, "the refusing column is drawn in a distinct color").not.toBe(idle);
+  await page.mouse.up();
+  const notice = column(page, "active").locator(".issue-queue-column-notice");
+  await expect(notice).toHaveText("The system controls issues while an implementation agent runs. To stop one, use Stop agent on its card.");
+  const refusalShot = info.outputPath(`drag-refusal-${info.project.name}.png`);
+  await page.screenshot({ path: refusalShot });
+  await info.attach(`drag-refusal-${info.project.name}`, { path: refusalShot, contentType: "image/png" });
+  await expect(column(page, "active")).not.toHaveAttribute("data-drop-state", /.+/);
+  await expect(notice).toHaveCount(0, { timeout: 7000 });
+  expect(await messages(page)).toEqual([]);
 });
 
 test("Issue #4499 hold labels preserve queue controls while source exclusions explain triage", async ({ page }) => {

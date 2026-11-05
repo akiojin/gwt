@@ -71,7 +71,7 @@ fn sample_issue_snapshot(number: u64, labels: &[&str]) -> gwt_github::client::Is
 
 fn compile_fake_gh(bin_dir: &Path) {
     let source = r###"
-use std::{env, process::ExitCode};
+use std::{env, io::Write, process::ExitCode};
 
 fn pr_json(number: &str, title: &str) -> String {
 format!(
@@ -81,6 +81,12 @@ format!(
 
 fn main() -> ExitCode {
 let args: Vec<String> = env::args().skip(1).collect();
+if args.first().is_some_and(|argument| argument == "api") && args.iter().any(|argument| argument.contains("/actions/")) {
+    if let Ok(path) = env::var("GWT_FAKE_GH_ARGV_FILE") {
+        let mut log = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+        writeln!(log, "{args:?}").unwrap();
+    }
+}
 match args.as_slice() {
     [pr, view, _number, json_flag, fields, ..]
         if pr == "pr" && view == "view" && json_flag == "--json" && fields.contains("headRefOid") =>
@@ -164,26 +170,43 @@ match args.as_slice() {
         print!("job log 91");
         ExitCode::SUCCESS
     }
-    [api, endpoint] if api == "api" && endpoint == "/repos/akiojin/gwt/actions/runs/90" => {
-        println!("{{\"id\":90,\"repository\":{{\"full_name\":\"akiojin/gwt\"}}}}");
-        ExitCode::SUCCESS
-    }
-    [api, endpoint] if api == "api" && endpoint == "/repos/akiojin/gwt/actions/jobs/91" => {
-        println!("{{\"id\":91,\"run_url\":\"https://api.github.com/repos/akiojin/gwt/actions/runs/90\"}}");
-        ExitCode::SUCCESS
-    }
     [api, endpoint]
-        if api == "api" && endpoint.starts_with("/repos/akiojin/gwt/actions/") =>
+        if api == "api" && (endpoint.starts_with("/repos/akiojin/gwt/actions/") || endpoint.starts_with("/repos/other/project/actions/")) =>
     {
-        eprintln!("gh: Not Found (HTTP 404)");
-        ExitCode::FAILURE
+        let body = match endpoint.as_str() {
+            "/repos/akiojin/gwt/actions/runs/90" => r#"{"id":90,"repository":{"full_name":"akiojin/gwt"},"workflow_id":10,"path":".github/workflows/test.yml"}"#,
+            "/repos/akiojin/gwt/actions/jobs/91" => r#"{"id":91,"run_id":90,"run_url":"https://api.github.com/repos/akiojin/gwt/actions/runs/90"}"#,
+            "/repos/akiojin/gwt/actions/runs/92" => r#"{"id":92,"repository":{"full_name":"akiojin/gwt"},"workflow_id":11,"path":".github/workflows/windows-diagnostic.yml"}"#,
+            "/repos/akiojin/gwt/actions/runs/94" => r#"{"id":94,"repository":{"full_name":"akiojin/gwt"},"workflow_id":11,"path":".github/workflows/windows-diagnostic.yml@refs/heads/develop"}"#,
+            "/repos/akiojin/gwt/actions/runs/106" => r#"{"id":106,"repository":{"full_name":"akiojin/gwt"},"workflow_id":12,"path":".github/workflows/windows-diagnostic.yml@canary.yml@refs/heads/fix@canary"}"#,
+            "/repos/akiojin/gwt/actions/workflows/10" => r#"{"id":10,"path":".github/workflows/test.yml"}"#,
+            "/repos/akiojin/gwt/actions/workflows/11" => r#"{"id":11,"path":".github/workflows/windows-diagnostic.yml"}"#,
+            "/repos/akiojin/gwt/actions/workflows/12" => r#"{"id":12,"path":".github/workflows/windows-diagnostic.yml@canary.yml"}"#,
+            "/repos/akiojin/gwt/actions/jobs/93" => r#"{"id":93,"run_id":94,"run_url":"https://api.github.com/repos/akiojin/gwt/actions/runs/94"}"#,
+            "/repos/akiojin/gwt/actions/jobs/95" => r#"{"id":95,"run_id":0,"run_url":"https://api.github.com/repos/akiojin/gwt/actions/runs/90"}"#,
+            "/repos/akiojin/gwt/actions/jobs/96" => r#"{"id":96,"run_id":98,"run_url":"https://api.github.com/repos/akiojin/gwt/actions/runs/98"}"#,
+            "/repos/akiojin/gwt/actions/runs/98" => r#"{"id":98,"repository":{"full_name":"akiojin/gwt"}}"#,
+            "/repos/akiojin/gwt/actions/jobs/97" => r#"{"id":97,"run_id":99,"run_url":"https://api.github.com/repos/akiojin/gwt/actions/runs/99"}"#,
+            "/repos/akiojin/gwt/actions/runs/99" => r#"{"id":100,"repository":{"full_name":"akiojin/gwt"},"path":".github/workflows/test.yml"}"#,
+            "/repos/akiojin/gwt/actions/jobs/101" => r#"{"id":101,"run_id":102,"run_url":"https://api.github.com/repos/akiojin/gwt/actions/runs/102"}"#,
+            "/repos/akiojin/gwt/actions/runs/102" => r#"{"id":102,"repository":{"full_name":"foreign/repo"},"path":".github/workflows/test.yml"}"#,
+            "/repos/akiojin/gwt/actions/jobs/105" => r#"{"id":105,"run_id":90,"run_url":"https://api.github.com/repos/akiojin/gwt/actions/runs/94"}"#,
+            "/repos/other/project/actions/runs/90" => r#"{"id":90,"repository":{"full_name":"other/project"},"path":".github/workflows/windows-diagnostic.yml"}"#,
+            "/repos/other/project/actions/jobs/91" => r#"{"run_url":"https://api.github.com/repos/other/project/actions/runs/90"}"#,
+            _ => { eprintln!("gh: Not Found (HTTP 404)"); return ExitCode::FAILURE; }
+        };
+        println!("{body}");
+        ExitCode::SUCCESS
     }
     [api, method_flag, method, endpoint]
         if api == "api"
             && method_flag == "--method"
             && method == "POST"
             && (endpoint == "/repos/akiojin/gwt/actions/runs/90/rerun-failed-jobs"
-                || endpoint == "/repos/akiojin/gwt/actions/jobs/91/rerun") =>
+                || endpoint == "/repos/akiojin/gwt/actions/runs/106/rerun"
+                || endpoint == "/repos/akiojin/gwt/actions/jobs/91/rerun"
+                || endpoint == "/repos/other/project/actions/runs/90/rerun"
+                || endpoint == "/repos/other/project/actions/jobs/91/rerun") =>
     {
         println!("{{}}");
         ExitCode::SUCCESS
@@ -319,6 +342,105 @@ fn lazy_issue_client_defers_resolution_until_first_issue_call() {
         Err(gwt_github::client::ApiError::Unauthorized)
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn diagnostic_workflow_id_requires_the_durable_request_route() {
+    use axum::http::{Method, StatusCode, Uri};
+    use gwt_github::client::http::{HttpIssueClient, ReqwestTransport};
+    let _lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+    fs::create_dir_all(gwt_core::paths::gwt_home()).unwrap();
+    fs::write(
+        gwt_core::paths::gwt_config_path(),
+        "[allowed_workflows]\n\"akiojin/gwt\"=[\"windows-diagnostic.yml\"]\n\"other/project\"=[\"windows-diagnostic.yml\"]\n",
+    )
+    .unwrap();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let captured = requests.clone();
+    let app = axum::Router::new().fallback(move |method: Method, uri: Uri| {
+        captured.fetch_add(1, Ordering::SeqCst);
+        async move {
+            match (method.as_str(), uri.path()) {
+                ("GET", "/repos/akiojin/gwt/actions/workflows/42") => (
+                    StatusCode::OK,
+                    r#"{"path":".github/workflows/windows-diagnostic.yml"}"#,
+                ),
+                (
+                    "GET",
+                    "/repos/other/project/contents/.github/workflows/windows-diagnostic.yml",
+                ) => (
+                    StatusCode::OK,
+                    "name: Other workflow\non: workflow_dispatch\n",
+                ),
+                (
+                    "POST",
+                    "/repos/other/project/actions/workflows/windows-diagnostic.yml/dispatches",
+                ) => (StatusCode::NO_CONTENT, ""),
+                _ => (StatusCode::NOT_FOUND, ""),
+            }
+        }
+    });
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let listener = runtime
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    runtime.spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let repo = tempfile::tempdir().unwrap();
+    let factory: Arc<IssueClientFactory> = Arc::new(move |owner, repo| {
+        HttpIssueClient::with_transport(
+            ReqwestTransport::new().unwrap(),
+            "fixture".into(),
+            owner,
+            repo,
+        )
+        .with_test_endpoints(base.clone(), format!("{base}/graphql"), true)
+    });
+    let mut env = DefaultCliEnv::new_with_client_factory(
+        "akiojin",
+        "gwt",
+        repo.path().to_path_buf(),
+        factory.clone(),
+    );
+    let error = env
+        .dispatch_actions(crate::cli::ActionsDispatchCall {
+            workflow: "42".into(),
+            git_ref: "develop".into(),
+            inputs: Default::default(),
+        })
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("actions.diagnostic.request"),
+        "{error}"
+    );
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
+    fs::create_dir_all(repo.path().join(".github/workflows")).unwrap();
+    fs::write(
+        repo.path().join(".github/workflows/windows-diagnostic.yml"),
+        "name: Other workflow\non: workflow_dispatch\n",
+    )
+    .unwrap();
+    let mut other = DefaultCliEnv::new_with_client_factory(
+        "other",
+        "project",
+        repo.path().to_path_buf(),
+        factory,
+    );
+    assert_eq!(
+        other
+            .dispatch_actions(crate::cli::ActionsDispatchCall {
+                workflow: "windows-diagnostic.yml".into(),
+                git_ref: "develop".into(),
+                inputs: Default::default()
+            })
+            .unwrap(),
+        "workflow dispatch requested"
+    );
+    assert_eq!(requests.load(Ordering::SeqCst), 3);
 }
 
 #[test]
@@ -2512,6 +2634,13 @@ fn default_cli_env_routes_gh_backed_methods_and_internal_dispatch() {
             .rerun_actions(crate::cli::ActionsRerunTarget::Job { job_id: 91 })
             .expect("rerun job")
             .contains("job 91"));
+        assert!(env
+            .rerun_actions(crate::cli::ActionsRerunTarget::Run {
+                run_id: 106,
+                failed_only: false,
+            })
+            .expect("a distinct workflow containing @ remains rerunnable")
+            .contains("run 106"));
         let refused = env
             .rerun_actions(crate::cli::ActionsRerunTarget::Run {
                 run_id: 777,
@@ -2524,6 +2653,64 @@ fn default_cli_env_routes_gh_backed_methods_and_internal_dispatch() {
                 .contains("run 777 does not belong to akiojin/gwt"),
             "unexpected error: {refused}"
         );
+
+        {
+            let log = repo_path.join("refused-rerun-argv");
+            let _log = gwt_core::test_support::ScopedEnvVar::set("GWT_FAKE_GH_ARGV_FILE", &log);
+            for target in [
+                crate::cli::ActionsRerunTarget::Run {
+                    run_id: 92,
+                    failed_only: false,
+                },
+                crate::cli::ActionsRerunTarget::Run {
+                    run_id: 92,
+                    failed_only: true,
+                },
+                crate::cli::ActionsRerunTarget::Run {
+                    run_id: 94,
+                    failed_only: false,
+                },
+                crate::cli::ActionsRerunTarget::Job { job_id: 93 },
+                crate::cli::ActionsRerunTarget::Job { job_id: 95 },
+                crate::cli::ActionsRerunTarget::Job { job_id: 96 },
+                crate::cli::ActionsRerunTarget::Job { job_id: 97 },
+                crate::cli::ActionsRerunTarget::Job { job_id: 101 },
+                crate::cli::ActionsRerunTarget::Job { job_id: 105 },
+            ] {
+                let refused = env
+                    .rerun_actions(target)
+                    .expect_err("fixed or unconfirmed workflow must not be rerun");
+                assert!(refused.to_string().contains("actions.rerun"), "{refused}");
+            }
+            assert!(!fs::read_to_string(log).unwrap().contains("\"POST\""));
+        }
+        let mut other = DefaultCliEnv::new("other", "project", repo_path.to_path_buf());
+        assert!(
+            other
+                .rerun_actions(crate::cli::ActionsRerunTarget::Run {
+                    run_id: 90,
+                    failed_only: false
+                })
+                .is_ok(),
+            "the diagnostic filename remains ordinary in another repository"
+        );
+        {
+            let log = repo_path.join("ordinary-job-rerun-argv");
+            let _log = gwt_core::test_support::ScopedEnvVar::set("GWT_FAKE_GH_ARGV_FILE", &log);
+            assert!(other
+                .rerun_actions(crate::cli::ActionsRerunTarget::Job { job_id: 91 })
+                .is_ok());
+            let calls = fs::read_to_string(log).unwrap();
+            assert_eq!(
+                calls.lines().count(),
+                2,
+                "an ordinary job keeps one lookup and one POST"
+            );
+            assert!(
+                !calls.contains("/actions/runs/"),
+                "an ordinary job needs no parent lookup"
+            );
+        }
 
         let note_path = repo_path.join("note.md");
         fs::write(&note_path, "hello").expect("write note");

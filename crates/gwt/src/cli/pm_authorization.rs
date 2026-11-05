@@ -120,7 +120,10 @@ fn validate(intent: &OperationIntent) -> io::Result<()> {
         "update.settings.set" => {
             let _: UpdateInput = decode(&intent.params)?;
         }
-        "actions.release_policy.add" | "actions.release_policy.rollback" => {
+        "actions.release_policy.add"
+        | "actions.release_policy.rollback"
+        | "actions.diagnostic.policy.add"
+        | "actions.diagnostic.policy.rollback" => {
             super::actions::release_policy::validate(intent)?;
         }
         "pr.auto_merge.enable" => {
@@ -288,6 +291,7 @@ fn request_with(
         "board.config.set" | "discussion.create" => "Board synchronization can publish this project's Board entries to its repository Discussion.",
         "repository.required_checks.update" => "This changes required check contexts on the selected develop/main branch.",
         "actions.release_policy.add" | "actions.release_policy.rollback" => "This changes only prepare-release.yml permission for the current repository. It does not dispatch a workflow. Rollback requires the original successful add receipt and unchanged post-state.",
+        "actions.diagnostic.policy.add" | "actions.diagnostic.policy.rollback" => "This changes only windows-diagnostic.yml permission for akiojin/gwt. It does not submit or rerun a diagnostic. Rollback requires this target's successful add receipt and unchanged post-state.",
         "pr.auto_merge.enable" => "Enables GitHub auto-merge for this reviewed external fork head. It can merge immediately when GitHub's gates pass. Remembered approval remains fixed to this PR and reviewed SHA.",
         _ => "The existing operation's ownership and safety checks still apply.",
     };
@@ -295,7 +299,10 @@ fn request_with(
         "Permission applies only to this PR number and reviewed head SHA, including remembered approval. A changed head requires another review and authorization."
     } else if matches!(
         intent.operation.as_str(),
-        "actions.release_policy.add" | "actions.release_policy.rollback"
+        "actions.release_policy.add"
+            | "actions.release_policy.rollback"
+            | "actions.diagnostic.policy.add"
+            | "actions.diagnostic.policy.rollback"
     ) {
         "Permission remains bound to these exact request, token and reason parameters, including remembered approval. A changed request requires fresh authorization."
     } else {
@@ -564,7 +571,10 @@ fn execute<E: CliEnv>(
     validate(intent)?;
     if matches!(
         intent.operation.as_str(),
-        "actions.release_policy.add" | "actions.release_policy.rollback"
+        "actions.release_policy.add"
+            | "actions.release_policy.rollback"
+            | "actions.diagnostic.policy.add"
+            | "actions.diagnostic.policy.rollback"
     ) {
         return super::actions::release_policy::execute(env, repo, intent, authorization);
     }
