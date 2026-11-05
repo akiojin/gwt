@@ -198,7 +198,7 @@ export function createSocketReceiveDispatcher({
           error_name: error && error.name,
         }));
         console.warn(
-          "[ws-dispatcher] receive threw for %s — continuing with remaining events",
+          "[ws-dispatcher] receive threw for %s",
           eventKind,
           error,
         );
@@ -208,6 +208,11 @@ export function createSocketReceiveDispatcher({
           } catch (_) {
             // The error reporter must never take down the event path.
           }
+        }
+        // Later ANSI chunks depend on the screen this packet produced.
+        // Discard the torn suffix and recover an authoritative snapshot.
+        if (!disposed && (eventKind === "terminal_output" || eventKind === "terminal_snapshot")) {
+          invalidate("receive-error");
         }
       }
       cursor += 1;

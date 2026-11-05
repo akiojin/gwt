@@ -1287,8 +1287,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           onResync: (reason) => {
             if (ownGeneration !== socketReceiveDispatcherGeneration) return;
             // A native receive backlog precedes snapshots on the old socket.
-            // Replace the project transport on foreground recovery to discard it.
-            if ((reason === "visible" || reason === "overflow") && socketProjectKey) connectSocket(true);
+            // Replace the transport so a torn stream cannot precede recovery.
+            if ((reason === "visible" || reason === "overflow" || reason === "receive-error") && socketProjectKey) connectSocket(true);
             else requestSocketSnapshots();
           },
           // Issue #3365 — a receive() failure keeps the event stream alive but
