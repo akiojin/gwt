@@ -1,11 +1,13 @@
-//! Unpublished coordinator Host credential registry foundation (Issue #6476).
+//! Coordinator Host credential registry and offline administration (Issue #6476).
 //!
-//! No listener, device approval or PTY authority lives here. The unpublished
-//! storage module holds a separate registry lock, saves candidate secrets to
+//! No listener, device approval or PTY authority lives here. The storage module
+//! holds a separate registry lock, saves candidate secrets to
 //! private files first, atomically persists the registry second, and reloads
 //! before reporting success. Preparing a candidate is not successful issuance.
 
 pub mod storage;
+
+pub mod admin;
 
 use gwt_core::repo_hash::ProjectKey;
 use ring::rand::{SecureRandom, SystemRandom};
