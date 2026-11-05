@@ -163,20 +163,27 @@ fn reclaim_group(process_group: u32) -> bool {
     // The exited leader remains a group member until reap. Its presence must
     // not produce the transcript's "left descendants running" diagnostic.
     // This snapshot controls reporting only; cleanup is always attempted.
-    let mut system = System::new();
-    system.refresh_processes_specifics(
-        ProcessesToUpdate::All,
-        true,
-        ProcessRefreshKind::nothing().without_tasks(),
-    );
-    let descendants = system.processes().iter().any(|(pid, process)| {
-        pid.as_u32() != process_group
-            && !matches!(process.status(), ProcessStatus::Dead | ProcessStatus::Zombie)
-            // SAFETY: getpgid only queries a PID; disappearing processes are
-            // ignored. The owned leader still pins the target group id.
-            && unsafe { libc::getpgid(pid.as_u32() as libc::pid_t) }
-                == process_group as libc::pid_t
-    });
+    let descendants = match System::new() {
+        Ok(mut system) => {
+            system.refresh_processes_specifics(
+                ProcessesToUpdate::All,
+                true,
+                ProcessRefreshKind::nothing().without_tasks(),
+            );
+            system.processes().iter().any(|(pid, process)| {
+                pid.as_u32() != process_group
+                    && !matches!(process.status(), ProcessStatus::Dead | ProcessStatus::Zombie)
+                    // SAFETY: getpgid only queries a PID; disappearing processes are
+                    // ignored. The owned leader still pins the target group id.
+                    && unsafe { libc::getpgid(pid.as_u32() as libc::pid_t) }
+                        == process_group as libc::pid_t
+            })
+        }
+        Err(error) => {
+            tracing::warn!(%error, process_group, "owned group descendant observation unavailable; cleanup still attempted");
+            false
+        }
+    };
     // SAFETY: the owned leader is unreaped whenever production calls here,
     // so the group id cannot be recycled. Reporting never suppresses cleanup.
     unsafe { libc::killpg(process_group as libc::pid_t, libc::SIGKILL) == 0 && descendants }

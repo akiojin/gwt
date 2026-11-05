@@ -249,6 +249,21 @@ fn owner_output_coalescing_order(
             && id == previous_id
             && incarnation == previous_incarnation =>
         {
+            // A matching queue entry always discards one of these two observations.
+            // Global sequence distance is not a count of discarded output chunks.
+            tracing::debug!(
+                target: "gwt.terminal.delivery",
+                stage = "gui_output_coalesced",
+                process_id = std::process::id(),
+                project_key = context.project_key.as_str(),
+                connection_id = *connection_id,
+                pane_id = id.as_str(),
+                incarnation = *incarnation,
+                discarded_count = 1u64,
+                discarded_seq = (*seq).min(*previous_seq),
+                retained_seq = (*seq).max(*previous_seq),
+                "GUI output inbox coalesced one observation"
+            );
             Some(seq.cmp(previous_seq))
         }
         _ => None,
@@ -503,7 +518,15 @@ fn update_notice(level: &str, message: String) -> OutboundEvent {
 }
 
 fn update_elevation_notice(version: &str) -> String {
-    format!("Update v{version}: Administrator privileges required; the update stays staged. Use the update button to apply manually.")
+    let reason = gwt_core::update::load_pending_update_manifest()
+        .filter(|manifest| manifest.version == version)
+        .and_then(|manifest| {
+            std::env::current_exe().ok().and_then(|exe| {
+                gwt_core::update::prepared_payload_automatic_apply_refusal(&manifest.payload, &exe)
+            })
+        })
+        .unwrap_or_else(|| "Administrator privileges required".into());
+    format!("Update v{version}: {reason}; the update stays staged. Use the update button to apply manually.")
 }
 
 fn record_pending_update_observation(
@@ -612,6 +635,20 @@ impl BlockingTaskSpawner {
                 Ok(())
             }
         }
+    }
+}
+
+struct HookDoctorFlight {
+    in_flight: Arc<Mutex<HashSet<PathBuf>>>,
+    project_root: PathBuf,
+}
+
+impl Drop for HookDoctorFlight {
+    fn drop(&mut self) {
+        self.in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.project_root);
     }
 }
 
@@ -1480,6 +1517,8 @@ pub(crate) enum IssueMonitorLaunchDeliveryState {
     Materializing {
         window_id: String,
         started_at: std::time::Instant,
+        // A successful launch retains its immutable operation in this owner epoch.
+        accepted_owner: Option<gwt::daemon_subscriber::ProjectOwnerIdentity>,
     },
     LaunchedPendingAck {
         window_id: String,
@@ -2003,6 +2042,7 @@ pub struct AppRuntime {
     pub(crate) project_log_scopes: HashMap<String, gwt_core::logging::ProjectLogScope>,
     pub(crate) proxy: AppEventProxy,
     pub(crate) blocking_tasks: BlockingTaskSpawner,
+    pub(crate) hook_doctor_in_flight: Arc<Mutex<HashSet<PathBuf>>>,
     pub(crate) agent_maintenance: agent_maintenance::AgentMaintenanceState,
     pub(crate) sessions_dir: PathBuf,
     pub(crate) launch_wizard_cache: LaunchWizardMemoryCache,
@@ -4896,6 +4936,7 @@ impl AppRuntime {
             project_log_scopes: HashMap::new(),
             proxy,
             blocking_tasks,
+            hook_doctor_in_flight: Default::default(),
             agent_maintenance: Default::default(),
             sessions_dir,
             launch_wizard_cache,
@@ -10045,6 +10086,7 @@ impl AppRuntime {
                 .filter(|lease| {
                     lease.owner.as_ref().is_some_and(|owner| {
                         gwt::process::is_descendant_of(owner.pid, std::process::id())
+                            .unwrap_or(true)
                     })
                 })
                 .and_then(|lease| lease.lease_id)
@@ -10895,6 +10937,73 @@ impl AppRuntime {
         generation
     }
 
+    fn spawn_hook_doctor(
+        &self,
+        context: &ProjectContext,
+        client_id: ClientId,
+        request_id: u64,
+        repair: bool,
+    ) -> Vec<OutboundEvent> {
+        let project_root = context.project_root.clone();
+        if !self
+            .hook_doctor_in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(project_root.clone())
+        {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::HookDoctor {
+                    project_root: project_root.to_string_lossy().into_owned(),
+                    request_id,
+                    report: None,
+                    error: Some("Hook audit or regeneration is already in progress for this project. Retry after it finishes.".to_string()),
+                },
+            )];
+        }
+        // Own the reservation before enqueue so a rejected or discarded task
+        // releases it as well as a completed or unwinding worker.
+        let flight = HookDoctorFlight {
+            in_flight: Arc::clone(&self.hook_doctor_in_flight),
+            project_root: project_root.clone(),
+        };
+        let proxy = self.proxy.for_project(context.clone());
+        let worker_root = project_root.clone();
+        let worker_client = client_id.clone();
+        if let Err(error) = self.blocking_tasks.try_spawn(move || {
+            let mut input = gwt::cli::hook::health::ManagedHookHealthInput::new(&worker_root);
+            // This is a project audit, not an observation of the GUI parent's
+            // agent Session or its runtime sidecar.
+            input.runtime_state_path = None;
+            let (report, error) =
+                match gwt::cli::hook::health::read_hook_doctor(&input, repair, None) {
+                    Ok(report) => (Some(report), None),
+                    Err(error) => (None, Some(error.to_string())),
+                };
+            drop(flight);
+            proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
+                worker_client,
+                BackendEvent::HookDoctor {
+                    project_root: worker_root.to_string_lossy().into_owned(),
+                    request_id,
+                    report,
+                    error,
+                },
+            )]));
+        }) {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::HookDoctor {
+                    project_root: project_root.to_string_lossy().into_owned(),
+                    request_id,
+                    report: None,
+                    error: Some(format!("Hook audit worker could not start: {error}")),
+                },
+            )];
+        }
+        Vec::new()
+    }
+
     fn spawn_agent_backend_connection_probe(
         &mut self,
         client_id: ClientId,
@@ -11238,6 +11347,15 @@ impl AppRuntime {
                     self.update_settings_event(None),
                 )]
             }
+            FrontendEvent::GetHookDoctor { request_id, .. } => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::HookDoctor {
+                    project_root: String::new(),
+                    request_id,
+                    report: None,
+                    error: Some("Open a project to audit managed hooks.".to_string()),
+                },
+            )],
             FrontendEvent::GetSystemSettings => self.system_settings_get_events(client_id),
             FrontendEvent::GetBoardAuthStatus => self.board_auth_status_events(client_id, None),
             FrontendEvent::BoardProviderSignIn { provider } => {
@@ -12422,6 +12540,9 @@ impl AppRuntime {
                 &client_id,
                 self.update_settings_event(Some(&context.project_root)),
             )],
+            FrontendEvent::GetHookDoctor { request_id, repair } => {
+                self.spawn_hook_doctor(context, client_id, request_id, repair)
+            }
             FrontendEvent::GetSystemSettings => self.system_settings_get_events(client_id),
             FrontendEvent::GetBoardAuthStatus => self.board_auth_status_events(client_id, None),
             FrontendEvent::BoardProviderSignIn { provider } => {
@@ -13851,7 +13972,10 @@ fn work_branches_with_live_processes(targets: &[WorkBranchScanTarget]) -> HashSe
         return HashSet::new();
     }
 
-    let mut system = System::new();
+    let Ok(mut system) = System::new() else {
+        // An unavailable census cannot authorize collection of any worktree.
+        return worktrees.into_iter().map(|(branch, _)| branch).collect();
+    };
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
         true,
@@ -13914,6 +14038,15 @@ impl AppRuntime {
         if !changed {
             return Vec::new();
         }
+        tracing::debug!(
+            target: "gwt.terminal.delivery",
+            stage = "owner_connection",
+            process_id = std::process::id(),
+            project_key = context.project_key.as_str(),
+            connection_id,
+            state = ?health.state,
+            "project owner connection changed"
+        );
         let mut events = vec![
             OutboundEvent::project(
                 context.project_key.clone(),
@@ -14240,15 +14373,17 @@ impl AppRuntime {
         };
         match event {
             OwnerEvent::Output {
-                id,
+                id: owner_pane_id,
                 incarnation,
                 data,
                 seq,
+                previous_seq,
                 screen,
                 screen_ansi,
                 screen_seq,
             } => {
-                let Some(id) = self.window_id_for_owner_pane(context, identity, &id, incarnation)
+                let Some(id) =
+                    self.window_id_for_owner_pane(context, identity, &owner_pane_id, incarnation)
                 else {
                     return Vec::new();
                 };
@@ -14256,7 +14391,31 @@ impl AppRuntime {
                 if seq <= runtime.output_seq {
                     return Vec::new();
                 }
-                let gap = seq != runtime.output_seq.saturating_add(1);
+                // Positions are process-wide, so another pane may legitimately
+                // occupy every numerical position between these two outputs.
+                let gap = previous_seq != Some(runtime.output_seq);
+                if gap {
+                    tracing::debug!(
+                        target: "gwt.terminal.delivery",
+                        stage = "output_gap",
+                        process_id = std::process::id(),
+                        project_key = context.project_key.as_str(),
+                        connection_id,
+                        pane_id = owner_pane_id.as_str(),
+                        window_id = id.as_str(),
+                        incarnation,
+                        accepted_seq = runtime.output_seq,
+                        previous_seq = ?previous_seq,
+                        seq,
+                        screen_seq,
+                        repair = if screen_seq.max(runtime.screen_seq) < seq {
+                            "request_snapshot"
+                        } else {
+                            "inline_snapshot"
+                        },
+                        "owner output predecessor requires snapshot repair"
+                    );
+                }
                 // Coalescing may omit deltas, but the owner carries its full
                 // parsed screen with every output event. Never forward a
                 // surviving delta across a gap as though it were contiguous.
@@ -15314,13 +15473,35 @@ impl AppRuntime {
                     self.apply_owner_window_removed_projection(&context, &window_id)
                 }
                 Ok(RemoteOwnerLaunchOutcome::Runtime(snapshot, session)) => {
-                    self.pending_launch_feedback_contexts.remove(&window_id);
                     let client = client_cell
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .as_ref()
                         .and_then(|value| value.as_ref().ok())
                         .cloned();
+                    let delivery_id = self
+                        .pending_launch_feedback_contexts
+                        .get(&window_id)
+                        .and_then(|feedback| feedback.issue_monitor_delivery_id.as_ref());
+                    match (
+                        client.as_ref().and_then(|client| client.identity()),
+                        delivery_id.and_then(|id| self.issue_monitor_launch_deliveries.get_mut(id)),
+                    ) {
+                        (
+                            Some(identity),
+                            Some(IssueMonitorLaunchDeliveryState::Materializing {
+                                window_id: pending,
+                                accepted_owner,
+                                ..
+                            }),
+                        ) if pending == &window_id => {
+                            // Inventory may already have installed this runtime. Keep the
+                            // native operation's owner before consuming its GUI feedback.
+                            *accepted_owner = Some(identity.clone());
+                        }
+                        _ => {}
+                    }
+                    self.pending_launch_feedback_contexts.remove(&window_id);
                     let Some(client) = client else {
                         return self.status_events(
                             window_id,
@@ -15344,10 +15525,22 @@ impl AppRuntime {
                     )
                 }
                 Err(error) => {
-                    let mut notification = if restore_refusal
-                        .as_ref()
-                        .is_none_or(|refusal| refusal.code == "restore_launch_failed")
-                    {
+                    // A refusal receipt is complete only after its readback and
+                    // exact cleanup succeed. A later RPC failure remains actionable.
+                    let pure_owner_refusal = restore_refusal.as_ref().is_some_and(|refusal| {
+                        !matches!(
+                            refusal.code.as_str(),
+                            "restore_launch_failed"
+                                | "source_unreadable"
+                                | "session_unreadable"
+                                | "monitor_unreadable"
+                                | "execution_unreadable"
+                                | "work_authority_unreadable"
+                        ) && refusal.canonical_rows.is_some()
+                            && refusal.message == error
+                    });
+                    let genuine_restore_failure = !pure_owner_refusal;
+                    let mut notification = if genuine_restore_failure {
                         restore_feedback
                             .as_ref()
                             .and_then(|feedback| {
@@ -15372,6 +15565,35 @@ impl AppRuntime {
                         .unwrap_or(startup::RestoreRefusal::LaunchNotStarted);
                     self.record_restore_window_outcome(&window_id, Err(refusal_reason));
                     self.restore_launch_windows.remove(&window_id);
+                    // A policy refusal is not a failed process launch. Retain its
+                    // diagnostic window without manufacturing an Error transition.
+                    // Only an authenticated, fully read-back owner refusal qualifies;
+                    // I/O failures while reading that receipt still take the error path.
+                    let expected_automatic_refusal =
+                        restore_feedback.as_ref().is_some_and(|feedback| {
+                            feedback.origin == startup::RestoreOrigin::Automatic
+                        }) && pure_owner_refusal
+                            && restore_refusal.as_ref().is_some_and(|refusal| {
+                                gwt::project_runtime::installation::is_expected_restore_exclusion(
+                                    &refusal.code,
+                                )
+                            });
+                    if expected_automatic_refusal {
+                        let refusal = restore_refusal.as_ref().expect("owner refusal");
+                        notification.push(OutboundEvent::project(
+                            context.project_key.clone(),
+                            BackendEvent::IssueMonitorToast {
+                                notification_transition: None,
+                                notification_transition_id: None,
+                                level: "info".into(),
+                                message: format!("Automatic restore skipped: {}", refusal.code),
+                                issue_number: restore_feedback
+                                    .as_ref()
+                                    .and_then(|feedback| feedback.source.as_ref())
+                                    .and_then(|source| source.linked_issue_number),
+                            },
+                        ));
+                    }
                     if restore_feedback.as_ref().is_some_and(|feedback| {
                         self.window_lookup
                             .get(&window_id)
@@ -15475,7 +15697,9 @@ impl AppRuntime {
                                             .is_some_and(|detail| !detail.trim().is_empty())
                                     }))
                     });
-                    if retained_diagnostic {
+                    if expected_automatic_refusal
+                        || (retained_diagnostic && !genuine_restore_failure)
+                    {
                         return notification;
                     }
                     let session_id = self
@@ -15486,15 +15710,16 @@ impl AppRuntime {
                                 .and_then(|tab| tab.workspace.window(&address.raw_id))
                         })
                         .and_then(|window| window.session_id.clone());
-                    let (status, detail) =
-                        if refusal_reason == startup::RestoreRefusal::NoResumeSession {
-                            (
-                                WindowProcessStatus::Stopped,
-                                Self::EXACT_SESSION_RESTORE_UNAVAILABLE_DETAIL.to_string(),
-                            )
-                        } else {
-                            (WindowProcessStatus::Error, error)
-                        };
+                    let (status, detail) = if pure_owner_refusal
+                        && refusal_reason == startup::RestoreRefusal::NoResumeSession
+                    {
+                        (
+                            WindowProcessStatus::Stopped,
+                            Self::EXACT_SESSION_RESTORE_UNAVAILABLE_DETAIL.to_string(),
+                        )
+                    } else {
+                        (WindowProcessStatus::Error, error)
+                    };
                     notification.extend(self.apply_owner_terminal_launch_projection(
                         &context,
                         &window_id,
@@ -15536,6 +15761,32 @@ impl AppRuntime {
             } else {
                 detail.into()
             };
+            if let Some(delivery_id) = feedback.issue_monitor_delivery_id.as_ref() {
+                if matches!(
+                    self.issue_monitor_launch_deliveries.get(delivery_id),
+                    Some(IssueMonitorLaunchDeliveryState::Materializing { window_id: pending, .. })
+                        if pending == window_id
+                ) {
+                    // Keep the original failure out of placeholder recovery while
+                    // the physical owner retains its delivery/cleanup authority.
+                    let fresh_execution = self.failed_fresh_execution_monitor_candidate(
+                        Some(&context.project_root),
+                        issue_number,
+                        delivery_id,
+                    );
+                    self.issue_monitor_launch_deliveries.insert(
+                        delivery_id.clone(),
+                        IssueMonitorLaunchDeliveryState::LaunchFailed {
+                            message: message.clone(),
+                            session_mode: feedback
+                                .issue_monitor_session_mode
+                                .unwrap_or(gwt_agent::SessionMode::Normal),
+                            retryable: true,
+                            fresh_execution,
+                        },
+                    );
+                }
+            }
             events.push(OutboundEvent::project(
                 context.project_key.clone(),
                 BackendEvent::IssueMonitorLaunchFailed {

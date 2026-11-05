@@ -900,10 +900,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           connectionOverlay.reportInputDropped();
           return "unavailable";
         }
-        // Revisioned names and switches belong to this live connection.
+        // These explicit writes belong to this live connection.
         // Never replay an unacknowledged write after reconnect.
         if ((message.kind === "agent_switch" && message.action.kind !== "read") ||
-            (message.kind === "agent_roster" && message.action.kind === "rename")) {
+            (message.kind === "agent_roster" && message.action.kind === "rename") ||
+            (message.kind === "get_hook_doctor" && message.repair === true)) {
           if (!socket || socket.readyState !== WebSocket.OPEN || socketProjectKey !== activeProjectKey()) return "unavailable";
           try { socket.send(JSON.stringify(message)); return "sent"; } catch (_err) { return "unavailable"; }
         }
@@ -1315,7 +1316,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         // every cleanup event emitted while it was away. Re-subscribe to the
         // operations it still shows as running.
         if (recoverSnapshots === true) resyncSocketSurfaces();
-        else if (socketProjectKey) send({ kind: "get_system_settings" });
+        else if (socketProjectKey) {
+          send({ kind: "get_system_settings" });
+          resyncHookDoctor();
+        }
         syncRunningBranchCleanups();
         requestVisiblePmReports(true);
         requestSupportedAgentRefresh();
@@ -1792,6 +1796,18 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
               active_tab_id: null,
               recent_projects: [],
             });
+            // Runtime snapshots observe unmounted windows too. Reconcile
+            // attention against the full catalog, never DOM membership.
+            const currentWindowIds = allProjectWindowIdSet();
+            for (const windowId of windowRuntimeStateMap.keys()) {
+              if (currentWindowIds.has(windowId)) continue;
+              agentAttentionToaster.forgetWindow(windowId);
+              alertsToasts.dismiss(`attention-${windowId}`);
+              windowRuntimeStateMap.delete(windowId);
+              windowRuntimeStateSinceMap.delete(windowId);
+              detailMap.delete(windowId);
+              renderedRuntimeStatusKeys.delete(windowId);
+            }
             // Rebind before rendering can emit requests for the new project.
             connectSocket();
             if (incomingRuntimeStatus) {
@@ -2592,7 +2608,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         return item;
       }
 
-      function applyStatus(windowId, status, detail) {
+      function applyStatus(windowId, status, detail, source = "snapshot", retryable = false) {
         return traceMeasure(
           UI_TRACE_EVENT.applyStatus,
           { window_id: windowId, status },
@@ -2619,6 +2635,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             if (detail) {
               detailMap.set(windowId, detail);
             } else if (
+              (source === "terminal_status" && runtimeState === "error") ||
               runtimeState === "running" ||
               runtimeState === "starting" ||
               runtimeState === "idle" ||
@@ -2635,6 +2652,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
                 runtimeState,
                 windowData,
                 statusDetail: effectiveDetail,
+                projectKey: windowContext?.tab.project_key || windowContext?.tab.id,
+                source,
+                retryable,
               });
             }
             const nextRuntimeStatusKey = windowRuntimeStatusRenderKey(
@@ -2957,6 +2977,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         options = {},
       ) {
         const readOnly = options.readOnly === true;
+        terminalContainer.title =
+          "Scroll to review history. Hold Shift+drag to select text (Option+drag on macOS).";
         const copyCleanup = installTerminalCopyHandlers(windowId, terminalContainer, terminal);
         const imagePasteCleanup = readOnly
           ? noopCleanup
@@ -2973,11 +2995,13 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           window,
           isApplicationScrollFallbackEnabled: () =>
             isAgentWindowPreset(workspaceWindowById(windowId)?.preset),
-          sendTerminalInput: (data) => {
+          sendTerminalInput: (data, { focus = true } = {}) => {
             if (readOnly || terminalMap.get(windowId)?.isReady !== true) {
               return;
             }
-            terminal.focus();
+            if (focus) {
+              terminal.focus();
+            }
             send({ kind: "terminal_input", id: windowId, data });
           },
         });
@@ -3070,6 +3094,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           fontSize: 14,
           lineHeight: isBlinkBrowser() ? 1.35 : 1.3,
           scrollback: 5000,
+          macOptionClickForcesSelection: true,
           // SPEC-3671 FR-008.
           disableStdin: options.readOnly === true,
         });
@@ -3740,7 +3765,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         const level = flavor === "error" ? "error" : flavor === "done" ? "done" : "warn";
         const timeoutMs = flavor === "error" ? 0 : flavor === "done" ? 8_000 : 14_000;
         const alert = {
-          id: `attention-${notice.windowId}`,
+          id: notice.id,
           level,
           title: notice.title || "Agent attention",
           message: notice.body || "",
@@ -3750,7 +3775,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         };
         // FR-011: recorded regardless of the toast; the history row keeps the
         // jump-to (Sc 7) and survives the window's toast being dismissed.
-        notificationCenter.record({ kind: "attention", ...alert });
+        if (flavor === "error") {
+          notificationCenter.recordSurfaceNotice({ key: notice.id, ...alert });
+        } else {
+          notificationCenter.record({ kind: "attention", ...alert });
+        }
         alertsToasts.push(alert);
       }
 
@@ -4375,6 +4404,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // document-level <select> guard listeners, wired through this
       // factory.
       const {
+        applyHookDoctorEvent,
         applyGlobalUpdateSettings,
         applyIssueSettingsStatus,
         applyIssueMonitorProfiles,
@@ -4390,6 +4420,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         applySupportedAgentList,
         applySupportedAgentMaintenance,
         requestSupportedAgentRefresh,
+        resyncHookDoctor,
         resyncSettings,
         renderSettingsWindow,
         renderSettingsAgentList,
@@ -4616,10 +4647,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
                     detailMap.delete(windowId);
                     windowRuntimeStateMap.delete(windowId);
                     windowRuntimeStateSinceMap.delete(windowId);
-                    agentAttentionToaster.forgetWindow(windowId);
-                    // SPEC #3206: dismiss this window's attention toast from the shared
-                    // alerts stack so a sticky error toast never orphans a gone window.
-                    alertsToasts.dismiss(`attention-${windowId}`);
                     renderedWindowElementKeys.delete(windowId);
                     renderedRuntimeStatusKeys.delete(windowId);
                     renderedAgentKanbanBodyKeys.delete(windowId);
@@ -4757,7 +4784,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       const terminalStatusModel = createUiStateStore(null);
       terminalStatusModel.subscribe(state => state, state => {
         if (!state) return;
-        applyStatus(state.id, state.status, state.detail);
+        applyStatus(state.id, state.status, state.detail, state.kind, state.retryable);
         if (state.kind === "terminal_status") {
           startupMetrics.onTerminalStatus(state.id, state.status, terminalMap.get(state.id));
         }
@@ -4817,6 +4844,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // SPEC-2356 Anshin Addendum (FR-040): the always-on, in-app counterpart.
       const agentAttentionToaster = createAgentAttentionToaster({
         showToast: showAttentionToast,
+        dismissToast: (id) => {
+          alertsToasts.dismiss(id);
+          notificationCenter.resolveError(id);
+        },
       });
 
       const workspaceWindowManager = Object.freeze({
@@ -5114,6 +5145,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           case "terminal_status":
             terminalStatusModel.update(() => ({
               kind: event.kind, id: event.id, status: event.status, detail: event.detail,
+              retryable: event.retryable,
             }));
             break;
           case "attachment_progress":
@@ -5335,6 +5367,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             break;
           case "update_settings":
             applyGlobalUpdateSettings(event);
+            break;
+          case "hook_doctor":
+            applyHookDoctorEvent(event);
             break;
           case "system_settings":
           case "system_settings_updated":
@@ -5644,7 +5679,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       });
       agentsSurface.element.hidden = true;
       document.querySelector(".surface-area").appendChild(agentsSurface.element);
-      worksTelemetryModel.subscribeFrame(state => state, () => worksSurface.sync());
+      // Telemetry updates keep the current native terminal host.
+      worksTelemetryModel.subscribeFrame(state => state, () => worksSurface.sync(false));
       splitSurfaces = createSplitSurfaces({
         document,
 

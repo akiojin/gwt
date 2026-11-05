@@ -34,6 +34,30 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "actions.diagnostic.cancel",
+        aliases: &[],
+    },
+    Operation {
+        name: "actions.diagnostic.observe",
+        aliases: &[],
+    },
+    Operation {
+        name: "actions.diagnostic.policy.add",
+        aliases: &[],
+    },
+    Operation {
+        name: "actions.diagnostic.policy.rollback",
+        aliases: &[],
+    },
+    Operation {
+        name: "actions.diagnostic.policy.status",
+        aliases: &[],
+    },
+    Operation {
+        name: "actions.diagnostic.request",
+        aliases: &[],
+    },
+    Operation {
         name: "actions.dispatch",
         aliases: &[],
     },
@@ -47,6 +71,18 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "actions.queued",
+        aliases: &[],
+    },
+    Operation {
+        name: "actions.release_policy.add",
+        aliases: &[],
+    },
+    Operation {
+        name: "actions.release_policy.rollback",
+        aliases: &[],
+    },
+    Operation {
+        name: "actions.release_policy.status",
         aliases: &[],
     },
     Operation {
@@ -613,6 +649,14 @@ pub const OPERATIONS: &[Operation] = &[
     Operation {
         name: "pm.message.send",
         aliases: &["pm.pane.send"],
+    },
+    Operation {
+        name: "pm.request_tasks.apply",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.request_tasks.read",
+        aliases: &[],
     },
     Operation {
         name: "pm.status",

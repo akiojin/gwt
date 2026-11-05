@@ -47,6 +47,7 @@ function fixture({ routeProjectKey = null } = {}) {
     resyncProfile: (ids) => context.resyncCalls.push(["profile", ...ids]),
     resyncProjectIndexSearch: (ids) => context.resyncCalls.push(["index", ...ids]),
     resyncSettings: () => context.resyncCalls.push(["settings"]),
+    hookDoctorResyncs: 0, resyncHookDoctor: () => { context.hookDoctorResyncs++; },
     applyPmWindowReceiveEvent: createPmWindowModel().applyPmWindowReceiveEvent,
     appState: { tabs: [], active_tab_id: null }, hubCatalog: null,
     routeProjectKey, routeProjectMissing: false, routeWebSocketUrl, projectUrlPath,
@@ -202,12 +203,15 @@ test("route-bound Project tab reconnects to the same Project only", () => {
   const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
   context.connectSocket();
   sockets[1].open();
+  assert.equal(context.hookDoctorResyncs, 1, "ordinary project connect recovers only Hook Doctor requests");
   sockets[1].close();
   assert.equal(context.closeResetCount, 1, "disconnected Project discards its close preview authority");
   context.connectSocket();
   assert.equal(context.attentionReportCount, 1, "fresh attention is reported for each opened Project connection");
   assert.equal(new URL(sockets.at(-1).url).searchParams.get("repo_hash"), projectA.project_key);
   sockets.at(-1).open();
+  assert.equal(context.hookDoctorResyncs, 2, "ordinary close/reopen recovers pending Hook Doctor reads");
+  assert.equal(context.resyncCalls.length, 0, "normal reconnect must not broadly resync every Settings surface");
   assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }, { kind: "get_system_settings" }], "reconnect re-requests only this client's full sync");
   assert.equal(context.attentionReportCount, 2);
 });
@@ -521,6 +525,27 @@ test("switch mutations never queue or replay, and a closed-socket race retains a
   assert.equal(context.pendingMessages.length, 0);
 });
 
+
+test("Hook Doctor repair uses only the current live socket and never queues a replay", () => {
+  const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
+  context.connectSocket();
+  sockets[1].open();
+  const repair = { kind: "get_hook_doctor", request_id: 1, repair: true };
+  assert.equal(context.send(repair), "sent");
+  assert.deepEqual(sockets[1].sent.at(-1), repair, "a live explicit repair is allowed");
+  sockets[1].close();
+  assert.equal(context.send(repair), "unavailable");
+  assert.equal(context.pendingMessages.length, 0);
+  context.connectSocket();
+  sockets.at(-1).open();
+  assert.ok(sockets.at(-1).sent.every(message => message.kind !== "get_hook_doctor" || message.repair !== true));
+  context.socketProjectKey = projectB.project_key;
+  assert.equal(context.send(repair), "unavailable", "repair cannot use another project's socket");
+  context.socketProjectKey = projectA.project_key;
+  sockets.at(-1).send = () => { throw new Error("connection closed during repair send"); };
+  assert.doesNotThrow(() => assert.equal(context.send(repair), "unavailable"));
+  assert.equal(context.pendingMessages.length, 0, "a failed send is never retried after reconnect");
+});
 
 test("first project connection reads saved Works settings without a Settings host", () => {
   const { sockets, select } = fixture();

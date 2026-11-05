@@ -570,21 +570,25 @@ fn completed_restore_reaches_exact_close(bookkeeping_warning: bool) {
         .get(&window_id)
         .copied()
         .expect("actual GUI window generation");
-    let observations = observe_terminal_windows_in_background(
-        &runtime.sessions_dir,
-        vec![TerminalWindowSnapshot {
-            window_id: window_id.clone(),
-            session_id: session_id.to_string(),
-            project_root: repo.clone(),
-            worktree_path: repo.clone(),
-            window_status: WindowProcessStatus::Idle,
-            lifecycle_generation: Some(generation),
-        }],
-        Duration::from_secs(5),
-    );
+    let mut observations = Vec::new();
+    let settlement_trace = capture_tracing_events(|| {
+        observations = observe_terminal_windows_in_background(
+            &runtime.sessions_dir,
+            vec![TerminalWindowSnapshot {
+                window_id: window_id.clone(),
+                session_id: session_id.to_string(),
+                project_root: repo.clone(),
+                worktree_path: repo.clone(),
+                window_status: WindowProcessStatus::Idle,
+                lifecycle_generation: Some(generation),
+            }],
+            Duration::from_secs(5),
+        );
+    });
     assert_eq!(
         observations[0].eligibility,
-        TerminalCloseEligibility::Eligible(reason)
+        TerminalCloseEligibility::Eligible(reason),
+        "terminal settlement trace: {settlement_trace:?}"
     );
     assert_eq!(
         runtime.restore_work_terminality(&session, &repo, Some(&window_id)),
@@ -1825,8 +1829,37 @@ fn startup_restore_refuses_landed_worktree_before_launch() {
             "actual owner refusal: {:?}",
             completion.result.as_ref().err()
         );
-        runtime.handle_remote_owner_launch_complete(completion);
+        let events = runtime.handle_remote_owner_launch_complete(completion);
+        assert!(
+            !events.iter().any(|event| matches!(
+                &event.event,
+                BackendEvent::TerminalStatus {
+                    status: WindowProcessStatus::Error,
+                    ..
+                }
+            )),
+            "an expected restore exclusion must not create a new agent error: {events:?}"
+        );
     });
+    assert_eq!(
+        runtime.tabs[0]
+            .workspace
+            .window("agent-landed")
+            .unwrap()
+            .status,
+        WindowProcessStatus::Stopped,
+        "the excluded stopped placeholder keeps its original state"
+    );
+    assert!(
+        !gwt_core::error_ledger::list_since(None)
+            .unwrap()
+            .iter()
+            .any(|row| {
+                row.kind == gwt_core::error_ledger::ErrorKind::LaunchFailure
+                    && row.target.session_id.as_deref() == Some("session-landed")
+            }),
+        "normal restore admission must not publish a host launch failure"
+    );
     assert!(runtime.pending_startup_auto_resume_sessions.is_empty());
     assert_eq!(
         restore_admission_refusals(&logs)
@@ -1935,6 +1968,16 @@ fn startup_restore_removes_empty_unlinked_landed_windows_but_keeps_diagnostics()
         durable_empty.restore_window_on_startup,
     );
     assert!(windows.iter().all(|window| window.id != "empty"));
+    assert!(
+        !gwt_core::error_ledger::list_since(None)
+            .unwrap()
+            .iter()
+            .any(|row| {
+                row.kind == gwt_core::error_ledger::ErrorKind::LaunchFailure
+                    && row.target.session_id.as_deref() == Some("session-empty")
+            }),
+        "an empty landed restore exclusion must not publish a host launch failure"
+    );
     assert_eq!(
         windows
             .iter()

@@ -54,6 +54,7 @@ pub(crate) fn current_hook_context(
     worktree: &Path,
 ) -> Result<(CurrentHookContext, SessionRuntimeState), HookContextError> {
     use HookContextError::{Foreign, Missing, Unreadable};
+    let worktree = gwt_core::paths::resolve_current_worktree_root(worktree);
     let id = GwtSessionId::from_env().ok_or(Missing)?;
     gwt_agent::validate_session_id_path_component(id.as_str()).map_err(|_| Foreign)?;
     let sessions = gwt_core::paths::gwt_sessions_dir();
@@ -67,7 +68,7 @@ pub(crate) fn current_hook_context(
         })?;
     if session.id != id.as_str()
         || std::fs::canonicalize(&session.worktree_path).map_err(|_| Unreadable)?
-            != std::fs::canonicalize(worktree).map_err(|_| Unreadable)?
+            != std::fs::canonicalize(&worktree).map_err(|_| Unreadable)?
     {
         return Err(Foreign);
     }
@@ -107,7 +108,7 @@ pub(crate) fn current_hook_context(
         || crate::process::host_process_start_time(host_pid) != Some(host_started_at)
         || crate::process::host_process_start_time(child_pid) != Some(child_started_at)
         || (child_pid != std::process::id()
-            && !crate::process::is_descendant_of(std::process::id(), child_pid))
+            && !crate::process::is_descendant_of(std::process::id(), child_pid).unwrap_or(false))
     {
         return Err(Foreign);
     }
@@ -285,9 +286,63 @@ pub(crate) struct HookCompletionContext {
     runtime_path: PathBuf,
     worktree: PathBuf,
     exact: Option<CurrentHookContext>,
+    native: Option<NativeHookCompletionContext>,
+}
+
+/// Physical lifecycle evidence for the registered resident PM without an
+/// Execution binding. This permits completion publication only; it never
+/// supplies the execution authority required by `current_hook_context`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativeHookCompletionContext {
+    incarnation: u64,
+    host_started_at: u64,
+    child_pid: u32,
+    child_started_at: u64,
+}
+
+fn native_hook_completion_context(
+    path: &Path,
+    worktree: &Path,
+    session_id: &str,
+) -> Option<NativeHookCompletionContext> {
+    if !crate::pm_registry::is_canonical_pm_worktree(worktree) {
+        return None;
+    }
+    let store = worktree.parent()?.parent()?;
+    let registration = crate::pm_registry::load_pm_prefs(&store.join("project-state/pm.json"))
+        .ok()?
+        .registration?;
+    if registration.session_id != session_id
+        || std::fs::canonicalize(&registration.worktree_path).ok()?
+            != std::fs::canonicalize(worktree).ok()?
+    {
+        return None;
+    }
+    let runtime = SessionRuntimeState::load(path).ok()?;
+    if runtime.execution_identity.is_some() {
+        return None;
+    }
+    let host_pid = path.parent()?.file_name()?.to_str()?.parse::<u32>().ok()?;
+    let context = NativeHookCompletionContext {
+        incarnation: runtime.runtime_incarnation.filter(|n| *n > 0)?,
+        host_started_at: runtime.host_started_at?,
+        child_pid: runtime.child_pid.filter(|pid| *pid > 0)?,
+        child_started_at: runtime.child_started_at?,
+    };
+    if crate::process::host_process_start_time(host_pid) != Some(context.host_started_at)
+        || crate::process::host_process_start_time(context.child_pid)
+            != Some(context.child_started_at)
+        || (context.child_pid != std::process::id()
+            && !crate::process::is_descendant_of(std::process::id(), context.child_pid)
+                .unwrap_or(false))
+    {
+        return None;
+    }
+    Some(context)
 }
 
 pub(crate) fn capture_hook_completion(worktree: &Path) -> Option<HookCompletionContext> {
+    let worktree = gwt_core::paths::resolve_current_worktree_root(worktree);
     let id = GwtSessionId::from_env()?;
     gwt_agent::validate_session_id_path_component(id.as_str()).ok()?;
     let path = PathBuf::from(std::env::var_os(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV)?);
@@ -299,19 +354,28 @@ pub(crate) fn capture_hook_completion(worktree: &Path) -> Option<HookCompletionC
     let session = Session::load(&sessions.join(format!("{}.toml", id.as_str()))).ok()?;
     if session.id != id.as_str()
         || std::fs::canonicalize(&session.worktree_path).ok()?
-            != std::fs::canonicalize(worktree).ok()?
+            != std::fs::canonicalize(&worktree).ok()?
     {
         return None;
     }
+    let mut native = None;
     let exact = match SessionExecutionIdentity::from_session(&session).ok()? {
-        Some(_) => Some(current_hook_context(worktree).ok()?.0),
+        Some(_) => Some(current_hook_context(&worktree).ok()?.0),
         None => {
-            // Preserve #3541 for known legacy Sessions. Missing or corrupt bound
-            // identity is never downgraded to this compatibility path.
+            // Preserve #3541 for known legacy Sessions. A native unbound
+            // Session needs exact physical proof, while a corrupt bound
+            // identity is never downgraded to this path.
             if path.exists() {
                 let runtime = SessionRuntimeState::load(&path).ok()?;
-                if runtime.execution_identity.is_some() || runtime.runtime_incarnation.is_some() {
+                if runtime.execution_identity.is_some() {
                     return None;
+                }
+                if runtime.runtime_incarnation.is_some() {
+                    native = Some(native_hook_completion_context(
+                        &path,
+                        &worktree,
+                        id.as_str(),
+                    )?);
                 }
             }
             None
@@ -321,8 +385,9 @@ pub(crate) fn capture_hook_completion(worktree: &Path) -> Option<HookCompletionC
         sessions_dir: sessions,
         session_id: id.as_str().to_string(),
         runtime_path: path,
-        worktree: worktree.to_path_buf(),
+        worktree,
         exact,
+        native,
     })
 }
 
@@ -357,6 +422,17 @@ impl HookCompletionContext {
                         .ok()
                         .as_ref()
                         .map(|pair| &pair.0)
+                        != Some(expected)
+                    {
+                        return Ok(());
+                    }
+                } else if let Some(expected) = self.native.as_ref() {
+                    if native_hook_completion_context(
+                        &self.runtime_path,
+                        &self.worktree,
+                        &self.session_id,
+                    )
+                    .as_ref()
                         != Some(expected)
                     {
                         return Ok(());
@@ -947,6 +1023,92 @@ mod tests {
         assert_eq!(status_for_event("PreToolUse"), Some("Running"));
         assert_eq!(status_for_event("PostToolUse"), Some("Running"));
         assert_eq!(status_for_event("Stop"), Some("Idle"));
+    }
+
+    #[test]
+    fn unbound_native_hook_completion_is_fenced_without_execution_authority() {
+        let _lock = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(dir.path());
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let worktree = crate::pm_registry::pm_worktree_path_for_repo_path(&repo);
+        std::fs::create_dir_all(&worktree).unwrap();
+        let session = Session::new(&worktree, "work/pm", AgentId::ClaudeCode);
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        session.save(&sessions).unwrap();
+        let path = gwt_agent::runtime_state_path(&sessions, &session.id);
+        let pid = std::process::id();
+        let started_at = crate::process::host_process_start_time(pid).unwrap();
+        let mut runtime = SessionRuntimeState::new(AgentStatus::Idle);
+        runtime.runtime_incarnation = Some(7);
+        runtime.host_started_at = Some(started_at);
+        runtime.child_pid = Some(pid);
+        runtime.child_started_at = Some(started_at);
+        runtime.save(&path).unwrap();
+        let mut env = EnvGuard::new();
+        env.set(GWT_SESSION_ID_ENV, &session.id);
+        env.set(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV, path.as_os_str());
+
+        assert_eq!(
+            current_hook_context(&worktree).unwrap_err(),
+            HookContextError::Missing
+        );
+        assert!(
+            capture_hook_completion(&worktree).is_none(),
+            "an unregistered unbound Session has no completion authority"
+        );
+        let prefs_path = worktree
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("project-state/pm.json");
+        crate::pm_registry::try_register_pm(
+            &prefs_path,
+            crate::pm_registry::PmRegistration {
+                session_id: session.id.clone(),
+                agent_id: "claude".into(),
+                worktree_path: worktree.display().to_string(),
+                created_at: None,
+                consecutive_crashes: 0,
+                next_not_before: None,
+            },
+            |_| false,
+        )
+        .unwrap();
+        let completion = capture_hook_completion(&worktree)
+            .expect("native completion needs physical process proof, not an execution grant");
+        completion.record(gwt_agent::session::HookCompletionOutcome::Normal);
+        assert!(SessionRuntimeState::load(&path)
+            .unwrap()
+            .last_completed_hook_event_at
+            .is_some());
+
+        runtime.save(&path).unwrap();
+        let stale = capture_hook_completion(&worktree).unwrap();
+        runtime.runtime_incarnation = Some(8);
+        runtime.save(&path).unwrap();
+        stale.record(gwt_agent::session::HookCompletionOutcome::Normal);
+        assert!(SessionRuntimeState::load(&path)
+            .unwrap()
+            .last_completed_hook_event_at
+            .is_none());
+        runtime.host_started_at = Some(started_at + 1);
+        runtime.save(&path).unwrap();
+        assert!(
+            capture_hook_completion(&worktree).is_none(),
+            "a foreign process-start identity cannot publish completion"
+        );
+        runtime.host_started_at = Some(started_at);
+        runtime.save(&path).unwrap();
+        let revoked = capture_hook_completion(&worktree).unwrap();
+        crate::pm_registry::deregister_pm(&prefs_path, &session.id).unwrap();
+        revoked.record(gwt_agent::session::HookCompletionOutcome::Normal);
+        assert!(SessionRuntimeState::load(&path)
+            .unwrap()
+            .last_completed_hook_event_at
+            .is_none());
     }
 
     #[test]

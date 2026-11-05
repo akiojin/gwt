@@ -48,6 +48,81 @@ fn isolated_gwtd_command() -> std::process::Command {
     command
 }
 
+#[cfg(windows)]
+#[test]
+fn measured_verification_recovers_gui_ancestry_without_bypassing_authority() {
+    const FIXTURE: &str = "GWT_TEST_6735_GUI_ANCESTOR";
+    if env::var_os(FIXTURE).is_some() {
+        // This test process is named gwt.exe and owns no registered pane Job,
+        // matching the GUI -> daemon-owned pane ownership boundary.
+        let home = tempfile::tempdir().unwrap();
+        let mut child = isolated_gwtd_command()
+            .current_dir(home.path())
+            .env("HOME", home.path())
+            .env("USERPROFILE", home.path())
+            .env(
+                "ISSUE_6735_PRIVATE_CONTEXT",
+                "not-a-public-command-argument",
+            )
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let request = serde_json::json!({
+            "schema_version": 1,
+            "operation": "verify.run",
+            "params": {"commands": ["GWT_VERIFY_PERFORMANCE=1 git --version"]}
+        });
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(request.to_string().as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            !output.status.success(),
+            "missing Session must still refuse"
+        );
+        assert!(
+            stdout.contains("requires GWT_SESSION_ID")
+                || stderr.contains("requires GWT_SESSION_ID"),
+            "{stdout}\n{stderr}"
+        );
+        assert!(stderr.contains("Windows Job recovery"), "{stderr}");
+        assert!(stderr.contains("containment established"), "{stderr}");
+        assert!(!stdout.contains("not-a-public-command-argument"));
+        assert!(!stderr.contains("not-a-public-command-argument"));
+        return;
+    }
+
+    // A hard link avoids copying the large integration binary and gives the
+    // kernel the real gwt.exe image name used by the ancestry check.
+    let executable = env::current_exe().unwrap();
+    let fixture = tempfile::tempdir_in(executable.parent().unwrap()).unwrap();
+    let gui = fixture.path().join("gwt.exe");
+    fs::hard_link(&executable, &gui).unwrap();
+    let output = hidden_command(gui)
+        .args([
+            "--exact",
+            "gwtd_cli_test::measured_verification_recovers_gui_ancestry_without_bypassing_authority",
+            "--nocapture",
+        ])
+        .env(FIXTURE, "1")
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn auto_feedback_real_worker_has_no_consent_auth_process_or_raw_sinks() {
     use gwt_core::test_support::ScopedGwtHome;
@@ -527,7 +602,8 @@ fn native_feedback_worker_pids(repo: &Path) -> BTreeSet<u32> {
                 .with_cwd(sysinfo::UpdateKind::Always)
                 .without_tasks(),
         ),
-    );
+    )
+    .expect("initialize test process observation");
     system
         .processes()
         .iter()
@@ -555,7 +631,7 @@ fn native_feedback_role_pids(pids: &BTreeSet<u32>) -> (BTreeSet<u32>, BTreeSet<u
         .iter()
         .map(|pid| sysinfo::Pid::from_u32(*pid))
         .collect();
-    let mut system = sysinfo::System::new();
+    let mut system = sysinfo::System::new().expect("initialize test process observation");
     system.refresh_processes_specifics(
         sysinfo::ProcessesToUpdate::Some(&selected),
         true,
@@ -617,7 +693,7 @@ impl NativeFeedbackProcess {
         };
         assert_eq!(unsafe { GetProcessId(owned.handle) }, pid);
         assert!(!owned.exited());
-        let mut system = sysinfo::System::new();
+        let mut system = sysinfo::System::new().expect("initialize test process observation");
         system.refresh_processes_specifics(
             sysinfo::ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(pid)]),
             true,

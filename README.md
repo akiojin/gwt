@@ -391,6 +391,45 @@ in `~/.gwt/config.toml`:
 "akiojin/gwt" = ["prepare-release.yml"]
 ```
 
+For the release workflow, the registered PM can configure this permission through
+`actions.release_policy.status` and `actions.release_policy.add`. Read the status
+first, then submit a UUID `request_id`, its current `expected_token`, a short
+`reason`, and an exact scoped `instruction_id` or native `approval_id`. This adds
+only `prepare-release.yml` for the current repository and retains existing
+configuration. The verified checkout CLI can use the PM's existing Host bridge
+before the installed app is updated; replacement credentials are not needed.
+Read `pm.capabilities` when a runtime does not recognize these operations.
+
+Repeating a completed request returns its receipt without applying it again.
+For an unknown outcome, read the status and preserve the request; do not resend.
+`actions.release_policy.rollback` also requires a fresh request and scoped
+authority, plus `added_by` naming the successful add request. It removes only
+permission added by that request while its recorded post-state remains current.
+These operations configure permission; workflow submission remains separate.
+
+For the fixed historical Windows diagnostic, inspect `actions.diagnostic.observe`
+with `profile_id: "windows-4777-restore-f351-v1"`. The response reports the
+published profile digest, required PM authority, repository permission and recovery.
+`actions.diagnostic.request` accepts that profile, its `expected_profile_digest`
+and a UUID `request_id`; it cannot select another source, patch or command.
+The dedicated workflow must already be explicitly permitted. For `akiojin/gwt`,
+read `actions.diagnostic.policy.status`, then use `actions.diagnostic.policy.add`
+with a fresh UUID `request_id`, its current `expected_token`, a short `reason`,
+and an exact scoped `instruction_id` or native `approval_id`. This permits only
+`windows-diagnostic.yml` and retains existing settings. Its `.rollback` operation
+uses the same parameters plus `added_by` naming its successful add receipt.
+Release policy approval cannot authorize this operation. Configuring permission
+does not submit the diagnostic.
+
+Observe a submitted request by `request_id`. An unknown submission is retained
+without resending. Only a verified preexecution result permits one correction
+using `preexecution_of` and `expected_predecessor_revision`.
+`actions.diagnostic.cancel` requires its exact `expected_run_id` and current
+`expected_revision`; cancellation acknowledgement does not prove cleanup.
+Results retain failures and unknown cleanup, and do not count as Ready evidence.
+Each case's exit code is the shared provider test process exit, not a separate
+case process. Binary metadata records Cargo's `test` profile and actual hashes.
+
 ```bash
 gwtd <<'JSON'
 {"schema_version":1,"operation":"actions.dispatch","params":{"workflow":"prepare-release.yml","ref":"develop","inputs":{"bump":"auto"}}}
@@ -543,6 +582,9 @@ In terminal windows, drag to select text and release the mouse button to copy.
 On Windows, `Ctrl+C` copies the current terminal selection and clears it; if no
 selection exists, `Ctrl+C` stays mapped to the running terminal process. On
 Linux, `Ctrl+Shift+C` also copies the current terminal selection.
+The mouse wheel scrolls retained history even when an agent tracks the mouse.
+Use `Shift+drag` to select text in mouse-tracking applications (`Option+drag` on
+macOS); the terminal's hover hint also shows these modifiers.
 
 ## Issue surface and Issue Monitor
 
@@ -995,6 +1037,20 @@ missing milestone information. Monitor observations include their source and
 scan time; unavailable or incomplete observations do not prove full coverage.
 Reported milestone health and confidence remain unverified until supporting
 evidence is connected.
+
+The registered PM can inspect saved request tracking with `pm.request_tasks.read`.
+Omitting `selector` returns counts; `{"selector":{"kind":"pending"}}` lists
+unclassified source IDs, and `{"selector":{"kind":"tasks","limit":50}}` lists
+all task IDs, including completed and cancelled tasks. Pages contain only IDs,
+use exact lexical ordering, and accept a limit of 1–100 (default 50). If
+`next_after` is non-null, pass it as `after` together with the returned revision
+as `expected_revision`. A revision conflict requires restarting without `after`;
+an unreadable store is an error, while an uninitialized store reports `absent`.
+Use `source`, `task`, or `receipt` selectors with the corresponding `id` or
+`operation_id` to read one detail. These operations require the current project's
+registered PM and grant no Issue, Monitor, CI or approval authority. Automatic
+intake and the Tasks UI are not connected by this read API.
+
 `policy.dependency_observations` retains every supplied Monitor inbox row, including
 repeated Issues, with its state and canonical dependency blockers, cycle flag and bundle
 references. Absent typed status stays null with `dependency_status` named as missing.
@@ -1303,6 +1359,9 @@ The design lives in SPEC
 gwt keeps project knowledge close to the agent workspace:
 
 - JSON operation `issue.spec.read` reads GitHub Issue-backed SPECs from the local cache.
+- `issue.spec.edit` reports `outcome: committed_unverified` when the write committed
+  but cleanup or final confirmation failed. Read the section before retrying; this
+  outcome does not confirm a verified write.
 - JSON operations `issue.view` and `issue.comments` provide cache-backed Issue
   access through the gwt CLI surface.
 - `gwt-search` searches SPECs, Issues, source files, docs, and PM Reports through the shared
@@ -1394,6 +1453,19 @@ stores are no longer read and need no manual removal.
 Managed hooks preserve user hooks while adding gwt runtime behavior for agent
 state, workflow guardrails, Board reminders, discussion/plan/build Stop checks,
 and coordination-event summaries.
+
+**Settings → Project → Hook Center** audits the selected project's hook
+configuration, binary fallbacks, Codex discovery/trust, and opt-in profile path.
+**Regenerate managed hooks** uses the existing managed-only repair and preserves
+user hooks. Trust registration and starting a new agent session remain separate;
+regeneration does not upgrade running sessions. An unknown binary observation
+does not imply trust or successful hook execution.
+If an audit reports invalid or unreadable configuration, fix the listed file
+and refresh the audit before regeneration is available.
+Repairs require the live project connection and are never replayed after
+reconnect. A lost repair reply leaves the outcome Unknown; a read-only refresh
+does not confirm completion. The latest audit and last repair outcome are shown
+separately.
 
 If an agent stop or pane close reports unread Board evidence, read the bodies
 in that same agent session with JSON operation `board.show` and
@@ -1790,14 +1862,27 @@ interaction. Reports survive restarts in
 `~/.gwt/projects/<project-hash>/project-state/pm-reports.jsonl`. Captured Q&A and
 user instructions share `project-state/user-instructions.json` in the same
 machine-local project store, so one atomic save preserves both. There is no
-automatic expiry or count limit. Each non-empty report is limited to 64 KiB.
+automatic expiry or count limit. Q&A bodies and each structured event’s details are limited to 64 KiB; a structured submission is limited to 256 KiB.
 
-A registered PM can publish through `pm.report.post` with `kind` (`progress`,
-`decision`, `blocker`, or `qa`) and `body`; `qa` also requires a non-empty
-`question` summarizing the user's question or instruction. Its `body` contains
-the answer, actions taken, and their results. `pm.report.list` reads the saved history.
-These use the standard gwtd JSON envelope. A successful post confirms durable
-storage; failures return an explicit error.
+PM updates use a short common summary with **Details** for the complete explanation
+and references. **Copy** includes both. Unchanged observations create no new card,
+including after a restart or a switch between Claude and Codex. New critical
+failures and decisions appear immediately; ordinary updates share one digest.
+Resolution, recurrence, and meaningful changes produce a new report.
+
+A registered PM publishes non-Q&A updates through `pm.report.post` with a versioned
+`submission`: a `request_id`, project-local event/episode identities, expected
+revisions, typed material state, `summary`, full `details`, and `refs`.
+`pm.report.list` returns history, event revisions, and posting receipts. Retrying
+an identical request returns its saved receipt; conflicting payloads or stale
+revisions return an error. A receipt confirms durable acceptance or suppression,
+not user approval or completion. Body-only non-Q&A posts remain available only
+for direct user CLI compatibility. Q&A keeps `kind: qa`, `question`, `body`, and
+joined instruction capture. Explicitly requested detailed answers remain complete.
+
+Old report history remains readable. After the first structured report is saved,
+use this version or newer to read or post reports: older versions refuse the new
+journal format and leave the existing bytes intact. No history is deleted.
 
 PM Q&A posts include an `instruction` object with the full `original`, `kind`
 (`standing`, `one_off`, or `question`), `actions`, and `issue_numbers`. Optional
@@ -1978,6 +2063,15 @@ JSON
   Section writes serialize writers sharing the host cache and check fresh body
   content before replacing the index; cross-host/external writes and unknown
   network outcomes are outside this guarantee.
+  Section edit bodies must omit artifact markers; the operation adds them and
+  rejects marker-bearing input before writing. `issue.spec.repair` repairs
+  duplicated markers. After confirming that an old orphan artifact has been
+  superseded, pass its comment ID in `archive_comments` to the repair operation
+  (for example, `{"number":1784,"archive_comments":[12345]}`). This preserves
+  the comment text and retires only its outer markers, including `part=N/M`
+  markers from complete or incomplete orphan groups. Indexed comments are
+  refused. Retrying the same IDs skips comments already archived.
+  Run `issue.spec.lint` again to confirm index health.
 
 ```bash
 gwtd <<'JSON'
@@ -2000,6 +2094,12 @@ JSON
 Open the Logs surface and select **Project** for that project’s events, or
 **Global** for startup and diagnostics without a project. Background events
 remain with their originating project when you switch projects.
+
+Diagnostic logs keep seven days of history by default, with a 2 GiB total
+limit for `gwt.log.YYYY-MM-DD` files in each log directory. Other files,
+including `ui-trace-*.jsonl`, are outside this limit. Oldest dated files are
+removed first. If the current day alone reaches the limit, it restarts with
+the next complete log entry.
 
 - App logs:
   `~/.gwt/projects/<repo-hash>/logs/gwt.log.YYYY-MM-DD`
@@ -2383,8 +2483,16 @@ If the GUI was started separately, also set `GWT_VERIFY_TARGET_PIDS=1234`
 On Windows, verification waits for the CPU hard caps on its gwt pane Jobs to
 clear before measuring. All canonical slots and the legacy verification lane
 participate; configured caps return after their holders leave. Process priority
-and pane-close cleanup remain in effect. Restart gwt with the updated runtime
-if an older GUI's Job ancestry cannot be inspected.
+and pane-close cleanup remain in effect.
+
+If an ancestor GUI has no registered Job, `verify.run` automatically retries
+the same measured request in a hidden worker without restarting that GUI.
+Windows must confirm that the worker starts outside all Jobs before gwt puts
+it in a dedicated cleanup Job. The worker keeps the same session, environment,
+working directory, and complete verification matrix; its temporary context is
+encrypted for the current Windows user and removed after transfer. If Windows
+cannot provide that environment, recovery refuses and reports the cause.
+Separately nominated GUI targets still need their own readable, uncapped Jobs.
 
 The command's `measurement` evidence records target PIDs and start times,
 observed Job caps, sampled CPU time/utilization, admission wait, and cap-relief

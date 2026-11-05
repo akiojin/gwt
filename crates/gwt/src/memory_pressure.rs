@@ -46,8 +46,8 @@ pub struct MemoryPressureStatus {
 }
 
 /// Read every gwt GUI process from the OS and evaluate the threshold.
-pub fn probe() -> MemoryPressureStatus {
-    let mut system = System::new();
+pub fn probe() -> Result<MemoryPressureStatus, sysinfo::Error> {
+    let mut system = System::new()?;
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
         true,
@@ -63,7 +63,7 @@ pub fn probe() -> MemoryPressureStatus {
             uptime_secs: process.run_time(),
         })
         .collect();
-    evaluate(processes)
+    Ok(evaluate(processes))
 }
 
 fn is_gui_process(name: &Path) -> bool {

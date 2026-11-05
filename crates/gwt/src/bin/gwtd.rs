@@ -1,5 +1,9 @@
 use std::{io::IsTerminal, path::PathBuf, process::ExitCode};
 
+#[cfg(windows)]
+#[path = "gwtd/windows_verification_recovery.rs"]
+mod windows_verification_recovery;
+
 // Issue #3675: unit tests must never reach the real GitHub API. Armed before
 // any test runs; unsandboxed ProcessKind::Gh spawns then fail explicitly.
 // SAFETY(pre-main): only stores a relaxed AtomicBool.
@@ -11,6 +15,12 @@ fn forbid_real_gh_in_tests() {
 
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().collect();
+    #[cfg(windows)]
+    if let Some(code) = windows_verification_recovery::run_private_role(&argv, |input| {
+        dispatch_json_envelope("gwtd", input)
+    }) {
+        return ExitCode::from(code.clamp(0, 255) as u8);
+    }
     if let Some(code) = gwt::cli::run_feedback_private_role(&argv) {
         // A bounded private owner may still have an unobserved bookkeeping
         // thread. This role must not enter ordinary startup or join that I/O.
@@ -425,16 +435,38 @@ fn format_actions_help() -> String {
         "  actions.rerun                           Re-run a failed run or a single failed job",
         "  actions.cancel                          Request cancellation of a queued or in-progress run",
         "  actions.queued                          List queued runs without jobs, with elapsed age_seconds",
+        "  actions.diagnostic.observe              Inspect the fixed historical Windows profile or request",
+        "  actions.diagnostic.request              Reserve and submit that fixed profile once",
+        "  actions.diagnostic.cancel               Cancel the exact bound live run once",
+        "  actions.diagnostic.policy.status        Read fixed akiojin/gwt diagnostic permission and token",
+        "  actions.diagnostic.policy.add           Allow windows-diagnostic.yml with exact scoped authority",
+        "  actions.diagnostic.policy.rollback      Undo only the diagnostic permission added by its receipt",
+        "  actions.release_policy.status           Read current release permission, CAS token and recovery",
+        "  actions.release_policy.add              Allow prepare-release.yml for this repository only",
+        "  actions.release_policy.rollback         Undo a successful add with unchanged post-state",
         "",
         "Key params:",
         "  run_id, job_id",
         "  failed_only  actions.rerun with run_id: re-run only the failed jobs",
+        "  request_id (UUID), expected_token, reason   Fixed workflow policy mutations",
+        "  instruction_id | approval_id              Exact scoped human authority, registered PM only",
+        "  added_by                                  rollback: the original successful add request_id",
+        "  profile_id, expected_profile_digest        Fixed diagnostic profile; request_id is a UUID",
+        "  expected_run_id, expected_revision         Diagnostic cancellation requires current binding",
+        "  preexecution_of, expected_predecessor_revision   One correction after verified NoStart only",
         "",
         "Notes:",
         "  actions.rerun refuses a run_id/job_id the current repository does not own.",
         "  actions.cancel refuses completed runs and a run_id the current repository does not own.",
         "  actions.queued takes no params.",
         "  Prefer job_id so one flaky check does not re-run every job in the run.",
+        "  Release policy uses stdin JSON only and preserves other workflow permissions.",
+        "  Read status first; a verified checkout CLI uses the existing PM Host bridge.",
+        "  Changed Host/Session/generation or stale token refuses before settings persistence.",
+        "  UNKNOWN: inspect status without resending. Existing QA scopes cannot be expanded.",
+        "  Diagnostic requests require the registered PM, live Host proof and explicit repository permission.",
+        "  In akiojin/gwt, generic dispatch cannot submit windows-diagnostic.yml; use actions.diagnostic.request.",
+        "  Diagnostic receipt acceptance is separate from case PASS, cleanup and Ready verification.",
         "",
     ]
     .join("\n")
@@ -947,9 +979,17 @@ fn run_json_envelope_cli(argv: &[String]) -> i32 {
         eprintln!("{prog}: failed to read JSON envelope: {error}");
         return 1;
     }
+    #[cfg(windows)]
+    if let Some(code) = windows_verification_recovery::forward_if_needed(&input) {
+        return code;
+    }
+    dispatch_json_envelope(prog, &input)
+}
+
+fn dispatch_json_envelope(prog: &str, input: &str) -> i32 {
     let repo_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let mut env = json_envelope_env(repo_path, &input);
-    gwt::cli::dispatch_json_input(&mut env, prog, &input)
+    let mut env = json_envelope_env(repo_path, input);
+    gwt::cli::dispatch_json_input(&mut env, prog, input)
 }
 
 fn json_envelope_env(repo_path: PathBuf, input: &str) -> gwt::cli::DefaultCliEnv {
@@ -1196,6 +1236,35 @@ mod tests {
             "all unresolved",
             "plain text",
             "JSON array",
+        ] {
+            assert!(help.contains(expected), "missing {expected}: {help}");
+        }
+    }
+
+    #[test]
+    fn release_policy_actions_help_documents_fixed_scope_and_recovery() {
+        let help = family_help("actions").unwrap();
+        for expected in [
+            "actions.diagnostic.request",
+            "actions.diagnostic.observe",
+            "actions.diagnostic.cancel",
+            "actions.diagnostic.policy.status",
+            "actions.diagnostic.policy.add",
+            "actions.diagnostic.policy.rollback",
+            "actions.release_policy.status",
+            "actions.release_policy.add",
+            "actions.release_policy.rollback",
+            "prepare-release.yml",
+            "request_id",
+            "expected_token",
+            "added_by",
+            "instruction_id",
+            "approval_id",
+            "registered PM",
+            "stdin JSON",
+            "UNKNOWN",
+            "without resending",
+            "Host bridge",
         ] {
             assert!(help.contains(expected), "missing {expected}: {help}");
         }

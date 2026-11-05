@@ -29,6 +29,7 @@ const ORIGINAL: &str = "<!-- gwt-spec id=1 version=1 -->\n<!-- sections:\nspec=b
 enum Interference {
     FailedRollback,
     AfterCleanup,
+    CleanupDeletion,
     DuringCreation,
     MissingUnrelatedReference,
     ForeignReadback,
@@ -130,6 +131,9 @@ impl IssueClient for InterleavedClient {
         self.inner.patch_comment(id, body)
     }
     fn delete_comment(&self, id: CommentId) -> Result<(), ApiError> {
+        if matches!(self.interference, Interference::CleanupDeletion) && id == CommentId(100) {
+            return Err(ApiError::Unexpected("stale-part deletion failed".into()));
+        }
         self.inner.delete_comment(id)?;
         if matches!(self.interference, Interference::AfterCleanup) && id == CommentId(100) {
             self.fail_fetch.store(true, Ordering::SeqCst);
@@ -179,7 +183,10 @@ fn fixture(interference: Interference, check_lock: bool) -> (TempDir, SpecOps<In
     ) {
         inner.corrupt_next_create_comment();
     }
-    if matches!(interference, Interference::AfterCleanup) {
+    if matches!(
+        interference,
+        Interference::AfterCleanup | Interference::CleanupDeletion
+    ) {
         let FetchResult::Updated(mut snapshot) = inner.fetch(NUMBER, None).unwrap() else {
             unreachable!()
         };
@@ -320,10 +327,34 @@ fn writer_holds_host_local_lock_during_remote_reads_and_writes() {
 }
 
 #[test]
+fn cleanup_failure_reports_committed_unverified() {
+    let (_temp, ops) = fixture(Interference::CleanupDeletion, false);
+    let receipt = ops
+        .write_section(NUMBER, &SectionName("tasks".into()), &multipart_content())
+        .unwrap();
+    assert!(receipt
+        .verification_error
+        .as_deref()
+        .expect("failed cleanup must not claim a fully verified receipt")
+        .contains("stale-part deletion failed"));
+    assert_all_indexed_comments_exist(&ops.client().snapshot());
+    assert_eq!(ops.client().patches.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn final_fetch_failure_never_restores_deleted_old_comment_references() {
     let (_temp, ops) = fixture(Interference::AfterCleanup, false);
     let result = ops.write_section(NUMBER, &SectionName("tasks".into()), &multipart_content());
-    assert!(result.is_err(), "injected final fetch failure must surface");
+    assert!(
+        result.is_ok(),
+        "a final fetch failure must not report a committed write as failed: {result:?}"
+    );
+    let receipt = result.unwrap();
+    assert!(receipt
+        .verification_error
+        .as_deref()
+        .unwrap()
+        .contains("final fetch failed"));
     let snapshot = ops.client().snapshot();
     assert!(
         !snapshot
@@ -338,4 +369,20 @@ fn final_fetch_failure_never_restores_deleted_old_comment_references() {
         1,
         "committed cleanup must not rollback the body"
     );
+    let retry = ops
+        .write_section(NUMBER, &SectionName("tasks".into()), &multipart_content())
+        .unwrap();
+    assert_eq!(retry.verification_error, None);
+    let snapshot = ops.client().snapshot();
+    assert_all_indexed_comments_exist(&snapshot);
+    let comments = snapshot
+        .comments
+        .iter()
+        .map(|comment| Comment {
+            id: comment.id.0,
+            body: comment.body.clone(),
+        })
+        .collect::<Vec<_>>();
+    let diagnosis = diagnose_index(&snapshot.body, &comments).unwrap();
+    assert!(!diagnosis.contains("malformed"), "{diagnosis}");
 }

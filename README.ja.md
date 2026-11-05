@@ -373,6 +373,41 @@ workflow のファイル名を許可します。
 "akiojin/gwt" = ["prepare-release.yml"]
 ```
 
+リリース用の許可は、登録済み PM が `actions.release_policy.status` と
+`actions.release_policy.add` で設定できます。先に status を読み、UUID の
+`request_id`、現在の `expected_token`、短い `reason`、exact scope の
+`instruction_id` または native `approval_id` を指定します。現在のリポジトリの
+`prepare-release.yml` だけを追加し、既存設定を保持します。検証済み checkout CLI は
+アプリ更新前でも PM の既存 Host bridge を使用でき、代替の認証情報は不要です。
+稼働版が操作を認識しない場合は `pm.capabilities` を確認してください。
+
+完了した同じ要求の再送は、変更を再適用せず receipt を返します。結果不明の場合は
+status を読み、要求を保全して再送しないでください。
+`actions.release_policy.rollback` は新しい要求と scoped 権限に加え、成功した add の
+request_id を `added_by` に指定します。その要求が追加し、記録した変更後の状態が
+維持されている許可だけを取り消せます。許可設定と workflow の送信は別操作です。
+
+固定した過去ソースの Windows 診断は、`actions.diagnostic.observe` に
+`profile_id: "windows-4777-restore-f351-v1"` を渡して確認できます。応答には
+公開済み profile の digest、必要な PM 権限、リポジトリの許可状態、回復手順が含まれます。
+`actions.diagnostic.request` はその profile、`expected_profile_digest`、UUID の
+`request_id` を受け付け、任意のソース・パッチ・コマンドは選べません。
+専用 workflow の明示的な許可が必要です。`akiojin/gwt` では
+`actions.diagnostic.policy.status` を読み、`actions.diagnostic.policy.add` に
+新しい UUID の `request_id`、現在の `expected_token`、短い `reason`、exact scope の
+`instruction_id` または native `approval_id` を指定します。`windows-diagnostic.yml`
+だけを許可し、既存設定を保持します。`.rollback` は同じパラメータに加え、成功した
+add receipt の ID を `added_by` に指定します。リリース用の承認は流用できません。
+許可設定では診断を送信しません。
+
+送信後は `request_id` で照会します。送信結果が不明でも再送せず、確実な実行開始前の
+結果を検証できた場合だけ、`preexecution_of` と `expected_predecessor_revision` による
+訂正を一度受け付けます。`actions.diagnostic.cancel` は正確な `expected_run_id` と
+現在の `expected_revision` を要求し、取消受付を cleanup 完了とは扱いません。
+診断結果には失敗・cleanup 未観測をそのまま残し、Ready の検証証拠には使用しません。
+各ケースの終了コードは provider ごとの共有テストプロセスの実測値で、個別ケースの
+プロセス終了値ではありません。バイナリ情報には Cargo の `test` profile と実測 hash を記録します。
+
 ```bash
 gwtd <<'JSON'
 {"schema_version":1,"operation":"actions.dispatch","params":{"workflow":"prepare-release.yml","ref":"develop","inputs":{"bump":"auto"}}}
@@ -511,6 +546,9 @@ PowerShell 7 を選択できます。Docker 起動では引き続きコンテナ
 できます。Windows では `Ctrl+C` で現在の選択をコピーして選択を解除します。
 選択がない場合、`Ctrl+C` は実行中のターミナルプロセス向けの割り込みのままです。
 Linux では `Ctrl+Shift+C` でも現在の選択をコピーできます。
+エージェントがマウスを追跡している場合も、ホイールで保持済みの履歴をスクロールできます。
+マウス追跡中のアプリでは `Shift+drag`（macOS は `Option+drag`）で範囲選択できます。
+ターミナルにマウスを合わせると、この修飾キーの案内も表示されます。
 
 ## Issue サーフェスと Issue Monitor
 
@@ -905,6 +943,19 @@ harness の空き枠が不明な場合は、自身の補助枠が空いている
 診断を返します。Monitor の観測には取得元とスキャン時刻が付き、取得不能・不完全な
 観測から全件の確認済みとは判断しません。記入済みの health / confidence も、裏付け
 証拠が接続されるまでは検証済みとして扱いません。
+
+登録済み PM は `pm.request_tasks.read` で保存済みの依頼追跡状態を参照できます。
+`selector` の省略時は件数を返し、`{"selector":{"kind":"pending"}}` は未分類の
+source ID、`{"selector":{"kind":"tasks","limit":50}}` は完了・取消を含む全 Task ID
+を返します。ページは ID のみを原 ID の辞書順で返し、件数は 1〜100（既定 50）です。
+`next_after` が null でなければ、その値を `after`、返却 revision を
+`expected_revision` に指定して続きを取得します。revision が競合したら `after`
+なしで読み直してください。ストアの読取不能はエラー、未初期化は `absent` です。
+原文・Task 詳細・操作履歴は `source` / `task` / `receipt` selector に対応する
+`id` / `operation_id` を指定して 1 件ずつ取得します。対象 project の登録済み PM
+だけが使用でき、Issue・Monitor・CI・承認の権限は付与しません。この参照 API に
+自動受付や Tasks UI は接続されていません。
+
 `policy.dependency_observations` は供給された Monitor inbox の全行を、同じ Issue の
 重複も含めて保持し、状態と正本の blocker・cycle・bundle 参照を返します。
 型付き診断がなければ null とし、`dependency_status` を不足情報として示します。
@@ -1179,6 +1230,9 @@ head が変わった場合は再レビューと新しい許可が必要です。
 gwt は project knowledge を Agent workspace の近くに置きます。
 
 - JSON operation `issue.spec.read` は GitHub Issue-backed SPEC をローカル cache から読みます。
+- `issue.spec.edit` は書き込み確定後に cleanup または最終確認が失敗すると、
+  `outcome: committed_unverified` を返します。再実行の前に section を読み直してください。
+  この結果は書き込みの確認完了を意味しません。
 - JSON operations `issue.view` と `issue.comments` は gwt CLI surface から
   cache-backed Issue access を提供します。
 - `gwt-search` は共有 ChromaDB runtime を通じて SPEC、Issue、source files、
@@ -1264,6 +1318,17 @@ SPEC と通常 Issue は同じ検索索引を使い、SPEC は見出しチャン
 Managed hooks は user hook を保持しながら、Agent state、workflow guardrails、
 Board reminders、discussion/plan/build Stop checks、coordination-event summaries
 を追加します。
+
+**Settings → Project → Hook Center** では、選択したプロジェクトの hook 設定、
+バイナリの fallback、Codex の探索・信頼状態、任意の profile 出力先を監査できます。
+**Regenerate managed hooks** は既存の managed hook だけを修復し、user hook を保持します。
+信頼登録と新しい Agent session の開始は別の操作であり、実行中の session は更新しません。
+バイナリ観測が Unknown の場合も、信頼済み・hook 実行成功とは扱いません。
+不正または読み取り不能の設定を検出した場合は、表示されたファイルを修正し、
+監査を更新するまで再生成は無効になります。
+修復は接続中のプロジェクトへだけ送信し、再接続後に自動再送しません。
+修復の応答を失った場合は結果を Unknown として保持し、監査の更新だけでは完了扱いにしません。
+最新の監査と前回の修復結果は別々に表示します。
 
 agent の停止や pane close が Board の未読を報告した場合は、同じ agent session で
 JSON operation `board.show` に `params:{"all":true}` を渡して本文を読み、再試行します。
@@ -1641,12 +1706,24 @@ PM ウィンドウの **Reports** は、明示的に投稿された Markdown の
 使います。報告は `~/.gwt/projects/<project-hash>/project-state/pm-reports.jsonl` に保存します。
 指示を記録した Q&A は同じ machine-local project store の `project-state/user-instructions.json`
 を正本とし、1 回の原子的な保存で報告と指示を保持します。再起動後も保持し、自動失効・件数制限は
-ありません。空でない報告本文は 1 件 64 KiB までです。
+ありません。Q&A 本文と各構造化イベントの詳細は 64 KiB、構造化投稿全体は 256 KiB までです。
 
-登録済み PM は `pm.report.post` の `kind`（`progress` / `decision` / `blocker` / `qa`）と
-`body` で投稿します。`qa` には、ユーザーの質問・指示を要約した空でない `question` が必須で、
-`body` に回答・取った行動・結果を記載します。`pm.report.list` で履歴を読み出せます。標準の gwtd JSON envelope を
-使用します。投稿成功は永続化の確認を意味し、失敗時は明示的なエラーを返します。
+PM の更新は共通の短い概要で表示し、**Details** を開くと説明と参照をすべて読めます。
+**Copy** は概要と詳細の両方を含みます。同じ状態の観測では、再起動や Claude / Codex の
+切り替え後も報告を増やしません。新しい重大障害・判断依頼は即時に表示し、通常の更新は
+1 件の digest にまとめます。解決・再発・意味のある変化は新しい報告になります。
+
+登録済み PM の Q&A 以外の更新は、`pm.report.post` の version 付き `submission` に
+`request_id`、project 内の event / episode identity、期待 revision、型付き状態、`summary`、
+省略のない `details`、`refs` を渡します。`pm.report.list` は履歴・event revision・投稿 receipt を
+返します。同じ request の再送は保存済み receipt を返し、異なる payload や古い revision は
+エラーになります。receipt は永続的な受理・抑制の記録で、ユーザーの承認や作業完了の証明では
+ありません。本文だけの Q&A 以外の投稿は、ユーザーが直接使う CLI の互換経路に限ります。
+Q&A は `kind: qa`、`question`、`body` と指示の一体保存を維持し、明示的に求められた詳細回答を
+省略しません。
+
+旧報告履歴も読み出せます。構造化報告を初めて保存した後は、この版以降で報告を読み書きして
+ください。旧版は新 journal 形式を拒否し、既存データをそのまま保持します。履歴は削除しません。
 
 PM の Q&A 投稿には、原文 `original`、種別 `kind`（`standing` / `one_off` / `question`）、
 `actions`、`issue_numbers` を持つ `instruction` を含めます。任意の `supersedes` に旧指示の ID を
@@ -1818,6 +1895,15 @@ JSON
   （section・part 番号付き）も報告し、内容の書き換えや削除は行いません。
   section 書き込みはホストの同じ cache を使う writer を直列化し、索引更新直前に
   最新本文と比較します。別ホスト・外部 writer・通信結果不明は保証対象外です。
+  section 編集の本文には artifact マーカーを含めないでください。マーカーは
+  operation が付け、マーカーを含む入力は書き込み前に拒否します。
+  `issue.spec.repair` は二重マーカーを修復します。古い孤立 artifact が新しい内容へ
+  引き継がれていることを確認した場合は、修復の `archive_comments` にコメント ID を
+  指定できます（例: `{"number":1784,"archive_comments":[12345]}`）。本文を保存し、
+  外側マーカーだけを退役します。全 part が揃った孤立グループでも、一部しか残って
+  いないグループでも、`part=N/M` マーカーを扱えます。索引が参照するコメントは
+  拒否します。同じ ID で再試行すると、退役済みのコメントへの書き込みを省略します。
+  その後 `issue.spec.lint` を再実行し、索引の健全性を確認してください。
 
 ```bash
 gwtd <<'JSON'
@@ -1839,6 +1925,12 @@ JSON
 Logs サーフェスの **Project** でそのプロジェクトのイベント、**Global** で
 起動時およびプロジェクトに属さない診断を表示します。プロジェクトを切り替えても、
 バックグラウンド処理のログは発生元プロジェクトに残ります。
+
+診断ログは既定で7日分を保持し、各ログディレクトリの
+`gwt.log.YYYY-MM-DD` ファイルの合計を2 GiBに制限します。
+`ui-trace-*.jsonl` などの他のファイルは、この上限の対象外です。
+古い日付のファイルから削除し、当日分だけで上限に達した場合は、
+次の完全なログ行から当日ファイルへの記録を再開します。
 
 - アプリログ:
   `~/.gwt/projects/<repo-hash>/logs/gwt.log.YYYY-MM-DD`
@@ -2193,7 +2285,13 @@ canonical な headed E2E コマンドは計測環境も記録します。ブラ�
 Windows では、検証を含む gwt pane Job の CPU hard cap が解除されたことを確認してから
 計測します。canonical の全 slot と旧 verification lane が対象で、holder がいなくなると
 設定された上限を復元します。プロセス優先度と pane 終了時の回収は維持します。
-古い GUI の Job 祖先を検査できない場合は、更新後の runtime で gwt を再起動してください。
+
+祖先 GUI の Job 登録がない場合、`verify.run` は GUI を再起動せず、同じ計測要求を
+非表示の worker で自動的に再実行します。Windows が worker の起動時にすべての Job 外で
+あることを確認してから、専用の終了時回収 Job に収容します。同じ Session・環境変数・
+作業ディレクトリ・検証行列全体を保持し、一時的な文脈は現在の Windows ユーザー向けに
+暗号化して転送後に削除します。この実行環境を確保できない場合は復旧を拒否し、理由を
+表示します。別途指定した計測対象 GUI 自身の Job も、読み取り可能で上限がない必要があります。
 
 コマンドの `measurement` 証跡には、対象 PID と開始時刻、観測した Job cap、
 サンプリングした CPU 時間・使用率、admission 待ち時間、cap 解除待ち時間を記録します。

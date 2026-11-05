@@ -44,6 +44,8 @@ use gwt_core::workspace_projection::{
 use gwt_github::{client::ApiError, SpecOpsError};
 use serde::{Deserialize, Serialize};
 
+use crate::issue_monitor::IssueMonitorWaitSubject;
+
 use super::CliEnv;
 
 mod monitor_duplicate;
@@ -5520,6 +5522,369 @@ fn with_current_execution_binding_lease_wait<T>(
                 Ok(Some(operation()))
             },
         )
+    })
+}
+
+fn wait_subject_owner(
+    identity: &gwt_agent::SessionExecutionIdentity,
+) -> io::Result<ExecutionOwnerKey> {
+    gwt_agent::validate_session_id_path_component(&identity.session_id)
+        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
+    if identity.execution_binding.session_id != identity.session_id {
+        return Err(invalid_generation_data(
+            "wait subject Session binding is inconsistent",
+        ));
+    }
+    let kind = match identity.execution_binding.owner_kind.as_str() {
+        "issue" => ExecutionOwnerKind::Issue,
+        "spec" => ExecutionOwnerKind::Spec,
+        _ => {
+            return Err(invalid_generation_data(
+                "wait subject owner kind is invalid",
+            ))
+        }
+    };
+    let owner = ExecutionOwnerKey {
+        kind,
+        number: identity.execution_binding.owner_number,
+    };
+    validate_owner(owner)?;
+    Ok(owner)
+}
+
+fn wait_subject_owner_ledger(
+    owner_dir: &Path,
+    owner_number: u64,
+) -> io::Result<Option<ExecutionGenerationLedger>> {
+    let Some(contents) = read_owner_ledger_from_dir(owner_dir)? else {
+        return Ok(None);
+    };
+    let ledger: ExecutionGenerationLedger = serde_json::from_str(&contents).map_err(|error| {
+        invalid_generation_data(format!("malformed wait subject owner ledger: {error}"))
+    })?;
+    validate_generation_ledger(&ledger, ledger.owner)?;
+    if ledger.owner.number != owner_number {
+        return Err(invalid_generation_data(
+            "wait subject owner directory changed",
+        ));
+    }
+    Ok(Some(ledger))
+}
+
+fn observe_wait_subject_runtime(
+    sessions_dir: &Path,
+    session: &gwt_agent::Session,
+    identity: &gwt_agent::SessionExecutionIdentity,
+    lifecycle_identity: &gwt_agent::ExecutionBindingIdentity,
+) -> io::Result<Option<IssueMonitorWaitSubject>> {
+    gwt_core::operation_deadline::ensure_remaining("wait subject runtime observation")?;
+    let inventory = crate::session_inventory::observe_session(session, sessions_dir);
+    gwt_core::operation_deadline::ensure_remaining("wait subject runtime observation")?;
+    if !inventory.uncertainties.is_empty() || inventory.sessions.len() > 1 {
+        return Err(generation_conflict(
+            "wait subject native runtime identity is uncertain",
+        ));
+    }
+    let Some(observed) = inventory.sessions.first() else {
+        return Ok(None);
+    };
+    let runtime = gwt_agent::SessionRuntimeState::load(&gwt_agent::runtime_state_path_for_pid(
+        sessions_dir,
+        observed.host_pid,
+        &identity.session_id,
+    ))?;
+    let host_started_at = runtime.host_started_at.filter(|start| {
+        *start > 0 && Some(*start) == crate::process::host_process_start_time(observed.host_pid)
+    });
+    let runtime_incarnation = runtime.runtime_incarnation.filter(|value| *value > 0);
+    if runtime.execution_identity.as_ref() != Some(identity)
+        || runtime.child_pid != Some(observed.child_pid)
+        || runtime.child_started_at != Some(observed.child_started_at)
+        || matches!(
+            runtime.status,
+            gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
+        )
+    {
+        return Err(generation_conflict(
+            "wait subject native runtime changed during observation",
+        ));
+    }
+    let (Some(host_started_at), Some(runtime_incarnation)) = (host_started_at, runtime_incarnation)
+    else {
+        return Err(generation_conflict(
+            "wait subject native runtime lacks exact process identity",
+        ));
+    };
+    gwt_core::operation_deadline::ensure_remaining("wait subject runtime observation")?;
+    Ok(Some(IssueMonitorWaitSubject {
+        execution_identity: identity.clone(),
+        lifecycle_identity: lifecycle_identity.clone(),
+        host_pid: observed.host_pid,
+        host_started_at,
+        runtime_incarnation,
+        child_pid: observed.child_pid,
+        child_started_at: observed.child_started_at,
+    }))
+}
+
+/// Classify only while the repository owner and Session paths are fenced.
+/// `false` is a positively non-current subject; unreadable authority is an error.
+fn wait_subject_is_current_under_leases(
+    sessions_dir: &Path,
+    project_context: &GenerationTransactionContext,
+    subject: &IssueMonitorWaitSubject,
+) -> io::Result<bool> {
+    let expected = &subject.execution_identity;
+    let owner = wait_subject_owner(expected)?;
+    let ledger = wait_subject_owner_ledger(&project_context.owner_dir, owner.number)?
+        .ok_or_else(|| generation_conflict("wait subject owner authority is missing"))?;
+    let current = ledger.current_generation().ok_or_else(|| {
+        invalid_generation_data("wait subject owner current generation is missing")
+    })?;
+    let projection: ExecutionControlRecord =
+        serde_json::from_str(ledger.effective_projection_for(current)).map_err(|error| {
+            invalid_generation_data(format!("malformed wait subject holder: {error}"))
+        })?;
+    if ledger.owner != owner
+        || ledger.effective_status_for(current) != ExecutionControlStatus::Active
+        || execution_binding_for_generation(&ledger, current) != subject.lifecycle_identity
+        || projection.primary_session_id != expected.session_id
+    {
+        return Ok(false);
+    }
+    let session = match gwt_agent::inspect_session_path(
+        &sessions_dir.join(format!("{}.toml", expected.session_id)),
+    ) {
+        gwt_agent::SessionPathState::Missing => return Ok(false),
+        gwt_agent::SessionPathState::Error(error) => return Err(error),
+        gwt_agent::SessionPathState::Present(session) => session,
+    };
+    let current_identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+        .map_err(invalid_generation_data)?;
+    if current_identity.as_ref() != Some(expected) {
+        return Ok(false);
+    }
+    match dunce::canonicalize(&expected.worktree_path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    }
+    let context = GenerationTransactionContext::resolve(&expected.worktree_path, owner)?;
+    let repo_hash = crate::index_worker::detect_repo_hash(&context.worktree)
+        .ok_or_else(|| generation_conflict("wait subject repository identity is unreadable"))?;
+    if context.owner_dir != project_context.owner_dir
+        || expected.repo_hash.as_deref() != Some(repo_hash.as_str())
+    {
+        return Ok(false);
+    }
+    context.validate_unchanged()?;
+    if !current_active_execution_binding_matches_context(
+        &context,
+        &expected.session_id,
+        &expected.execution_binding.identity,
+    )? {
+        return Ok(false);
+    }
+    if gwt_agent::read_session_active_launch_handshake_under_lease(sessions_dir, expected)?
+        .is_some()
+        || gwt_agent::read_session_manual_handoff_under_lease(sessions_dir, expected)?.is_some()
+    {
+        return Err(generation_conflict(
+            "wait subject has an unresolved native launch or handoff",
+        ));
+    }
+    match observe_wait_subject_runtime(
+        sessions_dir,
+        &session,
+        expected,
+        &subject.lifecycle_identity,
+    )? {
+        Some(observed) => Ok(observed == *subject),
+        None if crate::process::exact_pty_process_tree_is_alive(
+            subject.child_pid,
+            subject.child_started_at,
+        ) =>
+        {
+            Err(generation_conflict(
+                "wait subject runtime evidence disappeared while its child remains live",
+            ))
+        }
+        None => Ok(false),
+    }
+}
+
+fn with_wait_subject_owner_leases<T>(
+    contexts: &[GenerationTransactionContext],
+    operation: &mut dyn FnMut() -> io::Result<T>,
+) -> io::Result<T> {
+    let Some((context, remaining)) = contexts.split_first() else {
+        return operation();
+    };
+    let deadline = gwt_core::operation_deadline::ensure_remaining("wait subject owner leases")?;
+    let wait = deadline.map_or(ACTIVE_BINDING_LEASE_WAIT, |deadline| {
+        ACTIVE_BINDING_LEASE_WAIT
+            .min(deadline.saturating_duration_since(gwt_core::operation_deadline::now()))
+    });
+    crate::cli::trusted_store::with_write_lease_for_resolved_dir_wait(
+        &context.owner_dir,
+        wait,
+        || {
+            context.validate_unchanged()?;
+            with_wait_subject_owner_leases(remaining, operation)
+        },
+    )
+}
+
+/// Fence every candidate before a full-state preference transaction. Retired
+/// subjects remain protected, but cannot authorize adopting an effective wait.
+pub(crate) fn with_wait_subject_leases<T>(
+    project_root: &Path,
+    subjects: &[IssueMonitorWaitSubject],
+    operation: impl FnOnce(&[IssueMonitorWaitSubject], &[IssueMonitorWaitSubject]) -> io::Result<T>,
+) -> io::Result<T> {
+    if subjects.is_empty() {
+        return operation(&[], &[]);
+    }
+    if gwt_agent::current_thread_holds_session_lease() {
+        return Err(generation_conflict(
+            "wait subject owner leases must precede every Session lease",
+        ));
+    }
+    let mut contexts = subjects
+        .iter()
+        .map(|subject| {
+            GenerationTransactionContext::resolve(
+                project_root,
+                wait_subject_owner(&subject.execution_identity)?,
+            )
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    contexts.sort_by(|left, right| left.owner_dir.cmp(&right.owner_dir));
+    contexts.dedup_by(|left, right| left.owner_dir == right.owner_dir);
+    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    let session_ids = subjects
+        .iter()
+        .map(|subject| subject.execution_identity.session_id.as_str())
+        .collect::<Vec<_>>();
+    let mut operation = Some(operation);
+    with_wait_subject_owner_leases(&contexts, &mut || {
+        gwt_core::operation_deadline::ensure_remaining("wait subject Session leases")?;
+        let _sessions = gwt_agent::acquire_session_path_leases(&sessions_dir, &session_ids)?;
+        gwt_core::operation_deadline::ensure_remaining("wait subject Session leases")?;
+        let mut live = Vec::new();
+        let mut retired = Vec::new();
+        for subject in subjects {
+            let context = contexts
+                .iter()
+                .find(|context| {
+                    context.owner.number
+                        == subject.execution_identity.execution_binding.owner_number
+                })
+                .expect("every wait subject has a protected owner directory");
+            context.validate_unchanged()?;
+            let target = if wait_subject_is_current_under_leases(&sessions_dir, context, subject)? {
+                &mut live
+            } else {
+                &mut retired
+            };
+            if !target.contains(subject) {
+                target.push(subject.clone());
+            }
+        }
+        gwt_core::operation_deadline::ensure_remaining("wait subject preference commit")?;
+        operation
+            .take()
+            .expect("wait subject transaction runs once")(&live, &retired)
+    })
+}
+
+/// Capture provenance from the canonical current holder, never from caller
+/// claims or runtime counts. Only absent legacy authority remains identity-less;
+/// incomplete canonical authority must not silently downgrade a new control.
+pub(crate) fn capture_current_wait_subject(
+    project_root: &Path,
+    owner_number: u64,
+) -> io::Result<Option<IssueMonitorWaitSubject>> {
+    if gwt_agent::current_thread_holds_session_lease() {
+        return Err(generation_conflict(
+            "wait subject owner lease must precede the Session lease",
+        ));
+    }
+    let context = match GenerationTransactionContext::resolve(
+        project_root,
+        ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: owner_number,
+        },
+    ) {
+        Ok(context) => context,
+        Err(error) if error.kind() == ErrorKind::InvalidInput => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    with_wait_subject_owner_leases(std::slice::from_ref(&context), &mut || {
+        let Some(ledger) = wait_subject_owner_ledger(&context.owner_dir, owner_number)? else {
+            if context
+                .worktree_trusted_dir
+                .join(GENERATION_POINTER_FILE)
+                .try_exists()?
+                || generation_pointer_path(&context.worktree).try_exists()?
+            {
+                return Err(generation_conflict(
+                    "wait subject owner ledger is missing while generation pointer exists",
+                ));
+            }
+            return Ok(None);
+        };
+        let current = ledger.current_generation().ok_or_else(|| {
+            invalid_generation_data("wait subject owner current generation is missing")
+        })?;
+        if ledger.effective_status_for(current) != ExecutionControlStatus::Active {
+            return Err(generation_conflict(
+                "wait subject canonical holder is not Active",
+            ));
+        }
+        let projection: ExecutionControlRecord =
+            serde_json::from_str(ledger.effective_projection_for(current)).map_err(|error| {
+                invalid_generation_data(format!("malformed wait holder projection: {error}"))
+            })?;
+        let lifecycle_identity = execution_binding_for_generation(&ledger, current);
+        let _sessions = gwt_agent::acquire_session_path_leases(
+            &gwt_core::paths::gwt_sessions_dir(),
+            &[&projection.primary_session_id],
+        )?;
+        gwt_core::operation_deadline::ensure_remaining("wait subject intake")?;
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let session = match gwt_agent::inspect_session_path(
+            &sessions_dir.join(format!("{}.toml", projection.primary_session_id)),
+        ) {
+            gwt_agent::SessionPathState::Missing => {
+                return Err(generation_conflict(
+                    "wait subject canonical holder Session is missing",
+                ))
+            }
+            gwt_agent::SessionPathState::Error(error) => return Err(error),
+            gwt_agent::SessionPathState::Present(session) => session,
+        };
+        let Some(identity) = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .map_err(invalid_generation_data)?
+        else {
+            return Err(generation_conflict(
+                "wait subject canonical holder has no execution identity",
+            ));
+        };
+        let Some(subject) =
+            observe_wait_subject_runtime(&sessions_dir, &session, &identity, &lifecycle_identity)?
+        else {
+            return Err(generation_conflict(
+                "wait subject canonical holder has no exact native runtime observation",
+            ));
+        };
+        if !wait_subject_is_current_under_leases(&sessions_dir, &context, &subject)? {
+            return Err(generation_conflict(
+                "wait subject canonical holder is no longer current",
+            ));
+        }
+        Ok(Some(subject))
     })
 }
 
@@ -13139,6 +13504,25 @@ fn probe_blocked_build_abort_recovery(
             )
         }
         Err(error) => return unavailable(GovernanceCause::Integrity, &error.to_string()),
+    }
+    match crate::agent_project_state::snapshot_blocked_done_build_abort_authority(
+        worktree,
+        session_id,
+        owner_number,
+    ) {
+        Ok(Some(_)) => {
+            let mut probe = RecoveryProbe::available(
+                "build.abort",
+                GovernanceMetadata {
+                    target_state: Some("build_inactive".into()),
+                    ..governance
+                },
+            );
+            probe.reason = Some("Current Blocked execution has an exact Done Work and same active build; build.abort requires a non-empty reason and ends only the build lifecycle, preserving Done Work and execution history".into());
+            return probe;
+        }
+        Ok(None) => {}
+        Err(error) => return unavailable(GovernanceCause::Authority, &error.to_string()),
     }
     match crate::agent_project_state::snapshot_bound_terminal_compatibility_authority(
         worktree,
@@ -22967,6 +23351,9 @@ mod tests {
                 &identity.session_id,
             ))
             .unwrap();
+            let wait_subject = capture_current_wait_subject(worktree.path(), owner.number)
+                .unwrap()
+                .expect("the current native holder has a canonical wait subject");
             let authority_before = generation_authority_bytes(worktree.path(), owner);
 
             assert_eq!(
@@ -23015,8 +23402,354 @@ mod tests {
                     Some(candidate.generation_id),
                     "same-session lifecycle events preserve the holder's runtime authority",
                 );
+                let fresh_subject = capture_current_wait_subject(worktree.path(), owner.number)
+                    .unwrap()
+                    .unwrap();
+                let mut expected_recovery = wait_subject.clone();
+                expected_recovery.lifecycle_identity =
+                    current_execution_binding(worktree.path(), owner)
+                        .unwrap()
+                        .unwrap();
+                assert_ne!(
+                    fresh_subject.lifecycle_identity,
+                    wait_subject.lifecycle_identity
+                );
+                assert_eq!(
+                    fresh_subject, expected_recovery,
+                    "same-session recovery changes canonical lifecycle provenance while retaining the exact durable Session and native tuple",
+                );
+                with_wait_subject_leases(
+                    worktree.path(),
+                    &[wait_subject.clone(), fresh_subject.clone()],
+                    |live, retired| {
+                        assert_eq!(live, std::slice::from_ref(&fresh_subject));
+                        assert_eq!(retired, std::slice::from_ref(&wait_subject));
+                        Ok(())
+                    },
+                )
+                .unwrap();
+                let mut ended_control = crate::AutonomousIssueRecord::new(owner.number);
+                assert!(crate::issue_monitor::apply_wait_subject_on_record(
+                    &mut ended_control,
+                    &wait_subject,
+                ));
+                ended_control.wait_control.as_mut().unwrap().ended = true;
+                ended_control.wait = None;
+                assert!(
+                    crate::issue_monitor::apply_wait_subject_on_record(
+                        &mut ended_control,
+                        &fresh_subject,
+                    ),
+                    "a fresh canonical declaration after same-Session recovery must not inherit the predecessor's ended control",
+                );
             }
         }
+    }
+
+    fn issue_5876_wait_subject_fixture(worktree: &Path) -> IssueMonitorWaitSubject {
+        let (_, identity) = startup_reaper_active_fixture_with_status(
+            worktree,
+            generation_owner(),
+            "wait-subject-holder",
+            gwt_agent::AgentStatus::Running,
+        );
+        let started_at = crate::process::host_process_start_time(std::process::id()).unwrap();
+        gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Running,
+            &identity,
+            41,
+            started_at,
+            std::process::id(),
+            started_at,
+        )
+        .save(&gwt_agent::runtime_state_path(
+            &gwt_core::paths::gwt_sessions_dir(),
+            &identity.session_id,
+        ))
+        .unwrap();
+        capture_current_wait_subject(worktree, generation_owner().number)
+            .unwrap()
+            .expect("the canonical holder has exact native runtime proof")
+    }
+
+    #[test]
+    fn issue_5876_wait_capture_rejects_pointer_without_owner_ledger() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        issue_5876_wait_subject_fixture(worktree.path());
+        let owner = generation_owner();
+        fs::remove_file(generation_ledger_path(worktree.path(), owner).unwrap()).unwrap();
+        let mirror = generation_pointer_path(worktree.path());
+        let pointer = fs::read(&mirror).unwrap();
+        let trusted = crate::cli::trusted_store::trusted_dir_for_worktree(worktree.path())
+            .unwrap()
+            .join(GENERATION_POINTER_FILE);
+
+        fs::remove_file(&mirror).unwrap();
+        assert!(
+            capture_current_wait_subject(worktree.path(), owner.number).is_err(),
+            "a trusted-only generation pointer without its ledger is damaged authority, not legacy"
+        );
+        fs::remove_file(&trusted).unwrap();
+        fs::write(&mirror, pointer).unwrap();
+        assert!(
+            capture_current_wait_subject(worktree.path(), owner.number).is_err(),
+            "a mirror-only generation pointer without its ledger cannot admit an identity-less wait"
+        );
+        fs::remove_file(&mirror).unwrap();
+        assert_eq!(
+            capture_current_wait_subject(worktree.path(), owner.number).unwrap(),
+            None,
+            "absent generation authority preserves legacy wait admission"
+        );
+    }
+
+    #[test]
+    fn issue_5876_wait_subject_batch_fences_current_and_classifies_replaced_or_missing_sessions() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let subject = issue_5876_wait_subject_fixture(worktree.path());
+        assert_eq!(
+            subject.execution_identity.execution_binding.owner_kind,
+            "spec"
+        );
+        assert_eq!(
+            GenerationTransactionContext::resolve(
+                worktree.path(),
+                ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Issue,
+                    number: generation_owner().number,
+                }
+            )
+            .unwrap()
+            .owner_dir,
+            generation_owner_dir(worktree.path(), generation_owner()).unwrap(),
+            "Issue-kind intake routing shares the canonical SPEC owner directory",
+        );
+        let owner_dir = generation_owner_dir(worktree.path(), generation_owner()).unwrap();
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let session_id = subject.execution_identity.session_id.clone();
+        crate::cli::trusted_store::set_write_lease_acquired_hook(|| {
+            assert!(!gwt_agent::current_thread_holds_session_lease());
+        });
+        with_wait_subject_leases(
+            worktree.path(),
+            &[subject.clone(), subject.clone()],
+            |live, retired| {
+                assert_eq!(live, std::slice::from_ref(&subject));
+                assert!(retired.is_empty());
+                let sessions_dir = sessions_dir.clone();
+                let session_id = session_id.clone();
+                std::thread::spawn(move || {
+                    let owner = crate::cli::trusted_store::with_write_lease_for_resolved_dir_wait(
+                        &owner_dir,
+                        Duration::ZERO,
+                        || Ok(()),
+                    )
+                    .unwrap_err();
+                    let session = gwt_agent::with_session_path_lease_wait(
+                        &sessions_dir,
+                        &session_id,
+                        Duration::ZERO,
+                        |_| Ok(()),
+                    )
+                    .unwrap_err();
+                    assert_eq!(owner.kind(), ErrorKind::WouldBlock);
+                    assert_eq!(session.kind(), ErrorKind::WouldBlock);
+                })
+                .join()
+                .unwrap();
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
+        let mut replacement = gwt_agent::SessionRuntimeState::load(&runtime_path).unwrap();
+        replacement.runtime_incarnation = Some(subject.runtime_incarnation + 1);
+        replacement.save(&runtime_path).unwrap();
+        let successor = capture_current_wait_subject(worktree.path(), generation_owner().number)
+            .unwrap()
+            .unwrap();
+        let mut foreign = subject.clone();
+        foreign
+            .execution_identity
+            .execution_binding
+            .identity
+            .generation_id = "foreign-generation".into();
+        with_wait_subject_leases(
+            worktree.path(),
+            &[subject.clone(), successor.clone(), foreign.clone()],
+            |live, retired| {
+                assert_eq!(live, std::slice::from_ref(&successor));
+                assert_eq!(retired, &[subject.clone(), foreign]);
+                Ok(())
+            },
+        )
+        .unwrap();
+        fs::remove_file(sessions_dir.join(format!("{session_id}.toml"))).unwrap();
+        assert!(
+            capture_current_wait_subject(worktree.path(), generation_owner().number).is_err(),
+            "an incomplete canonical holder cannot be admitted as a legacy wait"
+        );
+        with_wait_subject_leases(
+            worktree.path(),
+            &[subject.clone(), successor.clone()],
+            |live, retired| {
+                assert!(live.is_empty());
+                assert_eq!(retired, &[subject, successor]);
+                Ok(())
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn issue_5876_wait_subject_deleted_worktree_retires_under_the_current_project_owner_fence() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let _session_env = unset_live_session_env();
+        let project = tempfile::tempdir().unwrap();
+        let main = project.path().join("main");
+        fs::create_dir_all(&main).unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(&main);
+        let old_worktree = project.path().join("old");
+        assert!(gwt_core::process::hidden_command("git")
+            .args(["worktree", "add", "-q", "-b", "old-wait-holder"])
+            .arg(&old_worktree)
+            .arg("HEAD")
+            .current_dir(&main)
+            .status()
+            .unwrap()
+            .success());
+        let subject = issue_5876_wait_subject_fixture(&old_worktree);
+        fs::remove_dir_all(&old_worktree).unwrap();
+        with_wait_subject_leases(&main, std::slice::from_ref(&subject), |live, retired| {
+            assert!(live.is_empty());
+            assert_eq!(retired, std::slice::from_ref(&subject));
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn issue_5876_wait_subject_unknown_runtime_or_launch_fence_never_calls_the_writer() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let subject = issue_5876_wait_subject_fixture(worktree.path());
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let runtime_path =
+            gwt_agent::runtime_state_path(&sessions_dir, &subject.execution_identity.session_id);
+        let runtime_bytes = fs::read(&runtime_path).unwrap();
+        fs::write(&runtime_path, b"unreadable-runtime").unwrap();
+        let called = std::cell::Cell::new(false);
+        let write = |_: &[IssueMonitorWaitSubject], _: &[IssueMonitorWaitSubject]| {
+            called.set(true);
+            Ok(())
+        };
+        assert!(
+            with_wait_subject_leases(worktree.path(), std::slice::from_ref(&subject), write)
+                .is_err()
+        );
+        assert!(!called.get());
+        fs::remove_file(&runtime_path).unwrap();
+        assert!(
+            with_wait_subject_leases(worktree.path(), std::slice::from_ref(&subject), write)
+                .is_err()
+        );
+        assert!(
+            !called.get(),
+            "a live child with missing sidecar evidence is unknown"
+        );
+        assert!(
+            capture_current_wait_subject(worktree.path(), generation_owner().number).is_err(),
+            "first capture cannot downgrade missing canonical runtime proof to legacy"
+        );
+        fs::write(&runtime_path, runtime_bytes).unwrap();
+
+        // Reverse the input owners. The first acquired owner must precede
+        // the other owner and every Session lease, even for an unknown subject.
+        let owner = generation_owner();
+        let first_owner = generation_owner_dir(worktree.path(), owner).unwrap();
+        let second_owner = GenerationTransactionContext::resolve(
+            worktree.path(),
+            ExecutionOwnerKey {
+                number: owner.number + 1,
+                ..owner
+            },
+        )
+        .unwrap()
+        .owner_dir;
+        let mut unknown = subject.clone();
+        unknown.execution_identity.execution_binding.owner_number += 1;
+        unknown.execution_identity.linked_issue_number = Some(owner.number + 1);
+        crate::cli::trusted_store::set_write_lease_acquired_hook(move || {
+            assert!(!gwt_agent::current_thread_holds_session_lease());
+            std::thread::spawn(move || {
+                assert_eq!(
+                    crate::cli::trusted_store::with_write_lease_for_resolved_dir_wait(
+                        &first_owner,
+                        Duration::ZERO,
+                        || Ok(()),
+                    )
+                    .unwrap_err()
+                    .kind(),
+                    ErrorKind::WouldBlock
+                );
+                crate::cli::trusted_store::with_write_lease_for_resolved_dir_wait(
+                    &second_owner,
+                    Duration::ZERO,
+                    || Ok(()),
+                )
+                .expect("the second owner has not been acquired yet");
+            })
+            .join()
+            .unwrap();
+        });
+        assert!(
+            with_wait_subject_leases(worktree.path(), &[unknown, subject.clone()], write).is_err()
+        );
+        assert!(!called.get());
+        gwt_agent::with_session_path_lease(
+            &sessions_dir,
+            &subject.execution_identity.session_id,
+            |_| {
+                gwt_agent::begin_session_active_launch_handshake_under_lease(
+                    &sessions_dir,
+                    &subject.execution_identity,
+                    "pending-wait-launch",
+                    subject.host_started_at,
+                )
+                .map(|handshake| assert!(handshake.is_some()))
+            },
+        )
+        .unwrap();
+        assert!(
+            with_wait_subject_leases(worktree.path(), std::slice::from_ref(&subject), write)
+                .is_err()
+        );
+        assert!(!called.get());
     }
 
     #[test]

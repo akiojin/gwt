@@ -391,13 +391,16 @@ export function createNotificationCenter({
       }
       renderErrorCount(item, existing.count);
     } else {
-      item = record({ kind, level, title: notice.title, message: notice.message, onActivate: notice.onActivate });
+      item = record({ kind, level, title: notice.title, message: notice.message,
+        onActivate: key && typeof notice.onActivate === "function"
+          ? () => surfaceRows.get(key)?.onActivate?.() : notice.onActivate });
       if (!item) return null;
       if (key) {
         item.dataset.errorKey = key;
         surfaceRows.set(key, { item, count: 1 });
       }
     }
+    if (key) surfaceRows.get(key).onActivate = notice.onActivate;
     item.dataset.resolved = "false";
     let details = item.querySelector(".notification-center__details");
     if (notice.details) {

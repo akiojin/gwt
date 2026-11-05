@@ -883,6 +883,8 @@ pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
             | "issue.spec.audit"
             | "issue.monitor.status"
             | "update.settings.status"
+            | "actions.release_policy.status"
+            | "actions.diagnostic.policy.status"
             | "issue.monitor.profiles"
             | "issue.monitor.tiers"
             | "pr.current"
@@ -914,6 +916,7 @@ pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
             | "perf.violations"
             | "pm.capabilities"
             | "pm.plan.status"
+            | "pm.request_tasks.read"
             | "pm.status"
             | "pm.report.list"
             | "search"
@@ -1291,6 +1294,19 @@ fn is_read_only_gwtd_tokens(tokens: &[&str]) -> bool {
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn release_policy_json_status_is_read_only() {
+        assert!(is_read_only_json_envelope_operation(
+            "actions.release_policy.status"
+        ));
+        assert!(!is_read_only_json_envelope_operation(
+            "actions.release_policy.add"
+        ));
+        assert!(!is_read_only_json_envelope_operation(
+            "actions.release_policy.rollback"
+        ));
+    }
 
     // Issue #3265: the `.gwt/` bookkeeping allowance resolves the redirect
     // word the hook sees, which is *before* the shell expands it. Anything
@@ -2315,7 +2331,12 @@ mod tests {
 
     #[test]
     fn pm_plan_operations_preserve_identity_and_mutation_boundaries() {
-        for (operation, admitted) in [("pm.plan.status", true), ("pm.plan.apply", false)] {
+        for (operation, admitted) in [
+            ("pm.plan.status", true),
+            ("pm.plan.apply", false),
+            ("pm.request_tasks.read", true),
+            ("pm.request_tasks.apply", false),
+        ] {
             let event = HookEvent {
                 tool_name: Some("Bash".to_string()),
                 tool_input: Some(serde_json::json!({

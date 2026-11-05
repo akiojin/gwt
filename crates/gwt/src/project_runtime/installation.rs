@@ -82,6 +82,26 @@ pub(crate) struct OwnerRestoreRefusal {
     pub retryable: bool,
 }
 
+/// Known restore admission decisions that do not describe a failed launch.
+pub fn is_expected_restore_exclusion(code: &str) -> bool {
+    matches!(
+        code,
+        "closed_work_diagnostic_retained"
+            | "completed_work_retained"
+            | "execution_blocked"
+            | "landed_worktree"
+            | "empty_landed_worktree"
+            | "settled_execution"
+            | "closed_issue"
+            | "closed_issue_bookkeeping_warning"
+            | "revoked_launch"
+            | "lost_ownership"
+            | "monitor_stopped"
+            | "launch_revoked"
+            | "unregistered_pm"
+    )
+}
+
 impl OwnerSavedSessionRestore {
     pub fn refuse(&mut self, code: &str, message: impl Into<String>, retryable: bool) -> String {
         let message = message.into();
@@ -398,6 +418,12 @@ pub(crate) fn prepare_owner_saved_session_restore(
             && admission != RestoreAdmission::RefuseCompletedWork
         {
             let terminal = matches!(admission, RestoreAdmission::RefuseTerminal(_));
+            let retire_source = terminal
+                || matches!(
+                    admission,
+                    RestoreAdmission::RefuseRetainedTerminal
+                        | RestoreAdmission::RefuseHeld("launch_revoked")
+                );
             let reason = match admission {
                 RestoreAdmission::RefuseTerminal(reason) => reason.as_str(),
                 RestoreAdmission::RefuseRetainedTerminal => "closed_work_diagnostic_retained",
@@ -407,14 +433,16 @@ pub(crate) fn prepare_owner_saved_session_restore(
                 | RestoreAdmission::RefuseUnprovable(reason) => reason,
                 RestoreAdmission::Admit => unreachable!(),
             };
-            if terminal {
+            if retire_source {
                 mark_restore_source_completed_exact(sessions_dir, &restore.source)?;
+            }
+            if terminal {
                 remove_restore_placeholders(root, restore, false)?;
             }
             let error = restore.refuse(
                 reason,
                 format!("Automatic restore refused: {reason}"),
-                !terminal,
+                !retire_source,
             );
             restore
                 .refusal
@@ -429,8 +457,8 @@ pub(crate) fn prepare_owner_saved_session_restore(
             owner_restore_placeholder_known_empty(restore),
         ) {
             let remove_placeholder = code == "empty_landed_worktree";
+            mark_restore_source_completed_exact(sessions_dir, &restore.source)?;
             if remove_placeholder {
-                mark_restore_source_completed_exact(sessions_dir, &restore.source)?;
                 remove_restore_placeholders(root, restore, true)?;
             }
             let error = restore.refuse(code, format!("Automatic restore refused: {code}"), false);
@@ -442,6 +470,7 @@ pub(crate) fn prepare_owner_saved_session_restore(
             return Err(error);
         }
         if admission == RestoreAdmission::RefuseCompletedWork {
+            mark_restore_source_completed_exact(sessions_dir, &restore.source)?;
             return Err(restore.refuse(
                 "completed_work_retained",
                 "Automatic restore refused: completed_work_retained",
@@ -2247,7 +2276,7 @@ impl IssueMonitorLaunchClaimInput {
                     &self.project_root,
                     snapshot,
                     tabs,
-                    std::time::Duration::from_secs(5),
+                    crate::daemon_publisher::DURABLE_ISSUE_MONITOR_CONTROL_BUDGET.resolve(),
                 )
             },
             |payload| {

@@ -1,0 +1,205 @@
+{
+  "schema_version": 1,
+  "owner": 6701,
+  "baseline_commit": "5839e35f8c452d14bdb073143a09df68ae21cbed",
+  "method": "Run the same authenticated 34-request cross-runtime regression binary between netstat -an -p tcp snapshots; subtract prior loopback TIME_WAIT socket pairs; separate the known installed destinations.",
+  "installed_ports": [
+    52498,
+    52502,
+    61361,
+    61362
+  ],
+  "boundary": "Controlled native fixture, not three actual agent windows or the one-hour operational target.",
+  "before": {
+    "started_at": "2026-11-03T15:52:52.4765362Z",
+    "binary_sha256": "39bc40adf18d04bb0d5bfc95d81f76ac98c29d94f324f8cbfe273fde07e524be",
+    "exit_code": 101,
+    "log": "\r\nrunning 1 test\r\nprivate HTTP: 34 requests, 34 TCP connections\r\n\r\nthread 'project_runtime::client::tests::request_survives_another_callers_runtime_shutdown' (22588) panicked at crates\\gwt\\src\\project_runtime\\client.rs:393:9:\r\nassertion `left == right` failed: private HTTP connections were not reused\r\n  left: 34\r\n right: 1\r\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\r\ntest project_runtime::client::tests::request_survives_another_callers_runtime_shutdown ... FAILED\r\n\r\nfailures:\r\n\r\nfailures:\r\n    project_runtime::client::tests::request_survives_another_callers_runtime_shutdown\r\n\r\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5009 filtered out; finished in 0.46s\r\n\r\n",
+    "all_new_time_wait_by_remote_port": [
+      {
+        "count": 111,
+        "remote_port": 52498
+      },
+      {
+        "count": 105,
+        "remote_port": 52502
+      },
+      {
+        "count": 65,
+        "remote_port": 61361
+      },
+      {
+        "count": 34,
+        "remote_port": 56347
+      }
+    ],
+    "fixture_new_time_wait_rows": [
+      {
+        "key": "127.0.0.1:56368 127.0.0.1:56347",
+        "remote_port": 56347
+      },
+      {
+        "key": "127.0.0.1:56376 127.0.0.1:56347",
+        "remote_port": 56347
+      },
+      {
+        "key": "127.0.0.1:56378 127.0.0.1:56347",
+        "remote_port": 56347
+      },
+      {
+        "key": "127.0.0.1:56379 127.0.0.1:56347",
+        "remote_port": 56347
+      },
+      {
+        "key": "127.0.0.1:56381 127.0.0.1:56347",
+        "remote_port": 56347
+      },
+      {
+        "key": "127.0.0.1:56383 127.0.0.1:56347",
+        "remote_port": 56347
+      },
+      {
+        "key": "127.0.0.1:56385 127.0.0.1:56347",
+        "remote_port": 56347
+      },
+      {
+        "key": "127.0.0.1:56386 127.0.0.1:56347",
+        "remote_port": 56347
+      },
+      {
+        "key": "127.0.0.1:56389 127.0.0.1:56347",
+        "remote_port": 56347
+      },
+      {
+        "key": "127.0.0.1:56390 127.0.0.1:56347",
+        "remote_port": 56347
+      },
+      {
+        "key": "127.0.0.1:56392 127.0.0.1:56347",
+        "remote_port": 56347
+      },
+      {
+        "key": "127.0.0.1:56393 127.0.0.1:56347",
+        "remote_port": 56347
+      },
+      {
+        "key": "127.0.0.1:56394 127.0.0.1:56347",
+        "remote_port": 56347
+      },
+      {
+        "key": "127.0.0.1:56395 127.0.0.1:56347",
+        "remote_port": 56347
+      },
+      {
+        "key": "127.0.0.1:56396 127.0.0.1:56347",
+        "remote_port": 56347
+      },
+      {
+        "key": "127.0.0.1:56397 127.0.0.1:56347",
+        "remote_port": 56347
+      },
+      {
+        "key": "127.0.0.1:56398 127.0.0.1:56347",
+        "remote_port": 56347
+      },
+      {
+        "key": "127.0.0.1:56399 127.0.0.1:56347",
+        "remote_port": 56347
+      },
+      {
+        "key": "127.0.0.1:56400 127.0.0.1:56347",
+        "remote_port": 56347
+      },
+      {
+        "key": "127.0.0.1:56401 127.0.0.1:56347",
+        "remote_port": 56347
+      },
+      {
+        "key": "127.0.0.1:56402 127.0.0.1:56347",
+        "remote_port": 56347
+      },
+      {
+        "key": "127.0.0.1:56403 127.0.0.1:56347",
+        "remote_port": 56347
+      },
+      {
+        "key": "127.0.0.1:56404 127.0.0.1:56347",
+        "remote_port": 56347
+      },
+      {
+        "key": "127.0.0.1:56405 127.0.0.1:56347",
+        "remote_port": 56347
+      },
+      {
+        "key": "127.0.0.1:56406 127.0.0.1:56347",
+        "remote_port": 56347
+      },
+      {
+        "key": "127.0.0.1:56410 127.0.0.1:56347",
+        "remote_port": 56347
+      },
+      {
+        "key": "127.0.0.1:56411 127.0.0.1:56347",
+        "remote_port": 56347
+      },
+      {
+        "key": "127.0.0.1:56412 127.0.0.1:56347",
+        "remote_port": 56347
+      },
+      {
+        "key": "127.0.0.1:56413 127.0.0.1:56347",
+        "remote_port": 56347
+      },
+      {
+        "key": "127.0.0.1:56414 127.0.0.1:56347",
+        "remote_port": 56347
+      },
+      {
+        "key": "127.0.0.1:56416 127.0.0.1:56347",
+        "remote_port": 56347
+      },
+      {
+        "key": "127.0.0.1:56420 127.0.0.1:56347",
+        "remote_port": 56347
+      },
+      {
+        "key": "127.0.0.1:56422 127.0.0.1:56347",
+        "remote_port": 56347
+      },
+      {
+        "key": "127.0.0.1:56423 127.0.0.1:56347",
+        "remote_port": 56347
+      }
+    ]
+  },
+  "after": {
+    "started_at": "2026-11-03T15:55:50.1948966Z",
+    "binary_sha256": "a323e2686bed7956ecbd8653f21a3c958bab8e4f51abc22b858972d837f80662",
+    "exit_code": 0,
+    "log": "\r\nrunning 1 test\r\nprivate HTTP: 34 requests, 1 TCP connections\r\ntest project_runtime::client::tests::request_survives_another_callers_runtime_shutdown ... ok\r\n\r\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5009 filtered out; finished in 0.67s\r\n\r\n",
+    "all_new_time_wait_by_remote_port": [
+      {
+        "count": 139,
+        "remote_port": 52498
+      },
+      {
+        "count": 136,
+        "remote_port": 52502
+      },
+      {
+        "count": 77,
+        "remote_port": 61361
+      },
+      {
+        "count": 1,
+        "remote_port": 53326
+      }
+    ],
+    "fixture_new_time_wait_rows": [
+      {
+        "key": "127.0.0.1:53251 127.0.0.1:53326",
+        "remote_port": 53326
+      }
+    ]
+  }
+}

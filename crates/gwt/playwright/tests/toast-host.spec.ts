@@ -13,7 +13,276 @@
  */
 import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
-import { gotoLiveGwt } from "./_helpers/live-gwt";
+import { gotoLiveGwt, readLiveHubCatalog } from "./_helpers/live-gwt";
+
+test("Issue #6659 removes attention for unmounted and mounted windows while preserving history (isolated checkout)", async ({ page }, testInfo) => {
+  const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+  test.skip(!base || !process.env.GWT_PLAYWRIGHT_CHECK_HOME, "requires browser-check checkout and fresh HOME");
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  const catalog = await readLiveHubCatalog(page, base!);
+  const primary = catalog.projects[0];
+  expect(primary).toBeTruthy();
+  const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+  const agent = (id: string) => ({
+    id, title: id, preset: "codex", status: "error", agent_id: "codex",
+    geometry: { x: 40, y: 60, width: 800, height: 500 }, z_index: 1,
+    minimized: false, maximized: false, persist: true,
+  });
+  const orphan = agent("issue-6659-unmounted");
+  const keeper = agent("issue-6659-retained");
+  const mounted = agent("issue-6659-mounted");
+  const snapshot = {
+    app_version: "playwright",
+    tabs: [
+      { ...primary, project_root: process.env.GWT_PLAYWRIGHT_PROJECT_ROOT, kind: "git", workspace: {
+        viewport: { x: 0, y: 0, zoom: 1 }, windows: [] as ReturnType<typeof agent>[],
+      } },
+      { id: "issue-6659-background", project_key: "6659665966596659", title: "Background fixture", project_root: "/fixture/background", kind: "git", workspace: {
+        viewport: { x: 0, y: 0, zoom: 1 }, windows: [orphan, keeper],
+      } },
+    ],
+    active_tab_id: primary.id,
+    recent_projects: [],
+  };
+  // Only transport is deterministic: HTML/JS/CSS still come from the fresh
+  // checkout binary. No window is launched and no backend state is rewritten.
+  await page.addInitScript(({ selectedTheme, initial }) => {
+    localStorage.setItem("gwt:ui:theme", selectedTheme);
+    class SnapshotSocket extends EventTarget {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSING = 2;
+      static CLOSED = 3;
+      readyState = 0;
+      constructor(_url: string) {
+        super();
+        setTimeout(() => {
+          this.readyState = SnapshotSocket.OPEN;
+          this.dispatchEvent(new Event("open"));
+        }, 0);
+      }
+      send(raw: string) {
+        if (JSON.parse(raw).kind !== "frontend_ready") return;
+        for (const payload of [
+          { kind: "hub_state", hub: { app_version: initial.app_version, projects: initial.tabs, recent_projects: [] } },
+          { kind: "workspace_state", workspace: initial },
+        ]) {
+          this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(payload) }));
+        }
+      }
+      close() { this.readyState = SnapshotSocket.CLOSED; }
+    }
+    // @ts-ignore - deterministic transport over binary-served frontend assets.
+    window.WebSocket = SnapshotSocket;
+  }, { selectedTheme: theme, initial: snapshot });
+  await gotoLiveGwt(page, new URL(`/p/${primary.project_key}`, base!).href);
+  await expect(page.locator("#app-version")).toHaveText("vplaywright");
+  const toast = (id: string) => page.locator(`.toast-alerts__item[data-toast-id="attention-${id}"]`);
+  const alerts = page.locator(".toast-alerts__item");
+  const rows = page.locator("#notification-center .notification-center__item");
+  const publish = () => inject(page, { kind: "workspace_state", workspace: snapshot });
+  const diagnose = (id: string) => inject(page, { kind: "terminal_status", id, status: "error", detail: "Local runtime failed" });
+
+  // Saved status alone is not evidence that this machine ran the Agent.
+  await expect(alerts).toHaveCount(0);
+  await diagnose(orphan.id);
+  await diagnose(keeper.id);
+  await expect(toast(orphan.id)).toHaveCount(1);
+  await expect(toast(keeper.id)).toHaveAttribute("data-level", "error");
+  await expect(page.locator(`.workspace-window[data-id="${orphan.id}"]`)).toHaveCount(0);
+  await expect(rows).toHaveCount(2);
+  await publish();
+  await expect(alerts).toHaveCount(2);
+  await expect(rows).toHaveCount(2);
+
+  snapshot.tabs[1].workspace.windows = [keeper];
+  await publish();
+  await expect(toast(orphan.id)).toHaveCount(0);
+  await expect(toast(keeper.id)).toHaveCount(1);
+  await expect(rows).toHaveCount(2);
+
+  snapshot.tabs[0].workspace.windows = [mounted];
+  await publish();
+  await diagnose(mounted.id);
+  await expect(page.locator(`.workspace-window[data-id="${mounted.id}"]`)).toHaveCount(1);
+  await expect(toast(mounted.id)).toHaveCount(1);
+  await publish();
+  await expect(rows).toHaveCount(3);
+  snapshot.tabs[0].workspace.windows = [];
+  await publish();
+  await expect(toast(mounted.id)).toHaveCount(0);
+  await expect(rows).toHaveCount(3);
+
+  for (let cycle = 0; cycle < 3; cycle += 1) {
+    snapshot.tabs[1].workspace.windows = [orphan, keeper];
+    await publish();
+    await diagnose(orphan.id);
+    await expect(toast(orphan.id)).toHaveCount(1);
+    await expect(rows).toHaveCount(3);
+    await publish();
+    await expect(rows).toHaveCount(3);
+    snapshot.tabs[1].workspace.windows = [keeper];
+    await publish();
+    await expect(toast(orphan.id)).toHaveCount(0);
+    await expect(toast(keeper.id)).toHaveCount(1);
+  }
+  // Removing the inactive Project from the authoritative catalog is also
+  // removal authority, even without a new runtime-status snapshot.
+  await inject(page, { kind: "hub_state", hub: {
+    app_version: snapshot.app_version, projects: [snapshot.tabs[0]], recent_projects: [],
+  } });
+  await expect(alerts).toHaveCount(0);
+  await page.locator("#op-notifications-button").click();
+  await expect(rows).toHaveCount(3);
+  await expect(rows.filter({ hasText: orphan.id })).toHaveCount(1);
+  await expect(rows.filter({ hasText: mounted.id })).toHaveCount(1);
+  await expect(rows.filter({ hasText: keeper.id })).toHaveCount(1);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  const screenshot = testInfo.outputPath(`removed-window-attention-${theme}.png`);
+  await page.screenshot({ path: screenshot, fullPage: true });
+  await testInfo.attach(`removed-window-attention-${theme}`, { path: screenshot, contentType: "image/png" });
+  expect(errors).toEqual([]);
+});
+
+test("Issue #6729 keeps only unresolved local errors across launch retry and foreign snapshots (isolated checkout)", async ({ page }, testInfo) => {
+  const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+  test.skip(!base || !process.env.GWT_PLAYWRIGHT_CHECK_HOME, "requires browser-check checkout and fresh HOME");
+  const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+  const soakSeconds = theme === "dark" ? Number(process.env.GWT_PLAYWRIGHT_ATTENTION_SOAK_SECONDS || 0) : 0;
+  test.setTimeout((soakSeconds + 120) * 1000);
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  const catalog = await readLiveHubCatalog(page, base!);
+  const primary = catalog.projects[0];
+  expect(primary).toBeTruthy();
+  const agent = (id: string, issue: number, startedAt?: number | null) => ({
+    id, linked_issue_number: issue, title: id, preset: "codex", status: "error", agent_id: "codex",
+    runtime_started_at_ms: startedAt,
+    geometry: { x: 40, y: 60, width: 800, height: 500 }, z_index: 1,
+    minimized: false, maximized: false, persist: true,
+  });
+  const first = agent("timeout-first", 6729, 1000);
+  const successor = agent("timeout-successor", 6729);
+  const real = agent("real-local-error", 6730, null);
+  const unprovenSuccessor = { ...agent("unknown-order-successor", 6730), status: "running" };
+  const recoveredOld = agent("recovered-old", 6731, 1000);
+  const recoveredNew = { ...agent("recovered-new", 6731, 2000), status: "running" };
+  const snapshot = {
+    app_version: "playwright", active_tab_id: primary.id, recent_projects: [],
+    tabs: [
+      { ...primary, kind: "git", workspace: { viewport: { x: 0, y: 0, zoom: 1 }, windows: [] } },
+      { id: "notifications-background", project_key: "6729672967296729", title: "Monitor Off", project_root: "/fixture/foreign",
+        kind: "git", workspace: { viewport: { x: 0, y: 0, zoom: 1 },
+          windows: [first, successor, real, unprovenSuccessor, agent("foreign-machine", 9999), recoveredOld, recoveredNew] } },
+    ],
+  };
+  // Use binary-served assets with a deterministic runtime stream. No Agent is
+  // launched and the isolated Monitor remains Off throughout the measurement.
+  await page.addInitScript(({ theme, snapshot }) => {
+    localStorage.setItem("gwt:ui:theme", theme);
+    class SnapshotSocket extends EventTarget {
+      static OPEN = 1;
+      static CLOSED = 3;
+      readyState = 0;
+      constructor() {
+        super();
+        setTimeout(() => { this.readyState = 1; this.dispatchEvent(new Event("open")); }, 0);
+      }
+      send(raw: string) {
+        if (JSON.parse(raw).kind !== "frontend_ready") return;
+        for (const payload of [
+          { kind: "hub_state", hub: { app_version: snapshot.app_version, projects: snapshot.tabs, recent_projects: [] } },
+          { kind: "workspace_state", workspace: snapshot },
+        ]) this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(payload) }));
+      }
+      close() { this.readyState = 3; }
+    }
+    // @ts-ignore - deterministic transport; frontend assets come from the owned checkout GUI.
+    window.WebSocket = SnapshotSocket;
+  }, { theme, snapshot });
+  await gotoLiveGwt(page, new URL(`/p/${primary.project_key}`, base!).href);
+  await expect(page.locator("#app-version")).toHaveText("vplaywright");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  const alerts = page.locator(".toast-alerts__item");
+  const rows = page.locator("#notification-center .notification-center__item");
+  const status = (id: string, state: string, detail: string | null, retryable?: boolean) =>
+    inject(page, { kind: "terminal_status", id, status: state, detail, retryable });
+  await expect(alerts).toHaveCount(0);
+  await expect(rows).toHaveCount(0);
+  await status(recoveredOld.id, "error", "Retained old local diagnostic");
+  await expect(alerts).toHaveCount(0);
+  snapshot.tabs[1].workspace.windows = snapshot.tabs[1].workspace.windows.filter(w => w.id !== recoveredNew.id);
+  await inject(page, { kind: "workspace_state", workspace: snapshot });
+  await status(recoveredOld.id, "error", "Retained old local diagnostic");
+  await expect(alerts).toHaveCount(0);
+  await page.reload();
+  await expect(page.locator("#app-version")).toHaveText("vplaywright");
+  await status(recoveredOld.id, "error", "Retained old local diagnostic");
+  await expect(alerts).toHaveCount(0);
+  await status(first.id, "starting", "Launching...");
+  await inject(page, { kind: "window_state", window_id: first.id, state: "error" });
+  await expect(alerts).toHaveCount(0);
+  await status(first.id, "error", "Launch timed out: no window was created within 120s");
+  await expect(alerts).toHaveCount(1);
+  await expect(alerts).toContainText("Launch timed out");
+  await expect(alerts).not.toContainText("Launching...");
+  successor.runtime_started_at_ms = 2000;
+  await inject(page, { kind: "workspace_state", workspace: snapshot });
+  await status(successor.id, "error", "Second local launch failed");
+  await expect(alerts).toHaveCount(1);
+  await expect(alerts).toContainText(successor.id);
+  await expect(rows).toHaveCount(1);
+  await status(first.id, "stopped", "Late old window exit");
+  await status(first.id, "running", null);
+  await expect(alerts).toHaveCount(1);
+  await expect(alerts).toContainText(successor.id);
+  await status(successor.id, "error", "Retry scheduled", true);
+  await expect(alerts).toHaveCount(0);
+  await expect(rows).toHaveAttribute("data-resolved", "true");
+  await status(real.id, "error", "Process exited with status 1");
+  unprovenSuccessor.runtime_started_at_ms = 3000;
+  await inject(page, { kind: "workspace_state", workspace: snapshot });
+  await expect(alerts).toHaveCount(1);
+  await expect(alerts).toContainText(real.id);
+  await status(successor.id, "error", "Retry attempt failed");
+  await status(successor.id, "running", null);
+  await expect(alerts).toHaveCount(1);
+  await expect(alerts).toContainText(real.id);
+  await expect(rows).toHaveCount(2);
+  await expect(page.locator("#op-notifications-button .op-rail__badge")).toHaveText("1");
+
+  const startedAt = new Date().toISOString();
+  const started = performance.now();
+  let cycles = 0;
+  do {
+    await inject(page, { kind: "workspace_state", workspace: snapshot });
+    await status(successor.id, "starting", "Launching...");
+    await inject(page, { kind: "window_state", window_id: successor.id, state: "error" });
+    await status(successor.id, "error", "Automatic retry pending", true);
+    await status(successor.id, "running", null);
+    await status(first.id, "error", "Launch timed out: no window was created within 120s");
+    await status(recoveredOld.id, "error", "Retained old local diagnostic");
+    await expect(alerts).toHaveCount(1);
+    await expect(alerts).toContainText(real.id);
+    await expect(rows).toHaveCount(2);
+    expect(errors, "console and page errors").toEqual([]);
+    cycles++;
+    if (soakSeconds > 0 && cycles % 6 === 0) {
+      console.log(`Issue #6729 soak: ${Math.floor((performance.now() - started) / 1000)}s, ${cycles} checked cycles, zero spurious toasts`);
+    }
+    const remaining = soakSeconds * 1000 - (performance.now() - started);
+    if (remaining > 0) await page.waitForTimeout(Math.min(10_000, remaining));
+  } while (performance.now() - started < soakSeconds * 1000);
+  await testInfo.attach("attention-soak", { body: JSON.stringify({
+    theme, startedAt, finishedAt: new Date().toISOString(), elapsedMs: performance.now() - started,
+    cycles, spuriousToasts: 0, unresolvedRealErrors: 1, consoleAndPageErrors: errors,
+  }), contentType: "application/json" });
+  await page.screenshot({ path: testInfo.outputPath(`local-error-attention-${theme}.png`), fullPage: true });
+  expect(errors).toEqual([]);
+});
 
 test("Monitor notifications coalesce launch requests and preserve other events (isolated checkout)", async ({ page }, testInfo) => {
   const base = process.env.GWT_PLAYWRIGHT_BASE_URL;

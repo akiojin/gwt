@@ -23,6 +23,8 @@ struct TurnReceipt {
     qa_report_id: Option<String>,
     #[serde(default)]
     prompt_sha256: Option<String>,
+    #[serde(default)]
+    stop_reminder_sent: bool,
 }
 
 fn project_store(repo: &Path) -> PathBuf {
@@ -119,6 +121,7 @@ pub(crate) fn handle_user_prompt_submit(worktree: &Path, input: &str) -> io::Res
                 },
                 requires_qa,
                 qa_report_id: None,
+                stop_reminder_sent: false,
                 prompt_sha256: prompt
                     .as_deref()
                     .filter(|_| requires_qa)
@@ -153,6 +156,7 @@ pub(crate) fn capture_qa_turn(repo: &Path) -> io::Result<Option<QaTurn>> {
                         requires_qa: true,
                         qa_report_id: None,
                         prompt_sha256: None,
+                        stop_reminder_sent: false,
                     };
                     write_receipt(repo, &receipt)?;
                     receipt
@@ -162,11 +166,7 @@ pub(crate) fn capture_qa_turn(repo: &Path) -> io::Result<Option<QaTurn>> {
             Err(error) => return Err(error),
         };
         Ok(Some(receipt)
-            .filter(|receipt| {
-                receipt.identity.session_id == session_id
-                    && receipt.requires_qa
-                    && receipt.qa_report_id.is_none()
-            })
+            .filter(|receipt| receipt.identity.session_id == session_id && receipt.requires_qa)
             .map(|receipt| receipt.identity))
     })
 }
@@ -180,10 +180,14 @@ pub(crate) fn instruction_prompt_identity(
 ) -> io::Result<(String, String)> {
     let receipt = read_receipt(repo, &turn.session_id)?
         .filter(|receipt| receipt.identity == *turn && receipt.requires_qa
-            && receipt.qa_report_id.is_none()
             && receipt.prompt_sha256.as_deref() == Some(gwt_core::pm_authorization::digest(original.as_bytes()).as_str()))
         .ok_or_else(|| io::Error::new(io::ErrorKind::PermissionDenied,
             "permission_stage=instruction: instruction.original must exactly match the current recorded human prompt; use pm.approval.request when no applicable instruction exists"))?;
+    native_prompt_identity(&receipt)
+}
+
+/// Stop must not demand a report that instruction capture cannot authorize.
+fn native_prompt_identity(receipt: &TurnReceipt) -> io::Result<(String, String)> {
     // Hook stdin is callable by agents. It is an obligation boundary, not a
     // human-authorship proof. Read the registered Session's native source too.
     gwt_agent::validate_session_id_path_component(&receipt.identity.session_id)
@@ -195,11 +199,12 @@ pub(crate) fn instruction_prompt_identity(
     let conversation = crate::pm_conversation::read_for_session(&session);
     let message = conversation.messages.iter().rev()
         .find(|message| message.role == crate::pm_conversation::PmConversationRole::User)
-        .filter(|message| message.text == original && !crate::pm_conversation::internal_prompt(&message.text))
+        .filter(|message| !crate::pm_conversation::internal_prompt(&message.text)
+            && receipt.prompt_sha256.as_deref() == Some(gwt_core::pm_authorization::digest(message.text.as_bytes()).as_str()))
         .ok_or_else(|| io::Error::new(io::ErrorKind::PermissionDenied,
             "permission_stage=instruction: the latest native human message must match instruction.original; use pm.approval.request otherwise"))?;
     // Native message identity stays stable even if a hook is replayed.
-    Ok((receipt.identity.session_id, message.id.clone()))
+    Ok((receipt.identity.session_id.clone(), message.id.clone()))
 }
 
 /// Called only after the joined report/instruction persistence path succeeds.
@@ -225,13 +230,28 @@ pub(crate) fn handle_stop(worktree: &Path, session: Option<&str>) -> HookOutput 
     let Some(session) = registered_pm_session(worktree, session) else {
         return HookOutput::Silent;
     };
-    match read_receipt(worktree, &session) {
-        Ok(Some(receipt)) if receipt.identity.session_id == session && receipt.requires_qa && receipt.qa_report_id.is_none() => {
-            HookOutput::stop_block("This human PM turn has no successful Q&A report. Post the user's question and your answer with JSON operation `pm.report.post`, `kind:\"qa\"`, before stopping. A progress post, failed post, or report from another session/turn does not satisfy this obligation.")
+    let result = with_receipt_lock(worktree, &session, || {
+        let Some(mut receipt) = read_receipt(worktree, &session)? else {
+            return Ok(HookOutput::Silent);
+        };
+        if receipt.identity.session_id != session
+            || !receipt.requires_qa
+            || receipt.qa_report_id.is_some()
+            || receipt.stop_reminder_sent
+            || native_prompt_identity(&receipt).is_err()
+        {
+            return Ok(HookOutput::Silent);
         }
-        Err(error) => HookOutput::stop_block(format!("PM reporting receipt could not be read: {error}. Run JSON operation `pm.report.post` with `kind:\"qa\"` to preserve the corrupt bytes and arm a fresh required turn before posting. A successful Q&A post settles it; a failed post keeps the obligation.")),
-        _ => HookOutput::Silent,
-    }
+        // One reminder per recorded turn, including providers without a
+        // stop_hook_active flag. This is not a successful report or authority.
+        receipt.stop_reminder_sent = true;
+        write_receipt(worktree, &receipt)?;
+        Ok(HookOutput::stop_block("This human PM turn has no successful Q&A report. Post the user's question and your answer with JSON operation `pm.report.post`, `kind:\"qa\"`, before stopping. This reminder is issued once per turn; an unresolved report does not prevent the next Stop."))
+    });
+    result.unwrap_or_else(|error| {
+        tracing::warn!(%error, "PM reporting Stop reminder failed open");
+        HookOutput::Silent
+    })
 }
 
 pub(crate) fn reporting_diagnostic(repo: &Path, session_id: &str) -> serde_json::Value {
@@ -240,6 +260,7 @@ pub(crate) fn reporting_diagnostic(repo: &Path, session_id: &str) -> serde_json:
             "turn_id": receipt.identity.turn_id,
             "requires_qa": receipt.requires_qa,
             "qa_report_id": receipt.qa_report_id,
+            "stop_reminder_sent": receipt.stop_reminder_sent,
         }),
         Ok(None) => serde_json::json!({
             "turn_id": null, "requires_qa": false, "qa_report_id": null,
@@ -322,6 +343,118 @@ mod tests {
         worktree
     }
 
+    fn native_human_fixture(home: &Path, worktree: &Path, original: &str) -> ScopedEnvVar {
+        let native_home = home.join("qa-native");
+        let native = ScopedEnvVar::set("CLAUDE_CONFIG_DIR", &native_home);
+        let mut session = gwt_agent::Session::new(worktree, "pm", gwt_agent::AgentId::ClaudeCode);
+        session.id = "pm-session".into();
+        session.agent_session_id = Some("qa-conversation".into());
+        fs::create_dir_all(gwt_core::paths::gwt_sessions_dir()).unwrap();
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        let directory = native_home.join("projects/project");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("qa-conversation.jsonl"), format!("{}\n", serde_json::json!({
+            "type":"user","uuid":"native-qa-turn","sessionId":"qa-conversation","cwd":worktree,
+            "message":{"role":"user","content":original}
+        }))).unwrap();
+        native
+    }
+
+    #[test]
+    fn unpostable_automatic_tool_answer_and_mid_turn_prompts_do_not_block_stop() {
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-session");
+        let worktree = fixture(home.path());
+        let _native = native_human_fixture(home.path(), &worktree, "状況は？");
+        let path = home
+            .path()
+            .join("qa-native/projects/project/qa-conversation.jsonl");
+        let previous_human = fs::read_to_string(&path).unwrap();
+        for (prompt, record) in [
+            (
+                "定期巡回を続けて",
+                serde_json::json!({
+                    "isMeta":true, "message":{"role":"user","content":"定期巡回を続けて"}
+                }),
+            ),
+            (
+                "はい",
+                serde_json::json!({"message":{"role":"user","content":[
+                    {"type":"tool_result","tool_use_id":"ask-user","content":"はい"}
+                ]}}),
+            ),
+            (
+                "ターミナルがスクロールできない問題は？",
+                serde_json::json!({
+                    "message":{"role":"assistant","content":"調査中です"}
+                }),
+            ),
+        ] {
+            let mut record = record;
+            record["type"] = record["message"]["role"].clone();
+            record["uuid"] = "not-current-human".into();
+            record["sessionId"] = "qa-conversation".into();
+            record["cwd"] = worktree.display().to_string().into();
+            fs::write(&path, format!("{previous_human}{record}\n")).unwrap();
+            handle_user_prompt_submit(&worktree, &serde_json::json!({"prompt":prompt}).to_string())
+                .unwrap();
+            let turn = capture_qa_turn(&worktree).unwrap().unwrap();
+            assert!(instruction_prompt_identity(&worktree, &turn, prompt).is_err());
+            assert_eq!(
+                handle_stop(&worktree, Some("pm-session")),
+                HookOutput::Silent,
+                "Stop cannot require a Q&A the posting path rejects: {prompt}"
+            );
+        }
+    }
+
+    #[test]
+    fn unresolved_human_qa_stop_reminder_is_bounded_per_turn() {
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-session");
+        let worktree = fixture(home.path());
+        let _native = native_human_fixture(home.path(), &worktree, "状況は？");
+        for _ in 0..2 {
+            handle_user_prompt_submit(&worktree, r#"{"prompt":"状況は？"}"#).unwrap();
+            assert!(matches!(
+                handle_stop(&worktree, Some("pm-session")),
+                HookOutput::StopBlock { .. }
+            ));
+            assert_eq!(
+                handle_stop(&worktree, Some("pm-session")),
+                HookOutput::Silent
+            );
+            assert_eq!(
+                handle_stop(&worktree, Some("pm-session")),
+                HookOutput::Silent
+            );
+            let turn = capture_qa_turn(&worktree).unwrap().unwrap();
+            assert_eq!(
+                reporting_diagnostic(&worktree, "pm-session")["stop_reminder_sent"],
+                true
+            );
+            assert!(
+                instruction_prompt_identity(&worktree, &turn, "別の質問").is_err(),
+                "fail-open never grants instruction authority"
+            );
+            assert!(reporting_diagnostic(&worktree, "pm-session")["qa_report_id"].is_null());
+        }
+    }
+
     #[test]
     fn scoped_instruction_capture_requires_the_native_human_message() {
         let home = tempfile::tempdir().unwrap();
@@ -395,10 +528,25 @@ mod tests {
             saved["instruction"]["authorizations"][0]["operation"],
             "update.settings.set"
         );
+        let mut ordinary = post();
+        let crate::cli::pm::PmCommand::ReportPost { instruction, .. } = &mut ordinary else {
+            unreachable!()
+        };
+        instruction.as_mut().unwrap().authorizations.clear();
+        assert!(
+            crate::cli::pm::run(&mut env, ordinary, &mut String::new()).is_err(),
+            "same native turn cannot mint a second capture through the ordinary path"
+        );
+        assert_eq!(
+            gwt_core::user_instruction::load(&home.path().join("repo"))
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
-    fn human_prompt_requires_a_successful_qa_in_the_same_session_and_turn() {
+    fn human_qa_response_loss_retries_one_joined_capture_after_acknowledgement() {
         let _env = gwt_core::test_support::env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -409,6 +557,59 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-session");
         let worktree = fixture(home.path());
+        let _native = native_human_fixture(home.path(), &worktree, "状況は？");
+        let repo = home.path().join("repo");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        handle_user_prompt_submit(&worktree, r#"{"prompt":"状況は？"}"#).unwrap();
+        let post = || crate::cli::pm::PmCommand::ReportPost {
+            project_root: None,
+            kind: gwt_core::pm_report::PmReportKind::Qa,
+            question: Some("状況は？".into()),
+            body: "確認しました".into(),
+            instruction: Some(instruction_capture()),
+        };
+        let mut first = String::new();
+        crate::cli::pm::run(&mut env, post(), &mut first).unwrap();
+        let mut retried = String::new();
+        crate::cli::pm::run(&mut env, post(), &mut retried).unwrap();
+        let first: serde_json::Value = serde_json::from_str(&first).unwrap();
+        let retried: serde_json::Value = serde_json::from_str(&retried).unwrap();
+        assert_eq!(first["instruction"]["id"], retried["instruction"]["id"]);
+        let source = gwt_core::user_instruction::instructions_path(&repo);
+        let before = fs::read(&source).unwrap();
+        let mut changed = post();
+        let crate::cli::pm::PmCommand::ReportPost { body, .. } = &mut changed else {
+            unreachable!()
+        };
+        *body = "回答を変更しました".into();
+        assert!(crate::cli::pm::run(&mut env, changed, &mut String::new()).is_err());
+        let mut changed = post();
+        let crate::cli::pm::PmCommand::ReportPost { question, .. } = &mut changed else {
+            unreachable!()
+        };
+        *question = Some("変更した質問要約".into());
+        assert!(crate::cli::pm::run(&mut env, changed, &mut String::new()).is_err());
+        assert_eq!(fs::read(source).unwrap(), before);
+        assert_eq!(gwt_core::user_instruction::load(&repo).unwrap().len(), 1);
+        assert_eq!(
+            handle_stop(&worktree, Some("pm-session")),
+            HookOutput::Silent
+        );
+    }
+
+    #[test]
+    fn human_qa_acknowledgement_is_scoped_to_the_same_session_and_turn() {
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-session");
+        let worktree = fixture(home.path());
+        let _native = native_human_fixture(home.path(), &worktree, "状況を教えて");
         handle_user_prompt_submit(&worktree, r#"{"prompt":"状況を教えて"}"#).unwrap();
         assert!(matches!(
             handle_stop(&worktree, Some("pm-session")),
@@ -420,10 +621,8 @@ mod tests {
             ..first.clone()
         };
         acknowledge_qa(&worktree, &other, "wrong-session").unwrap();
-        assert!(matches!(
-            handle_stop(&worktree, Some("pm-session")),
-            HookOutput::StopBlock { .. }
-        ));
+        assert!(reporting_diagnostic(&worktree, "pm-session")["qa_report_id"].is_null());
+        let _next_native = native_human_fixture(home.path(), &worktree, "次の質問です");
         handle_user_prompt_submit(&worktree, r#"{"prompt":"次の質問です"}"#).unwrap();
         acknowledge_qa(&worktree, &first, "old-turn").unwrap();
         assert!(matches!(
@@ -496,6 +695,7 @@ mod tests {
             format!("{notification}\n何が完了しましたか？"),
             format!("{notification}\nこの二つの通知を比較してください\n{notification}"),
         ] {
+            let _native = native_human_fixture(home.path(), &worktree, &prompt);
             handle_user_prompt_submit(&worktree, &serde_json::json!({"prompt":prompt}).to_string())
                 .unwrap();
             assert!(
@@ -539,6 +739,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-session");
         let worktree = fixture(home.path());
+        let _native = native_human_fixture(home.path(), &worktree, "状況は？");
         let mut env = crate::cli::TestEnv::new(home.path().join("repo"));
         let post = |kind, body: &str| crate::cli::pm::PmCommand::ReportPost {
             project_root: None,
@@ -579,16 +780,30 @@ mod tests {
             handle_stop(&worktree, Some("pm-session")),
             HookOutput::StopBlock { .. }
         ));
-        crate::cli::pm::run(
-            &mut env,
-            post(gwt_core::pm_report::PmReportKind::Progress, "進行中"),
-            &mut String::new(),
-        )
+        assert!(
+            crate::cli::pm::run(
+                &mut env,
+                post(gwt_core::pm_report::PmReportKind::Progress, "進行中"),
+                &mut String::new(),
+            )
+            .is_err(),
+            "registered PM cannot bypass typed reporting"
+        );
+        let input = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"request_id":"human-turn-progress","events":[{
+                "episode_id":"work","event_id":"status","expected_revision":0,"kind":"progress",
+                "state":{"status":"active","severity":"routine","impact":"local"},
+                "summary":{"result":"Work advanced"},"details":"Full evidence","refs":[]
+            }]
+        }))
         .unwrap();
-        assert!(matches!(
-            handle_stop(&worktree, Some("pm-session")),
-            HookOutput::StopBlock { .. }
-        ));
+        let batch = crate::cli::pm::PmCommand::ReportBatch {
+            project_root: None,
+            submission: Box::new(input),
+        };
+        crate::cli::pm::run(&mut env, batch.clone(), &mut String::new()).unwrap();
+        crate::cli::pm::run(&mut env, batch, &mut String::new()).unwrap();
+        assert!(reporting_diagnostic(&worktree, "pm-session")["qa_report_id"].is_null());
         crate::cli::pm::run(
             &mut env,
             post(gwt_core::pm_report::PmReportKind::Qa, "待機中です"),
@@ -758,6 +973,7 @@ mod tests {
         }
         for prompt in ["[gwt] Agent idle: について説明して", "UNRESOLVED BLOCKED ESCALATIONS (1) は何ですか",
             "[gwt] Agent idle: 修正担当 (#3932). Reconcile pane.list and issue.monitor.status; steer the idle agents. これは何？"] {
+            let _native = native_human_fixture(home.path(), &worktree, prompt);
             handle_user_prompt_submit(&worktree, &serde_json::json!({"prompt":prompt}).to_string()).unwrap();
             assert!(matches!(handle_stop(&worktree, Some("pm-session")), HookOutput::StopBlock { .. }), "similar human prose still needs QA: {prompt}");
         }
@@ -775,6 +991,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-session");
         let worktree = fixture(home.path());
+        let _native = native_human_fixture(home.path(), &worktree, "状況は？");
         let repo = home.path().join("repo");
         let mut env = crate::cli::TestEnv::new(repo.clone());
         let post = |body: &str| crate::cli::pm::PmCommand::ReportPost {
@@ -789,10 +1006,10 @@ mod tests {
         let path = receipt_path(&worktree, "pm-session");
         let corrupt = b"{broken receipt";
         fs::write(&path, corrupt).unwrap();
-        assert!(matches!(
+        assert_eq!(
             handle_stop(&worktree, Some("pm-session")),
-            HookOutput::StopBlock { .. }
-        ));
+            HookOutput::Silent
+        );
         assert_eq!(
             reporting_diagnostic(&repo, "pm-session")["unreadable"],
             true
@@ -815,11 +1032,11 @@ mod tests {
             .collect();
         assert_eq!(quarantined.len(), 1);
         assert_eq!(fs::read(quarantined[0].path()).unwrap(), corrupt);
-        assert!(matches!(
+        assert_eq!(
             handle_stop(&worktree, Some("pm-session")),
-            HookOutput::StopBlock { .. }
-        ));
-        handle_user_prompt_submit(&worktree, r#"{"prompt":"新しい質問"}"#).unwrap();
+            HookOutput::Silent
+        );
+        handle_user_prompt_submit(&worktree, r#"{"prompt":"状況は？"}"#).unwrap();
         acknowledge_qa(&repo, &recovered, "older-success").unwrap();
         assert!(matches!(
             handle_stop(&worktree, Some("pm-session")),

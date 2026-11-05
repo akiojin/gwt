@@ -3824,6 +3824,39 @@ fn issue_5343_reconnect_restores_staged_cta_and_elevation_notice() {
 }
 
 #[test]
+fn issue_5343_unknown_msi_scope_reconnect_names_reason_and_preserves_staged_payload() {
+    let temp = tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let payload = temp.path().join("update.msi");
+    fs::write(&payload, "invalid MSI fixture").unwrap();
+    gwt_core::update::persist_pending_update_manifest(&gwt_core::update::PendingUpdateManifest {
+        version: "999.0.0".into(),
+        asset_url: "https://example.invalid/update.msi".into(),
+        payload: gwt_core::update::PreparedPayload::Installer {
+            path: payload.clone(),
+            kind: gwt_core::update::InstallerKind::WindowsMsi,
+        },
+        downloaded_at: chrono::Utc::now().to_rfc3339(),
+        origin: gwt_core::update::PendingUpdateOrigin::Automatic,
+        auto_apply_deferred: false,
+    })
+    .unwrap();
+    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let events = runtime.frontend_sync_events("browser");
+    assert!(events.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::UpdateApplyPendingPersisted { .. }
+    )));
+    assert!(update_resume_toasts(&events)
+        .iter()
+        .any(|(level, message)| {
+            *level == "warn" && message.contains("Windows MSI") && message.contains("manually")
+        }));
+    assert!(gwt_core::update::load_pending_update_manifest().is_some());
+    assert!(payload.exists());
+}
+
+#[test]
 fn app_runtime_enabled_fallback_epoch_overflow_is_zero_write_error() {
     let temp = tempdir().expect("tempdir");
     let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
@@ -5473,6 +5506,36 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
     drain_queued_blocking_tasks(&launch_tasks);
     let (ack_spawner, ack_tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = ack_spawner;
+    let census_host_pid = std::process::id();
+    let census_host_started_at = gwt::process::host_process_start_time(census_host_pid)
+        .expect("the actual census host process start time");
+    let census_host_key = format!("{census_host_pid}:{census_host_started_at}");
+    let census_window_id = pane.id.clone();
+    owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Join the actual pane1 census before complete prefs baselines; no scheduler delay or field exclusion authorizes the comparison.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+                if prefs
+                    .monitor_runtime_counts
+                    .get(&census_host_key)
+                    .is_some_and(|census| {
+                        census.host_pid == census_host_pid
+                            && census.host_started_at == census_host_started_at
+                            && census.counts.len() == 1
+                            && census.counts.get(&3165) == Some(&1)
+                            && census.windows.len() == 1
+                            && census.windows.get(&census_window_id) == Some(&3165)
+                    })
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the actual exact-host pane1 census precedes prefs baselines");
+    });
     let disk_before_ack = gwt::load_workspace_state(&gwt::workspace_state_path(&repo)).unwrap();
     let pending_before_ack = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
     let delivery = &pending_before_ack.pending_launch_deliveries[0];
@@ -5758,6 +5821,29 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
         .unwrap()
         .agent_roster;
     gwt::save_issue_monitor_prefs(&prefs_path, &pending_after_replacement).unwrap();
+    pending_after_replacement = owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Join the normal pane0 census after original clone/save and capture whole prefs before either stale ACK; no field is copied or excluded.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+                if prefs
+                    .monitor_runtime_counts
+                    .get(&census_host_key)
+                    .is_some_and(|census| {
+                        census.host_pid == census_host_pid
+                            && census.host_started_at == census_host_started_at
+                            && census.counts.is_empty()
+                            && census.windows.is_empty()
+                    })
+                {
+                    break prefs;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the actual pane0 census precedes the stale ACK prefs baseline")
+    });
     let disk_before_stale_ack =
         gwt::load_workspace_state(&gwt::workspace_state_path(&repo)).unwrap();
     let stale_owner_ack = owner_fixture_block_on(owner.command(
@@ -5833,6 +5919,16 @@ fn assert_expired_launch_ack_cleanup(
         launch_payload::OwnerLaunchMetadata,
         test_support::OwnerLaunchStage,
     };
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // This verifies ownership across ACKs, not the daemon's wall-clock latency.
+    let _control_budget = ScopedEnvVar::set(
+        "GWT_TEST_BUDGET_DURABLE_ISSUE_MONITOR_CONTROL_MS",
+        gwt_core::deadline_budget::HANG_GUARD
+            .as_millis()
+            .to_string(),
+    );
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
     let (root, owner, delivery_id) =
@@ -5965,6 +6061,10 @@ fn assert_expired_launch_ack_cleanup(
             .await
             .unwrap()
     });
+    assert!(
+        captured.session.is_some(),
+        "the paused launch must have materialized its Session before changing Monitor state"
+    );
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&root);
     let expired = if disabled_monitor {
         gwt::daemon_publisher::publish_durable_issue_monitor_control(
@@ -7101,6 +7201,13 @@ fn issue_5642_materializing_replay_preserves_the_unconsumed_initial_launch() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // This verifies replay ownership, not the daemon's wall-clock ACK latency.
+    let _control_budget = ScopedEnvVar::set(
+        "GWT_TEST_BUDGET_DURABLE_ISSUE_MONITOR_CONTROL_MS",
+        gwt_core::deadline_budget::HANG_GUARD
+            .as_millis()
+            .to_string(),
+    );
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -7164,6 +7271,7 @@ fn issue_5642_materializing_replay_preserves_the_unconsumed_initial_launch() {
         super::super::IssueMonitorLaunchDeliveryState::Materializing {
             window_id,
             started_at,
+            ..
         } => {
             // test-hygiene: allow-wall-clock-deadline inject an elapsed TTL without sleeping; worker completion determines replay ordering.
             *started_at = Instant::now() - Duration::from_secs(61);
@@ -7424,6 +7532,7 @@ fn durable_issue_monitor_delivery_preserves_live_materializer_and_replays_after_
             super::super::IssueMonitorLaunchDeliveryState::Materializing {
                 window_id: "tab-1::missing-materializer".into(),
                 started_at: Instant::now(),
+                accepted_owner: None,
             },
         );
         let mut replay = prepare_monitor_relaunch(
@@ -7440,6 +7549,17 @@ fn durable_issue_monitor_delivery_preserves_live_materializer_and_replays_after_
             completion.result.as_ref().map(std::mem::discriminant)
         );
         let window_id = completion.window_id.clone();
+        if let Ok(super::super::RemoteOwnerLaunchOutcome::Runtime(snapshot, session)) =
+            &completion.result
+        {
+            replay.extend(fixture.runtime.install_remote_owner_projection(
+                &context,
+                &window_id,
+                client.clone(),
+                snapshot.clone(),
+                session.clone(),
+            ));
+        }
         replay.extend(
             fixture
                 .runtime
@@ -7533,6 +7653,7 @@ fn durable_issue_monitor_delivery_preserves_live_materializer_and_replays_after_
             super::super::IssueMonitorLaunchDeliveryState::Materializing {
                 window_id: live_id,
                 started_at,
+                ..
             } => {
                 assert_eq!(live_id, &window_id);
                 *started_at = Instant::now() - Duration::from_secs(61);
@@ -7630,6 +7751,85 @@ fn durable_issue_monitor_delivery_preserves_live_materializer_and_replays_after_
                 && delivery.materializer_id.as_deref() == Some(identity.host_instance_id.as_str())),
         "GuiLifetime drain preserves the same unacknowledged durable delivery"
     );
+    fixture
+        .runtime
+        .apply_owner_window_removed_projection(&context, &live_window_id);
+    let delivery_before = fixture.runtime.issue_monitor_launch_deliveries[&delivery_id].clone();
+    let rows_before: Vec<_> = fixture.runtime.tabs[0]
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .map(|row| row.id.clone())
+        .collect();
+    let previous_identity = fixture
+        .runtime
+        .project_state(&context)
+        .unwrap()
+        .project_owner_identity
+        .clone();
+    let previous_spawner = fixture.runtime.blocking_tasks.clone();
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    let no_rebuild: Result<(), &str> = (|| {
+        for cached_identity in [Some(identity.clone()), None] {
+            fixture
+                .runtime
+                .project_state_mut(&context)
+                .unwrap()
+                .project_owner_identity = cached_identity;
+            fixture
+                .runtime
+                .auto_launch_issue_monitor_delivery_events_for_project(
+                    &repo,
+                    3165,
+                    LinkedIssueKind::Spec,
+                    Some(delivery_id.clone()),
+                    gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+                );
+            if !queued.lock().unwrap().is_empty() {
+                return Err(
+                    "production admission queued fresh preparation for an accepted delivery",
+                );
+            }
+            fixture.runtime.auto_launch_issue_monitor_delivery_events(
+                &context,
+                3165,
+                LinkedIssueKind::Spec,
+                Some(delivery_id.clone()),
+                gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+            );
+            if !queued.lock().unwrap().is_empty() {
+                return Err("apply admission queued a new owner launch for an accepted delivery");
+            }
+            let rows: Vec<_> = fixture.runtime.tabs[0]
+                .workspace
+                .persisted()
+                .windows
+                .iter()
+                .map(|row| row.id.clone())
+                .collect();
+            if rows != rows_before {
+                return Err("accepted delivery created or replaced a GUI row");
+            }
+            if fixture
+                .runtime
+                .issue_monitor_launch_deliveries
+                .get(&delivery_id)
+                != Some(&delivery_before)
+            {
+                return Err("accepted delivery replaced its original local state");
+            }
+        }
+        Ok(())
+    })();
+    fixture.runtime.blocking_tasks = previous_spawner;
+    fixture
+        .runtime
+        .project_state_mut(&context)
+        .unwrap()
+        .project_owner_identity = previous_identity;
+    assert!(no_rebuild.is_ok(), "{}", no_rebuild.unwrap_err());
     let owner = start_monitor_relaunch_owner(&mut fixture, false);
     let replacement = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         assert_ne!(owner.client().identity().unwrap(), &identity);
@@ -8623,6 +8823,7 @@ fn app_runtime_issue_monitor_auto_launch_uses_last_settings_runtime_target() {
     run_git(&repo, &["push", "origin", "develop"]);
 
     run_git(&fixture.worktree, &["merge", "--ff-only", "develop"]);
+    eprintln!("last-settings-runtime phase: worktree_ready");
     let mut previous = gwt_agent::Session::load(
         &fixture
             .sessions_dir
@@ -8666,7 +8867,9 @@ fn app_runtime_issue_monitor_auto_launch_uses_last_settings_runtime_target() {
             capture_path.to_str().unwrap(),
         )],
     );
+    eprintln!("last-settings-runtime phase: owner_start");
     let owner = start_monitor_relaunch_owner(&mut fixture, false);
+    eprintln!("last-settings-runtime phase: owner_ready");
     let runtime = &mut fixture.runtime;
     let profiles = runtime.issue_monitor_previous_profiles(&runtime.tabs[0].project_root);
     let repo_profile = profiles.repo_local().expect("repo-local last settings");
@@ -8682,11 +8885,13 @@ fn app_runtime_issue_monitor_auto_launch_uses_last_settings_runtime_target() {
         3165,
         LinkedIssueKind::Spec,
     );
+    eprintln!("last-settings-runtime phase: prepare");
     events.extend(commit_issue_monitor_preparations(
         runtime,
         &tasks,
         &fixture.recorded_events,
     ));
+    eprintln!("last-settings-runtime phase: prepared");
     let window_id = runtime
         .runtimes
         .keys()
@@ -8725,20 +8930,24 @@ fn app_runtime_issue_monitor_auto_launch_uses_last_settings_runtime_target() {
     });
     let screen =
         gwt_core::process_console::redact_line(&pane.pane.lock().unwrap().screen().contents());
+    eprintln!("last-settings-runtime phase: close");
     let close = owner_fixture_block_on(owner.command(
         gwt::project_runtime::events::OwnerCommand::Close {
             id: pane.id.clone(),
             incarnation: pane.incarnation,
         },
     ));
+    eprintln!("last-settings-runtime phase: closed");
     runtime.runtimes.remove(&window_id);
     runtime.test_project_owners.remove(&repo);
+    eprintln!("last-settings-runtime phase: shutdown");
     owner_fixture_block_on(
         Arc::try_unwrap(owner)
             .ok()
             .expect("drained last-settings owner")
             .shutdown(),
     );
+    eprintln!("last-settings-runtime phase: stopped");
     let captured = captured
         .unwrap_or_else(|error| panic!("{error}; close={close:?}; provider screen={screen}"));
     close.unwrap();

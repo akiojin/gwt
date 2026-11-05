@@ -29,6 +29,12 @@ use crate::pm_registry;
 /// Parsed `pm.*` command surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PmCommand {
+    /// Read a summary, bounded IDs or one record, without a raw-store dump.
+    RequestTasksRead { selector: RequestTaskSelector },
+    /// Mutate tracking state as the current PM, never as an intake/user actor.
+    RequestTasksApply {
+        request: Box<gwt_core::pm_request_tasks::Request>,
+    },
     /// Read the canonical project's durable planning snapshot.
     PlanStatus,
     /// Apply one planning-only update as the ambient registered PM.
@@ -50,6 +56,10 @@ pub enum PmCommand {
         question: Option<String>,
         body: String,
         instruction: Option<Box<gwt_core::user_instruction::UserInstructionInput>>,
+    },
+    ReportBatch {
+        project_root: Option<String>,
+        submission: Box<pm_report::Submission>,
     },
     /// Read the project's reports in posting order.
     ReportList { project_root: Option<String> },
@@ -77,6 +87,69 @@ pub enum PmCommand {
     /// `pm.capabilities` (Issue #4249 FR-003) — what the PM can do through
     /// JSON operations, and the owner action for everything it cannot.
     Capabilities,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RequestTaskSelector {
+    Summary {},
+    Pending {
+        limit: Option<usize>,
+        expected_revision: Option<u64>,
+        after: Option<String>,
+    },
+    Tasks {
+        limit: Option<usize>,
+        expected_revision: Option<u64>,
+        after: Option<String>,
+    },
+    Source {
+        id: String,
+    },
+    Task {
+        id: String,
+    },
+    Receipt {
+        operation_id: String,
+    },
+}
+
+impl RequestTaskSelector {
+    pub(super) fn validate(&self) -> Result<(), &'static str> {
+        let id = match self {
+            Self::Summary {} => return Ok(()),
+            Self::Pending {
+                limit,
+                expected_revision,
+                after,
+            }
+            | Self::Tasks {
+                limit,
+                expected_revision,
+                after,
+            } => {
+                if !(1..=100).contains(&limit.unwrap_or(50)) {
+                    return Err("page limit must be between 1 and 100");
+                }
+                if after.is_some() && expected_revision.is_none() {
+                    return Err(
+                        "page continuation requires expected_revision; restart without after",
+                    );
+                }
+                match after {
+                    Some(id) => id,
+                    None => return Ok(()),
+                }
+            }
+            Self::Source { id } | Self::Task { id } => id,
+            Self::Receipt { operation_id } => operation_id,
+        };
+        if id.trim().is_empty() {
+            Err("selector identity must be nonempty")
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// Why the PM cannot perform a capability itself.
@@ -120,6 +193,22 @@ pub struct CapabilitiesReport {
 /// executable row comes from the dispatch catalog, and the test fails when a
 /// missing operation lands or a permission row names an unknown operation.
 const CAPABILITY_GAPS: &[(&str, &str, CapabilityGapReason, &str)] = &[
+    (
+        "actions.diagnostic.policy.add", r#"{}"#, CapabilityGapReason::Permission,
+        "Read actions.diagnostic.policy.status and use the current registered PM Host context plus fresh exact scoped instruction_id or pm.approval.request; only akiojin/gwt/windows-diagnostic.yml permission changes, and release authority is not reusable",
+    ),
+    (
+        "actions.diagnostic.policy.rollback", r#"{}"#, CapabilityGapReason::Permission,
+        "Read actions.diagnostic.policy.status and use fresh exact scoped authority plus added_by naming this target's successful add and unchanged post-state",
+    ),
+    (
+        "actions.release_policy.add", r#"{}"#, CapabilityGapReason::Permission,
+        "Read actions.release_policy.status, then use the current registered PM Host context and an exact scoped instruction_id or pm.approval.request; only this repository's prepare-release.yml permission is added",
+    ),
+    (
+        "actions.release_policy.rollback", r#"{}"#, CapabilityGapReason::Permission,
+        "Read actions.release_policy.status and use fresh exact scoped authority plus added_by naming the successful add; its post-state must be unchanged and preexisting permission cannot be removed",
+    ),
     (
         "discussion.create",
         r#"{}"#,
@@ -208,7 +297,16 @@ pub(crate) fn capabilities_report() -> CapabilitiesReport {
         });
     CapabilitiesReport {
         schema_version: 1,
-        capabilities: executable.chain(gaps).collect(),
+        capabilities: executable.chain(gaps).chain([
+            "actions.diagnostic.request",
+            "actions.diagnostic.cancel",
+        ].into_iter().map(|operation| Capability {
+            operation: operation.into(), params:Some(serde_json::json!({})), executable:false,
+            reason:Some(CapabilityGapReason::Permission),
+            owner_action:Some("Use actions.diagnostic.observe with the fixed profile_id to inspect current PM Host authority, publication and repository permission. Requests reserve the historical source budget; cancellation requires the current exact run/revision. Release-policy approval does not authorize the diagnostic workflow.".into()),
+            permission_stage:Some("registered_pm_and_repository_policy".into()),
+            alternative_operation:Some("actions.diagnostic.observe".into()),
+        })).collect(),
     }
 }
 
@@ -235,6 +333,12 @@ pub(super) fn run<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     match command {
+        PmCommand::RequestTasksRead { selector } => {
+            request_tasks(env.repo_path(), Some(selector), None, out)
+        }
+        PmCommand::RequestTasksApply { request } => {
+            request_tasks(env.repo_path(), None, Some(&request), out)
+        }
         PmCommand::PlanStatus => {
             let state = crate::pm_planning::load_planning_state(
                 &peer_project_dir(env.repo_path()).join("project-state/pm-planning.json"),
@@ -368,6 +472,31 @@ pub(super) fn run<E: CliEnv>(
             out.push('\n');
             Ok(0)
         }
+        PmCommand::ReportBatch {
+            project_root,
+            submission,
+        } => {
+            let repo_path = resolve_repo_path(env, project_root);
+            if ambient_session_id().is_some() && !caller_is_registered_pm(&repo_path) {
+                return Err(refusal(
+                    "pm.report.post requires the registered PM or a direct user CLI call".into(),
+                ));
+            }
+            // Typed receipts never acknowledge an instruction/Q&A obligation.
+            let receipt = pm_report::post_submission(&repo_path, &submission).map_err(|error| {
+                refusal(format!("failed to persist PM report submission: {error}"))
+            })?;
+            if !receipt.reports.is_empty() {
+                if let Err(error) = crate::index_worker::queue_reports_index_refresh(&repo_path) {
+                    tracing::warn!(%error, "saved PM report refresh could not be queued; source polling will retry");
+                }
+            }
+            out.push_str(
+                &serde_json::json!({"schema_version":2,"ok":true,"receipt":receipt}).to_string(),
+            );
+            out.push('\n');
+            Ok(0)
+        }
         PmCommand::ReportPost {
             project_root,
             kind,
@@ -380,6 +509,9 @@ pub(super) fn run<E: CliEnv>(
                 return Err(refusal(
                     "pm.report.post requires the registered PM or a direct user CLI call".into(),
                 ));
+            }
+            if ambient_session_id().is_some() && kind != PmReportKind::Qa {
+                return Err(refusal("PM reports require a versioned submission with request_id, events, typed state and summary/details. Body-only non-Q&A is legacy direct-user CLI compatibility; read pm.report.list for event revisions.".into()));
             }
             if kind == PmReportKind::Qa
                 && (question
@@ -427,14 +559,14 @@ pub(super) fn run<E: CliEnv>(
                 }
                 input.summary = question.unwrap_or_default();
                 input.answer = body;
-                let saved = if input.authorizations.is_empty() {
-                    gwt_core::user_instruction::record(&repo_path, *input)
-                } else {
+                let saved = if ambient_session_id().is_some() || !input.authorizations.is_empty() {
                     let turn = qa_turn.as_ref().ok_or_else(|| refusal(
-                        "permission_stage=instruction: scoped instruction capture requires the current human PM turn; use pm.approval.request otherwise".into()))?;
+                        "permission_stage=instruction: PM instruction capture requires the current human PM turn; automatic prompts use structured submissions, and scoped authorization without a human turn uses pm.approval.request".into()))?;
                     let (session, turn_id) = super::hook::pm_reporting::instruction_prompt_identity(
                         &repo_path, turn, &input.original).map_err(super::io_as_api_error)?;
                     gwt_core::user_instruction::record_from_prompt(&repo_path, *input, &session, &turn_id)
+                } else {
+                    gwt_core::user_instruction::record(&repo_path, *input)
                 }.map_err(|error| {
                         SpecOpsError::from(ApiError::Unexpected(format!(
                             "failed to persist PM report: {error}"
@@ -474,13 +606,14 @@ pub(super) fn run<E: CliEnv>(
         }
         PmCommand::ReportList { project_root } => {
             let repo_path = resolve_repo_path(env, project_root);
-            let reports = pm_report::load_reports(&repo_path).map_err(|error| {
-                SpecOpsError::from(ApiError::Unexpected(format!(
-                    "failed to load PM reports: {error}"
-                )))
-            })?;
+            let (reports, journal) =
+                pm_report::load_reports_and_journal(&repo_path).map_err(|error| {
+                    SpecOpsError::from(ApiError::Unexpected(format!(
+                        "failed to load PM reports: {error}"
+                    )))
+                })?;
             out.push_str(
-                &serde_json::json!({"schema_version": 1, "ok": true, "reports": reports})
+                &serde_json::json!({"schema_version": 2, "ok": true, "reports": reports, "receipts":journal.receipts, "events":journal.events()})
                     .to_string(),
             );
             out.push('\n');
@@ -629,6 +762,196 @@ pub(super) fn run<E: CliEnv>(
             Ok(0)
         }
     }
+}
+
+fn request_tasks(
+    repo: &Path,
+    selector: Option<RequestTaskSelector>,
+    request: Option<&gwt_core::pm_request_tasks::Request>,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    use gwt_core::pm_request_tasks::{Actor, ActorKind, TaskError, TaskStore};
+    use serde_json::json;
+
+    let store = TaskStore::for_repo(repo);
+    let mut current_revision = None;
+    let result = (|| {
+        // Resolve authority before touching private task state. Keep the same
+        // registration lock as its writers until the result is constructed.
+        let actor =
+            std::env::var(gwt_agent::GWT_SESSION_ID_ENV).map_err(|_| TaskError::Unauthorized)?;
+        let record = peer_registration(repo)
+            .map_err(|error| TaskError::Unreadable(error.to_string()))?
+            .filter(|record| record.registration.session_id == actor)
+            .ok_or(TaskError::Unauthorized)?;
+        let _authority_lock = gwt_core::operation_deadline::NamedFileLock::acquire(
+            &record.prefs_path.with_extension("lock"),
+            "pm_request_tasks",
+        )
+        .map_err(|error| TaskError::PersistenceUnconfirmed(error.to_string()))?;
+        if !pm_registry::session_is_registered_pm(&record.prefs_path, &actor) {
+            return Err(TaskError::Unauthorized);
+        }
+        if let Some(request) = request {
+            // Domain authorization rejects Capture even for an internal caller
+            // bypassing JSON parsing. PM tracking cannot mint human provenance.
+            let result = store.apply(
+                &Actor {
+                    kind: ActorKind::Pm,
+                    id: actor,
+                },
+                request,
+            );
+            if result.is_err() {
+                // A failed publication can have renamed before losing its
+                // acknowledgement. Observe after failure, never call the
+                // pre-write revision current or turn an unreadable store into 0.
+                current_revision = store
+                    .read()
+                    .ok()
+                    .map(|state| state.map_or(0, |state| state.revision));
+            }
+            return result.map(|receipt| json!({"schema_version":1,"ok":true,"receipt":receipt}));
+        }
+        let state = store.read()?;
+        current_revision = Some(state.as_ref().map_or(0, |state| state.revision));
+        let selector = selector.expect("read command has a selector");
+        selector
+            .validate()
+            .map_err(|error| TaskError::Invalid(error.into()))?;
+        if let RequestTaskSelector::Pending {
+            limit,
+            expected_revision,
+            after,
+        }
+        | RequestTaskSelector::Tasks {
+            limit,
+            expected_revision,
+            after,
+        } = &selector
+        {
+            let revision = current_revision.expect("successful read has a revision");
+            if expected_revision.is_some_and(|expected| expected != revision) {
+                return Err(TaskError::Conflict {
+                    current_revision: revision,
+                });
+            }
+            let limit = limit.unwrap_or(50);
+            let mut ids: Vec<&String> = match &state {
+                Some(state) => {
+                    // BTree ranges preserve the exact IDs and only visit the
+                    // requested page plus one lookahead, excluding raw details.
+                    let lower = after
+                        .clone()
+                        .map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded);
+                    if matches!(&selector, RequestTaskSelector::Pending { .. }) {
+                        state
+                            .pending
+                            .range((lower, std::ops::Bound::Unbounded))
+                            .take(limit + 1)
+                            .collect()
+                    } else {
+                        state
+                            .tasks
+                            .range((lower, std::ops::Bound::Unbounded))
+                            .take(limit + 1)
+                            .map(|(id, _)| id)
+                            .collect()
+                    }
+                }
+                None => Vec::new(),
+            };
+            let next_after = if ids.len() > limit {
+                ids.truncate(limit);
+                ids.last().copied()
+            } else {
+                None
+            };
+            let mut value = json!({"schema_version":1,"ok":true,
+                "state":if state.is_some() { "ready" } else { "absent" },
+                "revision":revision,"ids":ids,"next_after":next_after});
+            if let Some(state) = &state {
+                value["project_key"] = json!(state.project_key);
+            }
+            return Ok(value);
+        }
+        let Some(state) = state else {
+            return match selector {
+                RequestTaskSelector::Pending { .. } | RequestTaskSelector::Tasks { .. } => {
+                    unreachable!("ID pages handled above")
+                }
+                RequestTaskSelector::Summary {} => {
+                    Ok(json!({"schema_version":1,"ok":true,"state":"absent","revision":0}))
+                }
+                RequestTaskSelector::Source { .. } => Err(TaskError::MissingSource),
+                RequestTaskSelector::Task { .. } => Err(TaskError::MissingTask),
+                RequestTaskSelector::Receipt { .. } => {
+                    Err(TaskError::Invalid("operation receipt not found".into()))
+                }
+            };
+        };
+        let mut value = json!({"schema_version":1,"ok":true,"state":"ready","project_key":state.project_key,"revision":state.revision});
+        match selector {
+            RequestTaskSelector::Pending { .. } | RequestTaskSelector::Tasks { .. } => {
+                unreachable!("ID pages handled above")
+            }
+            RequestTaskSelector::Summary {} => {
+                value["counts"] = json!({"sources":state.sources.len(),"pending":state.pending.len(),"tasks":state.tasks.len(),"receipts":state.receipts.len()});
+            }
+            RequestTaskSelector::Source { id } => {
+                value["source"] = json!(state.sources.get(&id).ok_or(TaskError::MissingSource)?);
+                value["pending"] = json!(state.pending.contains(&id));
+            }
+            RequestTaskSelector::Task { id } => {
+                value["task"] = json!(state.tasks.get(&id).ok_or(TaskError::MissingTask)?);
+            }
+            RequestTaskSelector::Receipt { operation_id } => {
+                value["receipt"] = json!(state
+                    .receipts
+                    .iter()
+                    .find(|receipt| receipt.operation_id == operation_id)
+                    .ok_or_else(|| TaskError::Invalid("operation receipt not found".into()))?);
+            }
+        }
+        Ok(value)
+    })();
+    let (code, value) = match result {
+        Ok(value) => (0, value),
+        Err(error) => {
+            let error_code = match &error {
+                TaskError::Unauthorized => "unauthorized",
+                TaskError::ForeignProject => "foreign_project",
+                TaskError::Conflict {
+                    current_revision: revision,
+                } => {
+                    current_revision = Some(*revision);
+                    "conflict"
+                }
+                TaskError::OperationConflict => "operation_conflict",
+                TaskError::StaleReview => "stale_review",
+                TaskError::ReassessmentRequired => "reassessment_required",
+                TaskError::UnfinishedChildren => "unfinished_children",
+                TaskError::Invalid(_) => "invalid_request",
+                TaskError::MissingSource => "missing_source",
+                TaskError::MissingTask => "missing_task",
+                TaskError::Unreadable(_) => "unreadable_store",
+                TaskError::PersistenceUnconfirmed(_) => "persistence_unconfirmed",
+            };
+            let recovery = if matches!(error, TaskError::Unauthorized) {
+                "pm.status"
+            } else {
+                "pm.request_tasks.read"
+            };
+            (
+                1,
+                json!({"schema_version":1,"ok":false,"current_revision":current_revision,
+                "error":{"code":error_code,"message":error.to_string(),"recovery_operation":recovery}}),
+            )
+        }
+    };
+    out.push_str(&value.to_string());
+    out.push('\n');
+    Ok(code)
 }
 
 fn apply_plan(
@@ -851,6 +1174,334 @@ mod tests {
     use super::*;
     use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
     use std::fs;
+
+    #[test]
+    fn pm_request_tasks_adapter_preserves_authority_project_and_receipt_boundaries() {
+        use gwt_core::pm_request_tasks::{Actor, ActorKind, TaskStore};
+        use serde_json::{json, Value};
+        let _lock = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let invoke = |path: &Path, operation: &str, params: Value| {
+            let command = crate::cli::json_envelope::parse_operation(operation, &params).unwrap();
+            let mut env = crate::cli::env::TestEnv::new(path.to_path_buf());
+            let (code, output) = crate::cli::run_collect(&mut env, command).unwrap();
+            (code, serde_json::from_str::<Value>(&output).unwrap())
+        };
+        let apply = json!({"operation_id":"decompose-1","expected_revision":1,"reason":"Track accepted work",
+            "action":{"kind":"decompose","source_id":"source-1","root":{
+                "id":"task-1","title":"Original task","purpose":"Preserve the request",
+                "completion_conditions":["Demonstrate the result"],"issue_numbers":[],"goal_ids":[],"assignee":null},"children":[]}});
+        let _direct = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let denied = invoke(&repo, "pm.request_tasks.read", json!({}));
+        assert_eq!(denied.0, 1);
+        assert_eq!(denied.1["error"]["code"], "unauthorized");
+        assert!(denied.1["current_revision"].is_null());
+        assert!(!peer_project_dir(&repo)
+            .join("project-state/request-tasks")
+            .exists());
+        let prefs = pm_registry::pm_prefs_path_for_repo_path(&repo);
+        let register = |id: &str| {
+            pm_registry::save_pm_prefs(
+                &prefs,
+                &pm_registry::PmPrefs {
+                    registration: Some(pm_registry::PmRegistration {
+                        session_id: id.into(),
+                        agent_id: "codex".into(),
+                        worktree_path: pm_registry::pm_worktree_path_for_repo_path(&repo)
+                            .display()
+                            .to_string(),
+                        created_at: None,
+                        consecutive_crashes: 0,
+                        next_not_before: None,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        };
+        register("pm-a");
+        let _pm = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-a");
+        let absent = invoke(&repo, "pm.request_tasks.read", json!({}));
+        assert_eq!(absent.0, 0);
+        assert_eq!(absent.1["state"], "absent");
+        assert!(absent.1.get("counts").is_none());
+        for kind in ["pending", "tasks"] {
+            let page = invoke(
+                &repo,
+                "pm.request_tasks.read",
+                json!({"selector":{"kind":kind}}),
+            );
+            assert_eq!(page.0, 0);
+            assert_eq!(page.1["state"], "absent");
+            assert_eq!(page.1["revision"], 0);
+            assert_eq!(page.1["ids"], json!([]));
+            assert!(page.1["next_after"].is_null());
+        }
+        assert!(!peer_project_dir(&repo)
+            .join("project-state/request-tasks")
+            .exists());
+        let original = "Keep the exact original.\nEven before a Q&A post.";
+        let store = TaskStore::for_repo(&repo);
+        let capture = json!({"operation_id":"capture-1","expected_revision":0,"reason":"Authenticated native input",
+            "action":{"kind":"capture","source":{"id":"source-1",
+                "project_key":gwt_core::paths::project_scope_hash(&repo).to_string(),"original":original,
+                "authority":{"session_id":"prior-pm","turn_id":"native-1",
+                    "prompt_sha256":gwt_core::pm_authorization::digest(original.as_bytes())}}}});
+        store
+            .apply(
+                &Actor {
+                    kind: ActorKind::Intake,
+                    id: "prior-pm".into(),
+                },
+                &serde_json::from_value(capture).unwrap(),
+            )
+            .unwrap();
+        let state_path = peer_project_dir(&repo).join("project-state/request-tasks/state.json");
+        let original_bytes = fs::read(&state_path).unwrap();
+        for caller in ["implementation-agent", "foreign-pm", " pm-a "] {
+            let _caller = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, caller);
+            for (operation, params) in [
+                (
+                    "pm.request_tasks.read",
+                    json!({"selector":{"kind":"source","id":"source-1"}}),
+                ),
+                (
+                    "pm.request_tasks.read",
+                    json!({"selector":{"kind":"pending"}}),
+                ),
+                (
+                    "pm.request_tasks.read",
+                    json!({"selector":{"kind":"tasks"}}),
+                ),
+                ("pm.request_tasks.apply", apply.clone()),
+            ] {
+                let result = invoke(&repo, operation, params);
+                assert_eq!(result.0, 1);
+                assert_eq!(result.1["error"]["code"], "unauthorized");
+                assert!(result.1["current_revision"].is_null());
+            }
+        }
+        let foreign = home.path().join("foreign");
+        fs::create_dir_all(&foreign).unwrap();
+        assert_eq!(
+            invoke(&foreign, "pm.request_tasks.apply", apply.clone()).0,
+            1
+        );
+        assert_eq!(fs::read(&state_path).unwrap(), original_bytes);
+        let prefs_bytes = fs::read(&prefs).unwrap();
+        let first = invoke(&repo, "pm.request_tasks.apply", apply.clone());
+        assert_eq!(first.0, 0);
+        assert_eq!(
+            first.1["receipt"]["actor"],
+            json!({"kind":"pm","id":"pm-a"})
+        );
+        let committed = fs::read(&state_path).unwrap();
+        assert_eq!(
+            invoke(&repo, "pm.request_tasks.apply", apply.clone()),
+            first
+        );
+        assert_eq!(fs::read(&state_path).unwrap(), committed);
+        let mut conflict = apply.clone();
+        conflict["operation_id"] = json!("other-operation");
+        let conflict = invoke(&repo, "pm.request_tasks.apply", conflict);
+        assert_eq!(conflict.0, 1);
+        assert_eq!(conflict.1["error"]["code"], "conflict");
+        assert_eq!(conflict.1["current_revision"], 2);
+        assert_eq!(
+            conflict.1["error"]["recovery_operation"],
+            "pm.request_tasks.read"
+        );
+        let summary = invoke(&repo, "pm.request_tasks.read", json!({})).1;
+        assert_eq!(summary["state"], "ready");
+        assert_eq!(
+            summary["counts"],
+            json!({"sources":1,"pending":0,"tasks":1,"receipts":2})
+        );
+        for field in ["sources", "tasks", "receipts", "original"] {
+            assert!(summary.get(field).is_none());
+        }
+        let runtime = peer_project_dir(&repo).join("pm/runtime/nested");
+        fs::create_dir_all(&runtime).unwrap();
+        let source = invoke(
+            &runtime,
+            "pm.request_tasks.read",
+            json!({"selector":{"kind":"source","id":"source-1"}}),
+        );
+        assert_eq!(source.0, 0);
+        assert_eq!(source.1["source"]["original"], original);
+        assert_eq!(
+            invoke(&runtime, "pm.request_tasks.read", json!({})).1,
+            summary
+        );
+        assert_eq!(
+            invoke(
+                &repo,
+                "pm.request_tasks.read",
+                json!({"selector":{"kind":"receipt","operation_id":"decompose-1"}})
+            )
+            .1["receipt"],
+            first.1["receipt"]
+        );
+        assert_eq!(
+            invoke(
+                &repo,
+                "pm.request_tasks.read",
+                json!({"selector":{"kind":"task","id":"task-1"}})
+            )
+            .1["task"]["draft"]["title"],
+            "Original task"
+        );
+        assert_eq!(
+            invoke(
+                &repo,
+                "pm.request_tasks.read",
+                json!({"selector":{"kind":"source","id":"missing"}})
+            )
+            .1["error"]["code"],
+            "missing_source"
+        );
+        assert_eq!(
+            fs::read(&prefs).unwrap(),
+            prefs_bytes,
+            "Task updates grant no PM/Monitor authority"
+        );
+        // More IDs than one page, deliberately inserted out of lexical order.
+        for suffix in [3, 2] {
+            let state = store.read().unwrap().unwrap();
+            let mut source = state.sources["source-1"].clone();
+            source.id = format!("source-{suffix}");
+            source.authority.turn_id = format!("native-{suffix}");
+            store
+                .apply(
+                    &Actor {
+                        kind: ActorKind::Intake,
+                        id: "prior-pm".into(),
+                    },
+                    &gwt_core::pm_request_tasks::Request {
+                        operation_id: format!("capture-{suffix}"),
+                        expected_revision: state.revision,
+                        reason: "Authenticated input".into(),
+                        action: gwt_core::pm_request_tasks::Action::Capture { source },
+                    },
+                )
+                .unwrap();
+        }
+        let mut child = apply["action"]["root"].clone();
+        for id in ["task-2", " task-0 "] {
+            child["id"] = json!(id);
+            let result = invoke(
+                &repo,
+                "pm.request_tasks.apply",
+                json!({
+                    "operation_id":format!("add-{id}"),"expected_revision":store.read().unwrap().unwrap().revision,
+                    "reason":"Decompose accepted work","action":{"kind":"add_child","parent_id":"task-1","child":child}
+                }),
+            );
+            assert_eq!(result.0, 0);
+        }
+        let revision = store.read().unwrap().unwrap().revision;
+        let before_reads = fs::read(&state_path).unwrap();
+        for (kind, ids) in [
+            ("pending", vec!["source-2", "source-3"]),
+            ("tasks", vec![" task-0 ", "task-1", "task-2"]),
+        ] {
+            let first = invoke(
+                &repo,
+                "pm.request_tasks.read",
+                json!({"selector":{"kind":kind,"limit":1}}),
+            );
+            assert_eq!(first.0, 0);
+            assert_eq!(first.1["ids"], json!([ids[0]]));
+            assert_eq!(first.1["next_after"], ids[0]);
+            assert_eq!(first.1["revision"], revision);
+            let second = invoke(
+                &repo,
+                "pm.request_tasks.read",
+                json!({"selector":{
+                    "kind":kind,"limit":2,"after":first.1["next_after"],"expected_revision":revision
+                }}),
+            );
+            assert_eq!(second.0, 0);
+            assert_eq!(second.1["ids"], json!(&ids[1..]));
+            assert!(second.1["next_after"].is_null());
+            let all = invoke(
+                &repo,
+                "pm.request_tasks.read",
+                json!({"selector":{"kind":kind}}),
+            );
+            assert_eq!(all.1["ids"], json!(ids));
+            assert!(all.1["next_after"].is_null());
+            for field in ["sources", "tasks", "receipts", "original", "source", "task"] {
+                assert!(first.1.get(field).is_none());
+            }
+            assert_eq!(
+                invoke(
+                    &runtime,
+                    "pm.request_tasks.read",
+                    json!({"selector":{"kind":kind}})
+                ),
+                all
+            );
+        }
+        assert_eq!(fs::read(&state_path).unwrap(), before_reads);
+        assert_eq!(invoke(&repo, "pm.request_tasks.apply", json!({
+            "operation_id":"classify-2","expected_revision":revision,"reason":"Only a question",
+            "action":{"kind":"classify_non_task","source_id":"source-2"}
+        })).0, 0);
+        for kind in ["pending", "tasks"] {
+            let stale = invoke(
+                &repo,
+                "pm.request_tasks.read",
+                json!({"selector":{
+                    "kind":kind,"after":"source-2","expected_revision":revision
+                }}),
+            );
+            assert_eq!(stale.0, 1);
+            assert_eq!(stale.1["error"]["code"], "conflict");
+            assert_eq!(stale.1["current_revision"], revision + 1);
+            assert_eq!(
+                stale.1["error"]["recovery_operation"],
+                "pm.request_tasks.read"
+            );
+            assert!(stale.1.get("ids").is_none());
+        }
+        assert_eq!(
+            invoke(
+                &repo,
+                "pm.request_tasks.read",
+                json!({"selector":{"kind":"pending"}})
+            )
+            .1["ids"],
+            json!(["source-3"])
+        );
+        let committed = fs::read(&state_path).unwrap();
+        register("replacement-pm");
+        assert_eq!(
+            invoke(&repo, "pm.request_tasks.apply", apply).1["error"]["code"],
+            "unauthorized"
+        );
+        assert_eq!(fs::read(&state_path).unwrap(), committed);
+        register("pm-a");
+        fs::write(&state_path, b"broken snapshot").unwrap();
+        let broken = invoke(&repo, "pm.request_tasks.read", json!({}));
+        assert_eq!(broken.0, 1);
+        assert_eq!(broken.1["error"]["code"], "unreadable_store");
+        assert!(broken.1.get("counts").is_none());
+        for kind in ["pending", "tasks"] {
+            let broken = invoke(
+                &repo,
+                "pm.request_tasks.read",
+                json!({"selector":{"kind":kind}}),
+            );
+            assert_eq!(broken.0, 1);
+            assert_eq!(broken.1["error"]["code"], "unreadable_store");
+            assert!(broken.1.get("ids").is_none());
+        }
+        assert_eq!(fs::read(&state_path).unwrap(), b"broken snapshot");
+    }
 
     #[test]
     fn pm_plan_adapter_binds_authority_to_current_project_and_registration() {
@@ -1247,6 +1898,21 @@ mod tests {
                 } else {
                     "pm.approval.request"
                 }
+            );
+        }
+        for operation in ["actions.diagnostic.request", "actions.diagnostic.cancel"] {
+            let row = report
+                .capabilities
+                .iter()
+                .find(|row| row.operation == operation && !row.executable)
+                .unwrap();
+            assert_eq!(
+                row.permission_stage.as_deref(),
+                Some("registered_pm_and_repository_policy")
+            );
+            assert_eq!(
+                row.alternative_operation.as_deref(),
+                Some("actions.diagnostic.observe")
             );
         }
     }

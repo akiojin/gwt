@@ -9,23 +9,51 @@ export const DEFAULT_MAX_CHARS_PER_FLUSH = 65536;
 export const DEFAULT_MAX_WINDOWS_PER_FLUSH = 8;
 export const DEFAULT_MAX_TOTAL_CHARS_PER_FLUSH = DEFAULT_MAX_CHARS_PER_FLUSH;
 
-function defaultSchedule(callback) {
-  const hasFrames = typeof requestAnimationFrame === "function";
+// A document can become hidden after work is queued. Promote pending work to
+// a yielding MessageChannel task before frames suspend and timers are clamped.
+// Supplying a window keeps visible work coalesced on that window's next frame.
+export function scheduleTerminalTask(callback, frameWindow = null) {
+  const owner = frameWindow ?? globalThis;
+  const visibility = owner.document;
   let finished = false;
+  let timer = null;
+  let frame = null;
+  let task = null;
+  const cancel = () => {
+    finished = true;
+    visibility?.removeEventListener?.("visibilitychange", scheduleHidden);
+    owner.clearTimeout(timer);
+    if (frame !== null) owner.cancelAnimationFrame?.(frame);
+    if (task) {
+      task.port1.onmessage = null;
+      task.port1.close();
+      task.port2.close();
+      task = null;
+    }
+  };
   const run = () => {
     if (finished) return;
-    finished = true;
-    clearTimeout(timer);
-    if (frame !== null && typeof cancelAnimationFrame === "function") {
-      cancelAnimationFrame(frame);
-    }
+    cancel();
     callback();
   };
-  // Receive dispatch also has a fallback: the downstream xterm buffer must
-  // keep advancing when an inactive WebView stops delivering animation frames.
-  const timer = setTimeout(run, hasFrames ? 100 : 0);
-  const frame = hasFrames ? requestAnimationFrame(run) : null;
-  return frame ?? timer;
+  const scheduleHidden = () => {
+    if (finished || task || !visibility?.hidden || typeof owner.MessageChannel !== "function") return;
+    task = new owner.MessageChannel();
+    task.port1.onmessage = run;
+    task.port2.postMessage(null);
+  };
+  scheduleHidden();
+  if (!task) {
+    visibility?.addEventListener?.("visibilitychange", scheduleHidden);
+    const hasFrames = frameWindow && !visibility?.hidden && typeof owner.requestAnimationFrame === "function";
+    timer = owner.setTimeout(run, hasFrames ? 100 : 0);
+    if (hasFrames) frame = owner.requestAnimationFrame(run);
+  }
+  return cancel;
+}
+
+function defaultSchedule(callback) {
+  return scheduleTerminalTask(callback, globalThis);
 }
 
 function normalizeMaxCharsPerFlush(value) {
