@@ -551,7 +551,8 @@ export async function focusLiveWindow(page: Page, id: string): Promise<void> {
   await sendLiveGwtEvent(page, { kind: "focus_window", id });
   await page.waitForFunction(id => {
     const state = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) => entry.payload.kind === "workspace_state")?.payload.workspace;
-    return state?.tabs.flatMap((tab: any) => tab.workspace.windows).reduce((top: any, window: any) =>
+    const tab = state?.tabs.find((tab: any) => tab.workspace.windows.some((window: any) => window.id === id));
+    return tab?.workspace.windows.reduce((top: any, window: any) =>
       !top || (window.z_index || 0) > (top.z_index || 0) ? window : top, null)?.id === id;
   }, id, { timeout: 5_000 });
   await page.reload();

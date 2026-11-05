@@ -2891,6 +2891,305 @@ fn app_runtime_launch_wizard_set_agent_failure_logs_requested_agent() {
 }
 
 #[test]
+fn issue6682_owner_status_is_shared_with_hub_when_gui_inventory_lags() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, _, id) = owner_browser_input_fixture(temp.path());
+    let context = runtime.project_context("browser-tab").unwrap();
+    let identity = runtime.runtimes[&id].owner_identity.clone();
+    runtime.handle_project_owner_health(
+        &context,
+        1,
+        Some(identity.clone()),
+        gwt::protocol::ProjectOwnerHealthView {
+            project_key: context.project_key.to_string(),
+            state: gwt::protocol::ProjectOwnerHealthState::Healthy,
+            detail: None,
+        },
+    );
+    let mut status = runtime.project_execution_status(&context, None);
+    status.effective_state = "running".into();
+    runtime.runtimes.clear();
+    let events = runtime.handle_project_owner_event(
+        &context,
+        1,
+        &identity,
+        gwt::project_runtime::events::OwnerEvent::ProjectExecutionStatus {
+            status: status.clone(),
+        },
+    );
+    let hub = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::HubState { hub } => Some(hub),
+            _ => None,
+        })
+        .expect("owner status updates the Hub");
+    assert_eq!(
+        serde_json::to_value(&hub.projects[0].execution).unwrap(),
+        serde_json::to_value(Some(status)).unwrap()
+    );
+    let policy_path = gwt_core::project_execution_policy::policy_path(&context.project_root);
+    fs::write(&policy_path, b"corrupt policy").unwrap();
+    let unavailable = runtime.project_execution_status(&context, None);
+    assert_eq!(unavailable.effective_state, "unknown");
+    assert_eq!(unavailable.start_reason, "policy_unreadable");
+    assert!(unavailable.degraded);
+    fs::remove_file(policy_path).unwrap();
+    assert_eq!(
+        runtime
+            .project_execution_status(&context, None)
+            .effective_state,
+        "running"
+    );
+}
+
+#[test]
+fn issue6682_host_birth_failure_revokes_the_saved_view_observation() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab("tab-1", "Repo", temp.path().into(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let context = runtime.test_context();
+    let saved = gwt::project_execution_policy::observation(temp.path())
+        .unwrap()
+        .unwrap();
+    runtime
+        .project_state_mut(&context)
+        .unwrap()
+        .project_views
+        .clear_fixture_views();
+    runtime.blocking_tasks = BlockingTaskSpawner::failing("retain exact revocation for retry");
+    assert!(runtime
+        .persist_actual_project_views_with_birth(&context, None)
+        .is_err());
+    assert!(!gwt::project_execution_policy::actual_open(temp.path()).unwrap());
+    let invalidation = runtime
+        .project_state(&context)
+        .unwrap()
+        .project_views
+        .pending_invalidation_for_test()
+        .expect("the owner's saved grant also needs revocation");
+    assert_eq!(invalidation.host_started_at, saved.host_started_at);
+    assert!(runtime.project_execution_admission(&context, &[]).is_err());
+}
+
+#[test]
+fn issue6682_cold_restore_uses_saved_issue_lineage_without_a_view() {
+    use gwt_core::project_execution_policy::{self as store, Choice, EffectState};
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab("tab-1", "Repo", temp.path().into(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let context = runtime.test_context();
+    runtime
+        .project_state_mut(&context)
+        .unwrap()
+        .project_views
+        .clear_fixture_views();
+    fs::remove_file(gwt::project_execution_policy::observation_path(
+        &context.project_root,
+    ))
+    .unwrap();
+    let mut source =
+        gwt_agent::Session::new(temp.path(), "work/issue-42", gwt_agent::AgentId::Codex);
+    source.linked_issue_number = Some(42);
+    source.save(&runtime.sessions_dir).unwrap();
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    store::choose(
+        &context.project_root,
+        &store::ChoiceRequest {
+            operation_id: operation_id.clone(),
+            expected_revision: 0,
+            generation: context.generation,
+            choice: Choice::Continue,
+            consent_source_id: "explicit".into(),
+            actor: "browser:a".into(),
+            authorized_work_lineage: vec!["issue:42".into()],
+        },
+    )
+    .unwrap();
+    store::record_effect(
+        &context.project_root,
+        &operation_id,
+        EffectState::Confirmed,
+        None,
+    )
+    .unwrap();
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
+    let result = runtime.queue_project_owner_cold_restore(
+        &context,
+        "tab-1::restore".into(),
+        Some(1),
+        source.id,
+        false,
+    );
+    assert!(
+        result.is_ok(),
+        "Continue's saved issue lineage must admit cold restore: {result:?}"
+    );
+}
+
+fn issue6682_retained_close_fixture(
+    temp: &Path,
+    choice: &str,
+) -> (AppRuntime, super::super::ProjectContext, String) {
+    let tab = sample_project_tab("tab-1", "Repo", temp.into(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp, vec![tab], Some("tab-1"));
+    let context = runtime.test_context();
+    runtime
+        .project_state_mut(&context)
+        .unwrap()
+        .project_views
+        .clear_fixture_views();
+    issue6682_accept_view(&mut runtime, &context, "a", "view-a");
+    issue6682_accept_view(&mut runtime, &context, "b", "view-b");
+    let scope = ClientScope::Hub;
+    let preview = runtime.handle_frontend_event_in_scope(
+        "a".into(),
+        serde_json::from_value(
+        serde_json::json!({"kind":"preview_close_project", "project_key":context.project_key.to_string(),
+            "project_wide":true}),
+        )
+        .unwrap(),
+        &scope,
+    );
+    let preview = preview
+        .iter()
+        .find_map(|event| {
+            let value = serde_json::to_value(&event.event).unwrap();
+            (value["kind"] == "close_project_preview").then_some(value)
+        })
+        .unwrap();
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
+    runtime.handle_frontend_event_in_scope(
+        "a".into(),
+        serde_json::from_value(serde_json::json!({
+        "kind":"confirm_close_project", "token":preview["token"], "choice":choice,
+        "operation_id":operation_id, "expected_policy_revision":preview["policy_revision"],
+        "expected_view_set_revision":preview["view_set_revision"]}))
+        .unwrap(),
+        &scope,
+    );
+    let observed = gwt::project_execution_policy::observation(temp)
+        .unwrap()
+        .unwrap();
+    gwt_core::project_execution_policy::choose(
+        temp,
+        &observed.close_intents[&operation_id].request,
+    )
+    .unwrap();
+    (runtime, context, operation_id)
+}
+
+#[test]
+fn issue6682_lost_project_wide_ack_reconciles_only_preview_receipts() {
+    use gwt_core::project_execution_policy::{self as store, EffectState};
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, context, operation_id) =
+        issue6682_retained_close_fixture(temp.path(), "continue");
+    store::record_effect(temp.path(), &operation_id, EffectState::Confirmed, None).unwrap();
+    runtime.project_execution_choice_completed(
+        super::super::project_execution_policy::ProjectExecutionChoiceCompleted {
+            context: context.clone(),
+            client_id: "a".into(),
+            operation_id: operation_id.clone(),
+            closing_receipts: Default::default(),
+            result: Err("ACK lost".into()),
+        },
+    );
+    issue6682_accept_view(&mut runtime, &context, "c", "fresh-view");
+    let events = runtime.handle_frontend_event_in_scope(
+        "a".into(),
+        FrontendEvent::GetProjectExecutionStatus {
+            project_key: Some(context.project_key.to_string()),
+            operation_id: Some(operation_id),
+        },
+        &ClientScope::Hub,
+    );
+    assert_eq!(
+        runtime
+            .project_state(&context)
+            .unwrap()
+            .project_views
+            .view_count(),
+        1
+    );
+    for client in ["a", "b"] {
+        assert!(events.iter().any(
+            |event| event.target == DispatchTarget::Client(client.into())
+                && matches!(event.event, BackendEvent::ProjectViewClosed { .. })
+        ));
+    }
+    assert!(!events
+        .iter()
+        .any(|event| event.target == DispatchTarget::Client("c".into())
+            && matches!(event.event, BackendEvent::ProjectViewClosed { .. })));
+}
+
+#[test]
+fn issue6682_unconfirmed_stop_retains_views_and_reconciliation_intent() {
+    use gwt_core::project_execution_policy::{self as store, EffectState};
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, context, operation_id) =
+        issue6682_retained_close_fixture(temp.path(), "stop");
+    store::record_effect(temp.path(), &operation_id, EffectState::Unknown, None).unwrap();
+    let status = runtime.project_execution_status(&context, Some(&operation_id));
+    let events = runtime.project_execution_choice_completed(
+        super::super::project_execution_policy::ProjectExecutionChoiceCompleted {
+            context: context.clone(),
+            client_id: "a".into(),
+            operation_id: operation_id.clone(),
+            closing_receipts: runtime
+                .project_state(&context)
+                .unwrap()
+                .project_views
+                .view_receipts(),
+            result: Ok(serde_json::json!({"status":status})),
+        },
+    );
+    assert_eq!(
+        runtime
+            .project_state(&context)
+            .unwrap()
+            .project_views
+            .view_count(),
+        2
+    );
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::ProjectViewClosed { .. })));
+    assert!(gwt::project_execution_policy::observation(temp.path())
+        .unwrap()
+        .unwrap()
+        .close_intents
+        .contains_key(&operation_id));
+    store::record_effect(temp.path(), &operation_id, EffectState::Confirmed, None).unwrap();
+    let events = runtime.handle_frontend_event_in_scope(
+        "a".into(),
+        FrontendEvent::GetProjectExecutionStatus {
+            project_key: Some(context.project_key.to_string()),
+            operation_id: Some(operation_id),
+        },
+        &ClientScope::Hub,
+    );
+    assert_eq!(
+        runtime
+            .project_state(&context)
+            .unwrap()
+            .project_views
+            .view_count(),
+        0
+    );
+    assert!(events
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::ProjectViewClosed { .. })));
+}
+
+#[test]
 fn issue6682_hydration_requires_a_bound_actual_view_receipt() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
@@ -3209,6 +3508,13 @@ fn issue6682_persisted_close_callback_preserves_a_fresh_reopened_view() {
             actor: "browser:a".into(),
             authorized_work_lineage: Vec::new(),
         },
+    )
+    .unwrap();
+    gwt_core::project_execution_policy::record_effect(
+        &context.project_root,
+        &operation_id,
+        gwt_core::project_execution_policy::EffectState::Confirmed,
+        None,
     )
     .unwrap();
     // A real ready handshake completes after owner CAS but before its callback.

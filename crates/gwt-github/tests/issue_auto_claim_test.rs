@@ -2,9 +2,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use gwt_github::client::{OwnerMutationError, OwnerMutationResult};
 use gwt_github::issue_auto_claim::{
-    acquire_claim, acquire_claim_mutation, claim_is_active, parse_claim_comment, release_claim,
-    release_claim_mutation, render_claim_comment, renew_claim_mutation, select_winning_claim,
-    ClaimAcquireOutcome, ClaimComment, ClaimReleaseOutcome, ClaimRenewOutcome, ClaimStatus,
+    acquire_claim, acquire_claim_mutation, claim_is_active, observe_claim_acquisition,
+    parse_claim_comment, release_claim, release_claim_mutation, render_claim_comment,
+    renew_claim_mutation, select_winning_claim, ClaimAcquireOutcome, ClaimComment,
+    ClaimReleaseOutcome, ClaimRenewOutcome, ClaimStatus,
 };
 use gwt_github::{
     ApiError, CommentId, CommentSnapshot, FakeIssueClient, FetchResult, IssueClient, IssueNumber,
@@ -1348,6 +1349,16 @@ fn mutation_reconcile_terminalizes_every_active_duplicate_for_the_logical_claim(
     );
     client.seed(snapshot(vec![comment(9, &first), comment(10, &second)]));
 
+    let observed =
+        observe_claim_acquisition(&client, IssueNumber(42), &first, "2026-06-23T10:01:00Z")
+            .expect("a prior acquisition can be observed without mutation");
+    assert!(matches!(observed, ClaimAcquireOutcome::Acquired(_)));
+    assert_eq!(client.call_log(), vec!["fetch:#42"]);
+    assert!(client.comments(IssueNumber(42)).iter().all(|comment| {
+        parse_claim_comment(Some(comment.id), &comment.body)
+            .is_ok_and(|claim| claim.status == ClaimStatus::Active)
+    }));
+
     let outcome = release_claim_mutation(
         &client,
         IssueNumber(42),
@@ -1366,6 +1377,7 @@ fn mutation_reconcile_terminalizes_every_active_duplicate_for_the_logical_claim(
     assert_eq!(
         client.call_log(),
         vec![
+            "fetch:#42",
             "fetch:#42",
             "patch_comment:comment:9",
             "patch_comment:comment:10",

@@ -65,9 +65,7 @@ fn observation_revocations() -> &'static std::sync::Mutex<ObservationRevocations
 /// This can only remove an actual-view prerequisite, never grant one.
 pub fn invalidate_observation(repo: &Path, invalidation: ObservationInvalidation) {
     let key = (
-        gwt_core::paths::resolve_project_scope(repo)
-            .hash
-            .to_string(),
+        store::project_key(repo),
         invalidation.host_pid,
         invalidation.host_started_at,
     );
@@ -104,8 +102,7 @@ pub(crate) fn observation_is_revoked(observed: &RuntimeObservation) -> bool {
 }
 
 pub fn observation_path(repo: &Path) -> PathBuf {
-    gwt_core::paths::gwt_project_dir_for_repo_path(repo)
-        .join("project-state/project-window-runtime.json")
+    store::policy_path(repo).with_file_name("project-window-runtime.json")
 }
 
 pub(crate) fn lock_observation(repo: &Path) -> io::Result<std::fs::File> {
@@ -118,13 +115,56 @@ pub(crate) fn lock_observation(repo: &Path) -> io::Result<std::fs::File> {
         .read(true)
         .write(true)
         .open(path.with_extension("lock"))?;
-    lock.lock_exclusive()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        match lock.try_lock_exclusive() {
+            Ok(()) => break,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "Project observation is busy; retry after reconciliation",
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => return Err(error),
+        }
+    }
     Ok(lock)
 }
 
 pub fn write_observation(repo: &Path, observation: &RuntimeObservation) -> io::Result<()> {
+    // Never unlink without the lock: a competing writer may already have
+    // published a newer view set. Readers take this same bounded lock, so a
+    // missing/unreadable lock also withholds an old disk observation.
+    let lock = lock_observation(repo);
+    if lock.is_ok() {
+        let existing = std::fs::read(observation_path(repo))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<RuntimeObservation>(&bytes).ok());
+        if existing.is_some_and(|existing| {
+            existing.schema_version == 1
+                && existing.project_key == observation.project_key
+                && (existing.host_pid, existing.host_started_at)
+                    != (observation.host_pid, observation.host_started_at)
+                && !existing.views.is_empty()
+                && crate::process::is_process_alive(existing.host_pid)
+                && crate::process::host_process_start_time(existing.host_pid)
+                    .is_none_or(|birth| birth == existing.host_started_at)
+        }) {
+            // This host has not written anything. In particular, do not enter
+            // the failed-write cleanup and remove another host's live views.
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "Another live GUI host owns this Project view; use that instance",
+            ));
+        }
+    }
     let result = (|| {
-        let _lock = lock_observation(repo)?;
+        let _lock = lock
+            .as_ref()
+            .map_err(|error| io::Error::new(error.kind(), error.to_string()))?;
         gwt_core::atomic_file::write_atomic(
             &observation_path(repo),
             &serde_json::to_vec(observation)?,
@@ -144,9 +184,11 @@ pub fn write_observation(repo: &Path, observation: &RuntimeObservation) -> io::R
                     .map(|receipt| receipt.receipt_id.clone()),
             },
         );
-        if let Err(error) = std::fs::remove_file(observation_path(repo)) {
-            if error.kind() != io::ErrorKind::NotFound {
-                tracing::warn!(%error,"stale Project observation could not be removed; its in-process grant is revoked");
+        if lock.is_ok() {
+            if let Err(error) = std::fs::remove_file(observation_path(repo)) {
+                if error.kind() != io::ErrorKind::NotFound {
+                    tracing::warn!(%error,"stale Project observation could not be removed; its in-process grant is revoked");
+                }
             }
         }
     }
@@ -155,6 +197,18 @@ pub fn write_observation(repo: &Path, observation: &RuntimeObservation) -> io::R
 
 /// A dead or reused GUI process cannot leave behind an actual-open grant.
 pub fn observation(repo: &Path) -> Result<Option<RuntimeObservation>, String> {
+    if !observation_path(repo)
+        .try_exists()
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(None);
+    }
+    let _lock = lock_observation(repo).map_err(|error| error.to_string())?;
+    observation_unlocked(repo)
+}
+
+/// Caller must hold `lock_observation` through the read and any publication.
+pub(crate) fn observation_unlocked(repo: &Path) -> Result<Option<RuntimeObservation>, String> {
     let bytes = match std::fs::read(observation_path(repo)) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -162,9 +216,7 @@ pub fn observation(repo: &Path) -> Result<Option<RuntimeObservation>, String> {
     };
     let value: RuntimeObservation =
         serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
-    let key = gwt_core::paths::resolve_project_scope(repo)
-        .hash
-        .to_string();
+    let key = store::project_key(repo);
     if value.schema_version != 1 || value.project_key != key {
         return Err("Project observation identity or schema mismatch".into());
     }
@@ -174,6 +226,44 @@ pub fn observation(repo: &Path) -> Result<Option<RuntimeObservation>, String> {
         return Ok(None);
     }
     Ok(Some(value))
+}
+
+/// Revoke only this host's saved generation when a fresh birth lookup fails.
+/// A newer writer or another host must retain its observation.
+pub fn revoke_saved_observation(
+    repo: &Path,
+    host_pid: u32,
+    generation: u64,
+    view_set_revision: u64,
+) -> io::Result<Option<ObservationInvalidation>> {
+    let _lock = lock_observation(repo)?;
+    let bytes = match std::fs::read(observation_path(repo)) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let observed: RuntimeObservation = serde_json::from_slice(&bytes)?;
+    if observed.schema_version != 1
+        || observed.project_key != store::project_key(repo)
+        || observed.host_pid != host_pid
+        || observed.generation != generation
+        || observed.view_set_revision > view_set_revision
+    {
+        return Ok(None);
+    }
+    let invalidation = ObservationInvalidation {
+        host_pid,
+        host_started_at: observed.host_started_at,
+        generation,
+        view_set_revision,
+        last_open_receipt_id: observed.last_open_receipt.map(|receipt| receipt.receipt_id),
+    };
+    invalidate_observation(repo, invalidation.clone());
+    match std::fs::remove_file(observation_path(repo)) {
+        Ok(()) => Ok(Some(invalidation)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Some(invalidation)),
+        Err(error) => Err(error),
+    }
 }
 
 pub fn actual_open(repo: &Path) -> Result<bool, String> {
@@ -197,15 +287,13 @@ pub fn session_lineage(repo: &Path, session: &gwt_agent::Session) -> Vec<String>
     let mut lineage = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     let mut current = Some(session.clone());
-    let key = gwt_core::paths::resolve_project_scope(repo).hash;
+    let key = store::project_key(repo);
     while let Some(session) = current {
         let state_root = session
             .project_state_root
             .as_deref()
             .unwrap_or(&session.worktree_path);
-        if gwt_core::paths::resolve_project_scope(state_root).hash != key
-            || !seen.insert(session.id.clone())
-        {
+        if store::project_key(state_root) != key || !seen.insert(session.id.clone()) {
             break;
         }
         lineage.push(format!("session:{}", session.id));
@@ -297,6 +385,12 @@ pub fn admission_without_actual_view(repo: &Path, lineage: &[String]) -> Result<
     let policy = store::load(repo)
         .map_err(|error| format!("policy_unreadable: {error}; use project.execution.status"))?;
     if policy.choice == Some(Choice::Continue) {
+        if lineage
+            .iter()
+            .any(|item| policy.authorized_work_lineage.contains(item))
+        {
+            return Ok(());
+        }
         let derived = load_derived_owners(repo)?;
         let instructions =
             gwt_core::user_instruction::load(repo).map_err(|error| error.to_string())?;
@@ -338,8 +432,7 @@ struct DerivedOwnerReceipt {
 }
 
 fn derived_owners_path(repo: &Path) -> PathBuf {
-    gwt_core::paths::gwt_project_dir_for_repo_path(repo)
-        .join("project-state/project-window-derived-owners.json")
+    store::policy_path(repo).with_file_name("project-window-derived-owners.json")
 }
 
 fn load_derived_owners(repo: &Path) -> Result<Vec<DerivedOwnerReceipt>, String> {
@@ -472,23 +565,36 @@ fn work_has_continued_lineage(repo: &Path, work_id: &str, policy: &store::Policy
     let Ok(Some(works)) = gwt_core::workspace_projection::load_workspace_work_items(repo) else {
         return false;
     };
-    let Some(work) = works.work_items.iter().find(|work| work.id == work_id) else {
-        return false;
-    };
-    work.agents.iter().any(|agent| {
-        policy
+    let mut pending = vec![work_id];
+    let mut visited = std::collections::BTreeSet::new();
+    while let Some(id) = pending.pop() {
+        if !visited.insert(id) {
+            continue;
+        }
+        if policy
             .authorized_work_lineage
-            .contains(&format!("session:{}", agent.session_id))
-    }) || work
-        .events
-        .iter()
-        .filter(|event| event.is_successor_lineage_anchor())
-        .filter_map(|event| event.related_work_item_id.as_ref())
-        .any(|parent| {
+            .contains(&format!("work:{id}"))
+        {
+            return true;
+        }
+        let Some(work) = works.work_items.iter().find(|work| work.id == id) else {
+            continue;
+        };
+        if work.agents.iter().any(|agent| {
             policy
                 .authorized_work_lineage
-                .contains(&format!("work:{parent}"))
-        })
+                .contains(&format!("session:{}", agent.session_id))
+        }) {
+            return true;
+        }
+        pending.extend(
+            work.events
+                .iter()
+                .filter(|event| event.is_successor_lineage_anchor())
+                .filter_map(|event| event.related_work_item_id.as_deref()),
+        );
+    }
+    false
 }
 
 /// Monitor queue intent is durable unfinished work even between PTY generations.
@@ -590,9 +696,7 @@ pub fn local_status(
         ("selection_pending", "actual_view_required".into())
     };
     crate::protocol::ProjectExecutionStatusView {
-        project_key: gwt_core::paths::resolve_project_scope(repo)
-            .hash
-            .to_string(),
+        project_key: store::project_key(repo),
         generation: observed.as_ref().map_or(0, |value| value.generation),
         revision: policy.as_ref().map_or(0, |value| value.revision),
         choice,
@@ -667,6 +771,12 @@ mod tests {
             admission(&repo, &["issue:102".into()]).is_err(),
             "another owner is not covered by the Continue choice"
         );
+        std::fs::write(derived_owners_path(&repo), b"unreadable lineage").unwrap();
+        assert!(
+            admission(&repo, &["issue:100".into()]).is_ok(),
+            "direct Continue membership does not depend on auxiliary receipts"
+        );
+        assert!(admission(&repo, &["issue:101".into()]).is_err());
     }
 
     #[test]
@@ -765,6 +875,44 @@ mod tests {
     }
 
     #[test]
+    fn issue6682_policy_observation_lock_failure_preserves_disk_but_denies_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path().join("home"));
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let observed = accepted_observation(&repo);
+        write_observation(&repo, &observed).unwrap();
+        let path = observation_path(&repo);
+        let bytes = std::fs::read(&path).unwrap();
+        let lock_path = path.with_extension("lock");
+        std::fs::remove_file(&lock_path).unwrap();
+        std::fs::create_dir(&lock_path).unwrap();
+        assert!(write_observation(&repo, &observed).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert!(observation(&repo).is_err());
+        assert!(admission(&repo, &["issue:999".into()]).is_err());
+    }
+
+    #[test]
+    fn issue6682_policy_second_host_cannot_replace_live_views() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path().join("home"));
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let observed = accepted_observation(&repo);
+        write_observation(&repo, &observed).unwrap();
+        let mut competing = observed.clone();
+        competing.host_pid = u32::MAX;
+        competing.views.clear();
+        assert!(write_observation(&repo, &competing).is_err());
+        assert_eq!(
+            observation(&repo).unwrap().unwrap().host_pid,
+            observed.host_pid
+        );
+        assert!(actual_open(&repo).unwrap());
+    }
+
+    #[test]
     fn issue6682_policy_observation_revocation_is_shared_but_preserves_valid_continue() {
         let temp = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(temp.path().join("home"));
@@ -807,6 +955,17 @@ mod tests {
             admission(&repo, &["issue:999".into()]).is_ok(),
             "only a new accepted receipt restores normal open admission"
         );
+        assert!(revoke_saved_observation(&repo, observed.host_pid, 1, 1)
+            .unwrap()
+            .is_none());
+        assert!(actual_open(&repo).unwrap(), "a newer view set is retained");
+        let revoked = revoke_saved_observation(&repo, observed.host_pid, 1, 2)
+            .unwrap()
+            .unwrap();
+        assert_eq!(revoked.host_started_at, observed.host_started_at);
+        assert!(observation(&repo).unwrap().is_none());
+        assert!(admission(&repo, &["issue:999".into()]).is_err());
+        assert!(admission(&repo, &["issue:100".into()]).is_ok());
     }
 
     #[test]
@@ -868,6 +1027,15 @@ mod tests {
         event.related_work_item_id = Some("parent".into());
         gwt_core::workspace_projection::record_workspace_work_event(&repo, event).unwrap();
         assert!(admission(&repo, &[format!("work:{successor}")]).is_ok());
+        let next = gwt_core::workspace_projection::successor_work_id(&successor);
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Start,
+            &next,
+            Utc::now(),
+        );
+        event.related_work_item_id = Some(successor);
+        gwt_core::workspace_projection::record_workspace_work_event(&repo, event).unwrap();
+        assert!(admission(&repo, &[format!("work:{next}")]).is_ok());
         let foreign = temp.path().join("foreign");
         std::fs::create_dir_all(&foreign).unwrap();
         restored.project_state_root = None;

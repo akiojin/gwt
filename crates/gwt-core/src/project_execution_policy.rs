@@ -100,10 +100,20 @@ pub fn policy_path(repo: &Path) -> PathBuf {
     resolve(repo).1
 }
 
+/// Canonical PM checkouts share their owner's Project identity and policy.
+pub fn project_key(repo: &Path) -> String {
+    resolve(repo).0
+}
+
 fn resolve(repo: &Path) -> (String, PathBuf) {
-    let key = crate::paths::project_scope_hash(repo);
-    let path = crate::paths::gwt_project_dir(&key).join("project-state/project-window-policy.json");
-    (key.to_string(), path)
+    let directory = crate::pm_peer::project_dir(repo);
+    let key = directory
+        .file_name()
+        .expect("Project directory has an identity")
+        .to_string_lossy()
+        .into_owned();
+    let path = directory.join("project-state/project-window-policy.json");
+    (key, path)
 }
 
 /// A missing policy is unselected. Old auto-start preferences and saved Work
@@ -479,6 +489,44 @@ mod tests {
         assert!(policy.authorized_work_lineage.is_empty());
         assert!(!policy_path(&repo).exists());
         assert!(repo.join(".gwt/session.json").exists());
+    }
+
+    #[test]
+    fn overlapping_choices_publish_exactly_one_same_revision_receipt() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let requests = [request(0, Choice::Continue), request(0, Choice::Stop)];
+        let barrier = std::sync::Barrier::new(2);
+        let results = std::thread::scope(|scope| {
+            let home_path = home.path();
+            let repo = &repo;
+            let barrier = &barrier;
+            let handles = requests
+                .iter()
+                .map(|request| {
+                    scope.spawn(move || {
+                        let _home = ScopedGwtHome::set(home_path);
+                        barrier.wait();
+                        choose(repo, request)
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        let accepted = results
+            .into_iter()
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>();
+        assert_eq!(accepted.len(), 1, "one competing same-revision choice wins");
+        let policy = load(&repo).unwrap();
+        assert_eq!(policy.revision, 1);
+        assert_eq!(policy.choice, Some(accepted[0].choice));
+        assert_eq!(policy.receipts, accepted);
     }
 
     #[test]

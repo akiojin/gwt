@@ -4,11 +4,11 @@ import { parseHTML } from 'linkedom';
 import { createCloseProjectController } from '../close-project-confirm-modal.js';
 
 const token = { project_key: '0123456789abcdef', generation: 1, nonce: 'nonce' };
-function fixture() {
+function fixture(send = () => 'sent') {
   const { document } = parseHTML('<html><body><button id="origin">Close Project</button></body></html>');
   const sent = [], closed = [], storage = new Map();
   const sessionStorage = { getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) };
-  const controller = createCloseProjectController({ document, send: message => { sent.push(message); return 'sent'; }, onClosed: key => closed.push(key), sessionStorage });
+  const controller = createCloseProjectController({ document, send: message => { sent.push(message); return send(message); }, onClosed: key => closed.push(key), sessionStorage });
   document.body.append(controller.modal);
   return { document, controller, sent, closed, sessionStorage };
 }
@@ -86,6 +86,30 @@ test('repeated requests and disconnected previews cannot retain stale authority'
   assert.equal(current.sent.length, 2);
   current.controller.receive({ kind: 'close_project_preview', token: { ...token, project_key: 'foreign' }, title: 'Foreign', choice_required: true });
   assert.equal(current.controller.modal.classList.contains('open'), false);
+});
+test('an unsent choice clears only its local intent and permits a fresh preview', () => {
+  let available = true;
+  const current = fixture(() => available ? 'sent' : 'unavailable');
+  preview(current);
+  available = false;
+  current.document.querySelector('[data-role="close-project-stop"]').click();
+  assert.equal(current.sessionStorage.getItem('gwt:project-close-intent'), undefined);
+  assert.equal(current.controller.modal.classList.contains('open'), false);
+  assert.deepEqual(current.closed, []);
+  available = true;
+  current.controller.request(token.project_key);
+  assert.equal(current.sent.at(-1).kind, 'preview_close_project');
+  assert.equal(current.sent.filter(event => event.kind === 'confirm_close_project').length, 1);
+});
+test('an unsent preview does not block another Close request', () => {
+  let available = false;
+  const current = fixture(() => available ? 'sent' : 'unavailable');
+  current.controller.request(token.project_key);
+  available = true;
+  current.controller.request(token.project_key);
+  assert.equal(current.sent.length, 2);
+  current.controller.receive({ kind: 'close_project_preview', token, title: 'Alpha', choice_required: true });
+  assert.equal(current.controller.modal.classList.contains('open'), true);
 });
 test('a missing or degraded receipt never reallocates the unanswered choice', () => {
   const current = fixture(); preview(current);

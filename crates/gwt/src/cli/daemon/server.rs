@@ -7068,10 +7068,13 @@ fn issue_monitor_project_submission_permitted(
     permit: &IssueMonitorEffectPermitToken,
 ) -> bool {
     match (&effect.payload, &permit.project_root) {
-        (crate::IssueMonitorEffectPayload::AcquireClaim { issue_number, .. }, Some(root)) => {
-            crate::project_execution_policy::admission(root, &[format!("issue:{issue_number}")])
-                .is_ok()
-        }
+        (
+            crate::IssueMonitorEffectPayload::AcquireClaim { issue_number, .. }
+            | crate::IssueMonitorEffectPayload::ArmAutoMerge { issue_number, .. }
+            | crate::IssueMonitorEffectPayload::RerunFailedCi { issue_number, .. },
+            Some(root),
+        ) => crate::project_execution_policy::admission(root, &[format!("issue:{issue_number}")])
+            .is_ok(),
         _ => true,
     }
 }
@@ -7194,7 +7197,8 @@ fn execute_issue_monitor_effect(
 ) -> IssueMonitorEffectOutcome {
     use gwt_github::client::OwnerMutationError;
     use gwt_github::issue_auto_claim::{
-        acquire_claim_mutation, release_claim_mutation, ClaimComment, ClaimStatus,
+        acquire_claim_mutation, observe_claim_acquisition, release_claim_mutation, ClaimComment,
+        ClaimStatus,
     };
     use gwt_github::IssueNumber;
 
@@ -7253,10 +7257,8 @@ fn execute_issue_monitor_effect(
             .map(|expires| expires.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
             .unwrap_or_else(|_| expires_at.clone());
             IssueMonitorEffectOutcome::Claim(match client {
-                Ok(client) => acquire_claim_mutation(
-                    &client,
-                    IssueNumber(*issue_number),
-                    ClaimComment {
+                Ok(client) => {
+                    let claim = ClaimComment {
                         comment_id: None,
                         claim_id: claim_id.clone(),
                         owner: owner.clone(),
@@ -7265,9 +7267,23 @@ fn execute_issue_monitor_effect(
                         heartbeat_at: execution_now.to_string(),
                         expires_at,
                         launched_work_id: launched_work_id.clone(),
-                    },
-                    execution_now,
-                ),
+                    };
+                    if allow_submit {
+                        acquire_claim_mutation(
+                            &client,
+                            IssueNumber(*issue_number),
+                            claim,
+                            execution_now,
+                        )
+                    } else {
+                        observe_claim_acquisition(
+                            &client,
+                            IssueNumber(*issue_number),
+                            &claim,
+                            execution_now,
+                        )
+                    }
+                }
                 Err(error) => Err(OwnerMutationError::PreSubmit(
                     gwt_github::ApiError::Network(error),
                 )),
@@ -7362,7 +7378,7 @@ fn execute_issue_monitor_effect(
                     ),
                 );
             };
-            if authority_current {
+            if authority_current && allow_submit {
                 IssueMonitorEffectOutcome::AutoMerge(gwt_git::pr_status::arm_pr_auto_merge(
                     &scope.project_root,
                     *pr_number,
@@ -7376,7 +7392,7 @@ fn execute_issue_monitor_effect(
                         ..
                     } => gwt_git::pr_status::AutoMergeMutationOutcome::AlreadyTargetState,
                     _ => gwt_git::pr_status::AutoMergeMutationOutcome::PreSubmit(
-                        "authority revoked before auto-merge submission".to_string(),
+                        "auto-merge submission is not currently permitted".to_string(),
                     ),
                 };
                 IssueMonitorEffectOutcome::AutoMerge(outcome)
@@ -20217,6 +20233,8 @@ exit 0
         let home = temp.path().join("home");
         fs::create_dir_all(&home).expect("create gwt home");
         let _home = ScopedGwtHome::set(&home);
+        let _process_home = ScopedEnvVar::set("HOME", &home);
+        let _process_profile = ScopedEnvVar::set("USERPROFILE", &home);
         let fake_gh = temp.path().join("gh");
         fs::write(
             &fake_gh,
@@ -20271,6 +20289,7 @@ exit 1
         init_git_repo(&repo);
         commit_initial_branch(&repo);
         git_remote_add_origin(&repo, "https://github.com/example/repo.git");
+        crate::project_runtime::test_support::seed_actual_project_view(&repo).unwrap();
         let scope = RuntimeScope::new(
             "abcdef0123456789",
             "feedfacecafebeef",
@@ -22719,6 +22738,29 @@ exit 1
             !super::issue_monitor_project_submission_permitted(&uncertain, &project_permit),
             "reconciliation cannot submit a new cold claim"
         );
+        let mut arm = grant.clone();
+        arm.payload = crate::IssueMonitorEffectPayload::ArmAutoMerge {
+            issue_number: 42,
+            pr_number: 99,
+            reviewed_sha: "abc123".into(),
+        };
+        assert!(!super::issue_monitor_effect_permitted(
+            &arm,
+            &project_permit
+        ));
+        let mut rerun = grant.clone();
+        rerun.payload = crate::IssueMonitorEffectPayload::RerunFailedCi {
+            issue_number: 42,
+            target: crate::issue_monitor_ci::CiRerunTarget {
+                pr_number: 99,
+                head_sha: "abc123".into(),
+                run_id: 701,
+            },
+        };
+        assert!(!super::issue_monitor_effect_permitted(
+            &rerun,
+            &project_permit
+        ));
         gwt_core::project_execution_policy::choose(
             temp.path(),
             &gwt_core::project_execution_policy::ChoiceRequest {
@@ -22736,6 +22778,11 @@ exit 1
             super::issue_monitor_effect_permitted(&grant, &project_permit),
             "the admitted Continue owner is not falsely rejected"
         );
+        assert!(super::issue_monitor_effect_permitted(&arm, &project_permit));
+        assert!(super::issue_monitor_effect_permitted(
+            &rerun,
+            &project_permit
+        ));
         permit.deny();
 
         let fenced = super::fence_next_issue_monitor_effect_with_permit(

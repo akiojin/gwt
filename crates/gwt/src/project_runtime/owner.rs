@@ -2291,7 +2291,36 @@ impl OwnerState {
         let observed_continue = status.choice
             == Some(gwt_core::project_execution_policy::Choice::Continue)
             && status.start_reason == "runtime_observation_unavailable";
-        if !self.runtimes.is_empty()
+        let mut running = false;
+        let mut runtime_unavailable = false;
+        for runtime in self.runtimes.values() {
+            match runtime.pty.try_wait() {
+                Ok(None) => running = true,
+                Ok(Some(_)) => {}
+                Err(_) => runtime_unavailable = true,
+            }
+        }
+        if runtime_unavailable {
+            status.effective_state = "unknown".into();
+            status.start_reason = "runtime_status_unavailable".into();
+            status.degraded = true;
+            status.recovery_operation = Some("project.execution.status".into());
+            return status;
+        }
+        let draining = !self.pending.is_empty()
+            || !self.closing.is_empty()
+            || !self.retirements.is_empty()
+            || self.retiring != 0;
+        if status.choice == Some(gwt_core::project_execution_policy::Choice::Stop)
+            && status.view_state != "open"
+            && status.effective_state != "unknown"
+            && draining
+        {
+            status.effective_state = "stopping".into();
+            status.start_reason = "drain_pending".into();
+            status.degraded = false;
+            status.recovery_operation = None;
+        } else if running
             && (observed_continue
                 || (status.effective_state != "stopping"
                     && status.effective_state != "unknown"
@@ -2303,7 +2332,7 @@ impl OwnerState {
                 status.degraded = false;
             }
         } else if status.choice == Some(gwt_core::project_execution_policy::Choice::Continue)
-            && self.runtimes.is_empty()
+            && !running
             && self.pending.is_empty()
             && status.start_reason != "policy_unreadable"
             && status.start_reason != "runtime_observation_unreadable"
@@ -2369,6 +2398,11 @@ impl OwnerState {
         {
             return Err("Project Stop is still draining or unknown; reconcile the existing operation before Continue".into());
         }
+        if request.choice == Choice::Continue && !self.pending.is_empty() {
+            return Err(
+                "Project launches are still pending; retry Continue after they settle".into(),
+            );
+        }
         if policy.receipts.iter().any(|receipt| {
             receipt.choice == Choice::Stop
                 && receipt.effect_state != EffectState::Confirmed
@@ -2412,7 +2446,7 @@ impl OwnerState {
         }
         let observation_lock = crate::project_execution_policy::lock_observation(&self.root)
             .map_err(|error| error.to_string())?;
-        let observed = crate::project_execution_policy::observation(&self.root)?;
+        let observed = crate::project_execution_policy::observation_unlocked(&self.root)?;
         if observed
             .as_ref()
             .is_some_and(crate::project_execution_policy::observation_is_revoked)
@@ -2558,6 +2592,9 @@ impl OwnerState {
             }
         })?;
         drop(observation_lock);
+        // PM revoke/supersede may proceed once the exact choice is durable;
+        // physical draining and status publication must not retain these locks.
+        drop(pm_attempt);
         if request.choice == Choice::Continue {
             store::record_effect(
                 &self.root,
@@ -2755,6 +2792,42 @@ impl OwnerState {
             )
             .expect("status serializes")));
             return;
+        }
+        let cached_launch = match &request.command {
+            OwnerCommand::LaunchAgent { operation_id, .. }
+            | OwnerCommand::LaunchConfiguredShell { operation_id, .. }
+            | OwnerCommand::RestoreSavedSession { operation_id, .. } => {
+                self.agent_operations.get(operation_id)
+            }
+            _ => None,
+        }
+        .filter(|operation| operation.result.as_ref().is_some_and(Result::is_ok));
+        if let Some(operation) = cached_launch {
+            let result = if serde_json::to_value(&request.command)
+                .is_ok_and(|command| command == operation.request)
+            {
+                operation.result.clone().expect("completed launch receipt")
+            } else {
+                Err("operation identity is already bound to a different launch".into())
+            };
+            let _ = reply.send(result);
+            return;
+        }
+        if let OwnerCommand::ContinueWork {
+            client_id,
+            operation_id,
+            work_id,
+        } = &request.command
+        {
+            if self.continue_work_outcomes.contains_key(operation_id) {
+                self.continue_work(
+                    client_id.clone(),
+                    operation_id.clone(),
+                    work_id.clone(),
+                    reply,
+                );
+                return;
+            }
         }
         let lineage = match &request.command {
             OwnerCommand::LaunchAgent { config, .. } => {
@@ -11488,12 +11561,19 @@ mod tests {
             .choose_project_execution(request.clone(), None, Some(2))
             .is_err());
         assert_eq!(store::load(&root).unwrap().revision, 0);
+        state.pending.insert("accepted-launch".into(), 1);
+        assert!(state
+            .choose_project_execution(request.clone(), None, Some(3))
+            .is_err());
+        assert!(state.pending.contains_key("accepted-launch"));
+        state.pending.clear();
         assert!(state
             .choose_project_execution(request.clone(), None, Some(3))
             .is_ok());
         let policy = store::load(&root).unwrap();
         assert_eq!(policy.revision, 1);
         assert_eq!(policy.choice, Some(Choice::Continue));
+        state.pending.insert("accepted-after-choice".into(), 2);
         assert!(
             state
                 .choose_project_execution(request, None, Some(3))
@@ -11501,6 +11581,7 @@ mod tests {
             "lost ACK reconciliation returns one receipt"
         );
         assert_eq!(store::load(&root).unwrap().revision, 1);
+        assert!(state.pending.contains_key("accepted-after-choice"));
     }
 
     #[test]
@@ -11546,6 +11627,55 @@ mod tests {
             state.project_execution_status(None).effective_state,
             "stopped"
         );
+        state.closing.insert(
+            "reopened-view-drain".into(),
+            ClosingRuntime {
+                incarnation: 2,
+                pm_worktree: false,
+            },
+        );
+        let status = state.project_execution_status(None);
+        assert_eq!(status.effective_state, "stopping");
+        assert_eq!(status.start_reason, "drain_pending");
+        state.closing.clear();
+        assert_eq!(
+            state.project_execution_status(None).effective_state,
+            "stopped"
+        );
+    }
+
+    #[test]
+    fn issue6682_owner_status_excludes_naturally_exited_retained_runtime() {
+        use gwt_core::project_execution_policy::Choice;
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let root = temp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let (mut state, _, _) = owner_fixture(&root);
+        let request = issue6682_request(Choice::Continue);
+        issue6682_accept_choice(&root, &request);
+        state
+            .choose_project_execution(request, None, Some(3))
+            .unwrap();
+        let (_, pane) = unbound_fixture(&root);
+        state
+            .install_pane("retained".into(), 1, pane, Arc::new(AtomicBool::new(true)))
+            .unwrap();
+        assert_eq!(
+            state.project_execution_status(None).effective_state,
+            "running"
+        );
+        let pty = state.runtimes["retained"].pty.clone();
+        pty.write_input(b"done\n").unwrap();
+        pty.wait().unwrap();
+        assert!(
+            !pty.tree_exit_confirmed(),
+            "natural exit is distinct from a tree teardown"
+        );
+        assert_eq!(state.runtimes.len(), 1, "the recovery pane is retained");
+        let status = state.project_execution_status(None);
+        assert_eq!(status.effective_state, "waiting");
+        assert_eq!(status.start_reason, "user_continue");
     }
 
     #[test]
@@ -12947,12 +13077,22 @@ mod tests {
         .map_err(|error| error.detail)
         .unwrap();
         state.refresh_registry_projection();
+        let launch_request = serde_json::to_value(OwnerCommand::LaunchAgent {
+            id: id.clone(),
+            operation_id: "completed".into(),
+            tab_id: key.clone(),
+            config: Box::new(gwt_agent::AgentLaunchBuilder::new(snapshot.agent_id.clone()).build()),
+            metadata: Box::default(),
+            cols: 80,
+            rows: 24,
+        })
+        .unwrap();
         state.agent_operations.insert(
             "completed".into(),
             AgentOperation {
                 session_id: Some(snapshot.id.clone()),
                 early_events: VecDeque::new(),
-                request: json!(null),
+                request: launch_request.clone(),
                 id: id.clone(),
                 incarnation: 1,
                 current: Arc::new(AtomicBool::new(false)),
@@ -12966,11 +13106,66 @@ mod tests {
                 result: Some(Ok(json!({"id":id}))),
             },
         );
+        state.continue_work_outcomes.insert(
+            "continued".into(),
+            super::super::continuation::CachedContinueWorkOutcome {
+                work_id: "work/fixture".into(),
+                outcome: crate::ContinueWorkOutcomeKind::FocusedExisting,
+                message: None,
+                error_code: None,
+                retryable: false,
+            },
+        );
+        gwt_core::project_execution_policy::choose(
+            &root,
+            &issue6682_request(gwt_core::project_execution_policy::Choice::Stop),
+        )
+        .unwrap();
         let owner_home = home.path().to_path_buf();
         let actor = thread::spawn(move || {
             let _home = gwt_core::test_support::ScopedGwtHome::set(owner_home);
             run_fixture_owner(state, receiver);
         });
+        let replayed = handle
+            .request(OwnerRequest {
+                project_key: key.clone(),
+                command: serde_json::from_value(launch_request.clone()).unwrap(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(replayed, json!({"id":id}));
+        let mut changed = launch_request.clone();
+        changed["rows"] = json!(25);
+        assert!(handle
+            .request(OwnerRequest {
+                project_key: key.clone(),
+                command: serde_json::from_value(changed).unwrap(),
+            })
+            .await
+            .unwrap_err()
+            .contains("different launch"));
+        let mut fresh = launch_request;
+        fresh["operation_id"] = json!("new-operation");
+        assert!(handle
+            .request(OwnerRequest {
+                project_key: key.clone(),
+                command: serde_json::from_value(fresh).unwrap(),
+            })
+            .await
+            .unwrap_err()
+            .contains("user_stop"));
+        let continued = handle
+            .request(OwnerRequest {
+                project_key: key.clone(),
+                command: OwnerCommand::ContinueWork {
+                    client_id: "client".into(),
+                    operation_id: "continued".into(),
+                    work_id: "work/fixture".into(),
+                },
+            })
+            .await
+            .unwrap();
+        assert_eq!(continued["accepted"], true);
         let result = handle
             .request(OwnerRequest {
                 project_key: key,

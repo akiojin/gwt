@@ -1,5 +1,8 @@
 //! Project-fixed policy diagnostics and explicitly authorized choice delivery.
-use std::{io, path::Path};
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
 
 use gwt_core::{
     pm_authorization::{self as authority, Authorization, OperationIntent},
@@ -22,10 +25,13 @@ pub(super) struct ChoiceInput {
 pub(super) fn validate(params: &Value) -> io::Result<ChoiceInput> {
     let input: ChoiceInput = serde_json::from_value(params.clone())
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-    if uuid::Uuid::parse_str(&input.operation_id).is_err() || input.expected_generation == 0 {
+    if !uuid::Uuid::parse_str(&input.operation_id)
+        .is_ok_and(|id| id.to_string() == input.operation_id)
+        || input.expected_generation == 0
+    {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "operation_id must be a UUID and expected_generation must be a live Project generation",
+            "operation_id must be a canonical lowercase UUID and expected_generation must be a live Project generation",
         ));
     }
     Ok(input)
@@ -40,7 +46,7 @@ fn runtime() -> io::Result<tokio::runtime::Runtime> {
 /// PM worktrees share a repository but have a different runtime worktree key.
 /// Resolve only live owners in this project's canonical store, and refuse an
 /// ambiguous match rather than sending a choice to whichever endpoint sorts first.
-async fn project_client(repo: &Path) -> io::Result<ProjectRuntimeClient> {
+async fn project_client(repo: &Path) -> io::Result<(PathBuf, ProjectRuntimeClient)> {
     let home = gwt_core::paths::gwt_home();
     if let Some(observation) =
         crate::project_execution_policy::observation(repo).map_err(io::Error::other)?
@@ -51,9 +57,11 @@ async fn project_client(repo: &Path) -> io::Result<ProjectRuntimeClient> {
                 .zip(dunce::canonicalize(&observation.project_root).ok())
                 .is_some_and(|(a, b)| a == b)
         {
-            return ProjectRuntimeClient::from_current_project(&observation.project_root, &home)
-                .await
-                .map_err(io::Error::other);
+            let client =
+                ProjectRuntimeClient::from_current_project(&observation.project_root, &home)
+                    .await
+                    .map_err(io::Error::other)?;
+            return Ok((observation.project_root, client));
         }
         return Err(io::Error::other(
             "Project observation belongs to another repository",
@@ -101,7 +109,7 @@ async fn project_client(repo: &Path) -> io::Result<ProjectRuntimeClient> {
         if let Ok(client) =
             ProjectRuntimeClient::from_current_project(&endpoint.scope.project_root, &home).await
         {
-            live.push(client);
+            live.push((endpoint.scope.project_root, client));
         }
     }
     if live.len() == 1 {
@@ -117,14 +125,14 @@ async fn project_client(repo: &Path) -> io::Result<ProjectRuntimeClient> {
 pub(super) fn status(repo: &Path, operation_id: Option<&str>) -> io::Result<Value> {
     runtime()?.block_on(async {
         match project_client(repo).await {
-            Ok(client) => match client
+            Ok((root, client)) => match client
                 .command(OwnerCommand::ProjectExecutionStatus {
                     operation_id: operation_id.map(str::to_owned),
                 })
                 .await
             {
                 Ok(status) => Ok(status),
-                Err(error) => degraded_status(repo, operation_id, &error),
+                Err(error) => degraded_status(&root, operation_id, &error),
             },
             Err(error) => degraded_status(repo, operation_id, &error.to_string()),
         }
@@ -155,6 +163,9 @@ pub(super) fn choose(
             "Project choice requires the current registered PM Session",
         )
     })?;
+    runtime()?.block_on(async {
+    let (owner_root, client) = project_client(repo).await?;
+    let repo = owner_root.as_path();
     let policy = store::load(repo).ok();
     // The first call may have persisted before losing its ACK. Reconcile the
     // exact public intent without consuming one-off human authority twice.
@@ -177,10 +188,13 @@ pub(super) fn choose(
                 "operation_id already records a different intent; inspect project.execution.status",
             ));
         }
-        return status(repo, Some(&input.operation_id));
+        return match client.command(OwnerCommand::ProjectExecutionStatus {
+            operation_id: Some(input.operation_id.clone()),
+        }).await {
+            Ok(status) => Ok(status),
+            Err(error) => degraded_status(repo, Some(&input.operation_id), &error),
+        };
     }
-    runtime()?.block_on(async {
-        let client = project_client(repo).await?;
         let mut before = client.command(OwnerCommand::ProjectExecutionStatus { operation_id: None })
             .await.map_err(io::Error::other)?;
         if before["generation"].as_u64() != Some(input.expected_generation)
@@ -221,15 +235,142 @@ pub(super) fn choose(
             Err(error) => json!({"operation_id":input.operation_id,"outcome":"unknown","error":error,
                 "recovery_operation":"project.execution.status"}),
         };
-        attempt.finish(repo, result.is_ok(), after)?;
-        result.map_err(|error| io::Error::other(format!(
-            "Project choice outcome requires status reconciliation: {error}; use project.execution.status with the same operation_id")))
+        let finished = attempt.finish(repo, result.is_ok(), after);
+        finish_choice_result(result, finished)
     })
+}
+
+fn finish_choice_result(result: Result<Value, String>, audit: io::Result<()>) -> io::Result<Value> {
+    let value = result.map_err(|error| io::Error::other(format!(
+        "Project choice outcome requires status reconciliation: {error}; use project.execution.status with the same operation_id")))?;
+    audit.map_err(|error| io::Error::other(format!(
+        "Project choice was recorded but final audit failed: {error}; use project.execution.status with the same operation_id")))?;
+    Ok(value)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audit_failure_preserves_project_choice_outcome_and_reconciliation() {
+        let unknown = finish_choice_result(
+            Err("owner ACK lost".into()),
+            Err(io::Error::other("audit unavailable")),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(unknown.contains("owner ACK lost") && unknown.contains("project.execution.status"));
+        let accepted = finish_choice_result(
+            Ok(json!({"accepted":true})),
+            Err(io::Error::other("audit unavailable")),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(accepted.contains("recorded") && accepted.contains("project.execution.status"));
+    }
+
+    #[test]
+    fn originless_pm_choice_uses_the_physical_owner_project_store() {
+        let _env = gwt_core::test_support::env_lock().lock().unwrap();
+        let home = gwt_core::test_support::socket_tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let _session = gwt_core::test_support::ScopedEnvVar::set("GWT_SESSION_ID", "fixture-pm");
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        for args in [
+            vec!["init", "--quiet", "--initial-branch=main"],
+            vec![
+                "-c",
+                "user.name=fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "fixture",
+            ],
+        ] {
+            assert!(gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success());
+        }
+        let pm = crate::pm_registry::pm_worktree_path_for_repo_path(&repo);
+        assert!(gwt_core::process::hidden_command("git")
+            .args(["worktree", "add", "--quiet", "-b", "fixture-pm"])
+            .arg(&pm)
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+        assert_ne!(
+            gwt_core::paths::resolve_project_scope(&pm).hash,
+            gwt_core::paths::resolve_project_scope(&repo).hash
+        );
+        crate::pm_registry::save_pm_prefs(
+            &crate::pm_registry::pm_prefs_path_for_repo_path(&repo),
+            &crate::pm_registry::PmPrefs {
+                registration: Some(crate::pm_registry::PmRegistration {
+                    session_id: "fixture-pm".into(),
+                    agent_id: "codex".into(),
+                    worktree_path: pm.display().to_string(),
+                    created_at: None,
+                    consecutive_crashes: 0,
+                    next_not_before: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let executor = runtime().unwrap();
+        let owner = executor
+            .block_on(crate::project_runtime::test_support::ProjectOwnerHarness::start(&repo))
+            .unwrap();
+        let intent = OperationIntent {
+            operation: "project.execution.choose".into(),
+            params: json!({"operation_id":uuid::Uuid::new_v4().to_string(),
+                "expected_revision":0,"expected_generation":1,"choice":"continue"}),
+        };
+        let approval =
+            authority::record_approval(&repo, &intent, "Continue this project", "Stop it", false)
+                .unwrap();
+        let authorization = Authorization {
+            instruction_id: None,
+            approval_id: Some(approval.id),
+        };
+        let result = choose(&pm, &intent, &authorization).and_then(|result| {
+            let replay = choose(&pm, &intent, &authorization)?;
+            assert_eq!(replay["choice"], "continue");
+            Ok(result)
+        });
+        executor.block_on(owner.shutdown());
+        let result =
+            result.expect("the PM checkout must deliver its exact approval to the owner store");
+        assert_eq!(result["status"]["choice"], "continue");
+        assert_eq!(store::load(&repo).unwrap().revision, 1);
+        assert_eq!(store::policy_path(&pm), store::policy_path(&repo));
+        assert!(authority::approvals(&repo).unwrap()[0].consumed);
+        let offline = status(&pm, intent.params["operation_id"].as_str()).unwrap();
+        assert_eq!(offline["choice"], "continue");
+        assert_eq!(
+            offline["operation_outcome"]["operation_id"],
+            intent.params["operation_id"]
+        );
+        assert_eq!(offline["effective_state"], "unknown");
+        assert_eq!(offline["degraded"], true);
+        let scope = gwt_core::daemon::RuntimeScope::from_project_root(
+            &repo,
+            gwt_core::daemon::RuntimeTarget::Host,
+        )
+        .unwrap();
+        assert!(
+            !scope.endpoint_path(&gwt_core::paths::gwt_home()).exists(),
+            "read-only diagnosis never starts an owner"
+        );
+    }
 
     #[test]
     fn status_without_an_owner_is_unknown_and_does_not_create_a_policy() {

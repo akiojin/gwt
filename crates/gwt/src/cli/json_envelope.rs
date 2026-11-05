@@ -1879,12 +1879,11 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "project.execution.status" => {
             let operation_id = optional_string(params, "operation_id")?;
-            if operation_id
-                .as_ref()
-                .is_some_and(|id| uuid::Uuid::parse_str(id).is_err())
-            {
+            if operation_id.as_ref().is_some_and(|id| {
+                !uuid::Uuid::parse_str(id).is_ok_and(|parsed| parsed.to_string() == *id)
+            }) {
                 return Err(CliParseError::InvalidJson(
-                    "operation_id must be a UUID".into(),
+                    "operation_id must be a canonical lowercase UUID".into(),
                 ));
             }
             CliCommand::Pm(crate::cli::pm::PmCommand::ProjectExecutionStatus { operation_id })
@@ -8400,11 +8399,24 @@ mod tests {
 
     #[test]
     fn project_execution_policy_operations_are_typed_and_project_fixed() {
-        let _ = ok("project.execution.status", json!({}));
-        let _ = ok(
+        assert!(matches!(
+            ok("project.execution.status", json!({})),
+            CliCommand::Pm(crate::cli::pm::PmCommand::ProjectExecutionStatus {
+                operation_id: None
+            })
+        ));
+        match ok(
             "project.execution.status",
             json!({"operation_id":"00000000-0000-4000-8000-000000000001"}),
-        );
+        ) {
+            CliCommand::Pm(crate::cli::pm::PmCommand::ProjectExecutionStatus { operation_id }) => {
+                assert_eq!(
+                    operation_id.as_deref(),
+                    Some("00000000-0000-4000-8000-000000000001")
+                );
+            }
+            _ => panic!("expected typed ProjectExecutionStatus"),
+        }
         let choice = json!({
             "operation_id":"00000000-0000-4000-8000-000000000001",
             "expected_revision":0,"expected_generation":1,"choice":"continue",
@@ -8429,6 +8441,18 @@ mod tests {
         ] {
             let mut invalid = choice.clone();
             invalid[key] = value;
+            let _ = err("project.execution.choose", invalid);
+        }
+        for operation_id in [
+            "550E8400-E29B-41D4-A716-446655440000",
+            "550e8400e29b41d4a716446655440000",
+        ] {
+            let _ = err(
+                "project.execution.status",
+                json!({"operation_id": operation_id}),
+            );
+            let mut invalid = choice.clone();
+            invalid["operation_id"] = operation_id.into();
             let _ = err("project.execution.choose", invalid);
         }
         let _ = err("project.execution.status", json!({"project_root":"/other"}));

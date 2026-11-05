@@ -184,7 +184,7 @@ pub(super) fn run<E: CliEnv>(
             let renewal = Cache::new(env.cache_root()).write_snapshot_with_receipt(&snapshot)?;
             let code = finish_issue_create(&snapshot, renewal, out);
             if let Some(error) = lineage_error {
-                out.push_str(&format!("warning: Issue #{} was created, but its continued-parent receipt could not be saved: {error}. Inspect project.execution.status; do not create this Issue again.\n", snapshot.number.0));
+                out.push_str(&format!("warning: Issue #{} was created, but its continued-parent receipt could not be saved: {error}. Do not create this Issue again. Render this Project or capture a new normal human instruction for this existing child Issue to continue it. project.execution.status is diagnostic only; it does not repair the receipt.\n", snapshot.number.0));
                 return Ok(1);
             }
             finish_urgent_issue_mutation(env, &snapshot, code, out)

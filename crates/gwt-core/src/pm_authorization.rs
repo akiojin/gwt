@@ -121,7 +121,7 @@ struct Store {
 }
 
 fn store_path(repo: &Path) -> PathBuf {
-    crate::paths::gwt_project_dir_for_repo_path(repo).join("project-state/pm-authorizations.json")
+    crate::pm_peer::project_dir(repo).join("project-state/pm-authorizations.json")
 }
 
 pub fn audit_path(repo: &Path) -> PathBuf {
@@ -136,7 +136,7 @@ fn load(repo: &Path) -> io::Result<Store> {
     }
 }
 
-fn locked<T>(repo: &Path, action: impl FnOnce(&mut Store) -> io::Result<T>) -> io::Result<T> {
+fn lock_authorizations(repo: &Path) -> io::Result<fs::File> {
     let path = store_path(repo);
     fs::create_dir_all(path.parent().expect("authorization parent"))?;
     let lock = fs::OpenOptions::new()
@@ -145,6 +145,12 @@ fn locked<T>(repo: &Path, action: impl FnOnce(&mut Store) -> io::Result<T>) -> i
         .write(true)
         .open(path.with_extension("lock"))?;
     lock.lock_exclusive()?;
+    Ok(lock)
+}
+
+fn locked<T>(repo: &Path, action: impl FnOnce(&mut Store) -> io::Result<T>) -> io::Result<T> {
+    let _lock = lock_authorizations(repo)?;
+    let path = store_path(repo);
     let mut store = load(repo)?;
     let result = action(&mut store)?;
     crate::workspace_projection::write_atomic(&path, &serde_json::to_vec(&store)?)
@@ -450,13 +456,29 @@ pub fn authorize(
     })
 }
 
+/// A validated PM choice holds revoke/supersede locks until policy publication.
+pub struct ProjectChoiceAttemptGuard {
+    attempt: Attempt,
+    _authorization_lock: fs::File,
+    _instruction_lock: fs::File,
+}
+
+impl std::ops::Deref for ProjectChoiceAttemptGuard {
+    type Target = Attempt;
+
+    fn deref(&self) -> &Self::Target {
+        &self.attempt
+    }
+}
+
 /// Validate the exact, already-authorized PM intent at the physical owner.
+/// Keep the returned guard through publication, then release it before effects.
 pub fn validate_project_choice_attempt(
     repo: &Path,
     intent: &OperationIntent,
     caller: &str,
     source_id: &str,
-) -> io::Result<Attempt> {
+) -> io::Result<ProjectChoiceAttemptGuard> {
     let scope = intent.scope()?;
     if scope.operation != "project.execution.choose"
         || caller.trim().is_empty()
@@ -466,13 +488,28 @@ pub fn validate_project_choice_attempt(
             "an exact Project choice, PM Session and authority source are required",
         ));
     }
+    // Keep the same order as authorization: PM authority precedes instruction
+    // reads. The instruction writer never acquires the PM authorization lock.
+    let authorization_lock = lock_authorizations(repo)?;
+    let instruction_path = crate::user_instruction::instructions_path(repo);
+    fs::create_dir_all(instruction_path.parent().expect("instruction parent"))?;
+    let instruction_lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(instruction_path.with_extension("lock"))?;
+    instruction_lock.lock_exclusive()?;
     let store = load(repo)?;
     let attempt = store.project_choice_attempts.iter().find(|attempt| {
         attempt.scope == scope && attempt.caller_session.as_deref() == Some(caller)
             && attempt.authority_id == source_id
     }).ok_or_else(|| permission_denied("no persisted authorization attempt matches this Project choice, PM Session and source"))?;
     validate_project_choice_source(repo, &store, attempt)?;
-    Ok(attempt.clone())
+    Ok(ProjectChoiceAttemptGuard {
+        attempt: attempt.clone(),
+        _authorization_lock: authorization_lock,
+        _instruction_lock: instruction_lock,
+    })
 }
 
 fn validate_project_choice_source(repo: &Path, store: &Store, attempt: &Attempt) -> io::Result<()> {
@@ -527,6 +564,28 @@ mod tests {
             fs::read(audit_path(repo)).ok(),
             fs::read(crate::user_instruction::instructions_path(repo)).ok(),
         ]
+    }
+
+    #[test]
+    fn canonical_pm_checkout_shares_authority_and_audit_with_owner_project() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let repo = home.path().join("originless-repo");
+        fs::create_dir_all(&repo).unwrap();
+        let pm = crate::pm_peer::project_dir(&repo).join("pm/worktree");
+        fs::create_dir_all(&pm).unwrap();
+        assert_ne!(
+            crate::paths::resolve_project_scope(&repo).hash,
+            crate::paths::resolve_project_scope(&pm).hash
+        );
+        assert_eq!(store_path(&pm), store_path(&repo));
+        assert_eq!(audit_path(&pm), audit_path(&repo));
+        let intent = project_choice_intent();
+        let approval =
+            record_approval(&pm, &intent, "Continue this Project", "Stop it", false).unwrap();
+        assert_eq!(approvals(&repo).unwrap()[0].id, approval.id);
+        revoke(&pm, &approval.id).unwrap();
+        assert!(approvals(&repo).unwrap()[0].revoked);
     }
 
     #[test]
@@ -973,6 +1032,25 @@ mod tests {
                 .id,
             first.id
         );
+        let publication =
+            validate_project_choice_attempt(&repo, &intent, "pm", &approval.id).unwrap();
+        for path in [
+            store_path(&repo).with_extension("lock"),
+            crate::user_instruction::instructions_path(&repo).with_extension("lock"),
+        ] {
+            let probe = fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            assert!(
+                probe.try_lock_exclusive().is_err(),
+                "the validated choice must fence revoke and supersede until publication: {}",
+                path.display()
+            );
+        }
+        drop(publication);
         assert!(validate_project_choice_attempt(&repo, &intent, "pm", "foreign-source").is_err());
         assert!(authorize(
             &repo,

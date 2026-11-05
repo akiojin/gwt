@@ -46,7 +46,11 @@ export function createCloseProjectController({ document: doc, send, onClosed = (
       expected_view_set_revision: preview.view_set_revision };
     freshIntentId = intent.operation_id;
     model.update(state => ({ ...state, preview: null, intent, unknown: false, absent: false, retrySameIntent: false }));
-    if (send(intent) !== 'sent') model.update(state => ({ ...state, unknown: true }));
+    if (send(intent) !== 'sent') {
+      freshIntentId = null;
+      model.update(state => ({ ...state, intent: null, unknown: false, absent: false, retrySameIntent: false,
+        error: { message: 'Project choice was not sent. Reconnect and try Close Project again.' } }));
+    }
   }
   function closed(key) {
     const matches = model.read().intent?.token.project_key === key;
@@ -141,7 +145,7 @@ export function createCloseProjectController({ document: doc, send, onClosed = (
     if (previewPending) return;
     if (model.read().preview) cancel();
     previewPending = { projectKey: key, projectWide };
-    send({ kind: 'preview_close_project', project_key: key, project_wide: projectWide });
+    if (send({ kind: 'preview_close_project', project_key: key, project_wide: projectWide }) !== 'sent') previewPending = null;
   }
   return { modal, receive, request, reconnect: reconcile, connectionLost() {
     previewPending = null; freshIntentId = null;

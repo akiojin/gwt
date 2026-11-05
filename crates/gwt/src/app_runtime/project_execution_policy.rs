@@ -184,8 +184,15 @@ impl AppRuntime {
         );
         let mut events = self.restore_prepared_open_project_windows(&context.tab_id, restores);
         events.extend(self.startup_auto_resume_ready_events());
-        events
-            .extend(self.ensure_pm_agent_for_tab(&context.tab_id, pm::PmEnsureTrigger::Automatic));
+        if self.agent_maintenance.busy {
+            if !self.pending_startup_pm_tabs.contains(&context.tab_id) {
+                self.pending_startup_pm_tabs.push(context.tab_id.clone());
+            }
+        } else {
+            events.extend(
+                self.ensure_pm_agent_for_tab(&context.tab_id, pm::PmEnsureTrigger::Automatic),
+            );
+        }
         events.push(self.hub_state_broadcast());
         events.push(OutboundEvent::project(
             context.project_key.clone(),
@@ -200,18 +207,54 @@ impl AppRuntime {
         &mut self,
         context: &ProjectContext,
     ) -> Result<(), String> {
+        self.persist_actual_project_views_with_birth(
+            context,
+            gwt::process::host_process_start_time(std::process::id()),
+        )
+    }
+
+    pub(super) fn persist_actual_project_views_with_birth(
+        &mut self,
+        context: &ProjectContext,
+        host_started_at: Option<u64>,
+    ) -> Result<(), String> {
         let state = self
             .project_state(context)
             .ok_or("Project generation changed")?;
         let host_pid = std::process::id();
+        let Some(host_started_at) = host_started_at else {
+            let revision = state.project_views.revision;
+            self.project_state_mut(context)
+                .expect("current project")
+                .project_views
+                .observation_unavailable = true;
+            match gwt::project_execution_policy::revoke_saved_observation(
+                &context.project_root,
+                host_pid,
+                context.generation,
+                revision,
+            ) {
+                Ok(Some(invalidation)) => {
+                    self.project_state_mut(context)
+                        .expect("current project")
+                        .project_views
+                        .pending_invalidation = Some(invalidation);
+                    self.schedule_project_observation_invalidation(context);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::error!(%error, "Project observation revocation failed after host birth lookup failure")
+                }
+            }
+            return Err("Host process birth is unavailable".into());
+        };
         let observation = RuntimeObservation {
             schema_version: 1,
             project_key: context.project_key.to_string(),
             project_root: context.project_root.clone(),
             generation: context.generation,
             host_pid,
-            host_started_at: gwt::process::host_process_start_time(host_pid)
-                .ok_or("Host process birth is unavailable")?,
+            host_started_at,
             view_set_revision: state.project_views.revision,
             views: state
                 .project_views
@@ -390,6 +433,30 @@ impl AppRuntime {
             status.recovery_operation = Some("project.execution.status".into());
             return status;
         }
+        if matches!(
+            status.start_reason.as_str(),
+            "policy_unreadable" | "runtime_observation_unreadable" | "drain_unconfirmed"
+        ) || self
+            .project_state(context)
+            .is_some_and(|state| state.project_views.observation_unavailable)
+        {
+            return status;
+        }
+        if let Some(cached) = self.project_state(context).and_then(|state| {
+            (!state.project_views.observation_unavailable)
+                .then_some(state)
+                .and_then(|state| state.project_owner_execution_status.as_ref())
+                .filter(|cached| {
+                    cached.project_key == context.project_key.as_str()
+                        && cached.generation == context.generation
+                        && cached.revision == status.revision
+                        && cached.view_set_revision == status.view_set_revision
+                })
+        }) {
+            let mut observed = cached.clone();
+            observed.operation_outcome = status.operation_outcome;
+            return observed;
+        }
         let running = self
             .runtimes
             .iter()
@@ -464,6 +531,7 @@ impl AppRuntime {
         context: &ProjectContext,
         client: &str,
         expected_receipts: Option<&BTreeMap<String, String>>,
+        completed_operation: Option<&str>,
     ) -> Vec<OutboundEvent> {
         let Some(state) = self.project_state_mut(context) else {
             return Vec::new();
@@ -479,11 +547,39 @@ impl AppRuntime {
             None if state.project_views.views.contains_key(client) => vec![client.to_string()],
             None => Vec::new(),
         };
-        for closing_client in &closing {
-            state.project_views.views.remove(closing_client);
-        }
+        let removed_views: HashMap<_, _> = closing
+            .iter()
+            .filter_map(|client| {
+                state
+                    .project_views
+                    .views
+                    .remove(client)
+                    .map(|view| (client.clone(), view))
+            })
+            .collect();
+        let completed = completed_operation.map(|operation| {
+            (
+                operation.to_string(),
+                state.project_views.close_intents.remove(operation),
+                state.project_views.previews.remove(client),
+                state.close_project_nonces.remove(client),
+            )
+        });
         state.project_views.revision += 1;
         if let Err(error) = self.persist_actual_project_views(context) {
+            let state = self.project_state_mut(context).expect("current project");
+            state.project_views.views.extend(removed_views);
+            if let Some((operation, intent, preview, nonce)) = completed {
+                if let Some(intent) = intent {
+                    state.project_views.close_intents.insert(operation, intent);
+                }
+                if let Some(preview) = preview {
+                    state.project_views.previews.insert(client.into(), preview);
+                }
+                if let Some(nonce) = nonce {
+                    state.close_project_nonces.insert(client.into(), nonce);
+                }
+            }
             return self.project_close_error(
                 client,
                 &context.project_key.to_string(),
@@ -501,6 +597,59 @@ impl AppRuntime {
             ));
         }
         events
+    }
+
+    fn confirmed_project_choice(
+        &self,
+        context: &ProjectContext,
+        operation: &str,
+    ) -> Option<store::Receipt> {
+        store::load(&context.project_root)
+            .ok()?
+            .operation(operation)
+            .filter(|receipt| {
+                receipt.generation == context.generation
+                    && receipt.effect_state == EffectState::Confirmed
+            })
+            .cloned()
+    }
+
+    pub(super) fn reconcile_project_choice(
+        &mut self,
+        context: &ProjectContext,
+        operation: Option<&str>,
+    ) -> Vec<OutboundEvent> {
+        let Some(operation) = operation else {
+            return Vec::new();
+        };
+        let Some(receipt) = self.confirmed_project_choice(context, operation) else {
+            return Vec::new();
+        };
+        let Some(client) = receipt.actor.strip_prefix("browser:") else {
+            return Vec::new();
+        };
+        let Some(state) = self.project_state(context) else {
+            return Vec::new();
+        };
+        let Some(intent) = state.project_views.close_intents.get(operation) else {
+            return Vec::new();
+        };
+        let Some(preview) = state.project_views.previews.get(client) else {
+            return Vec::new();
+        };
+        if intent.request.generation != receipt.generation
+            || intent.request.choice != receipt.choice
+            || intent.request.expected_revision != receipt.before_revision
+            || intent.request.actor != receipt.actor
+            || intent.request.consent_source_id != receipt.consent_source_id
+            || state.close_project_nonces.get(client) != Some(&receipt.consent_source_id)
+            || preview.policy_revision != receipt.before_revision
+            || preview.view_revision != intent.view_set_revision
+        {
+            return Vec::new();
+        }
+        let closing = preview.view_receipts.clone();
+        self.detach_actual_project_view(context, client, Some(&closing), Some(operation))
     }
 
     pub(super) fn execute_project_choice(
@@ -611,24 +760,30 @@ impl AppRuntime {
                 )
             }
             Ok(value) => {
-                if let Some(state) = self.project_state_mut(&completed.context) {
-                    state.close_project_nonces.remove(&completed.client_id);
-                    state.project_views.previews.remove(&completed.client_id);
-                    state
-                        .project_views
-                        .close_intents
-                        .remove(&completed.operation_id);
-                }
-                let mut events = self.detach_actual_project_view(
-                    &completed.context,
-                    &completed.client_id,
-                    Some(&completed.closing_receipts),
-                );
+                let mut events = if self
+                    .confirmed_project_choice(&completed.context, &completed.operation_id)
+                    .is_some_and(|receipt| {
+                        receipt.actor == format!("browser:{}", completed.client_id)
+                    }) {
+                    self.detach_actual_project_view(
+                        &completed.context,
+                        &completed.client_id,
+                        Some(&completed.closing_receipts),
+                        Some(&completed.operation_id),
+                    )
+                } else {
+                    Vec::new()
+                };
                 let status = value
                     .get("status")
                     .cloned()
                     .and_then(|value| serde_json::from_value(value).ok())
-                    .unwrap_or_else(|| self.project_execution_status(&completed.context, None));
+                    .unwrap_or_else(|| {
+                        self.project_execution_status(
+                            &completed.context,
+                            Some(&completed.operation_id),
+                        )
+                    });
                 events.push(OutboundEvent::reply(
                     completed.client_id,
                     BackendEvent::ProjectExecutionStatus { status },

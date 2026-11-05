@@ -264,6 +264,7 @@ pub(crate) struct PendingRestoreSummary {
     pending: HashSet<String>,
     restored: usize,
     admission: RestoreAdmissionLog,
+    waiting_for_policy: bool,
 }
 
 impl RestoreAdmissionLog {
@@ -1552,6 +1553,7 @@ impl AppRuntime {
                 pending,
                 restored,
                 admission,
+                waiting_for_policy: false,
             });
         }
     }
@@ -1581,7 +1583,7 @@ impl AppRuntime {
                 summary.admission.refuse(session_id, reason);
             }
         }
-        if summary.pending.is_empty() {
+        if summary.pending.is_empty() && !summary.waiting_for_policy {
             let summary = self.pending_restore_summaries.remove(index);
             summary
                 .admission
@@ -1590,6 +1592,10 @@ impl AppRuntime {
     }
 
     pub(super) fn startup_auto_resume_ready_events(&mut self) -> Vec<OutboundEvent> {
+        if self.agent_maintenance.busy {
+            self.agent_maintenance.deferred_startup_ready = true;
+            return Vec::new();
+        }
         gwt::perf::startup::mark(gwt::perf::startup::StartupPhase::SurfaceReady);
         let _phase =
             gwt::perf::startup::PhaseTimer::start(gwt::perf::startup::StartupPhase::RestoreDrain);
@@ -1597,6 +1603,17 @@ impl AppRuntime {
         // sink, so the bootstrap-time settle is recorded here, on the first
         // surface-ready round trip, where a client is guaranteed to listen.
         let mut events = self.update_resume_notice_events();
+        for context in self.project_contexts() {
+            let restores = self.project_state_mut(&context).and_then(|state| {
+                (state.project_views.view_count() > 0
+                    && !state.project_views.deferred_restores.is_empty())
+                .then(|| std::mem::take(&mut state.project_views.deferred_restores))
+            });
+            if let Some(restores) = restores {
+                events
+                    .extend(self.restore_prepared_open_project_windows(&context.tab_id, restores));
+            }
+        }
 
         let resume_started = Instant::now();
         let resume_phase = gwt::perf::startup::PhaseTimer::start(
@@ -1608,9 +1625,21 @@ impl AppRuntime {
         // drain that follows a queued sweep has something to report; a later
         // surface-ready round trip must stay silent instead of emitting an
         // empty second line.
-        let queued_sweep = self.pending_startup_restore_log.is_some();
-        let mut admission = self.pending_startup_restore_log.take().unwrap_or_default();
-        let previous_windows = self.restore_launch_windows.keys().cloned().collect();
+        let previous_summary = self
+            .pending_restore_summaries
+            .iter()
+            .position(|summary| summary.scope == "startup restore")
+            .map(|index| self.pending_restore_summaries.remove(index));
+        let queued_log = self.pending_startup_restore_log.take();
+        let queued_sweep = queued_log.is_some() || previous_summary.is_some();
+        let mut summary = previous_summary.unwrap_or_else(|| PendingRestoreSummary {
+            scope: "startup restore",
+            pending: HashSet::new(),
+            restored: 0,
+            admission: queued_log.unwrap_or_default(),
+            waiting_for_policy: false,
+        });
+        let previous_windows: HashSet<_> = self.restore_launch_windows.keys().cloned().collect();
         for pending_session in pending {
             if self.tab(&pending_session.tab_id).is_none_or(|tab| {
                 gwt::project_execution_policy::admission(
@@ -1627,7 +1656,9 @@ impl AppRuntime {
                 continue;
             }
             if !pending_session.session.worktree_path.is_dir() {
-                admission.refuse(&pending_session.session.id, RestoreRefusal::WorktreeMissing);
+                summary
+                    .admission
+                    .refuse(&pending_session.session.id, RestoreRefusal::WorktreeMissing);
                 continue;
             }
             let session_id = pending_session.session.id.clone();
@@ -1639,12 +1670,27 @@ impl AppRuntime {
                 RestoreOrigin::Automatic,
             );
             if self.pending_auto_resume_sources.len() == pending_before {
-                admission.refuse(&session_id, RestoreRefusal::LaunchNotStarted);
+                summary
+                    .admission
+                    .refuse(&session_id, RestoreRefusal::LaunchNotStarted);
             }
             events.append(&mut spawned);
         }
         if queued_sweep {
-            self.defer_restore_summary("startup restore", &previous_windows, 0, admission);
+            summary.pending.extend(
+                self.restore_launch_windows
+                    .keys()
+                    .filter(|id| !previous_windows.contains(*id))
+                    .cloned(),
+            );
+            summary.waiting_for_policy = !self.pending_startup_auto_resume_sessions.is_empty();
+            if summary.pending.is_empty() && !summary.waiting_for_policy {
+                summary
+                    .admission
+                    .emit_summary(summary.scope, summary.restored);
+            } else {
+                self.pending_restore_summaries.push(summary);
+            }
         }
         let resume_ms = resume_started.elapsed().as_millis() as u64;
         drop(resume_phase);
@@ -1966,6 +2012,15 @@ impl AppRuntime {
         tab_id: &str,
         restores: Vec<PreparedProjectWindowRestore>,
     ) -> Vec<OutboundEvent> {
+        if self.agent_maintenance.busy {
+            if let Some(context) = self.project_context(tab_id) {
+                if let Some(state) = self.project_state_mut(&context) {
+                    state.project_views.deferred_restores.extend(restores);
+                }
+            }
+            self.agent_maintenance.deferred_startup_ready = true;
+            return Vec::new();
+        }
         let mut events = Vec::new();
         let mut admission = RestoreAdmissionLog::default();
         let mut restored = 0usize;

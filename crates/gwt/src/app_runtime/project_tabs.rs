@@ -1187,12 +1187,14 @@ impl AppRuntime {
                     .project_contexts()
                     .into_iter()
                     .find(|context| context.project_key.as_str() == key)?;
-                return Some(vec![OutboundEvent::reply(
+                let mut events = self.reconcile_project_choice(&context, operation_id.as_deref());
+                events.push(OutboundEvent::reply(
                     client_id,
                     BackendEvent::ProjectExecutionStatus {
                         status: self.project_execution_status(&context, operation_id.as_deref()),
                     },
-                )]);
+                ));
+                return Some(events);
             }
             _ => return None,
         };
@@ -1271,7 +1273,7 @@ impl AppRuntime {
                 let state = self.project_state_mut(&context).expect("current project");
                 state.close_project_nonces.remove(client_id);
                 state.project_views.previews.remove(client_id);
-                return Some(self.detach_actual_project_view(&context, client_id, None));
+                return Some(self.detach_actual_project_view(&context, client_id, None, None));
             }
             return Some(self.execute_project_choice(
                 &context,

@@ -1639,6 +1639,7 @@ pub(crate) struct ProjectRuntimeState {
     pub(crate) project_owner_health: Option<gwt::protocol::ProjectOwnerHealthView>,
     pub(crate) project_owner_connection_id: u64,
     pub(crate) project_owner_identity: Option<gwt::daemon_subscriber::ProjectOwnerIdentity>,
+    pub(crate) project_owner_execution_status: Option<gwt::protocol::ProjectExecutionStatusView>,
     /// Latest close preview nonce for each requesting connection; never persisted.
     pub(crate) close_project_nonces: HashMap<ClientId, String>,
     pub(crate) project_views: project_execution_policy::ProjectViewState,
@@ -1754,6 +1755,7 @@ pub(crate) fn initial_project_states(
                     project_owner_health: None,
                     project_owner_connection_id: 0,
                     project_owner_identity: None,
+                    project_owner_execution_status: None,
                     close_project_nonces: HashMap::new(),
                     project_views: Default::default(),
                     pending_pm_launches: Default::default(),
@@ -2843,12 +2845,27 @@ fn begin_local_issue_monitor_effect_attempt(
     prefs_path: &Path,
     monitor: &mut gwt::IssueMonitorState,
     renewals_only: bool,
+    project_root: Option<&Path>,
 ) -> std::io::Result<Option<gwt::PendingIssueMonitorEffect>> {
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let eligible = |effect: &gwt::PendingIssueMonitorEffect| match effect.payload {
         gwt::IssueMonitorEffectPayload::RenewClaim { .. } => true,
-        gwt::IssueMonitorEffectPayload::AcquireClaim { .. }
-        | gwt::IssueMonitorEffectPayload::ReleaseClaim { .. } => !renewals_only,
+        gwt::IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } => {
+            !renewals_only
+                && (effect.state == gwt::IssueMonitorEffectState::Attempting
+                    || match project_root {
+                        Some(root) => gwt::project_execution_policy::admission(
+                            root,
+                            &[format!("issue:{issue_number}")],
+                        )
+                        .is_ok(),
+                        #[cfg(test)]
+                        None => true, // Custom-executor units have no physical Project.
+                        #[cfg(not(test))]
+                        None => false,
+                    })
+        }
+        gwt::IssueMonitorEffectPayload::ReleaseClaim { .. } => !renewals_only,
         _ => false,
     };
     try_rebase_mutate_and_persist_issue_monitor_state_without_authority_fence(
@@ -3076,6 +3093,114 @@ fn commit_local_issue_monitor_effect_result(
 #[cfg(test)]
 mod claim_renewal_tests {
     use super::*;
+
+    #[test]
+    fn local_project_claim_admission_keeps_cold_proposals_prepared_and_attempts_read_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let _budget = ScopedLocalIssueMonitorPrefsTimeout::set(std::time::Duration::from_secs(10));
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let grant = gwt::PendingIssueMonitorEffect::prepared(
+            "claim:42",
+            7,
+            gwt::IssueMonitorEffectPayload::AcquireClaim {
+                issue_number: 42,
+                claim_id: "claim-42".into(),
+                owner: "host/session".into(),
+                heartbeat_at: "2026-11-05T00:00:00Z".into(),
+                expires_at: "2026-11-05T00:30:00Z".into(),
+                launched_work_id: None,
+            },
+        );
+        let mut prefs = gwt::IssueMonitorPrefs {
+            enabled: true,
+            effect_authority_epoch: 7,
+            pending_effects: vec![grant],
+            terminal_queues: std::collections::BTreeMap::from([(
+                gwt::process::current_hostname(),
+                gwt::issue_monitor::IssueMonitorTerminalQueue {
+                    entries: vec![gwt::issue_monitor::IssueMonitorTerminalQueueEntry {
+                        number: 42,
+                        queued_at: chrono::Utc::now().to_rfc3339(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+        let remote = Arc::new(gwt_github::FakeIssueClient::new());
+        remote.seed(gwt_github::IssueSnapshot {
+            author_login: None,
+            number: gwt_github::IssueNumber(42),
+            title: "fixture".into(),
+            body: String::new(),
+            labels: Vec::new(),
+            state: gwt_github::IssueState::Open,
+            updated_at: gwt_github::UpdatedAt::new("2026-11-05T00:00:00Z"),
+            comments: Vec::new(),
+        });
+        let factory: RuntimeIssueClientFactory = Arc::new({
+            let remote = remote.clone();
+            move |_, _| Ok(remote.clone())
+        });
+        gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        let mut monitor = test_monitor_with_prefs(Default::default(), prefs.clone());
+        execute_local_issue_monitor_claim_effects(
+            &prefs_path,
+            temp.path(),
+            "owner",
+            "repo",
+            &mut monitor,
+            &factory,
+            false,
+        )
+        .unwrap();
+        assert!(remote.call_log().is_empty());
+        assert_eq!(
+            monitor.pending_effects()[0].state,
+            gwt::IssueMonitorEffectState::Prepared
+        );
+        prefs.pending_effects[0].state = gwt::IssueMonitorEffectState::Attempting;
+        prefs.pending_effects[0].attempt = 1;
+        gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        monitor = test_monitor_with_prefs(Default::default(), prefs);
+        execute_local_issue_monitor_claim_effects(
+            &prefs_path,
+            temp.path(),
+            "owner",
+            "repo",
+            &mut monitor,
+            &factory,
+            false,
+        )
+        .unwrap();
+        assert_eq!(remote.call_log(), vec!["fetch:#42"]);
+        assert_eq!(
+            monitor.pending_effects()[0].state,
+            gwt::IssueMonitorEffectState::Attempting
+        );
+        assert!(monitor.prefs().pending_launch_deliveries.is_empty());
+        gwt::project_runtime::test_support::seed_actual_project_view(temp.path()).unwrap();
+        let mut admitted = monitor.prefs();
+        admitted.claim_diagnostics.clear();
+        gwt::save_issue_monitor_prefs(&prefs_path, &admitted).unwrap();
+        monitor = test_monitor_with_prefs(Default::default(), admitted);
+        execute_local_issue_monitor_claim_effects(
+            &prefs_path,
+            temp.path(),
+            "owner",
+            "repo",
+            &mut monitor,
+            &factory,
+            false,
+        )
+        .unwrap();
+        assert!(remote
+            .call_log()
+            .iter()
+            .any(|call| call.starts_with("create_comment:")));
+    }
 
     #[test]
     fn local_renewal_result_never_creates_launch_delivery() {
@@ -3364,6 +3489,7 @@ mod claim_renewal_tests {
     }
 }
 
+#[cfg(test)]
 fn drive_local_issue_monitor_claim_effects_with(
     prefs_path: &Path,
     monitor: &mut gwt::IssueMonitorState,
@@ -3374,13 +3500,20 @@ fn drive_local_issue_monitor_claim_effects_with(
         &str,
     ) -> Result<LocalIssueMonitorEffectOutcome, String>,
 ) -> Result<(), String> {
-    drive_local_issue_monitor_claim_effects_matching_with(prefs_path, monitor, false, &mut execute)
+    drive_local_issue_monitor_claim_effects_matching_with(
+        prefs_path,
+        monitor,
+        false,
+        None,
+        &mut execute,
+    )
 }
 
 fn drive_local_issue_monitor_claim_effects_matching_with(
     prefs_path: &Path,
     monitor: &mut gwt::IssueMonitorState,
     renewals_only: bool,
+    project_root: Option<&Path>,
     mut execute: impl FnMut(
         &gwt::PendingIssueMonitorEffect,
         bool,
@@ -3402,9 +3535,13 @@ fn drive_local_issue_monitor_claim_effects_matching_with(
     let _local_deadline = local_deadline;
     let initial_count = monitor.pending_effects().len();
     for _ in 0..initial_count.max(1) {
-        let Some(effect) =
-            begin_local_issue_monitor_effect_attempt(prefs_path, monitor, renewals_only)
-                .map_err(|error| error.to_string())?
+        let Some(effect) = begin_local_issue_monitor_effect_attempt(
+            prefs_path,
+            monitor,
+            renewals_only,
+            project_root,
+        )
+        .map_err(|error| error.to_string())?
         else {
             break;
         };
@@ -3486,7 +3623,8 @@ fn execute_local_issue_monitor_claim_effects(
     renewals_only: bool,
 ) -> Result<(), String> {
     use gwt_github::issue_auto_claim::{
-        acquire_claim_mutation, release_claim_mutation, ClaimComment, ClaimStatus,
+        acquire_claim_mutation, observe_claim_acquisition, release_claim_mutation, ClaimComment,
+        ClaimStatus,
     };
     monitor.set_source_repository(Some((owner, repo)));
 
@@ -3547,22 +3685,39 @@ fn execute_local_issue_monitor_claim_effects(
                     .and_then(|(start, end)| (end - start).num_seconds().try_into().ok())
                     .filter(|ttl: &u64| *ttl > 0)
                     .unwrap_or(gwt::IssueMonitorConfig::default().claim_ttl_secs);
-                LocalIssueMonitorEffectOutcome::Claim(acquire_claim_mutation(
-                    client.as_ref(),
-                    gwt_github::IssueNumber(*issue_number),
-                    ClaimComment {
-                        comment_id: None,
-                        claim_id: claim_id.clone(),
-                        owner: owner.clone(),
-                        issue_number: *issue_number,
-                        status: ClaimStatus::Active,
-                        heartbeat_at: now_text.to_string(),
-                        expires_at: (*now + chrono::Duration::seconds(ttl as i64))
-                            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-                        launched_work_id: launched_work_id.clone(),
+                let claim = ClaimComment {
+                    comment_id: None,
+                    claim_id: claim_id.clone(),
+                    owner: owner.clone(),
+                    issue_number: *issue_number,
+                    status: ClaimStatus::Active,
+                    heartbeat_at: now_text.to_string(),
+                    expires_at: (*now + chrono::Duration::seconds(ttl as i64))
+                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    launched_work_id: launched_work_id.clone(),
+                };
+                LocalIssueMonitorEffectOutcome::Claim(
+                    if gwt::project_execution_policy::admission(
+                        project_root,
+                        &[format!("issue:{issue_number}")],
+                    )
+                    .is_ok()
+                    {
+                        acquire_claim_mutation(
+                            client.as_ref(),
+                            gwt_github::IssueNumber(*issue_number),
+                            claim,
+                            now_text,
+                        )
+                    } else {
+                        observe_claim_acquisition(
+                            client.as_ref(),
+                            gwt_github::IssueNumber(*issue_number),
+                            &claim,
+                            now_text,
+                        )
                     },
-                    now_text,
-                ))
+                )
             }
             gwt::IssueMonitorEffectPayload::AcquireClaim {
                 issue_number,
@@ -3588,16 +3743,13 @@ fn execute_local_issue_monitor_claim_effects(
             _ => return Err("unsupported local Issue Monitor effect".to_string()),
         })
     };
-    if renewals_only {
-        drive_local_issue_monitor_claim_effects_matching_with(
-            prefs_path,
-            monitor,
-            true,
-            &mut execute,
-        )
-    } else {
-        drive_local_issue_monitor_claim_effects_with(prefs_path, monitor, &mut execute)
-    }
+    drive_local_issue_monitor_claim_effects_matching_with(
+        prefs_path,
+        monitor,
+        renewals_only,
+        Some(project_root),
+        &mut execute,
+    )
 }
 
 fn run_local_issue_monitor_claim_renewals(
@@ -4608,6 +4760,7 @@ impl AppRuntime {
                     project_owner_health: None,
                     project_owner_connection_id: 0,
                     project_owner_identity: None,
+                    project_owner_execution_status: None,
                     close_project_nonces: HashMap::new(),
                     project_views: Default::default(),
                     pending_pm_launches: Default::default(),
@@ -14061,6 +14214,9 @@ impl AppRuntime {
         let changed = state.project_owner_health.as_ref() != Some(&health)
             || state.project_owner_connection_id != connection_id
             || state.project_owner_identity != identity;
+        if changed {
+            state.project_owner_execution_status = None;
+        }
         state.project_owner_connection_id = connection_id;
         state.project_owner_identity =
             if health.state == gwt::protocol::ProjectOwnerHealthState::Healthy {
@@ -14394,6 +14550,20 @@ impl AppRuntime {
         if !self.project_owner_event_is_current(context, connection_id, identity) {
             return Vec::new();
         }
+        if matches!(
+            &event,
+            OwnerEvent::Status { .. }
+                | OwnerEvent::WindowRemoved { .. }
+                | OwnerEvent::Closed { .. }
+                | OwnerEvent::Invalidated
+                | OwnerEvent::AgentStarted { .. }
+                | OwnerEvent::PmLifecycle { .. }
+                | OwnerEvent::ContinueWorkOutcome { .. }
+        ) {
+            self.project_state_mut(context)
+                .expect("fenced owner")
+                .project_owner_execution_status = None;
+        }
         let pending_alias = |owner_id: &str, operation_id: Option<&str>| {
             self.pending_launch_completions
                 .iter()
@@ -14406,13 +14576,25 @@ impl AppRuntime {
                 .map(|(id, _)| id.clone())
         };
         match event {
-            OwnerEvent::ProjectExecutionStatus { status } => vec![
-                OutboundEvent::project(
-                    context.project_key.clone(),
-                    BackendEvent::ProjectExecutionStatus { status },
-                ),
-                self.hub_state_broadcast(),
-            ],
+            OwnerEvent::ProjectExecutionStatus { status } => {
+                if status.project_key != context.project_key.as_str()
+                    || status.generation != context.generation
+                {
+                    return Vec::new();
+                }
+                self.project_state_mut(context)
+                    .expect("fenced owner")
+                    .project_owner_execution_status = Some(status);
+                vec![
+                    OutboundEvent::project(
+                        context.project_key.clone(),
+                        BackendEvent::ProjectExecutionStatus {
+                            status: self.project_execution_status(context, None),
+                        },
+                    ),
+                    self.hub_state_broadcast(),
+                ]
+            }
             OwnerEvent::Output {
                 id: owner_pane_id,
                 incarnation,
@@ -15010,7 +15192,13 @@ impl AppRuntime {
             ),
             RemoteOwnerLaunchRequest::ColdAutomaticRestore {
                 source_session_id, ..
-            } => vec![format!("session:{source_session_id}")],
+            } => {
+                let source = gwt_agent::Session::load(
+                    &self.sessions_dir.join(format!("{source_session_id}.toml")),
+                )
+                .map_err(|error| format!("Automatic restore source unavailable: {error}"))?;
+                gwt::project_execution_policy::session_lineage(&context.project_root, &source)
+            }
             _ => Vec::new(),
         };
         self.project_execution_admission(context, &lineage)?;
