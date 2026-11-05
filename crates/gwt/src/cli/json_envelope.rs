@@ -1901,6 +1901,30 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 .map_err(|error| CliParseError::InvalidJson(error.into()))?;
             CliCommand::Pm(crate::cli::pm::PmCommand::RequestTasksRead { selector })
         }
+        "pm.request_tasks.capture" => {
+            reject_unknown_params(
+                params,
+                &[
+                    "operation_id",
+                    "expected_revision",
+                    "reason",
+                    "provider",
+                    "conversation_id",
+                    "id",
+                    "prompt_sha256",
+                ],
+                "pm.request_tasks.capture",
+            )?;
+            let request: crate::cli::pm::NativeCaptureRequest =
+                serde_json::from_value(Value::Object(params.clone()))
+                    .map_err(|error| CliParseError::InvalidJson(error.to_string()))?;
+            request
+                .validate()
+                .map_err(|error| CliParseError::InvalidJson(error.into()))?;
+            CliCommand::Pm(crate::cli::pm::PmCommand::RequestTasksCapture {
+                request: Box::new(request),
+            })
+        }
         "pm.request_tasks.apply" => {
             reject_unknown_params(
                 params,
@@ -8187,6 +8211,68 @@ mod tests {
                 .capabilities
                 .iter()
                 .any(|row| row.operation == operation && row.executable));
+        }
+    }
+
+    #[test]
+    fn pm_request_tasks_native_selection_cannot_supply_provenance() {
+        let selection = json!({"provider":"codex", "conversation_id":"conversation", "id":"turn"});
+        ok(
+            "pm.request_tasks.read",
+            json!({"selector":{"kind":"native_turns"}}),
+        );
+        let mut detail = selection.clone();
+        detail["kind"] = json!("native_turn");
+        ok("pm.request_tasks.read", json!({"selector":detail}));
+        let mut capture = selection;
+        capture["operation_id"] = json!("capture-1");
+        capture["expected_revision"] = json!(0);
+        capture["reason"] = json!("Preserve this native request for classification");
+        capture["prompt_sha256"] = json!("a".repeat(64));
+        ok("pm.request_tasks.capture", capture.clone());
+        for field in [
+            "actor",
+            "authority",
+            "source",
+            "original",
+            "project_root",
+            "path",
+        ] {
+            let mut forged = capture.clone();
+            forged[field] = json!("forged");
+            assert!(matches!(
+                err("pm.request_tasks.capture", forged),
+                CliParseError::InvalidJson(_)
+            ));
+        }
+        for field in [
+            "provider",
+            "conversation_id",
+            "id",
+            "prompt_sha256",
+            "operation_id",
+            "reason",
+        ] {
+            let mut invalid = capture.clone();
+            invalid[field] = json!(" ");
+            assert!(matches!(
+                err("pm.request_tasks.capture", invalid),
+                CliParseError::InvalidJson(_)
+            ));
+        }
+        for field in [
+            "provider",
+            "conversation_id",
+            "id",
+            "prompt_sha256",
+            "expected_revision",
+        ] {
+            let mut missing = capture.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(matches!(
+                err("pm.request_tasks.capture", missing),
+                CliParseError::InvalidJson(_)
+            ));
         }
     }
 

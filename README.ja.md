@@ -969,9 +969,26 @@ source ID、`{"selector":{"kind":"tasks","limit":50}}` は完了・取消を含�
 完了条件・再評価世代・revision を確認して、根拠のある追跡変更だけを
 `pm.request_tasks.apply` へ送ります。未初期化・読取不能・途中までの取得は degraded
 として保持し、依頼が残っていない根拠にはしません。一時復旧や Monitor の空キューで
-元の依頼を完了扱いにしません。この手順の対象は保存済みの追跡です。自動受付・過去の
-依頼の取込み・ユーザー操作・Tasks UI は別の作業として残ります。追跡自体は Issue の
-起動や配信ゲートの変更を行いません。
+元の依頼を完了扱いにしません。この手順の対象は保存済みの追跡と選択した native 入力の
+受付です。自動受付・過去の依頼の取込み・ユーザー操作・Tasks UI は別の作業として
+残ります。追跡自体は Issue の起動や配信ゲートの変更を行いません。
+
+選択した native 入力を受け付けるには、登録済み PM が `pm.request_tasks.read` の
+`selector:{kind:"native_turns"}` を読みます。現在の `provider`・`conversation_id` と、
+対象 turn の ID・`prompt_sha256` を原文なしで返します。`window_only:true` と `detail`
+が示すのは件数・容量を制限した会話の範囲であり、履歴全件や永続 cursor ではありません。
+`selector:{kind:"native_turn",provider:"<provider>",conversation_id:"<conversation>",id:"<id>"}`
+で原文を 1 件取得します。両 native selector は Task 追跡の読取不能とは独立して
+利用できます。選択した turn を未分類の pending source として保存するには、
+`pm.request_tasks.capture` に `operation_id`・現在の `expected_revision`・`reason` と、
+`provider`・`conversation_id`・`id`・`prompt_sha256` を指定します。原文・source・actor は
+サーバーが確定し、caller による原文・source・actor・authority の指定は拒否します。
+resume/replay でも native source identity を保ち、同文で native ID が異なれば
+区別します。native データの取得不能、ID の欠落・未到着、選択範囲や digest の変更時は
+capture せず degraded として保持します。読取不能の Task ストアを初期化し直したり、
+Task を作成したり、指示権限・実行権限を付与したりする操作ではありません。
+PM は pending source を読んでから既存の `decompose` / `classify_non_task` を使い、
+質問を実行 Task にしません。
 
 登録済み PM への入力は、最新の Q&A receipt を置き換える前に保存されます。同じ本文の
 再入力や質問も保持しますが、未認証の入力候補であり、人間の source・Task・指示権限
@@ -986,7 +1003,8 @@ ID 集合が変わって `conflict` になったら先頭から再取得しま�
 で原文・未認証の観測 identity・本文 hash を 1 件取得します。保存先未作成・読取不能・
 候補欠落は区別されます。既 PM 権限確認を維持し、Task 追跡が読めない場合も取得でき、
 候補の消費や保存状態の変更は行いません。取得した原文は引き続き信頼できない入力です。
-native identity の照合と認証付き Task 受付は別の作業として残ります。
+候補と native identity の照合・自動 Task 受付は別の作業として残ります。capture の
+native identity を候補本文や一致する hash から推測してはいけません。
 
 生成される PM skill は、起動時・新しい人間の入力時・各 resident cycle に、Task 追跡が
 読めない場合も候補を発見します。必要な原文だけを取得し、発見・回収が未完なら degraded

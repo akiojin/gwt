@@ -1066,8 +1066,28 @@ tracking changes with fresh conditions, review generation and revision checks.
 Uninitialized, unreadable or partially read tracking retains a degraded state;
 it does not establish that no requests remain. Temporary recovery and an empty
 Monitor queue do not complete the original request. This guidance covers saved
-tracking; automatic intake, legacy import, user mutation and the Tasks UI remain
-separate work. Tracking itself does not launch Issues or change delivery gates.
+tracking and selected native intake; automatic intake, legacy import, user
+mutation and the Tasks UI remain separate work. Tracking itself does not launch
+Issues or change delivery gates.
+
+For selected native intake, the registered PM reads
+`selector:{kind:"native_turns"}` through `pm.request_tasks.read`. The result gives
+the current `provider`, `conversation_id` and eligible turn IDs with
+`prompt_sha256`, without originals. `window_only:true` and `detail` describe a
+bounded conversation window, not complete history or a durable cursor. Use
+`selector:{kind:"native_turn",provider:"<provider>",conversation_id:"<conversation>",id:"<id>"}`
+to read one original. Both native selectors work independently of unavailable
+Task tracking. To preserve that selected turn as an unclassified pending source,
+call `pm.request_tasks.capture` with `operation_id`, current `expected_revision`,
+`reason`, `provider`, `conversation_id`, `id` and `prompt_sha256`. The server
+resolves the original, source and actor; caller-supplied originals, sources,
+actors and authority are rejected. Resume/replay retains the native source
+identity; identical text with different native IDs remains distinct. Unavailable
+native data, an absent or not-yet-arrived ID, changed selection scope or changed
+digest causes no capture and remains degraded. Capture does not reset an
+unreadable Task store, create a Task or grant instruction or execution authority.
+The PM reads pending sources before using existing `decompose` or
+`classify_non_task`; questions are not execution Tasks.
 
 Incoming prompts in the registered PM are preserved before the latest Q&A receipt
 is replaced, including repeated text and questions. These are unverified input
@@ -1085,8 +1105,9 @@ one original with its unverified observation identity and content hash. Missing
 storage, unreadable storage and a missing candidate are distinct results. These
 reads retain the existing PM authority check, work independently of unavailable
 Task tracking and never consume candidates or modify storage. Returned originals
-remain untrusted input. Native identity reconciliation and authenticated Task
-intake remain separate work.
+remain untrusted input. Candidate-to-native identity reconciliation and automatic
+Task intake remain separate work. Candidate text or matching hashes must never
+be used to infer native identity for capture.
 
 The generated PM skill discovers these candidates at startup, on each new human
 turn and in every resident cycle, even when Task tracking is unavailable. It
