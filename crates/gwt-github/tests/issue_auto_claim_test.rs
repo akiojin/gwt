@@ -1347,6 +1347,34 @@ fn mutation_reconcile_terminalizes_every_active_duplicate_for_the_logical_claim(
         "2026-06-23T10:00:01Z",
         "2026-06-23T10:30:01Z",
     );
+    let empty = FakeIssueClient::new();
+    empty.seed(snapshot(Vec::new()));
+    assert!(matches!(
+        observe_claim_acquisition(&empty, IssueNumber(42), &first, "2026-06-23T10:01:00Z"),
+        Err(OwnerMutationError::RemoteOutcomeUnknown(_))
+    ));
+    assert_eq!(empty.call_log(), vec!["fetch:#42"]);
+    let foreign = claim(
+        "foreign-winner",
+        "host-b/session-b",
+        "2026-06-23T09:59:00Z",
+        "2026-06-23T10:30:00Z",
+    );
+    let blocked = FakeIssueClient::new();
+    blocked.seed(snapshot(vec![comment(8, &foreign)]));
+    assert!(matches!(
+        observe_claim_acquisition(&blocked, IssueNumber(42), &first, "2026-06-23T10:01:00Z"),
+        Ok(ClaimAcquireOutcome::Blocked(_))
+    ));
+    assert_eq!(blocked.call_log(), vec!["fetch:#42"]);
+    let lost = FakeIssueClient::new();
+    lost.seed(snapshot(vec![comment(8, &foreign), comment(9, &first)]));
+    assert!(matches!(
+        observe_claim_acquisition(&lost, IssueNumber(42), &first, "2026-06-23T10:01:00Z"),
+        Err(OwnerMutationError::RemoteOutcomeUnknown(_))
+    ));
+    assert_eq!(lost.call_log(), vec!["fetch:#42"]);
+    assert_eq!(stored_claim(&lost, 9).status, ClaimStatus::Active);
     client.seed(snapshot(vec![comment(9, &first), comment(10, &second)]));
 
     let observed =

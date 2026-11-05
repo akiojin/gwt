@@ -292,9 +292,12 @@ impl ProjectOwnerHarness {
     }
 
     fn bind(root: &std::path::Path, with_monitor: bool) -> Result<Self, String> {
-        // Existing owner fixtures model an actually opened Project. Policy
-        // rejection tests remove this receipt rather than bypassing admission.
-        seed_actual_project_view(root)?;
+        // A physical owner can attach to its controller's accepted view.
+        // Other owner fixtures model an already opened Project; policy
+        // rejection tests remove that receipt rather than bypassing admission.
+        if !crate::project_execution_policy::actual_open(root).unwrap_or(false) {
+            seed_actual_project_view(root)?;
+        }
         let scope = gwt_core::daemon::RuntimeScope::from_project_root(
             root,
             gwt_core::daemon::RuntimeTarget::Host,

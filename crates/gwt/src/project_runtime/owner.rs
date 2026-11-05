@@ -1151,9 +1151,15 @@ impl OwnerState {
         handle
     }
     fn run(mut self, receiver: mpsc::Receiver<OwnerMessage>) -> Vec<oneshot::Sender<()>> {
+        let mut continue_active = false;
+        let mut next_project_policy_check = std::time::Instant::now();
         loop {
-            self.reconcile_project_execution_stop();
-            let continue_active = self.has_unfinished_project_continue();
+            let now = std::time::Instant::now();
+            if now >= next_project_policy_check {
+                self.reconcile_project_execution_stop();
+                continue_active = self.has_unfinished_project_continue();
+                next_project_policy_check = now + std::time::Duration::from_secs(1);
+            }
             if !self.stopping
                 && !continue_active
                 && self.gui_presence.expired(std::time::Instant::now())
@@ -1178,7 +1184,7 @@ impl OwnerState {
                         .map(|deadline| {
                             if continue_active {
                                 // Queue and execution receipts can finish without a mailbox event.
-                                std::time::Instant::now() + std::time::Duration::from_secs(1)
+                                next_project_policy_check
                             } else {
                                 deadline
                             }
@@ -1195,7 +1201,10 @@ impl OwnerState {
                     .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
                 {
                     Ok(message) => message,
-                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        next_project_policy_check = std::time::Instant::now();
+                        continue;
+                    }
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 }
             } else {
@@ -1204,6 +1213,15 @@ impl OwnerState {
                     Err(_) => break,
                 }
             };
+            // Output does not change the lifetime authorization frontier. Keep
+            // its policy I/O on the existing one-second tick; control and
+            // runtime transitions still reconcile on the very next turn.
+            if !matches!(
+                &message,
+                OwnerMessage::Pane(PaneRuntimeEvent::Output { .. })
+            ) {
+                next_project_policy_check = std::time::Instant::now();
+            }
             #[cfg(any(test, feature = "test-gh-guard"))]
             let _clock = self
                 .test_operation_clock

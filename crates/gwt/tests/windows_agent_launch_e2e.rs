@@ -1316,8 +1316,11 @@ fn native_shell_failure_diagnostics(
                 "pid":identity.pid, "birth":identity.host_started_at,
                 "instance":identity.host_instance_id,
             }));
+            let execution_status = client.command(
+                gwt::project_runtime::events::OwnerCommand::ProjectExecutionStatus { operation_id: None },
+            ).await.unwrap_or_else(|error| serde_json::json!({"error":error}));
             let Ok(inventory) = client.command(gwt::project_runtime::events::OwnerCommand::ListPanes).await
-            else { return serde_json::json!({"owner":identity,"inventory":"unavailable"}); };
+            else { return serde_json::json!({"owner":identity,"execution_status":execution_status,"inventory":"unavailable"}); };
             let shells = inventory["panes"].as_array().into_iter().flatten()
                 .filter(|pane| pane["session_id"].is_null()).collect::<Vec<_>>();
             let shell = match shells.as_slice() {
@@ -1333,8 +1336,25 @@ fn native_shell_failure_diagnostics(
                 }
                 _ => None,
             };
-            serde_json::json!({"owner":identity,"shell_count":shells.len(),"shell":shell})
+            serde_json::json!({"owner":identity,"execution_status":execution_status,"shell_count":shells.len(),"shell":shell})
         }).await.unwrap_or_else(|_| serde_json::json!({"owner_diagnostic":"unavailable_before_hang_guard"}))
+    });
+    diagnostic["gui"] = serde_json::json!({
+        "pid":app.pid(), "alive":gwt::process::host_process_liveness(app.pid()),
+        "birth":gwt::process::host_process_start_time(app.pid()),
+    });
+    let project_key = gwt_core::paths::project_scope_hash(&app.workspace);
+    let store = app.home.join(".gwt/projects").join(project_key.as_str());
+    let observation_path = store.join("project-state/project-window-runtime.json");
+    let observation = std::fs::read(&observation_path)
+        .map_err(|error| error.to_string())
+        .and_then(|bytes| {
+            serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|error| error.to_string())
+        })
+        .unwrap_or_else(|error| serde_json::json!({"error":error}));
+    diagnostic["project_store"] = serde_json::json!({
+        "project_key":project_key.as_str(), "path":store,
+        "observation_path":observation_path, "observation":observation,
     });
     // GUI and daemon both log to this fixture HOME. Retain only the temporary
     // content-free target before unwinding removes those persistent files.

@@ -105,6 +105,11 @@ pub fn observation_path(repo: &Path) -> PathBuf {
     store::policy_path(repo).with_file_name("project-window-runtime.json")
 }
 
+fn observation_lock_is_contended(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::WouldBlock
+        || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+}
+
 pub(crate) fn lock_observation(repo: &Path) -> io::Result<std::fs::File> {
     use fs2::FileExt;
     let path = observation_path(repo);
@@ -119,7 +124,7 @@ pub(crate) fn lock_observation(repo: &Path) -> io::Result<std::fs::File> {
     loop {
         match lock.try_lock_exclusive() {
             Ok(()) => break,
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+            Err(error) if observation_lock_is_contended(&error) => {
                 if std::time::Instant::now() >= deadline {
                     return Err(io::Error::new(
                         io::ErrorKind::TimedOut,
@@ -727,6 +732,21 @@ pub fn local_status(
 mod tests {
     use super::*;
     use gwt_core::test_support::ScopedGwtHome;
+
+    #[test]
+    fn issue6682_policy_observation_platform_contention_is_retryable() {
+        assert!(observation_lock_is_contended(&fs2::lock_contended_error()));
+        assert!(observation_lock_is_contended(&io::Error::from(
+            io::ErrorKind::WouldBlock
+        )));
+        assert!(!observation_lock_is_contended(&io::Error::from(
+            io::ErrorKind::PermissionDenied
+        )));
+        #[cfg(windows)]
+        assert!(observation_lock_is_contended(
+            &io::Error::from_raw_os_error(33)
+        ));
+    }
 
     fn continued(repo: &Path, lineage: Vec<String>) {
         let receipt = store::choose(

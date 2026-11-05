@@ -272,7 +272,9 @@ mod tests {
 
     #[test]
     fn originless_pm_choice_uses_the_physical_owner_project_store() {
-        let _env = gwt_core::test_support::env_lock().lock().unwrap();
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = gwt_core::test_support::socket_tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
         let _session = gwt_core::test_support::ScopedEnvVar::set("GWT_SESSION_ID", "fixture-pm");
