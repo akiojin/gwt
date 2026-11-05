@@ -1024,6 +1024,8 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "discussion.create"
         | "actions.release_policy.add"
         | "actions.release_policy.rollback"
+        | "actions.diagnostic.policy.add"
+        | "actions.diagnostic.policy.rollback"
         | "board.config.set"
         | "repository.required_checks.update"
         | "repository.settings.set"
@@ -1338,6 +1340,30 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                     .map(|_| required_string(params, "thread_id"))
                     .transpose()?,
             })
+        }
+        "actions.diagnostic.request"
+        | "actions.diagnostic.observe"
+        | "actions.diagnostic.cancel" => {
+            // Decode the closed contract before the general key audit so a
+            // private caller-controlled key is never copied into diagnostics.
+            let command = super::actions::diagnostic::parse(&envelope.operation, &envelope.params)?;
+            let keys: &[&str] = match envelope.operation.as_str() {
+                "actions.diagnostic.request" => &[
+                    "request_id",
+                    "profile_id",
+                    "expected_profile_digest",
+                    "preexecution_of",
+                    "expected_predecessor_revision",
+                ],
+                "actions.diagnostic.observe" => &["request_id", "profile_id"],
+                _ => &["request_id", "expected_run_id", "expected_revision"],
+            };
+            reject_unknown_params(params, keys, &envelope.operation)?;
+            CliCommand::Actions(ActionsCommand::Diagnostic(command))
+        }
+        "actions.diagnostic.policy.status" => {
+            super::actions::release_policy::parse_status(&envelope.params)?;
+            CliCommand::Actions(ActionsCommand::DiagnosticPolicyStatus)
         }
         "actions.release_policy.status" => {
             super::actions::release_policy::parse_status(&envelope.params)?;
@@ -8093,6 +8119,10 @@ mod tests {
     fn pm_request_tasks_operations_parse_only_project_local_typed_requests() {
         for selector in [
             json!({"kind":"summary"}),
+            json!({"kind":"pending"}),
+            json!({"kind":"tasks","limit":100}),
+            json!({"kind":"pending","limit":1,"after":"source-1","expected_revision":2}),
+            json!({"kind":"tasks","after":"task-1","expected_revision":2}),
             json!({"kind":"source","id":"source-1"}),
             json!({"kind":"task","id":"task-1"}),
             json!({"kind":"receipt","operation_id":"operation-1"}),
@@ -8119,6 +8149,13 @@ mod tests {
         for selector in [
             json!({"kind":"source","id":" "}),
             json!({"kind":"summary","id":"unexpected"}),
+            json!({"kind":"pending","limit":0}),
+            json!({"kind":"tasks","limit":101}),
+            json!({"kind":"pending","limit":-1}),
+            json!({"kind":"tasks","after":"task-1"}),
+            json!({"kind":"pending","after":" ","expected_revision":2}),
+            json!({"kind":"tasks","expected_revision":"2"}),
+            json!({"kind":"pending","actor":"forged"}),
         ] {
             assert!(matches!(
                 err("pm.request_tasks.read", json!({"selector":selector})),
@@ -9119,9 +9156,99 @@ mod tests {
     }
 
     #[test]
+    fn diagnostic_policy_contract_names_only_the_fixed_target() {
+        assert!(matches!(
+            ok("actions.diagnostic.policy.status", json!({})),
+            CliCommand::Actions(_)
+        ));
+        let request = json!({"request_id":"d703dbb3-88e3-4e2d-a5b8-6a5d30a1ad4e","expected_token":"a".repeat(64),"reason":"fixed diagnostic permission","instruction_id":"fixture-scope"});
+        ok("actions.diagnostic.policy.add", request.clone());
+        let mut rollback = request.clone();
+        rollback["added_by"] = json!("d703dbb3-88e3-4e2d-a5b8-6a5d30a1ad4f");
+        ok("actions.diagnostic.policy.rollback", rollback);
+        let mut foreign = request;
+        foreign["workflow"] = json!("foreign.yml");
+        err("actions.diagnostic.policy.add", foreign);
+        err(
+            "actions.diagnostic.policy.status",
+            json!({"repository":"foreign/repo"}),
+        );
+        assert!(
+            super::super::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "actions.diagnostic.policy.status"
+            )
+        );
+        assert!(
+            !super::super::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "actions.diagnostic.policy.add"
+            )
+        );
+    }
+
+    #[test]
+    fn actions_diagnostic_accepts_only_the_fixed_profile_contract() {
+        let id = "d703dbb3-88e3-4e2d-a5b8-6a5d30a1ad4e";
+        let profile = "windows-4777-restore-f351-v1";
+        let digest = "a".repeat(64);
+        for (operation, params) in [
+            (
+                "actions.diagnostic.request",
+                json!({"request_id":id,"profile_id":profile,"expected_profile_digest":digest}),
+            ),
+            ("actions.diagnostic.observe", json!({"profile_id":profile})),
+            ("actions.diagnostic.observe", json!({"request_id":id})),
+            (
+                "actions.diagnostic.cancel",
+                json!({"request_id":id,"expected_run_id":1,"expected_revision":1}),
+            ),
+        ] {
+            assert!(matches!(ok(operation, params), CliCommand::Actions(_)));
+        }
+        for (operation, params) in [
+            (
+                "actions.diagnostic.request",
+                json!({"request_id":id,"profile_id":profile,"expected_profile_digest":digest,"source":"foreign"}),
+            ),
+            (
+                "actions.diagnostic.request",
+                json!({"request_id":id,"profile_id":"unknown","expected_profile_digest":digest}),
+            ),
+            (
+                "actions.diagnostic.request",
+                json!({"request_id":"../foreign","profile_id":profile,"expected_profile_digest":digest}),
+            ),
+            (
+                "actions.diagnostic.request",
+                json!({"request_id":id,"profile_id":profile,"expected_profile_digest":digest,"preexecution_of":id}),
+            ),
+            (
+                "actions.diagnostic.observe",
+                json!({"profile_id":profile,"request_id":id}),
+            ),
+            ("actions.diagnostic.observe", json!({})),
+            (
+                "actions.diagnostic.cancel",
+                json!({"request_id":id,"expected_run_id":0,"expected_revision":1}),
+            ),
+            (
+                "actions.diagnostic.cancel",
+                json!({"request_id":id,"expected_run_id":1,"expected_revision":1,"token":"private-sentinel"}),
+            ),
+            (
+                "actions.diagnostic.observe",
+                json!({"profile_id":profile,"private-sentinel":true}),
+            ),
+        ] {
+            let error = err(operation, params).to_string();
+            assert!(!error.contains("private-sentinel"));
+        }
+    }
+
+    #[test]
     fn actions_dispatch_accepts_selectors_and_rejects_invalid_contract() {
         for workflow in [
             json!("prepare-release.yml"),
+            json!("windows-diagnostic.yml"),
             json!("日本語 Release.yml"),
             json!(42),
         ] {

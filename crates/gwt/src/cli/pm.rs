@@ -29,7 +29,7 @@ use crate::pm_registry;
 /// Parsed `pm.*` command surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PmCommand {
-    /// Read a summary or one explicit record, without a raw-store dump.
+    /// Read a summary, bounded IDs or one record, without a raw-store dump.
     RequestTasksRead { selector: RequestTaskSelector },
     /// Mutate tracking state as the current PM, never as an intake/user actor.
     RequestTasksApply {
@@ -93,15 +93,54 @@ pub enum PmCommand {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RequestTaskSelector {
     Summary {},
-    Source { id: String },
-    Task { id: String },
-    Receipt { operation_id: String },
+    Pending {
+        limit: Option<usize>,
+        expected_revision: Option<u64>,
+        after: Option<String>,
+    },
+    Tasks {
+        limit: Option<usize>,
+        expected_revision: Option<u64>,
+        after: Option<String>,
+    },
+    Source {
+        id: String,
+    },
+    Task {
+        id: String,
+    },
+    Receipt {
+        operation_id: String,
+    },
 }
 
 impl RequestTaskSelector {
     pub(super) fn validate(&self) -> Result<(), &'static str> {
         let id = match self {
             Self::Summary {} => return Ok(()),
+            Self::Pending {
+                limit,
+                expected_revision,
+                after,
+            }
+            | Self::Tasks {
+                limit,
+                expected_revision,
+                after,
+            } => {
+                if !(1..=100).contains(&limit.unwrap_or(50)) {
+                    return Err("page limit must be between 1 and 100");
+                }
+                if after.is_some() && expected_revision.is_none() {
+                    return Err(
+                        "page continuation requires expected_revision; restart without after",
+                    );
+                }
+                match after {
+                    Some(id) => id,
+                    None => return Ok(()),
+                }
+            }
             Self::Source { id } | Self::Task { id } => id,
             Self::Receipt { operation_id } => operation_id,
         };
@@ -154,6 +193,14 @@ pub struct CapabilitiesReport {
 /// executable row comes from the dispatch catalog, and the test fails when a
 /// missing operation lands or a permission row names an unknown operation.
 const CAPABILITY_GAPS: &[(&str, &str, CapabilityGapReason, &str)] = &[
+    (
+        "actions.diagnostic.policy.add", r#"{}"#, CapabilityGapReason::Permission,
+        "Read actions.diagnostic.policy.status and use the current registered PM Host context plus fresh exact scoped instruction_id or pm.approval.request; only akiojin/gwt/windows-diagnostic.yml permission changes, and release authority is not reusable",
+    ),
+    (
+        "actions.diagnostic.policy.rollback", r#"{}"#, CapabilityGapReason::Permission,
+        "Read actions.diagnostic.policy.status and use fresh exact scoped authority plus added_by naming this target's successful add and unchanged post-state",
+    ),
     (
         "actions.release_policy.add", r#"{}"#, CapabilityGapReason::Permission,
         "Read actions.release_policy.status, then use the current registered PM Host context and an exact scoped instruction_id or pm.approval.request; only this repository's prepare-release.yml permission is added",
@@ -250,7 +297,16 @@ pub(crate) fn capabilities_report() -> CapabilitiesReport {
         });
     CapabilitiesReport {
         schema_version: 1,
-        capabilities: executable.chain(gaps).collect(),
+        capabilities: executable.chain(gaps).chain([
+            "actions.diagnostic.request",
+            "actions.diagnostic.cancel",
+        ].into_iter().map(|operation| Capability {
+            operation: operation.into(), params:Some(serde_json::json!({})), executable:false,
+            reason:Some(CapabilityGapReason::Permission),
+            owner_action:Some("Use actions.diagnostic.observe with the fixed profile_id to inspect current PM Host authority, publication and repository permission. Requests reserve the historical source budget; cancellation requires the current exact run/revision. Release-policy approval does not authorize the diagnostic workflow.".into()),
+            permission_stage:Some("registered_pm_and_repository_policy".into()),
+            alternative_operation:Some("actions.diagnostic.observe".into()),
+        })).collect(),
     }
 }
 
@@ -763,8 +819,67 @@ fn request_tasks(
         selector
             .validate()
             .map_err(|error| TaskError::Invalid(error.into()))?;
+        if let RequestTaskSelector::Pending {
+            limit,
+            expected_revision,
+            after,
+        }
+        | RequestTaskSelector::Tasks {
+            limit,
+            expected_revision,
+            after,
+        } = &selector
+        {
+            let revision = current_revision.expect("successful read has a revision");
+            if expected_revision.is_some_and(|expected| expected != revision) {
+                return Err(TaskError::Conflict {
+                    current_revision: revision,
+                });
+            }
+            let limit = limit.unwrap_or(50);
+            let mut ids: Vec<&String> = match &state {
+                Some(state) => {
+                    // BTree ranges preserve the exact IDs and only visit the
+                    // requested page plus one lookahead, excluding raw details.
+                    let lower = after
+                        .clone()
+                        .map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded);
+                    if matches!(&selector, RequestTaskSelector::Pending { .. }) {
+                        state
+                            .pending
+                            .range((lower, std::ops::Bound::Unbounded))
+                            .take(limit + 1)
+                            .collect()
+                    } else {
+                        state
+                            .tasks
+                            .range((lower, std::ops::Bound::Unbounded))
+                            .take(limit + 1)
+                            .map(|(id, _)| id)
+                            .collect()
+                    }
+                }
+                None => Vec::new(),
+            };
+            let next_after = if ids.len() > limit {
+                ids.truncate(limit);
+                ids.last().copied()
+            } else {
+                None
+            };
+            let mut value = json!({"schema_version":1,"ok":true,
+                "state":if state.is_some() { "ready" } else { "absent" },
+                "revision":revision,"ids":ids,"next_after":next_after});
+            if let Some(state) = &state {
+                value["project_key"] = json!(state.project_key);
+            }
+            return Ok(value);
+        }
         let Some(state) = state else {
             return match selector {
+                RequestTaskSelector::Pending { .. } | RequestTaskSelector::Tasks { .. } => {
+                    unreachable!("ID pages handled above")
+                }
                 RequestTaskSelector::Summary {} => {
                     Ok(json!({"schema_version":1,"ok":true,"state":"absent","revision":0}))
                 }
@@ -777,6 +892,9 @@ fn request_tasks(
         };
         let mut value = json!({"schema_version":1,"ok":true,"state":"ready","project_key":state.project_key,"revision":state.revision});
         match selector {
+            RequestTaskSelector::Pending { .. } | RequestTaskSelector::Tasks { .. } => {
+                unreachable!("ID pages handled above")
+            }
             RequestTaskSelector::Summary {} => {
                 value["counts"] = json!({"sources":state.sources.len(),"pending":state.pending.len(),"tasks":state.tasks.len(),"receipts":state.receipts.len()});
             }
@@ -1110,6 +1228,18 @@ mod tests {
         assert_eq!(absent.0, 0);
         assert_eq!(absent.1["state"], "absent");
         assert!(absent.1.get("counts").is_none());
+        for kind in ["pending", "tasks"] {
+            let page = invoke(
+                &repo,
+                "pm.request_tasks.read",
+                json!({"selector":{"kind":kind}}),
+            );
+            assert_eq!(page.0, 0);
+            assert_eq!(page.1["state"], "absent");
+            assert_eq!(page.1["revision"], 0);
+            assert_eq!(page.1["ids"], json!([]));
+            assert!(page.1["next_after"].is_null());
+        }
         assert!(!peer_project_dir(&repo)
             .join("project-state/request-tasks")
             .exists());
@@ -1137,6 +1267,14 @@ mod tests {
                 (
                     "pm.request_tasks.read",
                     json!({"selector":{"kind":"source","id":"source-1"}}),
+                ),
+                (
+                    "pm.request_tasks.read",
+                    json!({"selector":{"kind":"pending"}}),
+                ),
+                (
+                    "pm.request_tasks.read",
+                    json!({"selector":{"kind":"tasks"}}),
                 ),
                 ("pm.request_tasks.apply", apply.clone()),
             ] {
@@ -1230,6 +1368,116 @@ mod tests {
             prefs_bytes,
             "Task updates grant no PM/Monitor authority"
         );
+        // More IDs than one page, deliberately inserted out of lexical order.
+        for suffix in [3, 2] {
+            let state = store.read().unwrap().unwrap();
+            let mut source = state.sources["source-1"].clone();
+            source.id = format!("source-{suffix}");
+            source.authority.turn_id = format!("native-{suffix}");
+            store
+                .apply(
+                    &Actor {
+                        kind: ActorKind::Intake,
+                        id: "prior-pm".into(),
+                    },
+                    &gwt_core::pm_request_tasks::Request {
+                        operation_id: format!("capture-{suffix}"),
+                        expected_revision: state.revision,
+                        reason: "Authenticated input".into(),
+                        action: gwt_core::pm_request_tasks::Action::Capture { source },
+                    },
+                )
+                .unwrap();
+        }
+        let mut child = apply["action"]["root"].clone();
+        for id in ["task-2", " task-0 "] {
+            child["id"] = json!(id);
+            let result = invoke(
+                &repo,
+                "pm.request_tasks.apply",
+                json!({
+                    "operation_id":format!("add-{id}"),"expected_revision":store.read().unwrap().unwrap().revision,
+                    "reason":"Decompose accepted work","action":{"kind":"add_child","parent_id":"task-1","child":child}
+                }),
+            );
+            assert_eq!(result.0, 0);
+        }
+        let revision = store.read().unwrap().unwrap().revision;
+        let before_reads = fs::read(&state_path).unwrap();
+        for (kind, ids) in [
+            ("pending", vec!["source-2", "source-3"]),
+            ("tasks", vec![" task-0 ", "task-1", "task-2"]),
+        ] {
+            let first = invoke(
+                &repo,
+                "pm.request_tasks.read",
+                json!({"selector":{"kind":kind,"limit":1}}),
+            );
+            assert_eq!(first.0, 0);
+            assert_eq!(first.1["ids"], json!([ids[0]]));
+            assert_eq!(first.1["next_after"], ids[0]);
+            assert_eq!(first.1["revision"], revision);
+            let second = invoke(
+                &repo,
+                "pm.request_tasks.read",
+                json!({"selector":{
+                    "kind":kind,"limit":2,"after":first.1["next_after"],"expected_revision":revision
+                }}),
+            );
+            assert_eq!(second.0, 0);
+            assert_eq!(second.1["ids"], json!(&ids[1..]));
+            assert!(second.1["next_after"].is_null());
+            let all = invoke(
+                &repo,
+                "pm.request_tasks.read",
+                json!({"selector":{"kind":kind}}),
+            );
+            assert_eq!(all.1["ids"], json!(ids));
+            assert!(all.1["next_after"].is_null());
+            for field in ["sources", "tasks", "receipts", "original", "source", "task"] {
+                assert!(first.1.get(field).is_none());
+            }
+            assert_eq!(
+                invoke(
+                    &runtime,
+                    "pm.request_tasks.read",
+                    json!({"selector":{"kind":kind}})
+                ),
+                all
+            );
+        }
+        assert_eq!(fs::read(&state_path).unwrap(), before_reads);
+        assert_eq!(invoke(&repo, "pm.request_tasks.apply", json!({
+            "operation_id":"classify-2","expected_revision":revision,"reason":"Only a question",
+            "action":{"kind":"classify_non_task","source_id":"source-2"}
+        })).0, 0);
+        for kind in ["pending", "tasks"] {
+            let stale = invoke(
+                &repo,
+                "pm.request_tasks.read",
+                json!({"selector":{
+                    "kind":kind,"after":"source-2","expected_revision":revision
+                }}),
+            );
+            assert_eq!(stale.0, 1);
+            assert_eq!(stale.1["error"]["code"], "conflict");
+            assert_eq!(stale.1["current_revision"], revision + 1);
+            assert_eq!(
+                stale.1["error"]["recovery_operation"],
+                "pm.request_tasks.read"
+            );
+            assert!(stale.1.get("ids").is_none());
+        }
+        assert_eq!(
+            invoke(
+                &repo,
+                "pm.request_tasks.read",
+                json!({"selector":{"kind":"pending"}})
+            )
+            .1["ids"],
+            json!(["source-3"])
+        );
+        let committed = fs::read(&state_path).unwrap();
         register("replacement-pm");
         assert_eq!(
             invoke(&repo, "pm.request_tasks.apply", apply).1["error"]["code"],
@@ -1242,6 +1490,16 @@ mod tests {
         assert_eq!(broken.0, 1);
         assert_eq!(broken.1["error"]["code"], "unreadable_store");
         assert!(broken.1.get("counts").is_none());
+        for kind in ["pending", "tasks"] {
+            let broken = invoke(
+                &repo,
+                "pm.request_tasks.read",
+                json!({"selector":{"kind":kind}}),
+            );
+            assert_eq!(broken.0, 1);
+            assert_eq!(broken.1["error"]["code"], "unreadable_store");
+            assert!(broken.1.get("ids").is_none());
+        }
         assert_eq!(fs::read(&state_path).unwrap(), b"broken snapshot");
     }
 
@@ -1640,6 +1898,21 @@ mod tests {
                 } else {
                     "pm.approval.request"
                 }
+            );
+        }
+        for operation in ["actions.diagnostic.request", "actions.diagnostic.cancel"] {
+            let row = report
+                .capabilities
+                .iter()
+                .find(|row| row.operation == operation && !row.executable)
+                .unwrap();
+            assert_eq!(
+                row.permission_stage.as_deref(),
+                Some("registered_pm_and_repository_policy")
+            );
+            assert_eq!(
+                row.alternative_operation.as_deref(),
+                Some("actions.diagnostic.observe")
             );
         }
     }
