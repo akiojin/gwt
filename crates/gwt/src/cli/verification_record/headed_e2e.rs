@@ -35,6 +35,10 @@ impl Capture {
             directory.path().join("reporter.cjs"),
             include_str!("headed_e2e_reporter.cjs"),
         )?;
+        fs::write(
+            directory.path().join("headed_e2e_runtime.cjs"),
+            include_str!("headed_e2e_runtime.cjs"),
+        )?;
         let report_path = directory.path().join("report.json");
         Ok(Self {
             directory,
@@ -153,6 +157,11 @@ mod tests {
     fn capture_reads_only_its_fresh_report() {
         let capture = Capture::new().unwrap();
         let other = Capture::new().unwrap();
+        assert!(capture
+            .directory
+            .path()
+            .join("headed_e2e_runtime.cjs")
+            .is_file());
         assert!(capture.evidence().is_none());
         let report =
             br#"{"chromium_dark_passed":1,"chromium_light_passed":1,"failed":0,"status":"passed"}"#;
