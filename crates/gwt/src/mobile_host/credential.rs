@@ -337,4 +337,65 @@ mod tests {
         assert!(load_host_credential(&path, &binding, &project(), 100).is_ok());
         assert_eq!(std::fs::read(&path).unwrap(), original);
     }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_acl_grants_refuse_private_reads_and_writes_until_explicit_repair() {
+        fn acl(path: &Path, args: &[&str]) {
+            let output = gwt_core::process::resolved_command(
+                gwt_core::process::ProcessPlanRequest::new("/bin/chmod"),
+            )
+            .unwrap()
+            .args(args)
+            .arg(path)
+            .output()
+            .unwrap();
+            assert!(
+                output.status.success(),
+                "ACL fixture: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let (dir, mut store, path, binding) = fixture();
+        let original = std::fs::read(&path).unwrap();
+        acl(&path, &["+a", "everyone allow read"]);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o7777,
+            0o600
+        );
+        assert!(matches!(
+            load_host_credential(&path, &binding, &project(), 100),
+            Err(CredentialLoadError::Storage(StoreError::UnsafeStorage))
+        ));
+        acl(&path, &["-N"]);
+        assert!(load_host_credential(&path, &binding, &project(), 100).is_ok());
+
+        let registry = dir.path().join("registry.json");
+        let before = std::fs::read(&registry).unwrap();
+        let count = std::fs::read_dir(dir.path()).unwrap().count();
+        acl(dir.path(), &["+a", "everyone allow list,search"]);
+        assert_eq!(
+            std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o7777,
+            0o700
+        );
+        assert!(matches!(
+            load_host_credential(&path, &binding, &project(), 100),
+            Err(CredentialLoadError::Storage(StoreError::UnsafeStorage))
+        ));
+        assert!(matches!(
+            store.issue(ORIGIN, Uuid::new_v4(), &[project()], 200, 100),
+            Err(StoreError::UnsafeStorage)
+        ));
+        assert_eq!(std::fs::read(&registry).unwrap(), before);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), count);
+        acl(dir.path(), &["-N"]);
+        let loaded = load_host_credential(&path, &binding, &project(), 100).unwrap();
+        store
+            .registry()
+            .unwrap()
+            .verify(loaded.identity(), &project(), loaded.secret_bytes(), 100)
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
 }
