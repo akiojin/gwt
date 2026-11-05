@@ -10817,9 +10817,13 @@ fn native_pm_hook_runner() {
             env.stdin =
                 serde_json::json!({"prompt":gwt::pm_registry::PM_PERIODIC_WAKE_INSTRUCTION})
                     .to_string();
-            let code =
+            let code = {
+                // This fixture checks native lifecycle, not foreground hook latency.
+                let _clock =
+                    gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
                 gwt::cli::hook::run_daemon_hook(&mut env, "event", &["UserPromptSubmit".into()])
-                    .unwrap();
+                    .unwrap()
+            };
             assert_eq!(
                 code,
                 0,
@@ -10886,9 +10890,12 @@ fn native_pm_fixture_result(
                 match pty.try_wait() {
                     Ok(None) => {}
                     result => {
-                        let pane = pane.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let (status, last_exit, screen) = {
+                            let pane = pane.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                            (pane.status().clone(), pane.last_exit().cloned(), pane.screen().contents())
+                        };
                         panic!("native PM provider unavailable during {stage}: child={:?}; exit={result:?}; pane_status={:?}; pane_exit={:?}; screen={}",
-                            pty.process_id(), pane.status(), pane.last_exit(), pane.screen().contents());
+                            pty.process_id(), status, last_exit, screen);
                     }
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
