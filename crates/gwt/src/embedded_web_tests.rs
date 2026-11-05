@@ -610,7 +610,7 @@ fn embedded_web_terminal_writes_refresh_viewport_after_xterm_parse() {
     // short-circuit on a background tab leaves xterm with stale cell
     // metrics and dead scrollback wheel until the next OS resize.
     let snapshot_write = regex::Regex::new(
-            r"(?s)createTerminalSnapshotWriteCoordinator\(\{[\s\S]*?onLatestSnapshotWritten:\s*\(\)\s*=>\s*\{[\s\S]*?try\s*\{[\s\S]*?forceTerminalViewportRefresh\(windowId,\s*\{\s*shouldPersistGeometry:\s*true\s*\}\);[\s\S]*?\}\s*finally\s*\{[\s\S]*?flushDeferredTerminalWrites\(windowId,\s*runtime\);",
+            r"(?s)createTerminalSnapshotWriteCoordinator\(\{[\s\S]*?onLatestSnapshotWritten:\s*\(\)\s*=>\s*\{[\s\S]*?try\s*\{\s*terminalOutputBatcher\.clear\(windowId\);\s*forceTerminalViewportRefresh\(windowId,\s*\{\s*shouldPersistGeometry:\s*true\s*\}\);[\s\S]*?\}\s*finally\s*\{[\s\S]*?flushDeferredTerminalWrites\(windowId,\s*runtime\);",
         )
         .expect("valid regex");
     let snapshot_activation = regex::Regex::new(
@@ -674,8 +674,8 @@ fn embedded_web_terminal_writes_refresh_viewport_after_xterm_parse() {
     );
     assert!(
         html.contains("clearTerminalOutputBeforeSnapshot({")
-            && html.contains("clearBatchedOutput: (id) => terminalOutputBatcher.clear(id)"),
-        "expected snapshot receipt to clear every pre-boundary terminal output queue",
+            && html.contains("clearBatchedOutput: (id) => terminalOutputBatcher.clear(id, { preserveFailure: true })"),
+        "expected snapshot receipt to clear pre-boundary output while preserving failure until successful application",
     );
     assert!(
         html.contains("terminalViewportRefreshScheduler?.clear(windowId);"),
