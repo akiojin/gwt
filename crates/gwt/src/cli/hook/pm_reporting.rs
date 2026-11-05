@@ -108,6 +108,141 @@ fn write_unverified_intake_candidate(
     Ok(())
 }
 
+pub(crate) fn candidate_digest_valid(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+pub(crate) fn candidate_id_valid(value: &str) -> bool {
+    value.split_once('/').is_some_and(|(session, turn)| {
+        candidate_digest_valid(session)
+            && uuid::Uuid::parse_str(turn).is_ok_and(|id| id.to_string() == turn)
+    })
+}
+
+/// Inspect fixed directories without following a candidate path outside storage.
+fn candidate_directory(project: &Path) -> io::Result<Option<PathBuf>> {
+    let mut directory = project.to_path_buf();
+    for component in ["project-state", "pm-reporting", "intake-candidates"] {
+        directory.push(component);
+        match fs::symlink_metadata(&directory) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => return Err(io::Error::other("invalid PM candidate directory")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(Some(directory))
+}
+
+/// Only the shared atomic writer's unpublished sibling is not a candidate.
+fn candidate_temporary_name(name: &str) -> bool {
+    name.strip_prefix('.')
+        .and_then(|name| name.split_once(".json.tmp."))
+        .is_some_and(|(turn, suffix)| {
+            uuid::Uuid::parse_str(turn).is_ok_and(|id| id.to_string() == turn)
+                && suffix.split_once('.').is_some_and(|(pid, timestamp)| {
+                    pid.parse::<u32>().is_ok() && timestamp.parse::<u128>().is_ok()
+                })
+        })
+}
+
+/// The token describes observed immutable IDs, never human provenance or an
+/// atomic snapshot. A later cycle must start discovery again for new inputs.
+pub(crate) fn candidate_inventory(project: &Path) -> io::Result<(bool, Vec<String>, String)> {
+    let directory = candidate_directory(project)?;
+    let mut ids = Vec::new();
+    if let Some(directory) = &directory {
+        for session in fs::read_dir(directory)? {
+            let session = session?;
+            let session_id = session
+                .file_name()
+                .into_string()
+                .map_err(|_| io::Error::other("invalid PM candidate session name"))?;
+            if !candidate_digest_valid(&session_id) || !session.file_type()?.is_dir() {
+                return Err(io::Error::other("invalid PM candidate session directory"));
+            }
+            for entry in fs::read_dir(session.path())? {
+                let entry = entry?;
+                let name = entry
+                    .file_name()
+                    .into_string()
+                    .map_err(|_| io::Error::other("invalid PM candidate file name"))?;
+                if candidate_temporary_name(&name) {
+                    continue;
+                }
+                let id = format!(
+                    "{}/{}",
+                    session_id,
+                    name.strip_suffix(".json").unwrap_or("")
+                );
+                if !candidate_id_valid(&id) || !entry.file_type()?.is_file() {
+                    return Err(io::Error::other("invalid PM candidate file"));
+                }
+                ids.push(id);
+            }
+        }
+    }
+    ids.sort();
+    let bytes = serde_json::to_vec(&ids).map_err(io::Error::other)?;
+    let digest = gwt_core::pm_authorization::digest(&bytes);
+    Ok((directory.is_some(), ids, digest))
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct IntakeCandidate {
+    schema_version: u32,
+    state: String,
+    project_key: String,
+    observation: IntakeObservation,
+    original: String,
+    prompt_sha256: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct IntakeObservation {
+    session_id: String,
+    turn_id: String,
+}
+
+pub(crate) fn read_intake_candidate(project: &Path, id: &str) -> io::Result<serde_json::Value> {
+    if !candidate_id_valid(id) {
+        return Err(io::Error::other("invalid PM candidate identity"));
+    }
+    let directory = candidate_directory(project)?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "PM candidate not found"))?;
+    let (session, turn) = id.split_once('/').expect("validated composite ID");
+    let directory = directory.join(session);
+    if !fs::symlink_metadata(&directory)?.is_dir() {
+        return Err(io::Error::other("invalid PM candidate session directory"));
+    }
+    let path = directory.join(format!("{turn}.json"));
+    if !fs::symlink_metadata(&path)?.is_file() {
+        return Err(io::Error::other("invalid PM candidate file"));
+    }
+    let candidate: IntakeCandidate =
+        serde_json::from_slice(&fs::read(path)?).map_err(io::Error::other)?;
+    if candidate.schema_version != 1
+        || candidate.state != "unverified"
+        || Some(candidate.project_key.as_str())
+            != project.file_name().and_then(|name| name.to_str())
+        || candidate.observation.turn_id != turn
+        || crate::pm_registry::pm_delivery_prompt_sha256(&candidate.observation.session_id)
+            != session
+        || candidate.prompt_sha256
+            != gwt_core::pm_authorization::digest(candidate.original.as_bytes())
+    {
+        return Err(io::Error::other(
+            "PM candidate identity or content does not match",
+        ));
+    }
+    serde_json::to_value(candidate).map_err(io::Error::other)
+}
+
 fn with_receipt_lock<T>(
     repo: &Path,
     session: &str,

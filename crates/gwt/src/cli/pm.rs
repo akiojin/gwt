@@ -93,6 +93,14 @@ pub enum PmCommand {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RequestTaskSelector {
     Summary {},
+    Candidates {
+        limit: Option<usize>,
+        after: Option<String>,
+        expected_inventory_sha256: Option<String>,
+    },
+    Candidate {
+        id: String,
+    },
     Pending {
         limit: Option<usize>,
         expected_revision: Option<u64>,
@@ -118,6 +126,34 @@ impl RequestTaskSelector {
     pub(super) fn validate(&self) -> Result<(), &'static str> {
         let id = match self {
             Self::Summary {} => return Ok(()),
+            Self::Candidates {
+                limit,
+                after,
+                expected_inventory_sha256,
+            } => {
+                if !(1..=100).contains(&limit.unwrap_or(50)) {
+                    return Err("page limit must be between 1 and 100");
+                }
+                if after.is_some() && expected_inventory_sha256.is_none() {
+                    return Err("candidate continuation requires expected_inventory_sha256; restart without after");
+                }
+                if expected_inventory_sha256.as_deref().is_some_and(|digest| {
+                    !crate::cli::hook::pm_reporting::candidate_digest_valid(digest)
+                }) || after
+                    .as_deref()
+                    .is_some_and(|id| !crate::cli::hook::pm_reporting::candidate_id_valid(id))
+                {
+                    return Err("candidate token or identity is not canonical");
+                }
+                return Ok(());
+            }
+            Self::Candidate { id } => {
+                return if crate::cli::hook::pm_reporting::candidate_id_valid(id) {
+                    Ok(())
+                } else {
+                    Err("candidate identity must be a lowercase session digest/canonical UUID")
+                }
+            }
             Self::Pending {
                 limit,
                 expected_revision,
@@ -792,6 +828,17 @@ fn request_tasks(
         if !pm_registry::session_is_registered_pm(&record.prefs_path, &actor) {
             return Err(TaskError::Unauthorized);
         }
+        if let Some(
+            selector @ (RequestTaskSelector::Candidates { .. }
+            | RequestTaskSelector::Candidate { .. }),
+        ) = &selector
+        {
+            selector
+                .validate()
+                .map_err(|error| TaskError::Invalid(error.into()))?;
+            return read_candidates(&record.project_dir, selector)
+                .map_err(|error| TaskError::Unreadable(error.to_string()));
+        }
         if let Some(request) = request {
             // Domain authorization rejects Capture even for an internal caller
             // bypassing JSON parsing. PM tracking cannot mint human provenance.
@@ -877,6 +924,9 @@ fn request_tasks(
         }
         let Some(state) = state else {
             return match selector {
+                RequestTaskSelector::Candidates { .. } | RequestTaskSelector::Candidate { .. } => {
+                    unreachable!("candidate reads precede TaskStore")
+                }
                 RequestTaskSelector::Pending { .. } | RequestTaskSelector::Tasks { .. } => {
                     unreachable!("ID pages handled above")
                 }
@@ -892,6 +942,9 @@ fn request_tasks(
         };
         let mut value = json!({"schema_version":1,"ok":true,"state":"ready","project_key":state.project_key,"revision":state.revision});
         match selector {
+            RequestTaskSelector::Candidates { .. } | RequestTaskSelector::Candidate { .. } => {
+                unreachable!("candidate reads precede TaskStore")
+            }
             RequestTaskSelector::Pending { .. } | RequestTaskSelector::Tasks { .. } => {
                 unreachable!("ID pages handled above")
             }
@@ -916,7 +969,9 @@ fn request_tasks(
         Ok(value)
     })();
     let (code, value) = match result {
-        Ok(value) => (0, value),
+        // Candidate inventory conflicts use their own token, never a fabricated
+        // TaskStore revision. Their typed error envelope also sets exit status.
+        Ok(value) => (i32::from(value["ok"] == false), value),
         Err(error) => {
             let error_code = match &error {
                 TaskError::Unauthorized => "unauthorized",
@@ -952,6 +1007,59 @@ fn request_tasks(
     out.push_str(&value.to_string());
     out.push('\n');
     Ok(code)
+}
+
+fn read_candidates(
+    repo: &Path,
+    selector: &RequestTaskSelector,
+) -> std::io::Result<serde_json::Value> {
+    use crate::cli::hook::pm_reporting;
+    use serde_json::json;
+    match selector {
+        RequestTaskSelector::Candidates {
+            limit,
+            after,
+            expected_inventory_sha256,
+        } => {
+            let (present, ids, digest) = pm_reporting::candidate_inventory(repo)?;
+            if expected_inventory_sha256
+                .as_ref()
+                .is_some_and(|expected| expected != &digest)
+            {
+                return Ok(
+                    json!({"schema_version":1,"ok":false,"current_inventory_sha256":digest,
+                    "error":{"code":"conflict","message":"Candidate inventory changed; restart without after",
+                    "recovery_operation":"pm.request_tasks.read"}}),
+                );
+            }
+            let mut ids: Vec<_> = ids
+                .into_iter()
+                .filter(|id| after.as_ref().is_none_or(|after| id > after))
+                .take(limit.unwrap_or(50) + 1)
+                .collect();
+            let next_after = if ids.len() > limit.unwrap_or(50) {
+                ids.pop();
+                ids.last().cloned()
+            } else {
+                None
+            };
+            Ok(
+                json!({"schema_version":1,"ok":true,"state":if present {"ready"} else {"absent"},
+                "inventory_sha256":digest,"ids":ids,"next_after":next_after}),
+            )
+        }
+        RequestTaskSelector::Candidate { id } => {
+            match pm_reporting::read_intake_candidate(repo, id) {
+                Ok(candidate) => Ok(json!({"schema_version":1,"ok":true,"candidate":candidate})),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    Ok(json!({"schema_version":1,"ok":false,
+                "error":{"code":"missing_candidate","message":"PM candidate not found","recovery_operation":"pm.request_tasks.read"}}))
+                }
+                Err(error) => Err(error),
+            }
+        }
+        _ => unreachable!("candidate selector only"),
+    }
 }
 
 fn apply_plan(
@@ -1174,6 +1282,197 @@ mod tests {
     use super::*;
     use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
     use std::fs;
+
+    #[test]
+    fn pm_request_tasks_candidates_survive_replacement_and_stay_unverified() {
+        use serde_json::{json, Value};
+        let _lock = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let worktree = pm_registry::pm_worktree_path_for_repo_path(&repo);
+        fs::create_dir_all(&worktree).unwrap();
+        let prefs = pm_registry::pm_prefs_path_for_repo_path(&repo);
+        let register = |id: &str| {
+            pm_registry::save_pm_prefs(
+                &prefs,
+                &pm_registry::PmPrefs {
+                    registration: Some(pm_registry::PmRegistration {
+                        session_id: id.into(),
+                        agent_id: "codex".into(),
+                        worktree_path: worktree.display().to_string(),
+                        created_at: None,
+                        consecutive_crashes: 0,
+                        next_not_before: None,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        };
+        let invoke = |path: &Path, selector: Value| {
+            let command = crate::cli::json_envelope::parse_operation(
+                "pm.request_tasks.read",
+                &json!({"selector":selector}),
+            )
+            .expect("candidate selectors provide the existing PM read boundary");
+            let mut env = crate::cli::env::TestEnv::new(path.to_path_buf());
+            let (code, output) = crate::cli::run_collect(&mut env, command).unwrap();
+            (code, serde_json::from_str::<Value>(&output).unwrap())
+        };
+        register("pm-old");
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-old");
+        let absent = invoke(&repo, json!({"kind":"candidates"}));
+        assert_eq!(absent.0, 0);
+        assert_eq!(absent.1["state"], "absent");
+        let project = peer_project_dir(&repo);
+        assert!(!project
+            .join("project-state/pm-reporting/intake-candidates")
+            .exists());
+        for _ in 0..2 {
+            crate::cli::hook::pm_reporting::handle_user_prompt_submit(
+                &worktree,
+                r#"{"prompt":"同じ依頼\n原文を保持"}"#,
+            )
+            .unwrap();
+        }
+        register("pm-new");
+        let _next = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-new");
+        crate::cli::hook::pm_reporting::handle_user_prompt_submit(
+            &worktree,
+            r#"{"prompt":"状況は？"}"#,
+        )
+        .unwrap();
+        let first = invoke(&repo, json!({"kind":"candidates","limit":2}));
+        assert_eq!(first.0, 0);
+        assert_eq!(first.1["ids"].as_array().unwrap().len(), 2);
+        assert!(first.1.get("original").is_none());
+        assert!(first.1.get("revision").is_none());
+        let digest = first.1["inventory_sha256"].clone();
+        let second = invoke(
+            &worktree,
+            json!({"kind":"candidates","limit":2,
+            "after":first.1["next_after"],"expected_inventory_sha256":digest}),
+        );
+        assert_eq!(second.0, 0);
+        assert!(second.1["next_after"].is_null());
+        let ids: Vec<_> = first.1["ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(second.1["ids"].as_array().unwrap())
+            .cloned()
+            .collect();
+        assert_eq!(ids.len(), 3);
+        assert!(ids
+            .windows(2)
+            .all(|pair| pair[0].as_str() < pair[1].as_str()));
+        let mut originals = Vec::new();
+        let mut saved = Vec::new();
+        for id in &ids {
+            let path = project
+                .join("project-state/pm-reporting/intake-candidates")
+                .join(format!("{}.json", id.as_str().unwrap()));
+            saved.push((path.clone(), fs::read(&path).unwrap()));
+            let detail = invoke(&repo, json!({"kind":"candidate","id":id}));
+            assert_eq!(detail.0, 0);
+            assert_eq!(detail.1["candidate"]["state"], "unverified");
+            assert!(detail.1["candidate"].get("authority").is_none());
+            assert!(detail.1["candidate"].get("source_id").is_none());
+            originals.push(
+                detail.1["candidate"]["original"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            );
+        }
+        originals.sort();
+        assert_eq!(
+            originals,
+            vec!["同じ依頼\n原文を保持", "同じ依頼\n原文を保持", "状況は？"]
+        );
+        // Candidate recovery is independent of unavailable task tracking.
+        let task_dir = project.join("project-state/request-tasks");
+        assert!(!task_dir.exists());
+        fs::create_dir_all(&task_dir).unwrap();
+        fs::write(task_dir.join("state.json"), b"corrupt").unwrap();
+        assert_eq!(invoke(&repo, json!({"kind":"candidate","id":ids[0]})).0, 0);
+        assert_eq!(invoke(&repo, json!({"kind":"candidates"})).0, 0);
+        assert_eq!(fs::read(task_dir.join("state.json")).unwrap(), b"corrupt");
+        {
+            let _foreign = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-old");
+            let denied = invoke(&repo, json!({"kind":"candidate","id":ids[0]}));
+            assert_eq!(denied.1["error"]["code"], "unauthorized");
+        }
+        assert_eq!(
+            invoke(home.path(), json!({"kind":"candidates"})).1["error"]["code"],
+            "unauthorized"
+        );
+        crate::cli::hook::pm_reporting::handle_user_prompt_submit(
+            &worktree,
+            r#"{"prompt":"追加候補"}"#,
+        )
+        .unwrap();
+        let conflict = invoke(
+            &repo,
+            json!({"kind":"candidates","after":ids[0],
+            "expected_inventory_sha256":digest}),
+        );
+        assert_eq!(conflict.0, 1);
+        assert_eq!(conflict.1["error"]["code"], "conflict");
+        assert_ne!(conflict.1["current_inventory_sha256"], digest);
+        for (path, bytes) in &saved {
+            assert_eq!(fs::read(path).unwrap(), *bytes);
+        }
+        fs::write(&saved[0].0, b"broken").unwrap();
+        let unreadable = invoke(&repo, json!({"kind":"candidate","id":ids[0]}));
+        assert_eq!(unreadable.1["error"]["code"], "unreadable_store");
+        assert!(unreadable.1.get("candidate").is_none());
+        let mut foreign: Value = serde_json::from_slice(&saved[0].1).unwrap();
+        foreign["project_key"] = json!("foreign");
+        fs::write(&saved[0].0, foreign.to_string()).unwrap();
+        assert_eq!(invoke(&repo, json!({"kind":"candidate","id":ids[0]})).0, 1);
+        fs::write(&saved[0].0, &saved[0].1).unwrap();
+        for (field, value) in [("session_id", "foreign"), ("turn_id", "foreign")] {
+            foreign = serde_json::from_slice(&saved[0].1).unwrap();
+            foreign["observation"][field] = json!(value);
+            fs::write(&saved[0].0, foreign.to_string()).unwrap();
+            assert_eq!(invoke(&repo, json!({"kind":"candidate","id":ids[0]})).0, 1);
+        }
+        foreign = serde_json::from_slice(&saved[0].1).unwrap();
+        foreign["original"] = json!("changed original");
+        fs::write(&saved[0].0, foreign.to_string()).unwrap();
+        assert_eq!(invoke(&repo, json!({"kind":"candidate","id":ids[0]})).0, 1);
+        fs::write(&saved[0].0, &saved[0].1).unwrap();
+        foreign = serde_json::from_slice(&saved[0].1).unwrap();
+        foreign["authority"] = json!({"trusted":true});
+        fs::write(&saved[0].0, foreign.to_string()).unwrap();
+        assert_eq!(invoke(&repo, json!({"kind":"candidate","id":ids[0]})).0, 1);
+        fs::write(&saved[0].0, &saved[0].1).unwrap();
+        let missing = format!("{}/00000000-0000-4000-8000-000000000000", "a".repeat(64));
+        assert_eq!(
+            invoke(&repo, json!({"kind":"candidate","id":missing})).1["error"]["code"],
+            "missing_candidate"
+        );
+        let root = project.join("project-state/pm-reporting/intake-candidates");
+        let backup = root.with_extension("saved");
+        fs::rename(&root, &backup).unwrap();
+        fs::write(&root, b"blocked directory").unwrap();
+        let unreadable = invoke(&repo, json!({"kind":"candidates"}));
+        assert_eq!(unreadable.1["error"]["code"], "unreadable_store");
+        fs::remove_file(&root).unwrap();
+        fs::rename(&backup, &root).unwrap();
+        #[cfg(unix)]
+        {
+            let target = home.path().join("outside.json");
+            fs::write(&target, &saved[0].1).unwrap();
+            fs::remove_file(&saved[0].0).unwrap();
+            std::os::unix::fs::symlink(&target, &saved[0].0).unwrap();
+            assert_eq!(invoke(&repo, json!({"kind":"candidate","id":ids[0]})).0, 1);
+            assert_eq!(invoke(&repo, json!({"kind":"candidates"})).0, 1);
+        }
+    }
 
     #[test]
     fn pm_request_tasks_adapter_preserves_authority_project_and_receipt_boundaries() {
