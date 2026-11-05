@@ -8,6 +8,9 @@ import { createUiStateStore } from "../ui-state-store.js";
 import { createAgentSwitchModel } from "../agent-activity-model.js";
 
 const source = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+const boardSource = readFileSync(new URL("../board-logs-surface.js", import.meta.url), "utf8")
+  .replace(/from "\/([^"]+)"/g, (_, path) => `from "${new URL(`../${path}`, import.meta.url).href}"`);
+const { createBoardLogsSurface } = await import(`data:text/javascript;base64,${Buffer.from(boardSource).toString("base64")}`);
 function functionSource(name) {
   const start = source.indexOf(`      function ${name}(`);
   assert.notEqual(start, -1);
@@ -202,18 +205,53 @@ test("route-bound Project tab connects its scope from the URL before any catalog
 
 test("route-bound Project tab reconnects to the same Project only", () => {
   const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
+  context.activeWorkspace = () => ({ windows: [{ id: "board" }, { id: "logs" }] });
+  const surface = createBoardLogsSurface({
+    send: event => context.send(event), windowMap: new Map(),
+    activeWorkspace: context.activeWorkspace, activeProjectTab: () => null,
+    projectWindowContextById: () => null, getActiveWorkProjection: () => null,
+  });
+  context.resyncBoardLogs = ids => {
+    context.resyncCalls.push(["board-logs", ...ids]);
+    surface.resyncBoardLogs(ids);
+  };
   context.connectSocket();
   sockets[1].open();
-  assert.equal(context.hookDoctorResyncs, 1, "ordinary project connect recovers only Hook Doctor requests");
+  assert.equal(context.hookDoctorResyncs, 1, "ordinary project connect recovers Hook Doctor requests");
+  const board = surface.ensureBoardState("board");
+  board.composerBody = "Unsent draft";
+  board.pendingSubmit = { body: "Submitted draft", parentId: null, existingEntryIds: new Set() };
+  const logs = surface.ensureLogState("logs");
+  logs.scope = "global";
+  logs.query = "retained filter";
+  const foreign = surface.ensureBoardState("foreign-project");
+  foreign.loading = true;
+  surface.requestBoard("board");
+  surface.requestLogs("logs");
   sockets[1].close();
   assert.equal(context.closeResetCount, 1, "disconnected Project discards its close preview authority");
-  context.connectSocket();
+  context.reconnectCallbacks.at(-1)();
   assert.equal(context.attentionReportCount, 1, "fresh attention is reported for each opened Project connection");
   assert.equal(new URL(sockets.at(-1).url).searchParams.get("repo_hash"), projectA.project_key);
   sockets.at(-1).open();
   assert.equal(context.hookDoctorResyncs, 2, "ordinary close/reopen recovers pending Hook Doctor reads");
-  assert.equal(context.resyncCalls.length, 0, "normal reconnect must not broadly resync every Settings surface");
-  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }, { kind: "get_system_settings" }], "reconnect re-requests only this client's full sync");
+  assert.deepEqual(sockets.at(-1).sent, [
+    { kind: "frontend_ready" }, { kind: "get_system_settings" },
+    { kind: "load_board", id: "board", all: false },
+    { kind: "load_logs", id: "logs", scope: "global" },
+  ], "ordinary reconnect recovers interrupted reads without replaying the pending post");
+  assert.deepEqual(context.resyncCalls, [["board-logs", "board", "logs"], ["board-logs", "board", "logs"]],
+    "normal reconnect must not broadly resync every Settings surface");
+  assert.equal(board.resetToLatest, true);
+  assert.equal(board.composerBody, "Unsent draft");
+  assert.equal(board.pendingSubmit.body, "Submitted draft");
+  assert.equal(board.pendingSubmit.recovering, true);
+  assert.equal(logs.query, "retained filter");
+  assert.equal(foreign.loading, true, "another project's interrupted read stays fenced");
+  surface.applyBoardLogsReceiveEvent({ kind: "board_entries", id: "board", entries: [], has_more_before: false });
+  surface.applyBoardLogsReceiveEvent({ kind: "log_entries", id: "logs", entries: [], scope: "global" });
+  assert.equal(board.loading, false);
+  assert.equal(logs.loading, false);
   assert.equal(context.attentionReportCount, 2);
 });
 
@@ -221,6 +259,7 @@ test("receive recovery requests pane and open surface snapshots only on the owni
   const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
   context.connectSocket();
   sockets[1].open();
+  context.resyncCalls.length = 0;
   const old = context.dispatcherOptions.at(-1);
   let recoveryLoads = 0;
   context.recoveryCenterController = { reconnect() { recoveryLoads++; } };
@@ -327,6 +366,7 @@ test("foreground recovery replaces the native backlog without replaying mutation
   context.connectSocket();
   const oldSocket = sockets[1];
   oldSocket.open();
+  context.resyncCalls.length = 0;
   const oldDispatcher = context.dispatcherOptions.at(-1);
   context.send({ kind: "post_board_entry", id: "pane-a", body: "draft" });
   const sentBeforeResume = oldSocket.sent.length;
