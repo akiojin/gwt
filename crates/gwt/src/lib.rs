@@ -74,6 +74,7 @@ pub mod pm_registry;
 pub mod preset;
 pub mod process;
 pub mod profile_dispatch;
+pub mod project_execution_policy;
 pub mod project_notifications;
 pub mod project_open_control;
 pub mod project_runtime;

@@ -3,6 +3,7 @@ set -euo pipefail
 
 bash scripts/run-node-tests-with-linkedom.sh "$@" \
   crates/gwt/web/__tests__/close-project.test.mjs \
+  crates/gwt/web/__tests__/project-execution-policy-model.test.mjs \
   crates/gwt/web/__tests__/socket-project-scope.test.mjs \
   crates/gwt/web/__tests__/frontend-route.test.mjs \
   crates/gwt/web/__tests__/hub-app.test.mjs \

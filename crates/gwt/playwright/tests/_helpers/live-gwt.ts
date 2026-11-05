@@ -205,8 +205,14 @@ async function prepareLiveGwtPage(page: Page, options: LiveGwtOptions): Promise<
   }
 }
 
+export type ProjectExecutionObservation = {
+  project_key: string; generation: number; revision: number; choice: "continue" | "stop" | null;
+  effective_state: string; start_reason: string; observed_at: string; degraded: boolean;
+  operation_outcome?: { operation_id: string; choice: string | null; effect_state: string } | null;
+};
+
 export type LiveHubCatalog = {
-  projects: Array<{ id: string; project_key: string; title: string }>;
+  projects: Array<{ id: string; project_key: string; title: string; execution?: ProjectExecutionObservation }>;
   recent_projects: Array<{ path: string; title: string; project_key: string | null }>;
 };
 
@@ -274,7 +280,9 @@ export async function readLiveHubCatalog(
             reject(new Error("refusing to close a live test Project with running agents"));
             return;
           }
-          socket.send(JSON.stringify({ kind: "confirm_close_project", token: message.token }));
+          socket.send(JSON.stringify({ kind: "confirm_close_project", token: message.token, choice: message.choice_required ? "stop" : null,
+            operation_id: crypto.randomUUID(), expected_policy_revision: message.policy_revision,
+            expected_view_set_revision: message.view_set_revision }));
           return;
         }
         if (message.kind !== "hub_state") return;
@@ -315,13 +323,14 @@ export type LiveLaunchWizardFixture = {
 };
 
 const LIVE_WORK_SURFACE_SELECTOR = [
+  '.workspace-window[data-preset="issue"]',
   '.workspace-window[data-preset="work"]',
   '.workspace-window[data-preset="branches"]',
 ].join(", ");
 
 /**
  * Open the normal branch Launch Wizard through the active project's
- * visible Work/legacy Branches singleton. An existing user window is reused
+ * canonical Issues/legacy Work singleton. An existing user window is reused
  * and never owned by this helper. If none is visible, the helper requests a
  * persisted Work window; the backend may create one or reveal an existing
  * singleton. Cleanup closes the returned window only when its id did not exist
@@ -533,4 +542,18 @@ export async function openLiveGwtProject(
     await prepareLiveGwtPage(page, liveGwtPageOptions.get(page) ?? {});
   }
   await page.waitForSelector("#close-project-button", { state: "visible" });
+}
+
+
+/** Focus the exact persisted terminal through the production focus route. */
+export async function focusLiveWindow(page: Page, id: string): Promise<void> {
+  await page.bringToFront();
+  await sendLiveGwtEvent(page, { kind: "focus_window", id });
+  await page.waitForFunction(id => {
+    const state = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) => entry.payload.kind === "workspace_state")?.payload.workspace;
+    return state?.tabs.flatMap((tab: any) => tab.workspace.windows).reduce((top: any, window: any) =>
+      !top || (window.z_index || 0) > (top.z_index || 0) ? window : top, null)?.id === id;
+  }, id, { timeout: 5_000 });
+  await page.reload();
+  await page.locator(`.split-pane .workspace-window[data-id="${id}"]`).waitFor({ state: "visible", timeout: 5_000 });
 }

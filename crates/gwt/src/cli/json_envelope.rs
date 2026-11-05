@@ -1034,6 +1034,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         | "pr.review.submit"
         | "pr.auto_merge.enable"
         | "update.settings.set"
+        | "project.execution.choose"
         | "pm.approval.request"
         | "pm.approval.status"
         | "pm.approval.revoke"
@@ -1875,6 +1876,18 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 text: required_string(params, "text")?,
                 operation_id,
             })
+        }
+        "project.execution.status" => {
+            let operation_id = optional_string(params, "operation_id")?;
+            if operation_id
+                .as_ref()
+                .is_some_and(|id| uuid::Uuid::parse_str(id).is_err())
+            {
+                return Err(CliParseError::InvalidJson(
+                    "operation_id must be a UUID".into(),
+                ));
+            }
+            CliCommand::Pm(crate::cli::pm::PmCommand::ProjectExecutionStatus { operation_id })
         }
         "pm.capabilities" => CliCommand::Pm(crate::cli::pm::PmCommand::Capabilities),
         "pm.request_tasks.read" => {
@@ -8383,6 +8396,42 @@ mod tests {
                 "pm.capabilities"
             )
         );
+    }
+
+    #[test]
+    fn project_execution_policy_operations_are_typed_and_project_fixed() {
+        let _ = ok("project.execution.status", json!({}));
+        let _ = ok(
+            "project.execution.status",
+            json!({"operation_id":"00000000-0000-4000-8000-000000000001"}),
+        );
+        let choice = json!({
+            "operation_id":"00000000-0000-4000-8000-000000000001",
+            "expected_revision":0,"expected_generation":1,"choice":"continue",
+            "instruction_id":"human-instruction"
+        });
+        let _ = ok("project.execution.choose", choice.clone());
+        assert!(
+            crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "project.execution.status"
+            )
+        );
+        assert!(
+            !crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "project.execution.choose"
+            )
+        );
+        for (key, value) in [
+            ("project_root", json!("/other")),
+            ("approved", json!(true)),
+            ("choice", json!("cancel")),
+            ("operation_id", json!("not-a-uuid")),
+        ] {
+            let mut invalid = choice.clone();
+            invalid[key] = value;
+            let _ = err("project.execution.choose", invalid);
+        }
+        let _ = err("project.execution.status", json!({"project_root":"/other"}));
     }
 
     // Issue #3607: PM stop/deregister parse variants.

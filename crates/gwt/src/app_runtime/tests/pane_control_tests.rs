@@ -3233,6 +3233,7 @@ fn agent_pane_list_windows_returns_scoped_state_without_terminal_snapshots() {
         title: value["title"].as_str().unwrap().into(),
         project_root: value["project_root"].as_str().unwrap().into(),
         project_scope: value["project_scope"].as_str().unwrap().into(),
+        execution: None,
         kind: serde_json::from_value(value["kind"].clone()).unwrap(),
         workspace: gwt::WorkspaceView {
             windows: value["workspace"]["windows"]

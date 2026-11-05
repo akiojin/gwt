@@ -1,3 +1,4 @@
+import { createProjectExecutionPolicyModel, createProjectViewReadiness } from "/project-execution-policy-model.js";
 import { createCloseProjectController } from "/close-project-confirm-modal.js";
 import { createUiStateStore } from "/ui-state-store.js";
 import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleModel, createAgentSwitchModel, selectWorksTelemetry } from "/agent-activity-model.js";
@@ -423,6 +424,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // route, never from in-page selection, so reconnects rebind the same
       // Project and workspace actions never change the URL.
       const routeProjectKey = parseFrontendRoute(window.location.pathname).projectKey;
+      const projectExecutionPolicy = createProjectExecutionPolicyModel(routeProjectKey);
+      const projectViewReadiness = createProjectViewReadiness({ document, projectKey: routeProjectKey, send });
       const { model: agentActivityModel, applyAgentActivitySnapshot, clearAgentActivity } = createAgentActivityModel(routeProjectKey);
       const { model: rosterModel, applyAgentRosterSnapshot, applyAgentRosterError, applyAgentRosterUsage,
         editAgentMemberName, retryAgentMemberName, clearAgentRosterRename } = createAgentRosterModel(routeProjectKey, {
@@ -902,7 +905,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         }
         // These explicit writes belong to this live connection.
         // Never replay an unacknowledged write after reconnect.
-        if ((message.kind === "agent_switch" && message.action.kind !== "read") ||
+        if (["confirm_close_project", "cancel_close_project", "preview_close_project", "project_view_ready"].includes(message.kind) ||
+            (message.kind === "agent_switch" && message.action.kind !== "read") ||
             (message.kind === "agent_roster" && message.action.kind === "rename") ||
             (message.kind === "get_hook_doctor" && message.repair === true)) {
           if (!socket || socket.readyState !== WebSocket.OPEN || socketProjectKey !== activeProjectKey()) return "unavailable";
@@ -1301,10 +1305,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           },
         });
         projectPageMetadata.resetConnection();
+        projectViewReadiness.connectionLost();
         // A restarted backend has its own restore gate, even when this page survives.
         startupAutoResumeReadySent = false;
         setConnectionState(true);
         send({ kind: "frontend_ready" });
+        closeProjectController.reconnect();
         if (socketProjectKey) projectPageMetadata.reportAttention();
         recoveryCenterController?.reconnect();
         for (let index = 0; index < pendingMessages.length;) {
@@ -1400,6 +1406,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
 
       function handleSocketClose(recoverSnapshots = false) {
         closeProjectController.connectionLost();
+        projectViewReadiness.connectionLost();
+        projectExecutionPolicy.connectionLost();
         socketReceiveDispatcherGeneration += 1;
         socketReceiveDispatcher?.dispose?.();
         socketReceiveDispatcher = null;
@@ -1783,6 +1791,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       function receiveHubState(hub) {
+        const execution = hub.projects?.find(project => project.project_key === routeProjectKey)?.execution;
+        if (execution) projectExecutionPolicy.applyStatus(execution);
         hubCatalog = hub;
         renderAppState({ ...appState, app_version: hub.app_version });
       }
@@ -1950,7 +1960,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       const closeProjectController = createCloseProjectController({
-        document, send,
+        document, send, projectKey: routeProjectKey,
         onClosed: (projectKey) => {
           if (projectKey !== routeProjectKey) return;
           routeProjectMissing = true;
@@ -3961,6 +3971,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         document,
         send,
         confirm: (message) => window.confirm(message),
+        executionModel: projectExecutionPolicy.model, projectTitle: () => activeProjectTab()?.title || routeProjectKey,
       });
       pmSettingsPanel.bindEntryPoints({ document });
 
@@ -4996,6 +5007,13 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         updatePmLauncher(activeWorkspace());
       });
 
+      const projectViewChallengeModel = createUiStateStore(null);
+      projectViewChallengeModel.subscribe(value => value, challenge => {
+        if (challenge?.project_key !== routeProjectKey) return;
+        projectExecutionPolicy.bindGeneration(challenge.generation);
+        projectViewReadiness.challenge(challenge);
+      });
+
       const workspaceStateModel = createUiStateStore(null);
       workspaceStateModel.subscribe(state => state, snapshot => {
         if (!snapshot) return;
@@ -5005,6 +5023,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         // Keep launcher, pending navigation and startup ACKs in render order.
         updatePmLauncher(activeWorkspace());
         resolvePendingWindowFrames();
+        projectViewReadiness.rendered();
         sendStartupAutoResumeReady();
         startupMetrics.onWorkspaceRendered();
       });
@@ -5016,6 +5035,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           return;
         }
         switch (event.kind) {
+          case "project_view_challenge":
+            projectViewChallengeModel.update(() => event);
+            break;
+          case "project_execution_status":
+            projectExecutionPolicy.applyStatus(event.status);
+            break;
           case "hub_state": {
             hubCatalogModel.update(() => event.hub);
             break;
@@ -5668,7 +5693,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         openSurface("works");
         return worksSurface.openWork(live);
       }
-      agentsSurface = createAgentsSurface({ document, rosterModel, scheduleModel, switchModel, activityModel: agentActivityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
+      agentsSurface = createAgentsSurface({ document, executionModel: projectExecutionPolicy.model,
+        projectTitle: () => activeProjectTab()?.title || routeProjectKey, rosterModel, scheduleModel, switchModel, activityModel: agentActivityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
         onRenameMember: editAgentMemberName,
         onRetryName: retryAgentMemberName,
         onAddMember: (agentId, name) => {
@@ -5851,6 +5877,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           if (socketReceiveDispatcher) socketReceiveDispatcher.resume();
           else if (socketProjectKey) connectSocket(true);
         }
+        projectViewReadiness.visible();
         requestVisiblePmReports(true);
         rearmVisibleTerminalViewportRefreshes();
         resumeKnowledgeEventRefresh();

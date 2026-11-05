@@ -2889,3 +2889,755 @@ fn app_runtime_launch_wizard_set_agent_failure_logs_requested_agent() {
     );
     assert!(!event.fields.contains_key("selected_tool_version"));
 }
+
+#[test]
+fn issue6682_hydration_requires_a_bound_actual_view_receipt() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        temp.path().to_path_buf(),
+        ProjectKind::Git,
+        &[],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let context = runtime.project_context("tab-1").unwrap();
+    runtime
+        .project_state_mut(&context)
+        .unwrap()
+        .project_views
+        .clear_fixture_views();
+    let _ = std::fs::remove_file(gwt::project_execution_policy::observation_path(
+        &context.project_root,
+    ));
+    let events = runtime.handle_frontend_event_in_scope(
+        "browser-a".into(),
+        FrontendEvent::FrontendReady,
+        &ClientScope::Project(context.project_key.clone()),
+    );
+    let challenge = events
+        .iter()
+        .find_map(|event| {
+            let value = serde_json::to_value(&event.event).unwrap();
+            (value["kind"] == "project_view_challenge").then_some(value)
+        })
+        .expect("hydration must challenge the browser before granting actual-view admission");
+    assert_eq!(challenge["project_key"], context.project_key.to_string());
+    assert_eq!(challenge["generation"], context.generation);
+    assert!(!challenge["nonce"].as_str().unwrap().is_empty());
+    assert_eq!(runtime.tabs.len(), 1);
+}
+
+#[test]
+fn issue6682_last_view_close_requires_a_choice_even_without_agents() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        temp.path().to_path_buf(),
+        ProjectKind::Git,
+        &[],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let context = runtime.project_context("tab-1").unwrap();
+    runtime
+        .project_state_mut(&context)
+        .unwrap()
+        .project_views
+        .clear_fixture_views();
+    let _ = std::fs::remove_file(gwt::project_execution_policy::observation_path(
+        &context.project_root,
+    ));
+    let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+        "kind":"preview_close_project", "project_key":context.project_key.to_string()
+    }))
+    .unwrap();
+    let events = runtime.handle_frontend_event_in_scope(
+        "browser-a".into(),
+        event,
+        &ClientScope::Project(context.project_key.clone()),
+    );
+    let preview = events
+        .iter()
+        .find_map(|event| {
+            let value = serde_json::to_value(&event.event).unwrap();
+            (value["kind"] == "close_project_preview").then_some(value)
+        })
+        .unwrap();
+    assert_eq!(
+        preview["choice_required"], true,
+        "last-view consent cannot be inferred from agent count"
+    );
+    assert_eq!(preview["policy_revision"], 0);
+    assert_eq!(runtime.tabs.len(), 1, "preview preserves all project state");
+}
+
+fn issue6682_accept_view(
+    runtime: &mut AppRuntime,
+    context: &super::super::ProjectContext,
+    client: &str,
+    view: &str,
+) {
+    let scope = ClientScope::Project(context.project_key.clone());
+    let hydrated =
+        runtime.handle_frontend_event_in_scope(client.into(), FrontendEvent::FrontendReady, &scope);
+    let challenge = hydrated
+        .iter()
+        .find_map(|event| {
+            let value = serde_json::to_value(&event.event).unwrap();
+            (value["kind"] == "project_view_challenge").then_some(value)
+        })
+        .unwrap();
+    let ready: FrontendEvent = serde_json::from_value(serde_json::json!({
+        "kind":"project_view_ready", "generation":challenge["generation"], "nonce":challenge["nonce"], "view_id":view
+    })).unwrap();
+    runtime.handle_frontend_event_in_scope(client.into(), ready, &scope);
+}
+
+#[test]
+fn issue6682_view_receipt_is_single_use_and_client_bound() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        temp.path().to_path_buf(),
+        ProjectKind::Git,
+        &[],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let context = runtime.project_context("tab-1").unwrap();
+    runtime
+        .project_state_mut(&context)
+        .unwrap()
+        .project_views
+        .clear_fixture_views();
+    let _ = std::fs::remove_file(gwt::project_execution_policy::observation_path(
+        &context.project_root,
+    ));
+    let scope = ClientScope::Project(context.project_key.clone());
+    let hydrated =
+        runtime.handle_frontend_event_in_scope("a".into(), FrontendEvent::FrontendReady, &scope);
+    let challenge = hydrated
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::ProjectViewChallenge { nonce, .. } => Some(nonce.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let ready = || {
+        serde_json::from_value(serde_json::json!({"kind":"project_view_ready", "generation":context.generation, "nonce":challenge, "view_id":"view-a"})).unwrap()
+    };
+    runtime.handle_frontend_event_in_scope("foreign".into(), ready(), &scope);
+    assert!(!gwt::project_execution_policy::actual_open(&context.project_root).unwrap());
+    runtime.handle_frontend_event_in_scope("a".into(), ready(), &scope);
+    assert!(gwt::project_execution_policy::actual_open(&context.project_root).unwrap());
+    let revision = runtime
+        .project_execution_status(&context, None)
+        .view_set_revision;
+    let replay = runtime.handle_frontend_event_in_scope("a".into(), ready(), &scope);
+    assert!(replay.iter().any(|event| matches!(&event.event, BackendEvent::CloseProjectError { code, .. } if code == "StaleViewReceipt")));
+    assert_eq!(
+        runtime
+            .project_execution_status(&context, None)
+            .view_set_revision,
+        revision
+    );
+}
+
+#[test]
+fn issue6682_single_view_detach_preserves_other_view_and_choice() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        temp.path().to_path_buf(),
+        ProjectKind::Git,
+        &[],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let context = runtime.project_context("tab-1").unwrap();
+    runtime
+        .project_state_mut(&context)
+        .unwrap()
+        .project_views
+        .clear_fixture_views();
+    let _ = std::fs::remove_file(gwt::project_execution_policy::observation_path(
+        &context.project_root,
+    ));
+    issue6682_accept_view(&mut runtime, &context, "a", "view-a");
+    issue6682_accept_view(&mut runtime, &context, "b", "view-a");
+    assert_eq!(
+        runtime
+            .project_state(&context)
+            .unwrap()
+            .project_views
+            .view_count(),
+        2,
+        "duplicated tab identity never evicts another live client"
+    );
+    let scope = ClientScope::Project(context.project_key.clone());
+    let preview: FrontendEvent = serde_json::from_value(serde_json::json!({"kind":"preview_close_project", "project_key":context.project_key.to_string()})).unwrap();
+    let events = runtime.handle_frontend_event_in_scope("a".into(), preview, &scope);
+    let preview = events
+        .iter()
+        .find_map(|event| {
+            let value = serde_json::to_value(&event.event).unwrap();
+            (value["kind"] == "close_project_preview").then_some(value)
+        })
+        .unwrap();
+    assert_eq!(preview["choice_required"], false);
+    let confirm: FrontendEvent = serde_json::from_value(serde_json::json!({"kind":"confirm_close_project", "token":preview["token"], "operation_id":uuid::Uuid::new_v4().to_string(), "expected_policy_revision":preview["policy_revision"], "expected_view_set_revision":preview["view_set_revision"]})).unwrap();
+    let closed = runtime.handle_frontend_event_in_scope("a".into(), confirm, &scope);
+    assert!(closed
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::ProjectViewClosed { .. })));
+    assert_eq!(
+        runtime
+            .project_state(&context)
+            .unwrap()
+            .project_views
+            .view_count(),
+        1
+    );
+    assert_eq!(
+        gwt_core::project_execution_policy::load(&context.project_root)
+            .unwrap()
+            .choice,
+        None
+    );
+    assert_eq!(runtime.tabs.len(), 1);
+}
+
+#[test]
+fn issue6682_changed_view_set_and_legacy_confirm_have_no_effects() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        temp.path().to_path_buf(),
+        ProjectKind::Git,
+        &[],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let context = runtime.project_context("tab-1").unwrap();
+    runtime
+        .project_state_mut(&context)
+        .unwrap()
+        .project_views
+        .clear_fixture_views();
+    let _ = std::fs::remove_file(gwt::project_execution_policy::observation_path(
+        &context.project_root,
+    ));
+    issue6682_accept_view(&mut runtime, &context, "a", "view-a");
+    let scope = ClientScope::Project(context.project_key.clone());
+    let preview: FrontendEvent = serde_json::from_value(serde_json::json!({"kind":"preview_close_project", "project_key":context.project_key.to_string()})).unwrap();
+    let events = runtime.handle_frontend_event_in_scope("a".into(), preview, &scope);
+    let preview = events
+        .iter()
+        .find_map(|event| {
+            let value = serde_json::to_value(&event.event).unwrap();
+            (value["kind"] == "close_project_preview").then_some(value)
+        })
+        .unwrap();
+    let legacy = serde_json::from_value(
+        serde_json::json!({"kind":"confirm_close_project", "token":preview["token"]}),
+    )
+    .unwrap();
+    let rejected = runtime.handle_frontend_event_in_scope("a".into(), legacy, &scope);
+    assert!(rejected.iter().any(|event| matches!(&event.event, BackendEvent::CloseProjectError { code, .. } if code == "ClientUpgradeRequired")));
+    issue6682_accept_view(&mut runtime, &context, "b", "view-b");
+    let confirm = serde_json::from_value(serde_json::json!({"kind":"confirm_close_project", "token":preview["token"], "choice":"stop", "operation_id":uuid::Uuid::new_v4().to_string(), "expected_policy_revision":preview["policy_revision"], "expected_view_set_revision":preview["view_set_revision"]})).unwrap();
+    let rejected = runtime.handle_frontend_event_in_scope("a".into(), confirm, &scope);
+    assert!(rejected.iter().any(|event| matches!(&event.event, BackendEvent::CloseProjectError { code, .. } if code == "StaleCloseRequest")));
+    assert_eq!(
+        gwt_core::project_execution_policy::load(&context.project_root)
+            .unwrap()
+            .revision,
+        0
+    );
+    assert_eq!(
+        runtime
+            .project_state(&context)
+            .unwrap()
+            .project_views
+            .view_count(),
+        2
+    );
+}
+
+#[test]
+fn issue6682_persisted_close_callback_preserves_a_fresh_reopened_view() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        temp.path().to_path_buf(),
+        ProjectKind::Git,
+        &[],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let context = runtime.project_context("tab-1").unwrap();
+    runtime
+        .project_state_mut(&context)
+        .unwrap()
+        .project_views
+        .clear_fixture_views();
+    let _ = std::fs::remove_file(gwt::project_execution_policy::observation_path(
+        &context.project_root,
+    ));
+    issue6682_accept_view(&mut runtime, &context, "a", "view-a");
+    let closing_receipts = runtime
+        .project_state(&context)
+        .unwrap()
+        .project_views
+        .view_receipts();
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    gwt_core::project_execution_policy::choose(
+        &context.project_root,
+        &gwt_core::project_execution_policy::ChoiceRequest {
+            operation_id: operation_id.clone(),
+            expected_revision: 0,
+            generation: context.generation,
+            choice: gwt_core::project_execution_policy::Choice::Continue,
+            consent_source_id: "accepted-choice".into(),
+            actor: "browser:a".into(),
+            authorized_work_lineage: Vec::new(),
+        },
+    )
+    .unwrap();
+    // A real ready handshake completes after owner CAS but before its callback.
+    issue6682_accept_view(&mut runtime, &context, "b", "fresh-reopened-view");
+    let result = serde_json::json!({"status":runtime.project_execution_status(&context,None)});
+    let events = runtime.project_execution_choice_completed(
+        super::super::project_execution_policy::ProjectExecutionChoiceCompleted {
+            context: context.clone(),
+            client_id: "a".into(),
+            operation_id,
+            closing_receipts,
+            result: Ok(result),
+        },
+    );
+    assert_eq!(
+        runtime
+            .project_state(&context)
+            .unwrap()
+            .project_views
+            .view_count(),
+        1
+    );
+    assert!(events
+        .iter()
+        .any(|event| event.target == DispatchTarget::Client("a".into())
+            && matches!(event.event, BackendEvent::ProjectViewClosed { .. })));
+    assert!(!events.iter().any(
+        |event| matches!(event.event, BackendEvent::ProjectClosed { .. })
+            || (event.target == DispatchTarget::Client("b".into())
+                && matches!(event.event, BackendEvent::ProjectViewClosed { .. }))
+    ));
+    assert!(gwt::project_execution_policy::actual_open(&context.project_root).unwrap());
+}
+
+#[test]
+fn issue6682_before_save_refusal_keeps_the_view_and_returns_exact_retry_proof() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        temp.path().to_path_buf(),
+        ProjectKind::Git,
+        &[],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let context = runtime.project_context("tab-1").unwrap();
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let before = runtime
+        .project_state(&context)
+        .unwrap()
+        .project_views
+        .view_count();
+    let events = runtime.project_execution_choice_completed(
+        super::super::project_execution_policy::ProjectExecutionChoiceCompleted {
+            context: context.clone(), client_id: "a".into(), operation_id: operation_id.clone(),
+            closing_receipts: Default::default(),
+            result: Ok(serde_json::json!({"choice_not_started":true,"message":"policy unavailable before save"})),
+        });
+    assert_eq!(
+        runtime
+            .project_state(&context)
+            .unwrap()
+            .project_views
+            .view_count(),
+        before
+    );
+    assert!(events.iter().any(|event| matches!(&event.event,
+        BackendEvent::CloseProjectError { operation_id: Some(id), retry_same_intent: true, .. } if id == &operation_id)));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::ProjectViewClosed { .. })));
+}
+
+#[test]
+fn issue6682_pm_cold_restore_is_held_until_actual_open_without_losing_normal_start() {
+    let _pm_gate = super::super::pm::test_gate::PmEnsureTestGuard::enable();
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let context = runtime.project_context("tab-1").unwrap();
+    runtime
+        .project_state_mut(&context)
+        .unwrap()
+        .project_views
+        .clear_fixture_views();
+    std::fs::remove_file(gwt::project_execution_policy::observation_path(&repo)).unwrap();
+    assert!(
+        gwt::pm_registry::load_pm_prefs(&gwt::pm_registry::pm_prefs_path_for_repo_path(&repo))
+            .unwrap()
+            .settings
+            .auto_start
+    );
+    runtime.ensure_pm_agent_for_tab("tab-1", super::super::pm::PmEnsureTrigger::Automatic);
+    assert!(runtime
+        .project_state(&context)
+        .unwrap()
+        .pending_pm_worktree_preparations
+        .is_empty());
+    assert!(runtime
+        .project_state(&context)
+        .unwrap()
+        .pending_pm_launches
+        .is_empty());
+    issue6682_accept_view(&mut runtime, &context, "a", "actual-view");
+    assert_eq!(
+        runtime
+            .project_state(&context)
+            .unwrap()
+            .pending_pm_worktree_preparations
+            .len(),
+        1
+    );
+    runtime.ensure_pm_agent_for_tab("tab-1", super::super::pm::PmEnsureTrigger::Automatic);
+    assert_eq!(
+        runtime
+            .project_state(&context)
+            .unwrap()
+            .pending_pm_worktree_preparations
+            .len(),
+        1,
+        "the normal singleton/in-flight gates remain effective"
+    );
+}
+
+#[test]
+fn issue6682_owner_health_failure_keeps_cached_running_work_unknown() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, _, id) = owner_browser_input_fixture(temp.path());
+    let context = runtime.project_context("browser-tab").unwrap();
+    let identity = runtime.runtimes[&id].owner_identity.clone();
+    runtime.handle_project_owner_health(
+        &context,
+        1,
+        Some(identity),
+        gwt::protocol::ProjectOwnerHealthView {
+            project_key: context.project_key.to_string(),
+            state: gwt::protocol::ProjectOwnerHealthState::Healthy,
+            detail: None,
+        },
+    );
+    assert_eq!(
+        runtime
+            .project_execution_status(&context, None)
+            .effective_state,
+        "running"
+    );
+    runtime.handle_project_owner_health(
+        &context,
+        2,
+        None,
+        gwt::protocol::ProjectOwnerHealthView {
+            project_key: context.project_key.to_string(),
+            state: gwt::protocol::ProjectOwnerHealthState::Degraded,
+            detail: Some("owner connection lost".into()),
+        },
+    );
+    let hub = serde_json::to_value(runtime.hub_state_view()).unwrap();
+    assert_eq!(
+        hub["projects"][0]["execution"]["effective_state"],
+        "unknown"
+    );
+    let unknown = runtime.project_execution_status(&context, None);
+    assert_eq!(unknown.effective_state, "unknown");
+    assert!(unknown.degraded);
+    assert!(
+        runtime.runtimes.contains_key(&id),
+        "a missing observation does not destroy the work"
+    );
+}
+
+#[test]
+fn issue6682_continued_work_stays_observed_running_after_last_view_detaches() {
+    use gwt_core::project_execution_policy::{self as store, Choice, EffectState};
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, _, id) = owner_browser_input_fixture(temp.path());
+    let context = runtime.project_context("browser-tab").unwrap();
+    let request = store::ChoiceRequest {
+        operation_id: uuid::Uuid::new_v4().to_string(),
+        expected_revision: 0,
+        generation: context.generation,
+        choice: Choice::Continue,
+        consent_source_id: "explicit-continue".into(),
+        actor: "browser:fixture".into(),
+        authorized_work_lineage: vec![format!("pane:{}", runtime.runtimes[&id].owner_pane_id)],
+    };
+    store::choose(&context.project_root, &request).unwrap();
+    store::record_effect(
+        &context.project_root,
+        &request.operation_id,
+        EffectState::Confirmed,
+        None,
+    )
+    .unwrap();
+    let identity = runtime.runtimes[&id].owner_identity.clone();
+    runtime.handle_project_owner_health(
+        &context,
+        1,
+        Some(identity),
+        gwt::protocol::ProjectOwnerHealthView {
+            project_key: context.project_key.to_string(),
+            state: gwt::protocol::ProjectOwnerHealthState::Healthy,
+            detail: None,
+        },
+    );
+    runtime.reconcile_project_view_connections(&gwt::project_transport::ClientHub::default());
+
+    let hub = serde_json::to_value(runtime.hub_state_view()).unwrap();
+    let status = &hub["projects"][0]["execution"];
+    assert_eq!(status["effective_state"], "running");
+    assert_eq!(status["start_reason"], "authorized_resume");
+    assert_eq!(status["choice"], "continue");
+    assert_eq!(status["degraded"], false);
+    assert!(!runtime.runtimes[&id].exit_confirmed);
+}
+
+#[test]
+fn issue6682_failed_observation_publication_revokes_admission_and_retains_invalidation_retry() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        temp.path().to_path_buf(),
+        ProjectKind::Git,
+        &[],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let context = runtime.project_context("tab-1").unwrap();
+    let lock = gwt::project_execution_policy::observation_path(&context.project_root)
+        .with_extension("lock");
+    fs::remove_file(&lock).unwrap();
+    fs::create_dir(&lock).unwrap();
+    runtime.blocking_tasks = BlockingTaskSpawner::failing("fixture worker admission failed");
+    runtime.reconcile_project_view_connections(&gwt::project_transport::ClientHub::default());
+    assert!(runtime
+        .project_execution_admission(&context, &["issue:100".into()])
+        .is_err());
+    let invalidation = runtime
+        .project_state(&context)
+        .unwrap()
+        .project_views
+        .pending_invalidation_for_test()
+        .expect("failed notification remains pending");
+    fs::remove_dir(lock).unwrap();
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    runtime.retry_project_observation_invalidations();
+    assert_eq!(tasks.lock().unwrap().len(), 1);
+    runtime.project_observation_invalidation_completed(
+        super::super::project_execution_policy::ProjectObservationInvalidationCompleted {
+            context: context.clone(),
+            invalidation: invalidation.clone(),
+            result: Err("owner temporarily unavailable".into()),
+        },
+    );
+    runtime.retry_project_observation_invalidations();
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        2,
+        "a later canonical tick retries the exact revocation"
+    );
+    runtime.project_observation_invalidation_completed(
+        super::super::project_execution_policy::ProjectObservationInvalidationCompleted {
+            context: context.clone(),
+            invalidation,
+            result: Ok(()),
+        },
+    );
+    assert!(runtime
+        .project_state(&context)
+        .unwrap()
+        .project_views
+        .pending_invalidation_for_test()
+        .is_none());
+}
+
+#[test]
+fn issue6682_reopened_running_work_becomes_selection_pending_on_raw_detach() {
+    use gwt_core::project_execution_policy::{self as store, Choice, EffectState};
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        temp.path().to_path_buf(),
+        ProjectKind::Git,
+        &[WindowPreset::Shell],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let context = runtime.project_context("tab-1").unwrap();
+    runtime
+        .project_state_mut(&context)
+        .unwrap()
+        .project_views
+        .clear_fixture_views();
+    let request = store::ChoiceRequest {
+        operation_id: uuid::Uuid::new_v4().to_string(),
+        expected_revision: 0,
+        generation: context.generation,
+        choice: Choice::Stop,
+        consent_source_id: "earlier-stop".into(),
+        actor: "browser:fixture".into(),
+        authorized_work_lineage: Vec::new(),
+    };
+    store::choose(&context.project_root, &request).unwrap();
+    store::record_effect(
+        &context.project_root,
+        &request.operation_id,
+        EffectState::Confirmed,
+        None,
+    )
+    .unwrap();
+    issue6682_accept_view(&mut runtime, &context, "a", "new-open-after-stop");
+    let id = combined_window_id("tab-1", "shell-1");
+    insert_test_pane_runtime(&mut runtime, &id);
+    let identity = runtime.runtimes[&id].owner_identity.clone();
+    runtime.handle_project_owner_health(
+        &context,
+        1,
+        Some(identity),
+        gwt::protocol::ProjectOwnerHealthView {
+            project_key: context.project_key.to_string(),
+            state: gwt::protocol::ProjectOwnerHealthState::Healthy,
+            detail: None,
+        },
+    );
+    assert_eq!(
+        runtime
+            .project_execution_status(&context, None)
+            .effective_state,
+        "running"
+    );
+    runtime.reconcile_project_view_connections(&gwt::project_transport::ClientHub::default());
+    assert_eq!(
+        runtime
+            .project_execution_status(&context, None)
+            .effective_state,
+        "selection_pending"
+    );
+    assert!(!runtime.runtimes[&id].exit_confirmed);
+    let health = owner_fixture_block_on(
+        runtime.runtimes[&id]
+            .client
+            .command(gwt::project_runtime::events::OwnerCommand::Health),
+    )
+    .unwrap();
+    assert_eq!(
+        health["panes"], 1,
+        "raw detach cannot turn the old Stop receipt into another physical Stop"
+    );
+}
+
+#[test]
+fn issue6682_production_boots_do_not_reuse_a_project_generation() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let tabs = vec![sample_project_tab(
+        "tab-1",
+        "Repo",
+        temp.path().to_path_buf(),
+        ProjectKind::Git,
+        &[],
+    )];
+    let (first, _) = super::super::initial_project_tab_incarnations(&tabs);
+    let (second, _) = super::super::initial_project_tab_incarnations(&tabs);
+    assert_ne!(
+        first["tab-1"].generation, second["tab-1"].generation,
+        "an unused exact old-generation user grant must not match a later boot"
+    );
+    assert!(first["tab-1"].generation > 0 && first["tab-1"].generation < (1_u64 << 53));
+    assert!(second["tab-1"].generation > 0 && second["tab-1"].generation < (1_u64 << 53));
+}
+
+#[test]
+fn issue6682_backend_context_publishes_its_current_generation_without_an_open_grant() {
+    use gwt_core::project_execution_policy::{self as store, Choice};
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let current = temp.path().join("current");
+    let selected = temp.path().join("selected");
+    fs::create_dir_all(&current).unwrap();
+    fs::create_dir_all(&selected).unwrap();
+    init_repo_with_initial_commit(&selected);
+    store::choose(
+        &selected,
+        &store::ChoiceRequest {
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            expected_revision: 0,
+            generation: 1,
+            choice: Choice::Continue,
+            consent_source_id: "previous-boot-consent".into(),
+            actor: "browser:earlier".into(),
+            authorized_work_lineage: vec!["issue:42".into()],
+        },
+    )
+    .unwrap();
+    let tab = sample_project_tab("tab-1", "Current", current, ProjectKind::NonRepo, &[]);
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    runtime.open_project_path_events(selected.clone());
+    drain_queued_blocking_tasks(&queued);
+    let prepared = take_project_navigation_completion(&recorded);
+    runtime.handle_project_navigation_prepared(prepared);
+    let context = runtime
+        .project_contexts()
+        .into_iter()
+        .find(|context| same_worktree_path(&context.project_root, &selected))
+        .unwrap();
+    let observed = gwt::project_execution_policy::observation(&selected)
+        .unwrap()
+        .expect("the current host publishes a generation before any visible view");
+    assert_eq!(observed.generation, context.generation);
+    assert_ne!(observed.generation, 1);
+    assert!(observed.views.is_empty());
+    assert!(observed.last_open_receipt.is_none());
+    assert!(!gwt::project_execution_policy::actual_open(&selected).unwrap());
+    assert!(gwt::project_execution_policy::admission(&selected, &["issue:42".into()]).is_ok());
+    assert!(gwt::project_execution_policy::admission(&selected, &["issue:43".into()]).is_err());
+    assert!(runtime
+        .project_state(&context)
+        .unwrap()
+        .pending_pm_launches
+        .is_empty());
+}

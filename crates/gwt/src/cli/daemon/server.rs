@@ -2056,7 +2056,7 @@ fn spawn_issue_monitor_worker_with_lease(
             let execute_effects = execute_effects && !test_hooks.hold_effects;
             if execute_effects && in_flight_effect.is_none() {
                 effect_execution_requested = false;
-                let current_permit = effect_permit.capture();
+                let current_permit = effect_permit.capture_for_project(&scope.project_root);
                 let selection_now =
                     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
                 let next_effect = monitor
@@ -6965,6 +6965,7 @@ struct IssueMonitorEffectPermit {
 struct IssueMonitorEffectPermitToken {
     generation_open: Arc<AtomicBool>,
     lane_open: Arc<AtomicBool>,
+    project_root: Option<PathBuf>,
 }
 
 impl IssueMonitorEffectPermitToken {
@@ -6973,6 +6974,7 @@ impl IssueMonitorEffectPermitToken {
         Self {
             generation_open: Arc::new(AtomicBool::new(true)),
             lane_open: Arc::new(AtomicBool::new(true)),
+            project_root: None,
         }
     }
 
@@ -6989,10 +6991,20 @@ impl IssueMonitorEffectPermit {
         }
     }
 
+    fn capture_for_project(&self, project_root: &Path) -> IssueMonitorEffectPermitToken {
+        IssueMonitorEffectPermitToken {
+            generation_open: Arc::clone(&self.current_generation),
+            lane_open: Arc::clone(&self.lane_open),
+            project_root: Some(project_root.to_path_buf()),
+        }
+    }
+
+    #[cfg(test)]
     fn capture(&self) -> IssueMonitorEffectPermitToken {
         IssueMonitorEffectPermitToken {
             generation_open: Arc::clone(&self.current_generation),
             lane_open: Arc::clone(&self.lane_open),
+            project_root: None,
         }
     }
 
@@ -7040,7 +7052,28 @@ fn issue_monitor_effect_permitted(
     effect: &crate::PendingIssueMonitorEffect,
     permit: &IssueMonitorEffectPermitToken,
 ) -> bool {
-    issue_monitor_effect_is_safety(effect) || permit.load(Ordering::Acquire)
+    if issue_monitor_effect_is_safety(effect) {
+        return true;
+    }
+    if !permit.load(Ordering::Acquire) {
+        return false;
+    }
+    // An ambiguous earlier attempt must still perform read-only reconciliation.
+    effect.state == crate::IssueMonitorEffectState::Attempting
+        || issue_monitor_project_submission_permitted(effect, permit)
+}
+
+fn issue_monitor_project_submission_permitted(
+    effect: &crate::PendingIssueMonitorEffect,
+    permit: &IssueMonitorEffectPermitToken,
+) -> bool {
+    match (&effect.payload, &permit.project_root) {
+        (crate::IssueMonitorEffectPayload::AcquireClaim { issue_number, .. }, Some(root)) => {
+            crate::project_execution_policy::admission(root, &[format!("issue:{issue_number}")])
+                .is_ok()
+        }
+        _ => true,
+    }
 }
 
 fn expire_issue_monitor_effect_at_watchdog(
@@ -7106,7 +7139,7 @@ fn spawn_issue_monitor_effect(
                 &scope,
                 &effect,
                 authority_current,
-                allow_submit,
+                allow_submit && issue_monitor_project_submission_permitted(&effect, &permit),
                 &execution_now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             )
         };
@@ -22625,6 +22658,7 @@ exit 1
     fn volatile_deny_runs_safety_effects_but_not_grants() {
         let _prefs_budget = pin_prefs_hang_guard();
         let temp = TempDir::new().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
         let prefs_path = temp.path().join("issue-monitor.json");
         let grant = crate::PendingIssueMonitorEffect::prepared(
             "claim:42:grant",
@@ -22657,6 +22691,43 @@ exit 1
         crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
         let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
         let permit = super::IssueMonitorEffectPermit::new();
+        let mut project_permit = permit.capture();
+        project_permit.project_root = Some(temp.path().to_path_buf());
+        assert!(
+            !super::issue_monitor_effect_permitted(&grant, &project_permit),
+            "a cold project cannot acquire a new owner claim"
+        );
+        assert!(
+            super::issue_monitor_effect_permitted(&safety, &project_permit),
+            "cleanup remains allowed"
+        );
+        let mut uncertain = grant.clone();
+        uncertain.state = crate::IssueMonitorEffectState::Attempting;
+        assert!(
+            super::issue_monitor_effect_permitted(&uncertain, &project_permit),
+            "an unknown earlier claim can still be observed"
+        );
+        assert!(
+            !super::issue_monitor_project_submission_permitted(&uncertain, &project_permit),
+            "reconciliation cannot submit a new cold claim"
+        );
+        gwt_core::project_execution_policy::choose(
+            temp.path(),
+            &gwt_core::project_execution_policy::ChoiceRequest {
+                operation_id: uuid::Uuid::new_v4().to_string(),
+                expected_revision: 0,
+                generation: 1,
+                choice: gwt_core::project_execution_policy::Choice::Continue,
+                consent_source_id: "human-choice".into(),
+                actor: "human".into(),
+                authorized_work_lineage: vec!["issue:42".into()],
+            },
+        )
+        .unwrap();
+        assert!(
+            super::issue_monitor_effect_permitted(&grant, &project_permit),
+            "the admitted Continue owner is not falsely rejected"
+        );
         permit.deny();
 
         let fenced = super::fence_next_issue_monitor_effect_with_permit(

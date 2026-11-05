@@ -1022,6 +1022,7 @@ pub(crate) mod persist_dispatcher;
 pub(crate) mod pm;
 mod pm_chat;
 mod profile;
+pub(crate) mod project_execution_policy;
 mod project_notifications;
 mod project_route;
 mod project_tabs;
@@ -1640,6 +1641,7 @@ pub(crate) struct ProjectRuntimeState {
     pub(crate) project_owner_identity: Option<gwt::daemon_subscriber::ProjectOwnerIdentity>,
     /// Latest close preview nonce for each requesting connection; never persisted.
     pub(crate) close_project_nonces: HashMap<ClientId, String>,
+    pub(crate) project_views: project_execution_policy::ProjectViewState,
     /// Single-use launch requests keyed by the exact wizard that produced
     /// them. The visible modal may be replaced before the queued event runs;
     /// materialization ownership must not move with that global UI slot.
@@ -1753,6 +1755,7 @@ pub(crate) fn initial_project_states(
                     project_owner_connection_id: 0,
                     project_owner_identity: None,
                     close_project_nonces: HashMap::new(),
+                    project_views: Default::default(),
                     pending_pm_launches: Default::default(),
                     pending_pm_closes: Default::default(),
                     pm_sessions: Default::default(),
@@ -4606,6 +4609,7 @@ impl AppRuntime {
                     project_owner_connection_id: 0,
                     project_owner_identity: None,
                     close_project_nonces: HashMap::new(),
+                    project_views: Default::default(),
                     pending_pm_launches: Default::default(),
                     pending_pm_closes: Default::default(),
                     pm_sessions: Default::default(),
@@ -5040,6 +5044,11 @@ impl AppRuntime {
             agent_backend_latest_probe_generations: HashMap::new(),
         };
         app.rebuild_window_lookup();
+        for context in app.project_contexts() {
+            if let Err(error) = app.persist_actual_project_views(&context) {
+                tracing::warn!(%error, "Restored Project observation could not be published");
+            }
+        }
         app.seed_window_pty_statuses();
         app.seed_restored_window_details();
         app.start_agent_auto_update();
@@ -11624,7 +11633,22 @@ impl AppRuntime {
                 if let Some(refresh) = &self.usage_refresh {
                     refresh.notify_one();
                 }
-                self.frontend_project_sync_events(&client_id, context)
+                let mut events = self.frontend_project_sync_events(&client_id, context);
+                events.extend(self.project_view_challenge_events(context, &client_id));
+                events
+            }
+            FrontendEvent::ProjectViewReady {
+                generation,
+                nonce,
+                view_id,
+            } => self.accept_project_view_ready(context, &client_id, generation, &nonce, &view_id),
+            FrontendEvent::GetProjectExecutionStatus { operation_id, .. } => {
+                vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::ProjectExecutionStatus {
+                        status: self.project_execution_status(context, operation_id.as_deref()),
+                    },
+                )]
             }
             FrontendEvent::RetryWorkspaceStateLoad => {
                 spawn_workspace_projection_reload(
@@ -13088,6 +13112,9 @@ impl AppRuntime {
                 .iter()
                 .filter_map(|tab| {
                     Some(gwt::HubProjectView {
+                        execution: self
+                            .project_context(&tab.id)
+                            .map(|context| self.project_execution_status(&context, None)),
                         owner_health: self
                             .project_state_for_tab(&tab.id)
                             .and_then(|state| state.project_owner_health.clone()),
@@ -13187,6 +13214,9 @@ impl AppRuntime {
             workspace,
             running_agent_count: running_agents.len() as u32,
             running_agents,
+            execution: self
+                .project_context(&tab.id)
+                .map(|context| self.project_execution_status(&context, None)),
         }
     }
 
@@ -14376,6 +14406,13 @@ impl AppRuntime {
                 .map(|(id, _)| id.clone())
         };
         match event {
+            OwnerEvent::ProjectExecutionStatus { status } => vec![
+                OutboundEvent::project(
+                    context.project_key.clone(),
+                    BackendEvent::ProjectExecutionStatus { status },
+                ),
+                self.hub_state_broadcast(),
+            ],
             OwnerEvent::Output {
                 id: owner_pane_id,
                 incarnation,
@@ -14961,6 +14998,22 @@ impl AppRuntime {
         if !self.project_context_is_current(context) {
             return Err("Project is closed".into());
         }
+        let lineage = match &request {
+            RemoteOwnerLaunchRequest::Agent { config, .. } => {
+                gwt::project_execution_policy::agent_lineage(&context.project_root, config)
+            }
+            RemoteOwnerLaunchRequest::RestoreSavedSession {
+                expected_source, ..
+            } => gwt::project_execution_policy::session_lineage(
+                &context.project_root,
+                expected_source,
+            ),
+            RemoteOwnerLaunchRequest::ColdAutomaticRestore {
+                source_session_id, ..
+            } => vec![format!("session:{source_session_id}")],
+            _ => Vec::new(),
+        };
+        self.project_execution_admission(context, &lineage)?;
         let generation = window_generation.ok_or("window generation is unavailable")?;
         let owner_pane_id = format!(
             "{}::{}",

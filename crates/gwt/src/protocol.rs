@@ -532,12 +532,33 @@ pub enum FrontendEvent {
     },
     PreviewCloseProject {
         project_key: String,
+        #[serde(default)]
+        project_wide: bool,
     },
     ConfirmCloseProject {
         token: CloseProjectToken,
+        #[serde(default)]
+        choice: Option<gwt_core::project_execution_policy::Choice>,
+        #[serde(default)]
+        operation_id: Option<String>,
+        #[serde(default)]
+        expected_policy_revision: Option<u64>,
+        #[serde(default)]
+        expected_view_set_revision: Option<u64>,
     },
     CancelCloseProject {
         token: CloseProjectToken,
+    },
+    ProjectViewReady {
+        generation: u64,
+        nonce: String,
+        view_id: String,
+    },
+    GetProjectExecutionStatus {
+        #[serde(default)]
+        project_key: Option<String>,
+        #[serde(default)]
+        operation_id: Option<String>,
     },
     CreateWindow {
         preset: WindowPreset,
@@ -1439,6 +1460,55 @@ pub struct ProjectTabView {
     pub running_agent_count: u32,
     #[serde(default)]
     pub running_agents: Vec<RunningAgentSummary>,
+    #[serde(default)]
+    pub execution: Option<ProjectExecutionStatusView>,
+}
+
+/// Project-local observed execution, separate from the durable user choice.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectExecutionStatusView {
+    pub project_key: String,
+    pub generation: u64,
+    pub revision: u64,
+    pub choice: Option<gwt_core::project_execution_policy::Choice>,
+    pub effective_state: String,
+    pub start_reason: String,
+    pub view_state: String,
+    pub lineage_summary: Vec<String>,
+    pub operation_outcome: Option<ProjectExecutionOperationView>,
+    pub observed_at: String,
+    pub degraded: bool,
+    pub recovery_operation: Option<String>,
+    pub view_set_revision: u64,
+    #[serde(default)]
+    pub policy_corruption_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectExecutionOperationView {
+    pub operation_id: String,
+    pub before_revision: u64,
+    pub after_revision: u64,
+    pub generation: u64,
+    pub choice: gwt_core::project_execution_policy::Choice,
+    pub effect_state: gwt_core::project_execution_policy::EffectState,
+    pub reason: Option<String>,
+    pub decided_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl From<&gwt_core::project_execution_policy::Receipt> for ProjectExecutionOperationView {
+    fn from(receipt: &gwt_core::project_execution_policy::Receipt) -> Self {
+        Self {
+            operation_id: receipt.operation_id.clone(),
+            before_revision: receipt.before_revision,
+            after_revision: receipt.after_revision,
+            generation: receipt.generation,
+            choice: receipt.choice,
+            effect_state: receipt.effect_state,
+            reason: receipt.reason.clone(),
+            decided_at: receipt.decided_at,
+        }
+    }
 }
 
 /// Client-bound, single-use authority for one incarnation of an open Project.
@@ -1525,6 +1595,7 @@ pub struct ProjectOwnerHealthView {
 /// Lightweight project catalog. No workspace, terminal, or agent payloads.
 #[derive(Debug, Clone, Serialize)]
 pub struct HubProjectView {
+    pub execution: Option<ProjectExecutionStatusView>,
     pub owner_health: Option<ProjectOwnerHealthView>,
     pub id: String,
     pub project_key: String,
@@ -2191,10 +2262,29 @@ pub enum BackendEvent {
         token: CloseProjectToken,
         title: String,
         running_agents: Vec<RunningAgentSummary>,
+        choice_required: bool,
+        policy_revision: u64,
+        view_set_revision: u64,
+        view_count: usize,
+        project_wide: bool,
     },
     CloseProjectError {
         project_key: String,
         message: String,
+        code: String,
+        operation_id: Option<String>,
+        retry_same_intent: bool,
+    },
+    ProjectViewChallenge {
+        project_key: String,
+        generation: u64,
+        nonce: String,
+    },
+    ProjectViewClosed {
+        project_key: String,
+    },
+    ProjectExecutionStatus {
+        status: ProjectExecutionStatusView,
     },
     ProjectClosed {
         project_key: String,
@@ -3198,6 +3288,21 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::PreserveOrder,
     ),
     BackendEventPolicy::new(
+        "project_view_challenge",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "project_view_closed",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
+        "project_execution_status",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
         "project_owner_health",
         BackendEventDeliveryClass::IdempotentLatest,
         BackendEventBackpressurePolicy::LatestWins,
@@ -3801,6 +3906,9 @@ impl BackendEvent {
             BackendEvent::WorkspaceStateNotice { .. } => "workspace_state_notice",
             BackendEvent::CloseProjectPreview { .. } => "close_project_preview",
             BackendEvent::CloseProjectError { .. } => "close_project_error",
+            BackendEvent::ProjectViewChallenge { .. } => "project_view_challenge",
+            BackendEvent::ProjectViewClosed { .. } => "project_view_closed",
+            BackendEvent::ProjectExecutionStatus { .. } => "project_execution_status",
             BackendEvent::ProjectClosed { .. } => "project_closed",
             BackendEvent::ProjectOwnerHealth { .. } => "project_owner_health",
             BackendEvent::ProjectAgentAggregate { .. } => "project_agent_aggregate",
@@ -4190,10 +4298,18 @@ mod tests {
                 token,
                 title: "A".into(),
                 running_agents: Vec::new(),
+                choice_required: true,
+                policy_revision: 0,
+                view_set_revision: 0,
+                view_count: 1,
+                project_wide: false,
             },
             super::BackendEvent::CloseProjectError {
                 project_key: "a".into(),
                 message: "expired".into(),
+                code: "StaleCloseRequest".into(),
+                operation_id: None,
+                retry_same_intent: false,
             },
             super::BackendEvent::ProjectClosed {
                 project_key: "a".into(),

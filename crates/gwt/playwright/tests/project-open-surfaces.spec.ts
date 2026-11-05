@@ -392,3 +392,96 @@ async function centerHitBelongsTo(
     return Boolean(hit && owner.contains(hit));
   }, { targetSelector, ownerSelector });
 }
+
+// A real restored backend context and a socket do not constitute a Project view.
+// PM auto-start is disabled by browser-check; this checks the shared real shell
+// admission, while the PM-specific auto-start guard has runtime test coverage.
+test('live backend-only context refuses a shell until a visible Project receipt', async ({ page, context }, testInfo) => {
+  const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+  const checkHome = process.env.GWT_PLAYWRIGHT_CHECK_HOME;
+  test.skip(!base || !checkHome, 'requires browser-check isolated checkout HOME');
+  const { execFileSync } = await import('node:child_process');
+  const { mkdtemp, mkdir, writeFile } = await import('node:fs/promises');
+  const { join } = await import('node:path');
+  const { focusLiveWindow, readLiveHubCatalog, withLiveGwtBackendLock, sendLiveGwtEvent } = await import('./_helpers/live-gwt');
+  await withLiveGwtBackendLock(base!, testInfo, async () => {
+    const root = await mkdtemp(join(checkHome!, 'cold-view-'));
+    const actual = await context.newPage();
+    const errors: string[] = [];
+    for (const current of [page, actual]) {
+      current.on('pageerror', error => errors.push(error.message));
+      current.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+    }
+    let key = '';
+    try {
+      execFileSync('git', ['init', '--quiet', '--initial-branch=develop', '--separate-git-dir', `${root}.git`, root]);
+      execFileSync('git', ['-C', root, '-c', 'user.name=GWT acceptance', '-c', 'user.email=acceptance@example.invalid', 'commit', '--quiet', '--allow-empty', '-m', 'chore: seed Project receipt acceptance']);
+      const envelope = JSON.parse(execFileSync(process.env.GWT_PLAYWRIGHT_GWTD!, { cwd: root, encoding: 'utf8',
+        input: JSON.stringify({ schema_version: 1, operation: 'project.execution.status', params: {} }) }));
+      expect(envelope.ok).toBe(true);
+      key = JSON.parse(envelope.output).project_key;
+      expect(key).toMatch(/^[0-9a-f]{16}$/);
+      const state = join(checkHome!, '.gwt', 'projects', key, 'project-state'); await mkdir(state, { recursive: true });
+      await writeFile(join(state, 'pm.json'), JSON.stringify({ settings: { auto_start: false } }));
+      await writeFile(join(state, 'issue-monitor.json'), JSON.stringify({ enabled: false, max_active_agents: 1, priority_order: [] }));
+      await readLiveHubCatalog(page, base!, { send: { kind: 'reopen_recent_project', path: root },
+        until: (catalog, projectKey) => catalog.projects.some(project => project.project_key === projectKey), arg: key });
+      await gotoLiveGwt(page, base!, { hub: true });
+      const before = await page.evaluate(({ base, key }) => new Promise<any>((resolve, reject) => {
+        const url = new URL('/ws', base); url.protocol = 'ws:'; url.searchParams.set('repo_hash', key);
+        const socket = new WebSocket(url); (window as any).__coldObserver = socket;
+        const events: any[] = []; (window as any).__coldEvents = events;
+        let attempted = false, attemptObserved = false;
+        const timer = setTimeout(() => reject(new Error('cold admission observation timed out')), 30_000);
+        socket.onopen = () => socket.send(JSON.stringify({ kind: 'frontend_ready' }));
+        socket.onmessage = message => {
+          const event = JSON.parse(String(message.data)); events.push(event);
+          if (event.kind === 'workspace_state') {
+            if (!attempted) {
+              attempted = true;
+              socket.send(JSON.stringify({ kind: 'startup_auto_resume_ready' }));
+              socket.send(JSON.stringify({ kind: 'create_window', preset: 'shell' }));
+            } else {
+              attemptObserved = true;
+              socket.send(JSON.stringify({ kind: 'get_project_execution_status' }));
+            }
+          }
+          if (event.kind === 'project_execution_status' && attemptObserved) {
+            clearTimeout(timer); resolve({ status: event.status, events });
+          }
+        };
+      }), { base: base!, key });
+      expect(before.status.start_reason).toContain('actual_view_required');
+      expect(before.status.view_state).not.toBe('open');
+      expect(before.events.filter((event: any) => event.kind === 'terminal_status' && ['starting', 'running', 'idle'].includes(event.status))).toEqual([]);
+      expect(before.events.some((event: any) => event.kind === 'terminal_status' && event.status === 'error'
+        && /selection_pending|actual_view_required/.test(event.detail || ''))).toBe(true);
+      expect(before.events.filter((event: any) => event.kind === 'workspace_state').at(-1).workspace.tabs
+        .flatMap((tab: any) => tab.workspace.windows).filter((entry: any) => entry.agent_id || entry.is_pm)).toEqual([]);
+      await actual.bringToFront();
+      await gotoLiveGwt(actual, base!, { projectKey: key, enableTestBridge: true });
+      const theme = testInfo.project.name.includes('light') ? 'light' : 'dark';
+      await expect(actual.locator('html')).toHaveAttribute('data-theme', theme);
+      await expect.poll(() => actual.evaluate(() => (window as any).__gwtPlaywrightMessages?.filter((entry: any) =>
+        entry.payload.kind === 'project_execution_status').at(-1)?.payload.status.view_state)).toBe('open');
+      const beforeIds = new Set(await actual.locator('.workspace-window[data-preset="shell"]').evaluateAll(nodes => nodes.map(node => (node as HTMLElement).dataset.id)));
+      await sendLiveGwtEvent(actual, { kind: 'create_window', preset: 'shell' });
+      const created = async () => (await actual.locator('.workspace-window[data-preset="shell"]').evaluateAll(nodes => nodes.map(node => (node as HTMLElement).dataset.id!))).filter(id => !beforeIds.has(id));
+      await expect.poll(created).toHaveLength(1); const id = (await created())[0];
+      await focusLiveWindow(actual, id);
+      await expect.poll(() => actual.evaluate(id => (window as any).__gwtTerminalTestApi.bufferText(id).trim(), id), { timeout: 30_000 }).toMatch(/[^\n]+[>$#%]$/);
+      await actual.screenshot({ path: testInfo.outputPath(`actual-view-admitted-${theme}.png`) });
+      await sendLiveGwtEvent(actual, { kind: 'close_window', id });
+    } catch (error) {
+      await actual.screenshot({ path: testInfo.outputPath('cold-failure.png') }).catch(() => {});
+      await testInfo.attach('cold-backend-messages', { body: JSON.stringify(await page.evaluate(() => (window as any).__coldEvents).catch(() => [])), contentType: 'application/json' });
+      throw error;
+    } finally {
+      await actual.close();
+      await page.evaluate(() => (window as any).__coldObserver?.close()).catch(() => {});
+      if (key) await readLiveHubCatalog(page, base!, { send: { kind: 'preview_close_project', project_key: key, project_wide: true } }).catch(() => {});
+      // Keep fixture history inside the owned isolated HOME until teardown.
+    }
+    expect(errors).toEqual([]);
+  });
+});

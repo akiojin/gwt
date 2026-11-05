@@ -1930,8 +1930,17 @@ fn sample_runtime_with_events(
     let persist_dispatcher = Arc::new(super::persist_dispatcher::PersistDispatcher::new(
         &blocking_tasks,
     ));
-    let (project_tab_incarnations, next_project_incarnation) =
-        initial_project_tab_incarnations(&tabs);
+    let (mut project_tab_incarnations, _) = initial_project_tab_incarnations(&tabs);
+    // Runtime fixtures keep stable local generations; the production boot
+    // allocator has its own cross-boot grant regression.
+    let mut next_project_incarnation = 1;
+    for tab in &tabs {
+        project_tab_incarnations
+            .get_mut(&tab.id)
+            .unwrap()
+            .generation = next_project_incarnation;
+        next_project_incarnation += 1;
+    }
     let mut runtime = AppRuntime {
         test_project_owners: HashMap::new(),
         _runtime_namespace_gc: None,
@@ -2076,6 +2085,43 @@ fn sample_runtime_with_events(
     };
     runtime.rebuild_window_lookup();
     runtime.seed_window_pty_statuses();
+    // This long-standing UI fixture represents Projects already open to a user.
+    // Cold-start policy tests explicitly remove this accepted fixture receipt.
+    for context in runtime.project_contexts() {
+        let receipt = gwt::project_execution_policy::ActualViewReceipt {
+            receipt_id: uuid::Uuid::new_v4().to_string(),
+            accepted_at: chrono::Utc::now(),
+            admitted_policy_revision: gwt_core::project_execution_policy::load(
+                &context.project_root,
+            )
+            .map_or(0, |policy| policy.revision),
+        };
+        runtime
+            .project_state_mut(&context)
+            .unwrap()
+            .project_views
+            .seed_fixture_view(receipt.clone());
+        gwt::project_execution_policy::write_observation(
+            &context.project_root,
+            &gwt::project_execution_policy::RuntimeObservation {
+                schema_version: 1,
+                project_key: context.project_key.to_string(),
+                project_root: context.project_root.clone(),
+                generation: context.generation,
+                host_pid: std::process::id(),
+                host_started_at: gwt::process::host_process_start_time(std::process::id()).unwrap(),
+                view_set_revision: 0,
+                views: std::collections::BTreeMap::from([(
+                    "fixture-visible-view".into(),
+                    receipt.clone(),
+                )]),
+                last_open_receipt: Some(receipt),
+                close_intents: Default::default(),
+                observed_at: chrono::Utc::now(),
+            },
+        )
+        .expect("accepted visible Project fixture receipt");
+    }
     (runtime, _events)
 }
 

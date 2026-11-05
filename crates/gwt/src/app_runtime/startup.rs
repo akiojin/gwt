@@ -937,8 +937,21 @@ impl AppRuntime {
             if !should_auto_start_restored_window(&window) {
                 continue;
             }
-            gwt::perf::startup::track_terminal(&combined_window_id(&tab_id, &window.id));
-            let _ = self.start_window(&tab_id, &window.id, window.preset);
+            if self.tab(&tab_id).is_some_and(|tab| {
+                gwt::project_execution_policy::actual_open(&tab.project_root).unwrap_or(false)
+            }) {
+                gwt::perf::startup::track_terminal(&combined_window_id(&tab_id, &window.id));
+                let _ = self.start_window(&tab_id, &window.id, window.preset);
+            } else if let Some(context) = self.project_context(&tab_id) {
+                if let Some(state) = self.project_state_mut(&context) {
+                    state.project_views.deferred_restores.push(
+                        PreparedProjectWindowRestore::Process {
+                            window_id: window.id,
+                            preset: window.preset,
+                        },
+                    );
+                }
+            }
         }
         // SPEC-3431 FR-002: tabs already open at launch get their resident PM
         // pane once the frontend surfaces are ready (the same startup deferral
@@ -946,6 +959,16 @@ impl AppRuntime {
         // Projects opened later get it from `open_project_path_events`.
         self.pending_startup_pm_tabs = self.tabs.iter().map(|tab| tab.id.clone()).collect();
         let _ = self.persist();
+        if self.tabs.iter().any(|tab| {
+            gwt_core::project_execution_policy::load(&tab.project_root)
+                .ok()
+                .is_some_and(|policy| {
+                    policy.choice == Some(gwt_core::project_execution_policy::Choice::Continue)
+                })
+        }) {
+            let events = self.startup_auto_resume_ready_events();
+            self.proxy.send(crate::UserEvent::Dispatch(events));
+        }
     }
 
     pub(super) fn queue_startup_auto_resume_sessions(
@@ -1589,6 +1612,20 @@ impl AppRuntime {
         let mut admission = self.pending_startup_restore_log.take().unwrap_or_default();
         let previous_windows = self.restore_launch_windows.keys().cloned().collect();
         for pending_session in pending {
+            if self.tab(&pending_session.tab_id).is_none_or(|tab| {
+                gwt::project_execution_policy::admission(
+                    &tab.project_root,
+                    &gwt::project_execution_policy::session_lineage(
+                        &tab.project_root,
+                        &pending_session.session,
+                    ),
+                )
+                .is_err()
+            }) {
+                self.pending_startup_auto_resume_sessions
+                    .push(pending_session);
+                continue;
+            }
             if !pending_session.session.worktree_path.is_dir() {
                 admission.refuse(&pending_session.session.id, RestoreRefusal::WorktreeMissing);
                 continue;

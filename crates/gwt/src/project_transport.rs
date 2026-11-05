@@ -271,6 +271,9 @@ impl TransportState {
     }
 }
 pub enum TransportEvent {
+    BrowserDisconnected {
+        client_id: String,
+    },
     MobileInput(Arc<crate::mobile_connection::MobileInputRequest>),
     FreshExecutionReadyResend {
         grant: AgentCapabilityGrant,
@@ -3094,6 +3097,9 @@ async fn client_session_with_scope(
     }
 
     state.clients.unregister(&client_id);
+    if matches!(scope, ClientSessionScope::Browser(_)) {
+        state.send(TransportEvent::BrowserDisconnected { client_id });
+    }
 }
 
 #[cfg(any(test, feature = "test-gh-guard"))]

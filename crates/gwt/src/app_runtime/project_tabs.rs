@@ -26,14 +26,13 @@ use std::{
 use super::project_route::ProjectOpenControlFailure;
 use super::startup::prepare_open_project_window_restores;
 #[cfg(test)]
-use super::PreparedProjectSwitch;
+use super::{combined_window_id, PreparedProjectSwitch};
 use super::{
-    combined_window_id, load_restored_workspace_state, normalize_recent_project_path,
-    resolve_project_target, same_worktree_path, AppRuntime, BackendEvent, FrontendEvent,
-    OutboundEvent, PreparedMigrationSnapshot, PreparedProjectOpen, ProjectContext,
-    ProjectIncarnation, ProjectNavigationPayload, ProjectNavigationPrepared,
-    ProjectNavigationRequest, ProjectNavigationSource, ProjectOpenTarget, ProjectTabRuntime,
-    UserEvent, Uuid, WindowRegistry,
+    load_restored_workspace_state, normalize_recent_project_path, resolve_project_target,
+    same_worktree_path, AppRuntime, BackendEvent, FrontendEvent, OutboundEvent,
+    PreparedMigrationSnapshot, PreparedProjectOpen, ProjectContext, ProjectIncarnation,
+    ProjectNavigationPayload, ProjectNavigationPrepared, ProjectNavigationRequest,
+    ProjectNavigationSource, ProjectOpenTarget, ProjectTabRuntime, UserEvent, Uuid, WindowRegistry,
 };
 
 #[derive(Clone, Copy)]
@@ -74,7 +73,12 @@ fn pick_project_folder_with_deadline(deadline: Instant) -> Result<Option<PathBuf
 pub(crate) fn initial_project_tab_incarnations(
     tabs: &[ProjectTabRuntime],
 ) -> (HashMap<String, ProjectIncarnation>, u64) {
-    let mut next_generation = 1_u64;
+    // Keep cross-boot user grants fenced while leaving ample exact-integer
+    // headroom for per-process reopen generations in the browser protocol.
+    let bytes = *uuid::Uuid::new_v4().as_bytes();
+    let mut next_generation = (u64::from_le_bytes(bytes[..8].try_into().expect("UUID prefix"))
+        & ((1_u64 << 52) - 1))
+        .max(1);
     let incarnations = tabs
         .iter()
         .map(|tab| {
@@ -849,6 +853,11 @@ impl AppRuntime {
         let context = self
             .project_context(&tab_id)
             .expect("opened project context");
+        // A backend context publishes its incarnation without granting a view.
+        // This also replaces an earlier GUI's persisted open observation.
+        if let Err(error) = self.persist_actual_project_views(&context) {
+            tracing::warn!(%error, "Project context observation could not be published");
+        }
         #[cfg(test)]
         self.set_active_tab(tab_id.clone());
         self.register_project_log_scope(&tab_id);
@@ -879,13 +888,17 @@ impl AppRuntime {
             opened,
         ];
         if new_tab {
-            events.extend(
-                self.restore_prepared_open_project_windows(&tab_id, prepared.window_restores),
-            );
-            events.extend(self.ensure_pm_agent_for_tab(
-                &tab_id,
-                crate::app_runtime::pm::PmEnsureTrigger::Automatic,
-            ));
+            if self.project_execution_admission(&context, &[]).is_ok() {
+                events.extend(
+                    self.restore_prepared_open_project_windows(&tab_id, prepared.window_restores),
+                );
+                events.extend(self.ensure_pm_agent_for_tab(
+                    &tab_id,
+                    crate::app_runtime::pm::PmEnsureTrigger::Automatic,
+                ));
+            } else if let Some(state) = self.project_state_mut(&context) {
+                state.project_views.deferred_restores = prepared.window_restores;
+            }
             self.spawn_work_events_ingest_for_project_key(
                 prepared.target.project_root.clone(),
                 prepared.project_key,
@@ -1151,56 +1164,169 @@ impl AppRuntime {
         scope: &super::ClientScope,
     ) -> Option<Vec<OutboundEvent>> {
         let (project_key, token) = match event {
-            FrontendEvent::PreviewCloseProject { project_key } => (project_key, None),
-            FrontendEvent::ConfirmCloseProject { token }
+            FrontendEvent::PreviewCloseProject { project_key, .. } => (project_key, None),
+            FrontendEvent::ConfirmCloseProject { token, .. }
             | FrontendEvent::CancelCloseProject { token } => (&token.project_key, Some(token)),
+            FrontendEvent::GetProjectExecutionStatus {
+                project_key,
+                operation_id,
+            } => {
+                let key = project_key.as_deref().or_else(|| match scope {
+                    super::ClientScope::Project(key) => Some(key.as_str()),
+                    _ => None,
+                })?;
+                if matches!(scope, super::ClientScope::Project(own) if own.as_str() != key) {
+                    return Some(self.project_close_error(
+                        client_id,
+                        key,
+                        "ForeignProject",
+                        "Project status is scoped to its connection.",
+                    ));
+                }
+                let context = self
+                    .project_contexts()
+                    .into_iter()
+                    .find(|context| context.project_key.as_str() == key)?;
+                return Some(vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::ProjectExecutionStatus {
+                        status: self.project_execution_status(&context, operation_id.as_deref()),
+                    },
+                )]);
+            }
             _ => return None,
         };
-        let error = || {
-            let event = BackendEvent::CloseProjectError {
-                project_key: project_key.clone(),
-                message: "Close request expired or unauthorized. Try Close Project again.".into(),
-            };
-            Some(vec![OutboundEvent::reply(client_id.to_string(), event)])
+        let error = |runtime: &Self| {
+            Some(runtime.project_close_error(
+                client_id,
+                project_key,
+                "StaleCloseRequest",
+                "Close request expired or unauthorized. Try Close Project again.",
+            ))
         };
         if matches!(scope, super::ClientScope::Project(key) if key.as_str() != project_key) {
-            return error();
+            return error(self);
         }
         let Some(context) = self
             .project_contexts()
             .into_iter()
             .find(|context| context.project_key.as_str() == project_key)
         else {
-            return error();
+            return error(self);
         };
         if let Some(token) = token {
-            let Some(state) = self.project_state_mut(&context) else {
-                return error();
+            let Some(state) = self.project_state(&context) else {
+                return error(self);
             };
             if token.generation != context.generation
                 || state.close_project_nonces.get(client_id) != Some(&token.nonce)
             {
-                return error();
+                return error(self);
             }
-            state.close_project_nonces.remove(client_id);
-            return Some(
-                if matches!(event, FrontendEvent::ConfirmCloseProject { .. }) {
-                    self.close_project_tab_events(&context.tab_id)
-                } else {
-                    Vec::new()
-                },
-            );
+            if matches!(event, FrontendEvent::CancelCloseProject { .. }) {
+                let state = self.project_state_mut(&context).expect("current project");
+                state.close_project_nonces.remove(client_id);
+                state.project_views.previews.remove(client_id);
+                return Some(Vec::new());
+            }
+            let Some(preview) = state.project_views.previews.get(client_id).cloned() else {
+                return error(self);
+            };
+            let FrontendEvent::ConfirmCloseProject {
+                choice,
+                operation_id,
+                expected_policy_revision,
+                expected_view_set_revision,
+                ..
+            } = event
+            else {
+                unreachable!()
+            };
+            let Some(operation_id) = operation_id
+                .as_ref()
+                .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+            else {
+                return Some(self.project_close_error(
+                    client_id,
+                    project_key,
+                    "ClientUpgradeRequired",
+                    "Reload GWT: Close requires an operation identity and explicit revisions.",
+                ));
+            };
+            if *expected_policy_revision != Some(preview.policy_revision)
+                || *expected_view_set_revision != Some(preview.view_revision)
+                || state.project_views.revision != preview.view_revision
+            {
+                return error(self);
+            }
+            if preview.choice_required && choice.is_none() {
+                return Some(self.project_close_error(
+                    client_id,
+                    project_key,
+                    "ClientUpgradeRequired",
+                    "Reload GWT and choose Continue, Stop, or Cancel.",
+                ));
+            }
+            if !preview.choice_required {
+                let state = self.project_state_mut(&context).expect("current project");
+                state.close_project_nonces.remove(client_id);
+                state.project_views.previews.remove(client_id);
+                return Some(self.detach_actual_project_view(&context, client_id, None));
+            }
+            return Some(self.execute_project_choice(
+                &context,
+                client_id,
+                preview,
+                token,
+                choice.expect("explicit choice"),
+                operation_id.clone(),
+            ));
         }
+        let project_wide = matches!(
+            event,
+            FrontendEvent::PreviewCloseProject {
+                project_wide: true,
+                ..
+            }
+        ) || matches!(scope, super::ClientScope::Hub);
         let tab = self.tabs.iter().find(|tab| tab.id == context.tab_id)?;
         let title = tab.title.clone();
         let running_agents =
             crate::runtime_support::collect_running_agents(&tab.workspace.persisted().windows);
+        let policy_revision = gwt_core::project_execution_policy::load(&context.project_root)
+            .map_or(0, |policy| policy.revision);
+        let policy_corruption_digest =
+            gwt::project_execution_policy::policy_corruption_digest(&context.project_root);
+        let state = self.project_state_mut(&context)?;
+        let view_count = state.project_views.view_count();
+        let choice_required = project_wide || view_count <= 1;
+        let view_set_revision = state.project_views.revision();
+        let view_receipts = if project_wide {
+            state.project_views.view_receipts()
+        } else {
+            state
+                .project_views
+                .view_receipts()
+                .into_iter()
+                .filter(|(client, _)| client == client_id)
+                .collect()
+        };
         let nonce = uuid::Uuid::new_v4().to_string();
-        self.project_state_mut(&context)?
+        state
             .close_project_nonces
-            .insert(client_id.to_string(), nonce.clone());
+            .insert(client_id.into(), nonce.clone());
+        state.project_views.previews.insert(
+            client_id.into(),
+            super::project_execution_policy::ClosePreview {
+                policy_revision,
+                view_revision: view_set_revision,
+                choice_required,
+                policy_corruption_digest,
+                view_receipts,
+            },
+        );
         Some(vec![OutboundEvent::reply(
-            client_id.to_string(),
+            client_id,
             BackendEvent::CloseProjectPreview {
                 token: gwt::protocol::CloseProjectToken {
                     project_key: project_key.clone(),
@@ -1209,10 +1335,16 @@ impl AppRuntime {
                 },
                 title,
                 running_agents,
+                choice_required,
+                policy_revision,
+                view_set_revision,
+                view_count,
+                project_wide,
             },
         )])
     }
 
+    #[cfg(test)]
     pub(crate) fn close_project_tab_events(&mut self, tab_id: &str) -> Vec<OutboundEvent> {
         let Some(context) = self.project_context(tab_id) else {
             return Vec::new();

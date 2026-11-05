@@ -28,6 +28,7 @@ pub const OPERATIONS: &[&str] = &[
     "pr.auto_merge.enable",
     "release.metadata.set",
     "repository.settings.set",
+    "project.execution.choose",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -115,6 +116,8 @@ pub struct Approval {
 struct Store {
     approvals: Vec<Approval>,
     consumed_instructions: Vec<String>,
+    #[serde(default)]
+    project_choice_attempts: Vec<Attempt>,
 }
 
 fn store_path(repo: &Path) -> PathBuf {
@@ -296,6 +299,7 @@ fn select_authority(
     let exact_scope_required = matches!(
         scope.operation.as_str(),
         "pr.auto_merge.enable"
+            | "project.execution.choose"
             | "actions.release_policy.add"
             | "actions.release_policy.rollback"
             | "actions.diagnostic.policy.add"
@@ -379,7 +383,43 @@ pub fn authorize(
     before: Value,
 ) -> io::Result<Attempt> {
     let scope = intent.scope()?;
+    if authorization.instruction_id.is_some() && authorization.approval_id.is_some() {
+        return Err(permission_denied("choose one authority id"));
+    }
+    let project_choice = scope.operation == "project.execution.choose";
+    if project_choice && caller.is_none_or(|caller| caller.trim().is_empty()) {
+        return Err(permission_denied(
+            "project choices require a PM Session identity",
+        ));
+    }
     locked(repo, |store| {
+        if project_choice {
+            if let Some(attempt) = store
+                .project_choice_attempts
+                .iter()
+                .find(|attempt| attempt.scope == scope)
+            {
+                let same_source = match attempt.permission_stage.as_str() {
+                    "instruction" => {
+                        authorization.instruction_id.as_ref() == Some(&attempt.authority_id)
+                    }
+                    "approval" => {
+                        authorization.approval_id.as_ref() == Some(&attempt.authority_id)
+                            || (authorization.instruction_id.is_none()
+                                && authorization.approval_id.is_none()
+                                && store.approvals.iter().any(|approval| {
+                                    approval.id == attempt.authority_id && approval.standing
+                                }))
+                    }
+                    _ => false,
+                };
+                if attempt.caller_session.as_deref() != caller || !same_source {
+                    return Err(permission_denied("project choice attempt belongs to a different PM Session or authority source"));
+                }
+                validate_project_choice_source(repo, store, attempt)?;
+                return Ok(attempt.clone());
+            }
+        }
         let selected = select_authority(repo, store, &scope, authorization, None)?;
         if let Some(consumption) = selected.consume_instruction {
             store.consumed_instructions.push(consumption);
@@ -393,14 +433,72 @@ pub fn authorize(
             authority_id: selected.id,
             permission_stage: selected.stage.into(),
             caller_session: caller.map(str::to_owned),
-            before,
+            before: if project_choice {
+                crate::user_instruction::redact_json(before)
+            } else {
+                before
+            },
         };
         audit(
             repo,
             serde_json::json!({"event":"authorized", "at":chrono::Utc::now(), "attempt":attempt}),
         )?;
+        if project_choice {
+            store.project_choice_attempts.push(attempt.clone());
+        }
         Ok(attempt)
     })
+}
+
+/// Validate the exact, already-authorized PM intent at the physical owner.
+pub fn validate_project_choice_attempt(
+    repo: &Path,
+    intent: &OperationIntent,
+    caller: &str,
+    source_id: &str,
+) -> io::Result<Attempt> {
+    let scope = intent.scope()?;
+    if scope.operation != "project.execution.choose"
+        || caller.trim().is_empty()
+        || source_id.trim().is_empty()
+    {
+        return Err(permission_denied(
+            "an exact Project choice, PM Session and authority source are required",
+        ));
+    }
+    let store = load(repo)?;
+    let attempt = store.project_choice_attempts.iter().find(|attempt| {
+        attempt.scope == scope && attempt.caller_session.as_deref() == Some(caller)
+            && attempt.authority_id == source_id
+    }).ok_or_else(|| permission_denied("no persisted authorization attempt matches this Project choice, PM Session and source"))?;
+    validate_project_choice_source(repo, &store, attempt)?;
+    Ok(attempt.clone())
+}
+
+fn validate_project_choice_source(repo: &Path, store: &Store, attempt: &Attempt) -> io::Result<()> {
+    let active = match attempt.permission_stage.as_str() {
+        "instruction" => crate::user_instruction::load(repo)
+            .map_err(io::Error::other)?
+            .iter()
+            .any(|instruction| {
+                instruction.id == attempt.authority_id
+                    && instruction.superseded_by.is_none()
+                    && instruction.authority.is_some()
+                    && instruction.kind != crate::user_instruction::UserInstructionKind::Question
+                    && instruction.authorizations.contains(&attempt.scope)
+            }),
+        "approval" => store.approvals.iter().any(|approval| {
+            approval.id == attempt.authority_id
+                && !approval.revoked
+                && approval.scope == attempt.scope
+        }),
+        _ => false,
+    };
+    if active {
+        Ok(())
+    } else {
+        Err(permission_denied("the Project choice attempt's exact human authority was revoked, superseded or no longer applies"))
+    }
 }
 
 impl Attempt {
@@ -657,6 +755,239 @@ mod tests {
             .unwrap(),
         };
         assert_eq!(first.scope().unwrap(), second.scope().unwrap());
+    }
+
+    #[test]
+    fn project_execution_approval_stays_bound_to_exact_choice_and_generation() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        let intent = OperationIntent {
+            operation: "project.execution.choose".into(),
+            params: serde_json::json!({"operation_id":"00000000-0000-4000-8000-000000000001","expected_revision":0,"expected_generation":1,"choice":"continue"}),
+        };
+        let approval = record_approval(
+            &repo,
+            &intent,
+            "Continue this project",
+            "Stop this project",
+            true,
+        )
+        .unwrap();
+        let authorization = Authorization {
+            instruction_id: None,
+            approval_id: Some(approval.id),
+        };
+        let first = authorize(&repo, &intent, &authorization, Some("pm"), Value::Null).unwrap();
+        assert_eq!(
+            authorize(
+                &repo,
+                &intent,
+                &Authorization::default(),
+                Some("pm"),
+                Value::Null
+            )
+            .unwrap()
+            .id,
+            first.id
+        );
+        assert!(authorize(
+            &repo,
+            &intent,
+            &authorization,
+            Some("foreign-pm"),
+            Value::Null
+        )
+        .is_err());
+        for (field, value) in [
+            ("choice", serde_json::json!("stop")),
+            ("expected_generation", serde_json::json!(2)),
+            (
+                "operation_id",
+                serde_json::json!("00000000-0000-4000-8000-000000000002"),
+            ),
+        ] {
+            let mut changed = intent.clone();
+            changed.params[field] = value;
+            assert!(authorize(&repo, &changed, &authorization, Some("pm"), Value::Null).is_err());
+        }
+    }
+
+    fn project_choice_intent() -> OperationIntent {
+        OperationIntent {
+            operation: "project.execution.choose".into(),
+            params: serde_json::json!({"operation_id":"00000000-0000-4000-8000-000000000001","expected_revision":0,"expected_generation":7,"choice":"continue"}),
+        }
+    }
+
+    fn project_choice_instruction(
+        repo: &Path,
+        intent: &OperationIntent,
+        kind: crate::user_instruction::UserInstructionKind,
+        turn: &str,
+        supersedes: Vec<String>,
+    ) -> crate::user_instruction::UserInstruction {
+        crate::user_instruction::record_from_prompt(
+            repo,
+            crate::user_instruction::UserInstructionInput {
+                original: "Continue this project".into(),
+                summary: "Continue project".into(),
+                answer: "Continue the admitted work".into(),
+                actions: vec![],
+                issue_numbers: vec![],
+                kind,
+                supersedes,
+                authorizations: vec![intent.clone()],
+            },
+            "pm",
+            turn,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn project_choice_one_off_instruction_retries_only_its_exact_attempt() {
+        use crate::user_instruction::UserInstructionKind;
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        let intent = project_choice_intent();
+        let instruction = project_choice_instruction(
+            &repo,
+            &intent,
+            UserInstructionKind::OneOff,
+            "turn-1",
+            vec![],
+        );
+        let authorization = Authorization {
+            instruction_id: Some(instruction.id.clone()),
+            approval_id: None,
+        };
+        let first = authorize(
+            &repo,
+            &intent,
+            &authorization,
+            Some("pm"),
+            serde_json::json!({"revision":0,"access_token":"private-before-value"}),
+        )
+        .unwrap();
+        assert!(
+            !crate::project_execution_policy::policy_path(&repo).exists(),
+            "authorization precedes a failed or missing runtime dispatch"
+        );
+        let retry = authorize(
+            &repo,
+            &intent,
+            &authorization,
+            Some("pm"),
+            serde_json::json!({"revision":99}),
+        )
+        .expect("retry the exact consumed one-off after a missing ACK");
+        assert_eq!(retry.id, first.id);
+        assert_eq!(retry.before, first.before);
+        assert!(!fs::read_to_string(store_path(&repo))
+            .unwrap()
+            .contains("private-before-value"));
+        assert_eq!(
+            validate_project_choice_attempt(&repo, &intent, "pm", &instruction.id)
+                .unwrap()
+                .id,
+            first.id
+        );
+        assert!(authorize(
+            &repo,
+            &intent,
+            &authorization,
+            Some("foreign-pm"),
+            Value::Null
+        )
+        .is_err());
+        assert!(
+            validate_project_choice_attempt(&repo, &intent, "foreign-pm", &instruction.id).is_err()
+        );
+        let mut changed = intent.clone();
+        changed.params["operation_id"] = "00000000-0000-4000-8000-000000000002".into();
+        assert!(authorize(&repo, &changed, &authorization, Some("pm"), Value::Null).is_err());
+        assert!(validate_project_choice_attempt(&repo, &changed, "pm", &instruction.id).is_err());
+    }
+
+    #[test]
+    fn project_choice_attempt_rejects_a_superseded_standing_instruction() {
+        use crate::user_instruction::UserInstructionKind;
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        let intent = project_choice_intent();
+        let instruction = project_choice_instruction(
+            &repo,
+            &intent,
+            UserInstructionKind::Standing,
+            "turn-1",
+            vec![],
+        );
+        let authorization = Authorization {
+            instruction_id: Some(instruction.id.clone()),
+            approval_id: None,
+        };
+        authorize(&repo, &intent, &authorization, Some("pm"), Value::Null).unwrap();
+        assert!(validate_project_choice_attempt(&repo, &intent, "pm", &instruction.id).is_ok());
+        project_choice_instruction(
+            &repo,
+            &intent,
+            UserInstructionKind::Standing,
+            "turn-2",
+            vec![instruction.id.clone()],
+        );
+        assert!(authorize(&repo, &intent, &authorization, Some("pm"), Value::Null).is_err());
+        assert!(validate_project_choice_attempt(&repo, &intent, "pm", &instruction.id).is_err());
+    }
+
+    #[test]
+    fn project_choice_one_off_approval_retries_without_regranting_or_ignoring_revocation() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        let intent = project_choice_intent();
+        let approval =
+            record_approval(&repo, &intent, "Continue this project", "Stop it", false).unwrap();
+        let authorization = Authorization {
+            instruction_id: None,
+            approval_id: Some(approval.id.clone()),
+        };
+        let first = authorize(&repo, &intent, &authorization, Some("pm"), Value::Null).unwrap();
+        let retry = authorize(&repo, &intent, &authorization, Some("pm"), Value::Null)
+            .expect("one-off approval resumes its saved exact attempt");
+        assert_eq!(retry.id, first.id);
+        assert!(approvals(&repo).unwrap()[0].consumed);
+        assert!(authorize(
+            &repo,
+            &intent,
+            &Authorization::default(),
+            Some("pm"),
+            Value::Null
+        )
+        .is_err());
+        assert_eq!(
+            validate_project_choice_attempt(&repo, &intent, "pm", &approval.id)
+                .unwrap()
+                .id,
+            first.id
+        );
+        assert!(validate_project_choice_attempt(&repo, &intent, "pm", "foreign-source").is_err());
+        assert!(authorize(
+            &repo,
+            &intent,
+            &authorization,
+            Some("foreign-pm"),
+            Value::Null
+        )
+        .is_err());
+        let mut changed = intent.clone();
+        changed.params["choice"] = "stop".into();
+        assert!(authorize(&repo, &changed, &authorization, Some("pm"), Value::Null).is_err());
+        revoke(&repo, &approval.id).unwrap();
+        assert!(authorize(&repo, &intent, &authorization, Some("pm"), Value::Null).is_err());
+        assert!(validate_project_choice_attempt(&repo, &intent, "pm", &approval.id).is_err());
     }
 
     #[test]

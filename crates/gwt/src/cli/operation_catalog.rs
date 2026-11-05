@@ -759,6 +759,14 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "project.execution.choose",
+        aliases: &[],
+    },
+    Operation {
+        name: "project.execution.status",
+        aliases: &[],
+    },
+    Operation {
         name: "provider.reset",
         aliases: &[],
     },
