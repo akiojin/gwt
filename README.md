@@ -1051,6 +1051,16 @@ Use `source`, `task`, or `receipt` selectors with the corresponding `id` or
 registered PM and grant no Issue, Monitor, CI or approval authority. Automatic
 intake and the Tasks UI are not connected by this read API.
 
+The generated PM skill reconciles saved requests at startup, on each new human
+turn and in every resident cycle. It pins both ID lists to the summary revision,
+reads selected details, and uses `pm.request_tasks.apply` only for justified
+tracking changes with fresh conditions, review generation and revision checks.
+Uninitialized, unreadable or partially read tracking retains a degraded state;
+it does not establish that no requests remain. Temporary recovery and an empty
+Monitor queue do not complete the original request. This guidance covers saved
+tracking; automatic intake, legacy import, user mutation and the Tasks UI remain
+separate work. Tracking itself does not launch Issues or change delivery gates.
+
 `policy.dependency_observations` retains every supplied Monitor inbox row, including
 repeated Issues, with its state and canonical dependency blockers, cycle flag and bundle
 references. Absent typed status stays null with `dependency_status` named as missing.

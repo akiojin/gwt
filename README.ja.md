@@ -956,6 +956,15 @@ source ID、`{"selector":{"kind":"tasks","limit":50}}` は完了・取消を含�
 だけが使用でき、Issue・Monitor・CI・承認の権限は付与しません。この参照 API に
 自動受付や Tasks UI は接続されていません。
 
+生成される PM skill は、起動時・新しい人間の入力時・各 resident cycle に保存済みの
+依頼を照合します。概要の revision に両 ID 一覧を固定し、必要な詳細を読み、現在の
+完了条件・再評価世代・revision を確認して、根拠のある追跡変更だけを
+`pm.request_tasks.apply` へ送ります。未初期化・読取不能・途中までの取得は degraded
+として保持し、依頼が残っていない根拠にはしません。一時復旧や Monitor の空キューで
+元の依頼を完了扱いにしません。この手順の対象は保存済みの追跡です。自動受付・過去の
+依頼の取込み・ユーザー操作・Tasks UI は別の作業として残ります。追跡自体は Issue の
+起動や配信ゲートの変更を行いません。
+
 `policy.dependency_observations` は供給された Monitor inbox の全行を、同じ Issue の
 重複も含めて保持し、状態と正本の blocker・cycle・bundle 参照を返します。
 型付き診断がなければ null とし、`dependency_status` を不足情報として示します。
