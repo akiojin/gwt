@@ -3368,7 +3368,7 @@ mod tests {
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let mut buffer = [0u8; 2048];
-            stream.read(&mut buffer).unwrap();
+            assert!(stream.read(&mut buffer).unwrap() > 0);
             arrived_tx.send(()).unwrap();
             respond_rx.recv().unwrap();
             let body =
