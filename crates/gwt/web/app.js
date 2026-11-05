@@ -111,7 +111,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         attachContainerResizeReflow,
         attachHostResizeReflow,
         classifyProjectWindowVisibility,
-        clearTerminalOutputBeforeSnapshot,
         createTerminalFitScheduler,
         createTerminalSnapshotWriteCoordinator,
         createTerminalViewportRefreshScheduler,
@@ -238,7 +237,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       const appVersionLabel = document.getElementById("app-version");
 
       const decoderMap = new Map();
-      const pendingOutputMap = new Map();
       const pendingSnapshotMap = new Map();
       const detailMap = new Map();
       const windowRuntimeStateMap = new Map();
@@ -249,6 +247,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       let terminalFitScheduler = null;
       let terminalViewportRefreshScheduler = null;
       const terminalOutputBatcher = createTerminalOutputBatcher({
+        // The queue retains encoded strings; limits count their decoded RAW
+        // bytes, including writes awaiting xterm's completion callback.
+        measureBytes: (chunk) => chunk.length / 4 * 3
+          - (chunk.endsWith("==") ? 2 : chunk.endsWith("=") ? 1 : 0),
+        projectForWindow: (id) => projectWindowContextById(id)?.tab.project_key ?? socketProjectKey,
         mergeChunks: (chunks, windowId) => {
           const decoder = decoderMap.get(windowId);
           if (!decoder) {
@@ -261,14 +264,15 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         write: (windowId, text, onWritten) => {
           const runtime = terminalMap.get(windowId);
           if (!runtime) {
+            onWritten();
             return;
           }
+          runtime.hasOutput = true;
           runtime.terminal.write(text, onWritten);
         },
-        onError: (error, windowId) => {
-          const context = projectWindowContextById(windowId);
-          if (!socketProjectKey || context?.tab.project_key !== socketProjectKey
-            || !terminalMap.has(windowId) || socket?.readyState !== WebSocket.OPEN) return;
+        onError: (error, windowId, projectKey) => {
+          if (!socketProjectKey || projectKey !== socketProjectKey
+            || socket?.readyState !== WebSocket.OPEN) return;
           // The batch runs after receive() returns, so recover here rather than
           // letting the dispatcher continue an already torn terminal stream.
           connectSocket(true);
@@ -278,7 +282,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         // output at the current grid. Replaying it only after reveal can apply
         // old-width wraps and relative erases to an already resized terminal.
         // Hidden Agents likewise feed the buffer used by Issue previews.
-        canWrite: (windowId) => pmChatViews.has(windowId) || (worksHost && worksSurface?.contains(windowId)) || canRefreshTerminalViewport(windowId),
+        canWrite: (windowId) => {
+          const runtime = terminalMap.get(windowId);
+          return runtime?.isReady === true
+            && runtime.snapshotWriteCoordinator?.shouldDeferOutput() !== true
+            && (pmChatViews.has(windowId) || (worksHost && worksSurface?.contains(windowId)) || canRefreshTerminalViewport(windowId));
+        },
         onFlush: (windowId) => {
           const runtime = terminalMap.get(windowId);
           if (runtime?.snapshotWriteCoordinator?.shouldDeferOutput() === true) {
@@ -1822,7 +1831,16 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
               renderedRuntimeStatusKeys.delete(windowId);
             }
             // Rebind before rendering can emit requests for the new project.
-            connectSocket();
+            // A streamed prefix may precede an old catalog in the dispatcher.
+            // Reclaim unmounted orphans, then recover uncertain bytes through
+            // hydration rather than continuing across a silently dropped gap.
+            const discardedRaw = terminalOutputBatcher.prune(new Set([...currentWindowIds, ...windowMap.keys()]));
+            for (const id of discardedRaw) {
+              pendingSnapshotMap.delete(id);
+              renderedTerminalPackets.delete(id);
+              removePmWindowState(id);
+            }
+            connectSocket(discardedRaw.length > 0 && socket?.readyState === WebSocket.OPEN && socketProjectKey === activeProjectKey());
             if (incomingRuntimeStatus) {
               const wasReconciling = reconcilingWindowCatalog;
               reconcilingWindowCatalog = true;
@@ -2016,7 +2034,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // SPEC-2008 Phase 26.A regression fix (Issue #2832): completeInitialFitHandshake
       // must verify the container has a real layout box before flipping
       // `isReady` true, otherwise fit resolves against a 0-sized parent
-      // and the deferredWrites flush into xterm's default 80×24 grid.
+      // and queued output reaches xterm's default 80×24 grid.
       // Bound retries even when only the 100ms readiness fallback advances.
       // A later reveal can retry a window whose layout was unavailable.
       const HANDSHAKE_RETRY_LIMIT = 60;
@@ -2377,7 +2395,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           // (completeInitialFitHandshake bails when canRefreshTerminalViewport
           // is false). The hidden → visible transition is the first chance
           // to drain the pending buffers; complete the handshake here so
-          // subsequent writeOutput calls stop hitting deferredWrites.
+          // the bounded output queue can start draining.
           if (activeRuntime.isReady === false) {
             completeInitialFitHandshake(windowId);
           }
@@ -3170,15 +3188,14 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           // `isReady` flips to `true` AFTER the first
           // runTerminalActivationSequence has resolved real dimensions,
           // i.e. after xterm has reached its real cols/rows. Until then,
-          // all writeOutput / replaceTerminalSnapshot calls are captured
-          // in deferredWrites / pendingSnapshotMap so the bytes are not
+          // live output stays in the bounded batcher and snapshots in
+          // pendingSnapshotMap so the bytes are not
           // written against xterm's default 80x24 grid. Without this,
           // the early Claude Code TUI bytes (which were generated for
           // the backend's spawn cols/rows) land at the wrong grid size
           // and stay layout-locked until the next manual resize,
           // producing the post-launch corruption symptom.
           isReady: false,
-          deferredWrites: [],
           snapshotWriteCoordinator: null,
           hasOutput: false,
           // Issue #2937: bounds the focus-path reflow retry in
@@ -3212,14 +3229,13 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           installLiveDecoder: (decoder) => decoderMap.set(windowId, decoder),
           onSnapshotFailureSettled: () => {
             decoderMap.set(windowId, new TextDecoder());
-            flushDeferredTerminalWrites(windowId, runtime);
           },
           onLatestSnapshotWritten: () => {
             try {
-              terminalOutputBatcher.clear(windowId);
+              terminalOutputBatcher.finishSnapshot(windowId);
               forceTerminalViewportRefresh(windowId, { shouldPersistGeometry: true });
             } finally {
-              flushDeferredTerminalWrites(windowId, runtime);
+              terminalOutputBatcher.schedulePending(windowId);
             }
           },
           onError: (error, stage) => {
@@ -3239,21 +3255,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         scheduleInitialFitHandshake(windowId);
 
         return runtime;
-      }
-
-      function flushDeferredTerminalWrites(windowId, runtime) {
-        if (
-          terminalMap.get(windowId) !== runtime ||
-          runtime.snapshotWriteCoordinator?.shouldDeferOutput() === true ||
-          runtime.deferredWrites.length === 0
-        ) {
-          return;
-        }
-        const flush = runtime.deferredWrites;
-        runtime.deferredWrites = [];
-        for (const chunk of flush) {
-          writeOutput(windowId, chunk);
-        }
       }
 
       // SPEC-2008 Phase 26.A / FR-057: run the initial fit + replay
@@ -3284,7 +3285,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         // state `fitAddon.fit()` resolves cell-grid dimensions against a
         // 0-sized container and silently leaves the terminal at the xterm
         // default 80×24 grid. The previous code then flipped
-        // `isReady = true` and flushed `deferredWrites` into that broken
+        // `isReady = true` and flushed pending output into that broken
         // grid, producing the post-launch corruption that resize/move
         // recovered from. Re-schedule via rAF until the container has a
         // non-zero box, with an attempt ceiling so a perma-hidden window
@@ -3315,18 +3316,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           runtime.snapshotWriteCoordinator.start();
         }
 
-        const pending = pendingOutputMap.get(windowId);
-        if (pending?.length) {
-          for (const chunk of pending) {
-            writeOutput(windowId, chunk);
-          }
-          pendingOutputMap.delete(windowId);
-        }
-
-        // Flush any terminal_output WebSocket bytes that arrived
-        // between createTerminalRuntime returning and this handshake
-        // firing.
-        flushDeferredTerminalWrites(windowId, runtime);
+        terminalOutputBatcher.schedulePending(windowId);
       }
 
       function writeOutput(windowId, base64) {
@@ -3335,27 +3325,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           { window_id: windowId, bytes_base64: base64 ? base64.length : 0 },
           () => {
             const runtime = terminalMap.get(windowId);
-            if (!runtime) {
-              const queue = pendingOutputMap.get(windowId) || [];
-              queue.push(base64);
-              pendingOutputMap.set(windowId, queue);
-              return;
-            }
-            if (base64) {
+            if (base64 && runtime) {
               runtime.hasOutput = true;
             }
-            // SPEC-2008 Phase 26.A / FR-057: if the terminal has not yet
-            // completed its initial fit, hold the chunk in the runtime's
-            // deferred queue. The createTerminalRuntime rAF flushes this
-            // queue after the activation sequence so writes land at the
-            // real cols/rows instead of xterm's default 80×24 grid.
-            if (
-              runtime.isReady === false ||
-              runtime.snapshotWriteCoordinator?.shouldDeferOutput() === true
-            ) {
-              runtime.deferredWrites.push(base64);
-              return;
-            }
+            // One bounded queue covers absent/unfit/hidden runtimes and
+            // snapshot barriers. canWrite keeps bytes behind the real grid.
             terminalOutputBatcher.enqueue(windowId, base64);
             if (!canRefreshTerminalViewport(windowId)) {
               markTerminalViewportRefreshPending(windowId);
@@ -3366,12 +3340,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
 
       function replaceTerminalSnapshot(windowId, base64) {
         const runtime = terminalMap.get(windowId);
-        clearTerminalOutputBeforeSnapshot({
-          windowId,
-          runtime,
-          pendingOutputMap,
-          clearBatchedOutput: (id) => terminalOutputBatcher.clear(id, { preserveFailure: true }),
-        });
+        terminalOutputBatcher.beginSnapshot(windowId);
         pendingSnapshotMap.set(windowId, base64);
         if (base64 && runtime) {
           runtime.hasOutput = true;
@@ -4674,7 +4643,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
                       return next;
                     });
                     renderedIssueWindowHeaderKeys.delete(windowId);
-                    pendingOutputMap.delete(windowId);
                     pendingSnapshotMap.delete(windowId);
                     terminalOutputBatcher.clear(windowId);
                     disposeProfileWindow(windowId);
