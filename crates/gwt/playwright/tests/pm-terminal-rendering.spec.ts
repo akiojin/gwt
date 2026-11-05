@@ -20,6 +20,23 @@ test("PM terminal keeps redraw, grid and input consistent across view changes", 
   await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
   if (!liveBase) await installEmbeddedRoutes(page);
   await installPmBackend(page);
+  // Fail once inside the synchronous model subscriber, through the real
+  // fixture WebSocket/dispatcher path. No fault hook ships in the product.
+  await page.route("**/app.js", async route => {
+    const response = liveBase ? await route.fetch() : undefined;
+    const source = response ? await response.text() : readFileSync("crates/gwt/web/app.js", "utf8");
+    const needle = "const packet = state.terminal;";
+    expect(source.split(needle)).toHaveLength(2);
+    await route.fulfill({ response, contentType: "text/javascript", body: source.replace(needle, `${needle}
+        const fault = window.__terminalReceiveFault;
+        if (fault && packet) {
+          fault.seen.push(packet);
+          if (fault.armed && packet.dataBase64 === fault.marker) {
+            fault.armed = false;
+            throw new Error('one-shot terminal subscriber failure');
+          }
+        }`) });
+  });
   await page.setViewportSize({ width: 1920, height: 1080 });
   await page.goto(appUrl);
   await page.locator("#op-pm-entry").click();
@@ -110,6 +127,25 @@ test("PM terminal keeps redraw, grid and input consistent across view changes", 
   await emit(page, "terminal_output", "\r\nLive after reconnect");
   await expect.poll(() => text(page)).toContain("Live after reconnect");
 
+  for (const kind of ["terminal_output", "terminal_snapshot"]) {
+    const before = await page.evaluate(kind => {
+      (window as any).__terminalReceiveFault = { armed: true, marker: btoa("FAILED PACKET"), seen: [] };
+      const fixture = (window as any).__pmTerminalFixture;
+      const connections = fixture.connections();
+      fixture.emit({ kind, id: "pm-terminal", data_base64: btoa("FAILED PACKET") });
+      fixture.emit({ kind: "terminal_output", id: "pm-terminal", data_base64: btoa("TORN SUFFIX") });
+      return connections;
+    }, kind);
+    await expect.poll(() => page.evaluate(() => (window as any).__pmTerminalFixture.connections())).toBe(before + 1);
+    await expect.poll(() => page.evaluate(() => (window as any).__terminalReceiveFault.seen
+      .some((packet: any) => packet.kind === "terminal_snapshot" && atob(packet.dataBase64).includes("Reconnected status")))).toBe(true);
+    expect(await page.evaluate(() => (window as any).__terminalReceiveFault.seen
+      .some((packet: any) => atob(packet.dataBase64).includes("TORN SUFFIX")))).toBe(false);
+    await emit(page, "terminal_output", `\r\nRecovered ${kind}`);
+    await expect.poll(() => text(page)).toContain(`Recovered ${kind}`);
+  }
+  await expect(page.locator(".render-degradation-banner")).toBeVisible();
+
   const input = pm.locator(".xterm-helper-textarea");
   await input.focus();
   await page.evaluate(() => { (window as any).__pmTerminalFixture.sent.length = 0; });
@@ -126,6 +162,9 @@ test("PM terminal keeps redraw, grid and input consistent across view changes", 
   await expect.poll(() => sentInput(page)).toBe("/model");
   expect(await sentInput(page)).not.toContain("/modelmodel");
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  const recovered = info.outputPath(`pm-receive-recovered-${theme}.png`);
+  await pm.screenshot({ path: recovered });
+  await info.attach("terminal receive recovery", { path: recovered, contentType: "image/png" });
   await info.attach("PM terminal grid and errors", { body: JSON.stringify({ theme, grids, errors }), contentType: "application/json" });
   expect(errors, "zero console/page errors").toEqual([]);
 });
@@ -180,6 +219,7 @@ async function installPmBackend(page: Page): Promise<void> {
     }] } });
     const fixture = (window as any).__pmTerminalFixture = {
       sent: [] as any[],
+      connections: () => connections,
       emit: (packet: unknown) => socket.emit(packet),
       reconnect: () => socket.close(),
     };

@@ -243,6 +243,23 @@ test("receive recovery requests pane and open surface snapshots only on the owni
   assert.equal(sockets.at(-1).sent.length, 2, "a stale dispatcher cannot resync a replacement socket");
 });
 
+test("a terminal receive failure replaces the owning connection and fences its old dispatcher", () => {
+  const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
+  context.connectSocket();
+  sockets[1].open();
+  const old = context.dispatcherOptions.at(-1);
+  old.onResync("receive-error");
+  assert.equal(sockets.length, 3, "the native backlog cannot follow the failed terminal packet");
+  sockets[2].open();
+  assert.equal(sockets[1].readyState, 3);
+  assert.deepEqual(sockets[2].sent, [{ kind: "frontend_ready" }]);
+  const count = context.received.length;
+  old.receive({ kind: "terminal_output", data_base64: "stale" });
+  old.onResync("receive-error");
+  assert.equal(context.received.length, count);
+  assert.equal(sockets.length, 3);
+});
+
 test("native foreground recovery does not require an observed hidden event", () => {
   const document = { hidden: false };
   let resumes = 0;
