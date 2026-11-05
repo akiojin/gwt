@@ -41,6 +41,16 @@ test("PM terminal keeps redraw, grid and input consistent across view changes", 
           }
         }`);
     }
+    const snapshotDecode = "decodeTerminalSnapshotBoundary(decodeBase64(snapshot))";
+    expect(source.split(snapshotDecode)).toHaveLength(2);
+    source = source.replace(snapshotDecode, `(() => {
+      const fault = window.__terminalBatchFault;
+      if (fault?.snapshotFailures > 0) {
+        fault.snapshotFailures--;
+        throw new Error("one-shot replacement snapshot decode failure");
+      }
+      return ${snapshotDecode};
+    })()`);
     const needle = "const packet = state.terminal;";
     expect(source.split(needle)).toHaveLength(2);
     await route.fulfill({ response, contentType: "text/javascript", body: source.replace(needle, `${needle}
@@ -160,21 +170,79 @@ test("PM terminal keeps redraw, grid and input consistent across view changes", 
     await emit(page, "terminal_output", `\r\nRecovered ${kind}`);
     await expect.poll(() => text(page)).toContain(`Recovered ${kind}`);
   }
-  for (const stage of ["merge", "write"]) {
-    const before = await page.evaluate(stage => {
-      (window as any).__terminalBatchFault = { stage, armed: true, seen: [] };
+  for (const scenario of ["merge", "write", "replacement-snapshot"]) {
+    const stage = scenario === "replacement-snapshot" ? "write" : scenario;
+    const recoveries = scenario === "replacement-snapshot" ? 2 : 1;
+    const before = await page.evaluate(({ stage, recoveries }) => {
+      (window as any).__terminalBatchFault = { stage, armed: true, seen: [], snapshotFailures: recoveries - 1 };
       const fixture = (window as any).__pmTerminalFixture;
       const connections = fixture.connections();
       fixture.emit({ kind: "terminal_output", id: "pm-terminal", data_base64: btoa("FAILED BATCH") });
       fixture.emit({ kind: "terminal_output", id: "pm-terminal", data_base64: btoa("TORN BATCH SUFFIX") });
       return connections;
-    }, stage);
-    await expect.poll(() => page.evaluate(() => (window as any).__pmTerminalFixture.connections())).toBe(before + 1);
+    }, { stage, recoveries });
+    await expect.poll(() => page.evaluate(() => (window as any).__pmTerminalFixture.connections())).toBe(before + recoveries);
     await expect.poll(async () => (await text(page)).trim()).toBe("Reconnected status");
-    await emit(page, "terminal_output", `\r\nRecovered batch ${stage}`);
-    await expect.poll(() => text(page)).toContain(`Recovered batch ${stage}`);
-    expect(await page.evaluate(() => (window as any).__pmTerminalFixture.connections())).toBe(before + 1);
+    const seen = await page.evaluate(() => (window as any).__terminalBatchFault.seen);
+    const failed = seen.findIndex((entry: any) => entry.stage === stage && entry.bytes.includes("FAILED BATCH"));
+    expect(failed).toBeGreaterThanOrEqual(0);
+    expect(seen.slice(failed + 1).some((entry: any) => entry.bytes.includes("TORN BATCH SUFFIX"))).toBe(false);
+    await emit(page, "terminal_output", `\r\nRecovered batch ${scenario}`);
+    await expect.poll(() => text(page)).toContain(`Recovered batch ${scenario}`);
+    expect(await page.evaluate(() => (window as any).__pmTerminalFixture.connections())).toBe(before + recoveries);
   }
+  const overflowConnections = await page.evaluate(() => {
+    (window as any).__terminalBatchFault = { armed: false, seen: [] };
+    const fixture = (window as any).__pmTerminalFixture;
+    fixture.recoveryTail = "\r\nPOST SNAPSHOT SUFFIX";
+    const before = fixture.connections();
+    fixture.emit({ kind: "terminal_output", id: "pm-terminal", data_base64: btoa("X".repeat(512 * 1024 + 1)) });
+    fixture.emit({ kind: "terminal_output", id: "pm-terminal", data_base64: btoa("DISCARDED OVERFLOW SUFFIX") });
+    return before;
+  });
+  await expect.poll(() => page.evaluate(() => (window as any).__pmTerminalFixture.connections())).toBe(overflowConnections + 1);
+  await expect.poll(async () => (await text(page)).trim()).toBe("Reconnected status\nPOST SNAPSHOT SUFFIX");
+  expect(await page.evaluate(() => (window as any).__terminalBatchFault.seen
+    .some((entry: any) => entry.bytes.includes("DISCARDED OVERFLOW SUFFIX")))).toBe(false);
+  await emit(page, "terminal_output", "\r\nLive after overflow");
+  await expect.poll(() => text(page)).toContain("Live after overflow");
+  expect(await page.evaluate(() => (window as any).__pmTerminalFixture.connections())).toBe(overflowConnections + 1);
+  const catalogConnections = await page.evaluate(() => {
+    const fixture = (window as any).__pmTerminalFixture;
+    fixture.recoveryTail = "\r\nCATALOG RECOVERY";
+    const before = fixture.connections();
+    fixture.emit({ kind: "terminal_output", id: "unmounted-retention-orphan", data_base64: btoa("ORPHAN PREFIX") });
+    fixture.emitWorkspace(); // Same catalog: keyed DOM sync may be skipped.
+    return before;
+  });
+  await expect.poll(() => page.evaluate(() => (window as any).__pmTerminalFixture.connections())).toBe(catalogConnections + 1);
+  await expect.poll(async () => (await text(page)).trim()).toBe("Reconnected status\nCATALOG RECOVERY");
+  await expect(page.locator('[data-id="unmounted-retention-orphan"]')).toHaveCount(0);
+  await emit(page, "terminal_output", "\r\nLive after catalog recovery");
+  await expect.poll(() => text(page)).toContain("Live after catalog recovery");
+  expect(await page.evaluate(() => (window as any).__pmTerminalFixture.connections())).toBe(catalogConnections + 1);
+  const coldConnections = await page.evaluate(() => {
+    const fixture = (window as any).__pmTerminalFixture;
+    fixture.addColdWindow(); // The browser has not received this catalog yet.
+    fixture.recoveryTail = "\r\nCOLD RECOVERY";
+    const before = fixture.connections();
+    fixture.emit({ kind: "terminal_output", id: "cold-retention", data_base64: btoa("X".repeat(512 * 1024 + 1)) });
+    return before;
+  });
+  await expect.poll(() => page.evaluate(() => (window as any).__pmTerminalFixture.connections())).toBe(coldConnections + 1);
+  await expect.poll(async () => (await text(page)).trim()).toBe("Reconnected status\nCOLD RECOVERY");
+  await page.getByRole("button", { name: "Works", exact: true }).click();
+  await page.locator('.work-row[data-window-id="cold-retention"] .work-open').click();
+  await expect(page.locator('.works-surface:not(.works-surface--preview) .works-terminal[data-window-id="cold-retention"]')).toBeVisible();
+  await expect.poll(() => page.evaluate(() => (window as any).__gwtTerminalTestApi.metrics("cold-retention").isReady)).toBe(true);
+  await expect.poll(async () => (await text(page, "cold-retention")).trim()).toBe("Cold snapshot");
+  await page.evaluate(() => (window as any).__pmTerminalFixture.emit({ kind: "terminal_output", id: "cold-retention", data_base64: btoa("\r\nCOLD LIVE") }));
+  await expect.poll(async () => (await text(page, "cold-retention")).trim()).toBe("Cold snapshot\nCOLD LIVE");
+  await page.locator("#op-pm-entry").click();
+  await pm.getByRole("button", { name: "Execution log", exact: true }).click();
+  await emit(page, "terminal_output", "\r\nLive after cold recovery");
+  await expect.poll(() => text(page)).toContain("Live after cold recovery");
+  expect(await page.evaluate(() => (window as any).__pmTerminalFixture.connections())).toBe(coldConnections + 1);
   await expect(page.locator(".render-degradation-banner")).toBeVisible();
 
   const input = pm.locator(".xterm-helper-textarea");
@@ -220,8 +288,8 @@ async function expectGridConverged(page: Page): Promise<void> {
     }, { cols, rows });
   }, { message: "the visible PM grid is published to the PTY" }).toBe(true);
 }
-async function text(page: Page): Promise<string> {
-  return page.evaluate(id => (window as any).__gwtTerminalTestApi.bufferText(id), PM);
+async function text(page: Page, windowId = PM): Promise<string> {
+  return page.evaluate(id => (window as any).__gwtTerminalTestApi.bufferText(id), windowId);
 }
 async function sentInput(page: Page): Promise<string> {
   return page.evaluate(() => (window as any).__pmTerminalFixture.sent.filter((entry: any) => entry.kind === "terminal_input" && entry.id === "pm-terminal").map((entry: any) => entry.data).join(""));
@@ -250,8 +318,11 @@ async function installPmBackend(page: Page): Promise<void> {
     }] } });
     const fixture = (window as any).__pmTerminalFixture = {
       sent: [] as any[],
+      recoveryTail: "",
       connections: () => connections,
       emit: (packet: unknown) => socket.emit(packet),
+      emitWorkspace: () => socket.emit(workspace()),
+      addColdWindow: () => windows.push({ ...windows[0], id: "cold-retention", title: "Cold agent", preset: "agent", is_pm: false, session_id: "cold-retention-session" }),
       reconnect: () => socket.close(),
     };
     class FixtureWebSocket extends EventTarget {
@@ -270,7 +341,17 @@ async function installPmBackend(page: Page): Promise<void> {
           this.readyState = 1;
           this.dispatchEvent(new Event("open"));
           this.emit(workspace());
-          if (connections > 1) this.emit({ kind: "terminal_snapshot", id: "pm-terminal", data_base64: btoa("\x1b[H\x1b[2JReconnected status") });
+          if (connections > 1) {
+            this.emit({ kind: "terminal_snapshot", id: "pm-terminal", data_base64: btoa("\x1b[H\x1b[2JReconnected status") });
+            if (fixture.recoveryTail) this.emit({ kind: "terminal_output", id: "pm-terminal", data_base64: btoa(fixture.recoveryTail) });
+            if (windows.some(entry => entry.id === "cold-retention")) this.emit({ kind: "terminal_snapshot", id: "cold-retention", data_base64: btoa("Cold snapshot") });
+            if (windows.some(entry => entry.id === "cold-retention")) this.emit({ kind: "active_work_projection", projection: {
+              id: "cold-retention-live", active_works: [], local_agent_activity: {
+                project_key: location.pathname.split("/").at(-1), host_id: "raw-cap-fixture", observed_at: new Date().toISOString(),
+                agents: [{ window_id: "cold-retention", session_id: "cold-retention-session", runtime_incarnation: 1, is_pm: false, issue_number: null }],
+              },
+            } });
+          }
         }, 0);
       }
       send(raw: string) {

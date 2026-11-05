@@ -1918,6 +1918,7 @@ fn hub_frontend_event_allowed(event: &FrontendEvent) -> bool {
             | FrontendEvent::GithubRepositorySearch { .. }
             | FrontendEvent::CloneProjectStart { .. }
             | FrontendEvent::ReopenRecentProject { .. }
+            | FrontendEvent::GetProjectExecutionStatus { .. }
             | FrontendEvent::PreviewCloseProject { .. }
             | FrontendEvent::ConfirmCloseProject { .. }
             | FrontendEvent::CancelCloseProject { .. }
@@ -2355,6 +2356,15 @@ enum UserEvent {
         path: PathBuf,
         reply: app_runtime::ProjectOpenReply,
     },
+    ProjectObservationInvalidationCompleted(
+        Box<app_runtime::project_execution_policy::ProjectObservationInvalidationCompleted>,
+    ),
+    BrowserDisconnected {
+        client_id: String,
+    },
+    ProjectExecutionChoiceCompleted(
+        Box<app_runtime::project_execution_policy::ProjectExecutionChoiceCompleted>,
+    ),
     Dispatch(Vec<OutboundEvent>),
     PmConversationLoaded {
         client_id: ClientId,
@@ -3599,7 +3609,11 @@ mod tests {
                     project_key: "project".into(),
                     generation: 1,
                     nonce: "nonce".into(),
-                }
+                },
+                choice: None,
+                operation_id: None,
+                expected_policy_revision: None,
+                expected_view_set_revision: None,
             }
         ));
 
@@ -4589,6 +4603,7 @@ mod tests {
                 windows: Vec::new(),
                 work_items: Vec::new(),
             },
+            execution: None,
             running_agent_count: 1,
             running_agents: vec![gwt::RunningAgentSummary {
                 display_name: "claude".to_string(),
@@ -4782,8 +4797,18 @@ mod tests {
         let persist_dispatcher = Arc::new(
             crate::app_runtime::persist_dispatcher::PersistDispatcher::new(&blocking_tasks),
         );
-        let (project_tab_incarnations, next_project_incarnation) =
+        let (mut project_tab_incarnations, _) =
             crate::app_runtime::initial_project_tab_incarnations(&tabs);
+        // Historical wizard fixtures use generations 1..; production boot
+        // uniqueness is verified directly by the project navigation tests.
+        let mut next_project_incarnation = 1;
+        for tab in &tabs {
+            project_tab_incarnations
+                .get_mut(&tab.id)
+                .unwrap()
+                .generation = next_project_incarnation;
+            next_project_incarnation += 1;
+        }
         let mut runtime = AppRuntime {
             test_project_owners: HashMap::new(),
             _runtime_namespace_gc: None,
@@ -4923,6 +4948,7 @@ mod tests {
         };
         runtime.rebuild_window_lookup();
         runtime.seed_window_pty_statuses();
+        runtime.seed_fixture_project_views();
         (runtime, events)
     }
 
@@ -10655,7 +10681,7 @@ fn main() -> std::io::Result<()> {
         let event = match event {
             Event::UserEvent(UserEvent::TransientBrowserEnded { generation }) => {
                 let (current, connected) = transient_dispatch_clients.browser_session_state();
-                if connected || current != generation { return; }
+                if connected || current != generation || app.as_ref().is_some_and(|app| app.has_unfinished_continue_work()) { return; }
                 Event::UserEvent(UserEvent::QuitApp { reason: GuiShutdownReason::QuitApp })
             }
             Event::UserEvent(UserEvent::MenuEvent(ref menu))
@@ -10800,6 +10826,7 @@ fn main() -> std::io::Result<()> {
             }
         };
         let app = app.as_mut().expect("startup complete");
+        clients.dispatch(app.reconcile_project_view_connections(&clients));
         dispatch_timer.label = event_loop_dispatch_label(&event);
         watchdog_guard.set_event(dispatch_timer.label.as_str());
         // Issue #3611 AC-4: every dispatch on this thread is timed, not just
@@ -11287,9 +11314,11 @@ fn main() -> std::io::Result<()> {
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::RuntimeDaemonEnsureTick) => {
+                app.retry_project_observation_invalidations();
                 app.ensure_runtime_daemons_for_open_projects();
             }
             Event::UserEvent(UserEvent::TerminalConvergenceTick) => {
+                app.retry_project_observation_invalidations();
                 let mut events = app.terminal_convergence_tick_events();
                 // Issue #3906 AC-8: the 15 s convergence tick is also the
                 // update drain's clock (two clear ticks = quiescent).
@@ -11544,6 +11573,16 @@ fn main() -> std::io::Result<()> {
                     current,
                     error,
                 }));
+            }
+            Event::UserEvent(UserEvent::ProjectObservationInvalidationCompleted(completed)) => {
+                app.project_observation_invalidation_completed(*completed);
+            }
+            Event::UserEvent(UserEvent::BrowserDisconnected { client_id }) => {
+                let _ = client_id;
+                clients.dispatch(app.reconcile_project_view_connections(&clients));
+            }
+            Event::UserEvent(UserEvent::ProjectExecutionChoiceCompleted(completed)) => {
+                clients.dispatch(app.project_execution_choice_completed(*completed));
             }
             Event::UserEvent(UserEvent::Dispatch(events)) => {
                 app.observe_notification_toasts(&events);
@@ -12007,6 +12046,7 @@ fn main() -> std::io::Result<()> {
                 }
             }
             Event::MainEventsCleared => {
+                clients.dispatch(app.reconcile_project_view_connections(&clients));
                 if let Ok(mut roots) = capacity_projects.write() {
                     *roots = app.capacity_observation_contexts();
                 }

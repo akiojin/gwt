@@ -610,7 +610,7 @@ fn embedded_web_terminal_writes_refresh_viewport_after_xterm_parse() {
     // short-circuit on a background tab leaves xterm with stale cell
     // metrics and dead scrollback wheel until the next OS resize.
     let snapshot_write = regex::Regex::new(
-            r"(?s)createTerminalSnapshotWriteCoordinator\(\{[\s\S]*?onLatestSnapshotWritten:\s*\(\)\s*=>\s*\{[\s\S]*?try\s*\{[\s\S]*?forceTerminalViewportRefresh\(windowId,\s*\{\s*shouldPersistGeometry:\s*true\s*\}\);[\s\S]*?\}\s*finally\s*\{[\s\S]*?flushDeferredTerminalWrites\(windowId,\s*runtime\);",
+            r"(?s)createTerminalSnapshotWriteCoordinator\(\{[\s\S]*?onLatestSnapshotWritten:\s*\(\)\s*=>\s*\{[\s\S]*?try\s*\{\s*terminalOutputBatcher\.finishSnapshot\(windowId\);\s*forceTerminalViewportRefresh\(windowId,\s*\{\s*shouldPersistGeometry:\s*true\s*\}\);[\s\S]*?\}\s*finally\s*\{[\s\S]*?terminalOutputBatcher\.schedulePending\(windowId\);",
         )
         .expect("valid regex");
     let snapshot_activation = regex::Regex::new(
@@ -673,9 +673,9 @@ fn embedded_web_terminal_writes_refresh_viewport_after_xterm_parse() {
         "expected document visibility restore to re-arm visible terminal refreshes",
     );
     assert!(
-        html.contains("clearTerminalOutputBeforeSnapshot({")
-            && html.contains("clearBatchedOutput: (id) => terminalOutputBatcher.clear(id)"),
-        "expected snapshot receipt to clear every pre-boundary terminal output queue",
+        html.contains("terminalOutputBatcher.beginSnapshot(windowId);")
+            && html.contains("terminalOutputBatcher.finishSnapshot(windowId);"),
+        "expected snapshot receipt to discard old output and completion to resume its bounded suffix",
     );
     assert!(
         html.contains("terminalViewportRefreshScheduler?.clear(windowId);"),
@@ -721,9 +721,9 @@ fn embedded_web_terminal_runtime_buffers_writes_until_initial_fit_handshake() {
     // including when rAF stalls, keeping the handshake gated on real layout (see helper
     // below). Works caches keep a layout box while hidden; ordinary hidden
     // windows still wait for reveal. Inlining replay before fit would
-    // defeat the deferredWrites buffer (CodeRabbit PR #2693 concern).
+    // defeat the bounded output queue (CodeRabbit PR #2693 concern).
     let create_runtime_handshake = regex::Regex::new(
-            r#"(?s)isReady: false,\s*deferredWrites: \[\],[\s\S]*?handshakeAttempts: 0,[\s\S]*?\};\s*terminalMap\.set\(windowId, runtime\);\s*decoderMap\.set\(windowId, new TextDecoder\(\)\);[\s\S]*?scheduleInitialFitHandshake\(windowId\);\s*return runtime;"#,
+            r#"(?s)isReady: false,[\s\S]*?handshakeAttempts: 0,[\s\S]*?\};\s*terminalMap\.set\(windowId, runtime\);\s*decoderMap\.set\(windowId, new TextDecoder\(\)\);[\s\S]*?scheduleInitialFitHandshake\(windowId\);\s*return runtime;"#,
         )
         .expect("valid regex");
     let scheduled_handshake = regex::Regex::new(
@@ -733,7 +733,7 @@ fn embedded_web_terminal_runtime_buffers_writes_until_initial_fit_handshake() {
     // The helper must (a) bail on hidden windows outside the measurable
     // Works cache layout, and (b) mark ready only after activation succeeds.
     let handshake_helper = regex::Regex::new(
-            r#"(?s)function completeInitialFitHandshake\(windowId\) \{[\s\S]*?if \(!runtime \|\| runtime\.isReady\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?if \(!\(worksHost && worksSurface\?\.contains\(windowId\)\) && !canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?const activation = runTerminalActivationSequence\(\{[\s\S]*?\}\);\s*if \(!activation\.ran\) \{[\s\S]*?retryInitialFitHandshake\(windowId, runtime,[\s\S]*?return;[\s\S]*?\}\s*runtime\.handshakeAttempts = 0;\s*runtime\.isReady = true;[\s\S]*?if \(pendingSnapshotMap\.has\(windowId\)\) \{\s*runtime\.snapshotWriteCoordinator\.start\(\);\s*\}[\s\S]*?const pending = pendingOutputMap\.get\(windowId\);[\s\S]*?flushDeferredTerminalWrites\(windowId, runtime\);"#,
+            r#"(?s)function completeInitialFitHandshake\(windowId\) \{[\s\S]*?if \(!runtime \|\| runtime\.isReady\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?if \(!\(worksHost && worksSurface\?\.contains\(windowId\)\) && !canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?const activation = runTerminalActivationSequence\(\{[\s\S]*?\}\);\s*if \(!activation\.ran\) \{[\s\S]*?retryInitialFitHandshake\(windowId, runtime,[\s\S]*?return;[\s\S]*?\}\s*runtime\.handshakeAttempts = 0;\s*runtime\.isReady = true;[\s\S]*?if \(pendingSnapshotMap\.has\(windowId\)\) \{\s*runtime\.snapshotWriteCoordinator\.start\(\);\s*\}[\s\S]*?terminalOutputBatcher\.schedulePending\(windowId\);"#,
         )
         .expect("valid regex");
     // Hidden → visible activation path also needs to drive the
@@ -744,7 +744,7 @@ fn embedded_web_terminal_runtime_buffers_writes_until_initial_fit_handshake() {
         )
         .expect("valid regex");
     let write_gate = regex::Regex::new(
-            r#"(?s)function writeOutput\(windowId, base64\) \{[\s\S]*?if \(\s*runtime\.isReady === false\s*\|\|\s*runtime\.snapshotWriteCoordinator\?\.shouldDeferOutput\(\) === true\s*\) \{\s*runtime\.deferredWrites\.push\(base64\);\s*return;\s*\}"#,
+            r#"(?s)canWrite: \(windowId\) => \{\s*const runtime = terminalMap\.get\(windowId\);\s*return runtime\?\.isReady === true\s*&& runtime\.snapshotWriteCoordinator\?\.shouldDeferOutput\(\) !== true"#,
         )
         .expect("valid regex");
     let snapshot_gate = regex::Regex::new(
@@ -766,12 +766,16 @@ fn embedded_web_terminal_runtime_buffers_writes_until_initial_fit_handshake() {
         );
     assert!(
             reveal_completes_handshake.is_match(html),
-            "expected scheduleTerminalFocusActivation to invoke completeInitialFitHandshake on hidden -> visible so windows created hidden can still drain deferredWrites (FR-057, CodeRabbit fix)",
+            "expected scheduleTerminalFocusActivation to invoke completeInitialFitHandshake on hidden -> visible so windows created hidden can drain bounded output (FR-057, CodeRabbit fix)",
         );
     assert!(
             write_gate.is_match(html),
-            "expected writeOutput to push to runtime.deferredWrites when runtime.isReady === false (FR-057)",
+            "expected the bounded queue to write only after real initial fit and snapshot completion (FR-057)",
         );
+    assert!(
+        !html.contains("pendingOutputMap") && !html.contains("deferredWrites"),
+        "expected one bounded RAW queue across missing, unfit and hidden terminals",
+    );
     assert!(
             snapshot_gate.is_match(html),
             "expected replaceTerminalSnapshot to re-queue into pendingSnapshotMap when runtime.isReady === false (FR-057)",
@@ -1647,7 +1651,7 @@ fn embedded_web_socket_open_replays_frontend_ready_before_flushing_pending_messa
     // Readiness and the ephemeral attention report precede queue replay, and
     // replay must match the immutable connection scope.
     let open_flow = regex::Regex::new(
-        r#"function handleSocketOpen\(recoverSnapshots = false\)\s*\{[\s\S]*?setConnectionState\(true\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*if \(socketProjectKey\) projectPageMetadata\.reportAttention\(\);\s*recoveryCenterController\?\.reconnect\(\);\s*for \(let index = 0; index < pendingMessages\.length;\) \{\s*const pending = pendingMessages\[index\];\s*if \(pending\.projectKey !== socketProjectKey\) \{\s*index \+= 1;\s*continue;\s*\}\s*pendingMessages\.splice\(index, 1\);\s*socket\.send\(JSON\.stringify\(pending\.message\)\);\s*\}"#,
+        r#"function handleSocketOpen\(recoverSnapshots = false\)\s*\{[\s\S]*?setConnectionState\(true\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*closeProjectController\.reconnect\(\);\s*if \(socketProjectKey\) projectPageMetadata\.reportAttention\(\);\s*recoveryCenterController\?\.reconnect\(\);\s*for \(let index = 0; index < pendingMessages\.length;\) \{\s*const pending = pendingMessages\[index\];\s*if \(pending\.projectKey !== socketProjectKey\) \{\s*index \+= 1;\s*continue;\s*\}\s*pendingMessages\.splice\(index, 1\);\s*socket\.send\(JSON\.stringify\(pending\.message\)\);\s*\}"#,
     )
     .expect("valid regex");
 

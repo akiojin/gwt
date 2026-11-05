@@ -2056,36 +2056,15 @@ fn spawn_issue_monitor_worker_with_lease(
             let execute_effects = execute_effects && !test_hooks.hold_effects;
             if execute_effects && in_flight_effect.is_none() {
                 effect_execution_requested = false;
-                let current_permit = effect_permit.capture();
+                let current_permit = effect_permit.capture_for_project(&scope.project_root);
                 let selection_now =
                     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-                let next_effect = monitor
-                    .pending_effects()
-                    .iter()
-                    .filter(|effect| {
-                        issue_monitor_effect_permitted(effect, &current_permit)
-                            && monitor.effect_attempt_is_ready(effect, &selection_now)
-                    })
-                    .min_by_key(|effect| {
-                        (
-                            issue_monitor_effect_priority(effect),
-                            effect.state != crate::IssueMonitorEffectState::Attempting,
-                        )
-                    })
-                    .cloned();
-                let effect = next_effect.and_then(|effect| {
-                    if effect.state == crate::IssueMonitorEffectState::Attempting {
-                        Some((effect, false))
-                    } else {
-                        fence_next_issue_monitor_effect_with_permit(
-                            &prefs_path,
-                            &mut monitor,
-                            &current_permit,
-                            &selection_now,
-                        )
-                        .map(|effect| (effect, true))
-                    }
-                });
+                let effect = select_issue_monitor_effect(
+                    &prefs_path,
+                    &mut monitor,
+                    &current_permit,
+                    &selection_now,
+                );
                 if let Some((effect, allow_submit)) = effect {
                     let authority_current = effect.authority_epoch
                         == monitor.effect_authority_epoch()
@@ -6965,6 +6944,7 @@ struct IssueMonitorEffectPermit {
 struct IssueMonitorEffectPermitToken {
     generation_open: Arc<AtomicBool>,
     lane_open: Arc<AtomicBool>,
+    project_root: Option<PathBuf>,
 }
 
 impl IssueMonitorEffectPermitToken {
@@ -6973,6 +6953,7 @@ impl IssueMonitorEffectPermitToken {
         Self {
             generation_open: Arc::new(AtomicBool::new(true)),
             lane_open: Arc::new(AtomicBool::new(true)),
+            project_root: None,
         }
     }
 
@@ -6989,10 +6970,20 @@ impl IssueMonitorEffectPermit {
         }
     }
 
+    fn capture_for_project(&self, project_root: &Path) -> IssueMonitorEffectPermitToken {
+        IssueMonitorEffectPermitToken {
+            generation_open: Arc::clone(&self.current_generation),
+            lane_open: Arc::clone(&self.lane_open),
+            project_root: Some(project_root.to_path_buf()),
+        }
+    }
+
+    #[cfg(all(test, unix))]
     fn capture(&self) -> IssueMonitorEffectPermitToken {
         IssueMonitorEffectPermitToken {
             generation_open: Arc::clone(&self.current_generation),
             lane_open: Arc::clone(&self.lane_open),
+            project_root: None,
         }
     }
 
@@ -7040,7 +7031,75 @@ fn issue_monitor_effect_permitted(
     effect: &crate::PendingIssueMonitorEffect,
     permit: &IssueMonitorEffectPermitToken,
 ) -> bool {
-    issue_monitor_effect_is_safety(effect) || permit.load(Ordering::Acquire)
+    if issue_monitor_effect_is_safety(effect) {
+        return true;
+    }
+    if !permit.load(Ordering::Acquire) {
+        return false;
+    }
+    // An ambiguous earlier attempt must still perform read-only reconciliation.
+    effect.state == crate::IssueMonitorEffectState::Attempting
+        || issue_monitor_project_submission_permitted(effect, permit)
+}
+
+fn issue_monitor_project_submission_permitted(
+    effect: &crate::PendingIssueMonitorEffect,
+    permit: &IssueMonitorEffectPermitToken,
+) -> bool {
+    match (&effect.payload, &permit.project_root) {
+        (
+            crate::IssueMonitorEffectPayload::AcquireClaim { issue_number, .. }
+            | crate::IssueMonitorEffectPayload::ArmAutoMerge { issue_number, .. }
+            | crate::IssueMonitorEffectPayload::RerunFailedCi { issue_number, .. }
+            | crate::IssueMonitorEffectPayload::SettleMergedIssue { issue_number, .. },
+            Some(root),
+        ) => crate::project_execution_policy::admission(root, &[format!("issue:{issue_number}")])
+            .is_ok(),
+        _ => true,
+    }
+}
+
+fn select_issue_monitor_effect(
+    prefs_path: &Path,
+    monitor: &mut crate::IssueMonitorState,
+    permit: &IssueMonitorEffectPermitToken,
+    now: &str,
+) -> Option<(crate::PendingIssueMonitorEffect, bool)> {
+    let effect = monitor
+        .pending_effects()
+        .iter()
+        .filter(|effect| {
+            issue_monitor_effect_permitted(effect, permit)
+                // Settlement has no denied readback; its no-op result would
+                // fence scans and starve other eligible effects.
+                && !(effect.state == crate::IssueMonitorEffectState::Attempting
+                    && matches!(
+                        effect.payload,
+                        crate::IssueMonitorEffectPayload::SettleMergedIssue { .. }
+                    )
+                    && !issue_monitor_project_submission_permitted(effect, permit))
+                && monitor.effect_attempt_is_ready(effect, now)
+        })
+        .min_by_key(|effect| {
+            (
+                issue_monitor_effect_priority(effect),
+                effect.state != crate::IssueMonitorEffectState::Attempting,
+            )
+        })
+        .cloned()?;
+    if effect.state == crate::IssueMonitorEffectState::Attempting {
+        // These operations read back their stable claim/settlement identity
+        // before writing. Other uncertain effects retain read-only recovery.
+        let allow_submit = matches!(
+            &effect.payload,
+            crate::IssueMonitorEffectPayload::AcquireClaim { .. }
+                | crate::IssueMonitorEffectPayload::SettleMergedIssue { .. }
+        ) && issue_monitor_project_submission_permitted(&effect, permit);
+        Some((effect, allow_submit))
+    } else {
+        fence_next_issue_monitor_effect_with_permit(prefs_path, monitor, permit, now)
+            .map(|effect| (effect, true))
+    }
 }
 
 fn expire_issue_monitor_effect_at_watchdog(
@@ -7106,7 +7165,7 @@ fn spawn_issue_monitor_effect(
                 &scope,
                 &effect,
                 authority_current,
-                allow_submit,
+                allow_submit && issue_monitor_project_submission_permitted(&effect, &permit),
                 &execution_now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             )
         };
@@ -7161,7 +7220,8 @@ fn execute_issue_monitor_effect(
 ) -> IssueMonitorEffectOutcome {
     use gwt_github::client::OwnerMutationError;
     use gwt_github::issue_auto_claim::{
-        acquire_claim_mutation, release_claim_mutation, ClaimComment, ClaimStatus,
+        acquire_claim_mutation, observe_claim_acquisition, release_claim_mutation, ClaimComment,
+        ClaimStatus,
     };
     use gwt_github::IssueNumber;
 
@@ -7220,10 +7280,8 @@ fn execute_issue_monitor_effect(
             .map(|expires| expires.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
             .unwrap_or_else(|_| expires_at.clone());
             IssueMonitorEffectOutcome::Claim(match client {
-                Ok(client) => acquire_claim_mutation(
-                    &client,
-                    IssueNumber(*issue_number),
-                    ClaimComment {
+                Ok(client) => {
+                    let claim = ClaimComment {
                         comment_id: None,
                         claim_id: claim_id.clone(),
                         owner: owner.clone(),
@@ -7232,9 +7290,23 @@ fn execute_issue_monitor_effect(
                         heartbeat_at: execution_now.to_string(),
                         expires_at,
                         launched_work_id: launched_work_id.clone(),
-                    },
-                    execution_now,
-                ),
+                    };
+                    if allow_submit {
+                        acquire_claim_mutation(
+                            &client,
+                            IssueNumber(*issue_number),
+                            claim,
+                            execution_now,
+                        )
+                    } else {
+                        observe_claim_acquisition(
+                            &client,
+                            IssueNumber(*issue_number),
+                            &claim,
+                            execution_now,
+                        )
+                    }
+                }
                 Err(error) => Err(OwnerMutationError::PreSubmit(
                     gwt_github::ApiError::Network(error),
                 )),
@@ -7329,7 +7401,7 @@ fn execute_issue_monitor_effect(
                     ),
                 );
             };
-            if authority_current {
+            if authority_current && allow_submit {
                 IssueMonitorEffectOutcome::AutoMerge(gwt_git::pr_status::arm_pr_auto_merge(
                     &scope.project_root,
                     *pr_number,
@@ -7343,18 +7415,13 @@ fn execute_issue_monitor_effect(
                         ..
                     } => gwt_git::pr_status::AutoMergeMutationOutcome::AlreadyTargetState,
                     _ => gwt_git::pr_status::AutoMergeMutationOutcome::PreSubmit(
-                        "authority revoked before auto-merge submission".to_string(),
+                        "auto-merge submission is not currently permitted".to_string(),
                     ),
                 };
                 IssueMonitorEffectOutcome::AutoMerge(outcome)
             }
         }
-        crate::IssueMonitorEffectPayload::SettleMergedIssue {
-            issue_number,
-            pr_number,
-            merge_sha,
-            action,
-        } => {
+        crate::IssueMonitorEffectPayload::SettleMergedIssue { .. } => {
             if !authority_current {
                 return IssueMonitorEffectOutcome::MergedIssueSettlement(Err(
                     OwnerMutationError::PreSubmit(gwt_github::ApiError::Unexpected(
@@ -7364,48 +7431,13 @@ fn execute_issue_monitor_effect(
             }
             IssueMonitorEffectOutcome::MergedIssueSettlement(
                 match issue_monitor_http_client_with_repository(scope) {
-                    Ok((client, repository)) => {
-                        crate::issue_monitor_settlement::settle_merged_issue(
-                            &client,
-                            &repository,
-                            &scope.project_root,
-                            *issue_number,
-                            *pr_number,
-                            merge_sha.as_deref(),
-                            action,
-                            || {
-                                let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(
-                                    &scope.project_root,
-                                );
-                                let prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(
-                                    |error| {
-                                        OwnerMutationError::PreSubmit(ApiError::Unexpected(
-                                            format!(
-                                            "cannot recheck merged-issue close authority: {error}"
-                                        ),
-                                        ))
-                                    },
-                                )?;
-                                if prefs.enabled
-                                    && prefs.effect_authority_epoch == effect.authority_epoch
-                                    && prefs
-                                        .auto_close_merged_issues
-                                        .unwrap_or(prefs.autonomous_mode)
-                                    && !prefs.autonomous_records.iter().any(|record| {
-                                        record.issue_number == *issue_number
-                                            && record.review_passed == Some(false)
-                                    })
-                                {
-                                    Ok(())
-                                } else {
-                                    Err(OwnerMutationError::PreSubmit(ApiError::Unexpected(
-                                        "merged-issue close authority revoked or independent review failed"
-                                            .to_string(),
-                                    )))
-                                }
-                            },
-                        )
-                    }
+                    Ok((client, repository)) => execute_merged_issue_settlement(
+                        &client,
+                        &repository,
+                        scope,
+                        effect,
+                        allow_submit,
+                    ),
                     Err(error) => Err(OwnerMutationError::PreSubmit(
                         gwt_github::ApiError::Network(error),
                     )),
@@ -7430,6 +7462,67 @@ fn execute_issue_monitor_effect(
             ))
         }
     }
+}
+
+fn execute_merged_issue_settlement<
+    C: gwt_github::client::IssueClient + gwt_github::client::OwnerRepositoryClient,
+>(
+    client: &C,
+    repository: &gwt_github::client::RepositoryIdentity,
+    scope: &RuntimeScope,
+    effect: &crate::PendingIssueMonitorEffect,
+    allow_submit: bool,
+) -> gwt_github::client::OwnerMutationResult<
+    crate::issue_monitor_settlement::MergedIssueSettlementOutcome,
+> {
+    use gwt_github::client::OwnerMutationError;
+    use gwt_github::ApiError;
+    if !allow_submit {
+        return Err(OwnerMutationError::RemoteOutcomeUnknown(ApiError::Unexpected(
+            "Project admission does not permit merged-issue settlement; retain this attempt for reconciliation".into(),
+        )));
+    }
+    let crate::IssueMonitorEffectPayload::SettleMergedIssue {
+        issue_number,
+        pr_number,
+        merge_sha,
+        action,
+    } = &effect.payload
+    else {
+        unreachable!("settlement executor requires a settlement effect")
+    };
+    crate::issue_monitor_settlement::settle_merged_issue(
+        client,
+        repository,
+        &scope.project_root,
+        *issue_number,
+        *pr_number,
+        merge_sha.as_deref(),
+        action,
+        || {
+            let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
+            let prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(|error| {
+                OwnerMutationError::PreSubmit(ApiError::Unexpected(format!(
+                    "cannot recheck merged-issue close authority: {error}"
+                )))
+            })?;
+            if prefs.enabled
+                && prefs.effect_authority_epoch == effect.authority_epoch
+                && prefs
+                    .auto_close_merged_issues
+                    .unwrap_or(prefs.autonomous_mode)
+                && !prefs.autonomous_records.iter().any(|record| {
+                    record.issue_number == *issue_number && record.review_passed == Some(false)
+                })
+            {
+                Ok(())
+            } else {
+                Err(OwnerMutationError::PreSubmit(ApiError::Unexpected(
+                    "merged-issue close authority revoked or independent review failed".to_string(),
+                )))
+            }
+        },
+    )
 }
 
 fn claim_ttl_secs(heartbeat_at: &str, expires_at: &str) -> u64 {
@@ -19373,6 +19466,8 @@ exit 0
             RuntimeTarget::Host,
         )
         .expect("scope");
+        crate::project_runtime::test_support::seed_actual_project_view(&scope.project_root)
+            .expect("the controller has opened this Project");
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
         let mut seeded = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
@@ -19565,6 +19660,8 @@ exit 0
             RuntimeTarget::Host,
         )
         .expect("scope");
+        crate::project_runtime::test_support::seed_actual_project_view(&scope.project_root)
+            .expect("the controller has opened this Project");
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
         let mut seeded = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
@@ -20293,6 +20390,8 @@ exit 0
         let home = temp.path().join("home");
         fs::create_dir_all(&home).expect("create gwt home");
         let _home = ScopedGwtHome::set(&home);
+        let _process_home = ScopedEnvVar::set("HOME", &home);
+        let _process_profile = ScopedEnvVar::set("USERPROFILE", &home);
         let fake_gh = temp.path().join("gh");
         fs::write(
             &fake_gh,
@@ -20347,6 +20446,7 @@ exit 1
         init_git_repo(&repo);
         commit_initial_branch(&repo);
         git_remote_add_origin(&repo, "https://github.com/example/repo.git");
+        crate::project_runtime::test_support::seed_actual_project_view(&repo).unwrap();
         let scope = RuntimeScope::new(
             "abcdef0123456789",
             "feedfacecafebeef",
@@ -22534,6 +22634,8 @@ exit 1
         let home = temp.path().join("home");
         fs::create_dir_all(&home).expect("create home");
         let _home = ScopedGwtHome::set(&home);
+        let _process_home = ScopedEnvVar::set("HOME", &home);
+        let _process_profile = ScopedEnvVar::set("USERPROFILE", &home);
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         init_git_repo(&repo);
@@ -22546,6 +22648,8 @@ exit 1
             RuntimeTarget::Host,
         )
         .expect("scope");
+        crate::project_runtime::test_support::seed_actual_project_view(&scope.project_root)
+            .expect("the controller has opened this Project");
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
         let grant = crate::PendingIssueMonitorEffect::prepared(
             "claim:42:abort",
@@ -22738,6 +22842,7 @@ exit 1
     fn volatile_deny_runs_safety_effects_but_not_grants() {
         let _prefs_budget = pin_prefs_hang_guard();
         let temp = TempDir::new().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
         let prefs_path = temp.path().join("issue-monitor.json");
         let grant = crate::PendingIssueMonitorEffect::prepared(
             "claim:42:grant",
@@ -22770,6 +22875,86 @@ exit 1
         crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
         let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
         let permit = super::IssueMonitorEffectPermit::new();
+        let mut project_permit = permit.capture();
+        project_permit.project_root = Some(temp.path().to_path_buf());
+        assert!(
+            !super::issue_monitor_effect_permitted(&grant, &project_permit),
+            "a cold project cannot acquire a new owner claim"
+        );
+        assert!(
+            super::issue_monitor_effect_permitted(&safety, &project_permit),
+            "cleanup remains allowed"
+        );
+        let mut uncertain = grant.clone();
+        uncertain.state = crate::IssueMonitorEffectState::Attempting;
+        assert!(
+            super::issue_monitor_effect_permitted(&uncertain, &project_permit),
+            "an unknown earlier claim can still be observed"
+        );
+        assert!(
+            !super::issue_monitor_project_submission_permitted(&uncertain, &project_permit),
+            "reconciliation cannot submit a new cold claim"
+        );
+        let mut arm = grant.clone();
+        arm.payload = crate::IssueMonitorEffectPayload::ArmAutoMerge {
+            issue_number: 42,
+            pr_number: 99,
+            reviewed_sha: "abc123".into(),
+        };
+        assert!(!super::issue_monitor_effect_permitted(
+            &arm,
+            &project_permit
+        ));
+        let mut rerun = grant.clone();
+        rerun.payload = crate::IssueMonitorEffectPayload::RerunFailedCi {
+            issue_number: 42,
+            target: crate::issue_monitor_ci::CiRerunTarget {
+                pr_number: 99,
+                head_sha: "abc123".into(),
+                run_id: 701,
+            },
+        };
+        assert!(!super::issue_monitor_effect_permitted(
+            &rerun,
+            &project_permit
+        ));
+        let mut settlement = grant.clone();
+        settlement.payload = crate::IssueMonitorEffectPayload::SettleMergedIssue {
+            issue_number: 42,
+            pr_number: 99,
+            merge_sha: Some("abc123".into()),
+            action: crate::MergedIssueSettlementAction::AwaitClose { unmet: Vec::new() },
+        };
+        assert!(
+            !super::issue_monitor_effect_permitted(&settlement, &project_permit),
+            "an unadmitted Project cannot submit settlement comments or closes"
+        );
+        gwt_core::project_execution_policy::choose(
+            temp.path(),
+            &gwt_core::project_execution_policy::ChoiceRequest {
+                operation_id: uuid::Uuid::new_v4().to_string(),
+                expected_revision: 0,
+                generation: 1,
+                choice: gwt_core::project_execution_policy::Choice::Continue,
+                consent_source_id: "human-choice".into(),
+                actor: "human".into(),
+                authorized_work_lineage: vec!["issue:42".into()],
+            },
+        )
+        .unwrap();
+        assert!(
+            super::issue_monitor_effect_permitted(&grant, &project_permit),
+            "the admitted Continue owner is not falsely rejected"
+        );
+        assert!(super::issue_monitor_effect_permitted(&arm, &project_permit));
+        assert!(super::issue_monitor_effect_permitted(
+            &rerun,
+            &project_permit
+        ));
+        assert!(super::issue_monitor_effect_permitted(
+            &settlement,
+            &project_permit
+        ));
         permit.deny();
 
         let fenced = super::fence_next_issue_monitor_effect_with_permit(
@@ -22787,6 +22972,211 @@ exit 1
             monitor.pending_effects()[0].state,
             crate::IssueMonitorEffectState::Prepared
         );
+    }
+
+    #[test]
+    fn attempting_claim_and_settlement_resume_same_intent_after_project_readmission() {
+        let temp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let mut claim = crate::PendingIssueMonitorEffect::prepared(
+            "claim:42:stable",
+            7,
+            crate::IssueMonitorEffectPayload::AcquireClaim {
+                issue_number: 42,
+                claim_id: "stable-claim".into(),
+                owner: "host/session".into(),
+                heartbeat_at: "2026-11-05T00:00:00Z".into(),
+                expires_at: "2026-11-05T01:00:00Z".into(),
+                launched_work_id: Some("work/issue-42".into()),
+            },
+        );
+        claim.state = crate::IssueMonitorEffectState::Attempting;
+        claim.attempt = 1;
+        let monitor_for = |effects| {
+            test_monitor_with_prefs(
+                crate::IssueMonitorConfig::default(),
+                crate::IssueMonitorPrefs {
+                    enabled: true,
+                    effect_authority_epoch: 7,
+                    pending_effects: effects,
+                    ..Default::default()
+                },
+            )
+        };
+        let mut settlement = crate::PendingIssueMonitorEffect::prepared(
+            "settle:42:99",
+            7,
+            crate::IssueMonitorEffectPayload::SettleMergedIssue {
+                issue_number: 42,
+                pr_number: 99,
+                merge_sha: Some("abc123".into()),
+                action: crate::MergedIssueSettlementAction::AwaitClose { unmet: Vec::new() },
+            },
+        );
+        settlement.state = crate::IssueMonitorEffectState::Attempting;
+        settlement.attempt = 1;
+        let mut monitor = monitor_for(vec![claim.clone()]);
+        let permit = super::IssueMonitorEffectPermit::new();
+        let project_permit = permit.capture_for_project(temp.path());
+        let now = "2026-11-05T00:01:00Z";
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        gwt_core::project_execution_policy::choose(
+            temp.path(),
+            &gwt_core::project_execution_policy::ChoiceRequest {
+                operation_id: operation_id.clone(),
+                expected_revision: 0,
+                generation: 1,
+                choice: gwt_core::project_execution_policy::Choice::Stop,
+                consent_source_id: "human-stop".into(),
+                actor: "human".into(),
+                authorized_work_lineage: Vec::new(),
+            },
+        )
+        .unwrap();
+        let (stopped, allow_submit) =
+            super::select_issue_monitor_effect(&prefs_path, &mut monitor, &project_permit, now)
+                .unwrap();
+        assert_eq!(stopped, claim);
+        assert!(
+            !allow_submit,
+            "Stop permits only readback of this exact Attempting claim"
+        );
+        let mut stopped_settlement = monitor_for(vec![settlement.clone()]);
+        assert!(
+            super::select_issue_monitor_effect(
+                &prefs_path,
+                &mut stopped_settlement,
+                &project_permit,
+                now,
+            )
+            .is_none(),
+            "a denied settlement cannot perform readback and must remain unselected"
+        );
+        assert_eq!(
+            stopped_settlement.pending_effects(),
+            std::slice::from_ref(&settlement)
+        );
+        gwt_core::project_execution_policy::record_effect(
+            temp.path(),
+            &operation_id,
+            gwt_core::project_execution_policy::EffectState::Confirmed,
+            None,
+        )
+        .unwrap();
+        gwt_core::project_execution_policy::choose(
+            temp.path(),
+            &gwt_core::project_execution_policy::ChoiceRequest {
+                operation_id: uuid::Uuid::new_v4().to_string(),
+                expected_revision: 1,
+                generation: 1,
+                choice: gwt_core::project_execution_policy::Choice::Continue,
+                consent_source_id: "human-continue".into(),
+                actor: "human".into(),
+                authorized_work_lineage: vec!["issue:42".into()],
+            },
+        )
+        .unwrap();
+        let (resumed, allow_submit) =
+            super::select_issue_monitor_effect(&prefs_path, &mut monitor, &project_permit, now)
+                .unwrap();
+        assert_eq!(
+            resumed, claim,
+            "readmission must not reallocate the claim or attempt identity"
+        );
+        assert!(
+            allow_submit,
+            "the same admitted claim must recover after missing readback"
+        );
+        let mut monitor = stopped_settlement;
+        let (resumed, allow_submit) =
+            super::select_issue_monitor_effect(&prefs_path, &mut monitor, &project_permit, now)
+                .unwrap();
+        assert_eq!(resumed, settlement);
+        assert!(
+            allow_submit,
+            "an idempotent settlement resumes its existing marker readback"
+        );
+        let mut denied_settlement = settlement.clone();
+        denied_settlement.effect_id = "settle:43:99".into();
+        if let crate::IssueMonitorEffectPayload::SettleMergedIssue { issue_number, .. } =
+            &mut denied_settlement.payload
+        {
+            *issue_number = 43;
+        }
+        let mut prepared_claim = claim.clone();
+        prepared_claim.state = crate::IssueMonitorEffectState::Prepared;
+        let mut mixed = monitor_for(vec![denied_settlement.clone(), prepared_claim]);
+        mixed.terminal_queue_push(&[42], "test", now);
+        crate::save_issue_monitor_prefs(&prefs_path, &mixed.prefs()).unwrap();
+        let (selected, allow_submit) =
+            super::select_issue_monitor_effect(&prefs_path, &mut mixed, &project_permit, now)
+                .expect("an admitted claim must not wait behind an unadmitted settlement");
+        assert_eq!(selected, claim);
+        assert!(allow_submit);
+        assert_eq!(mixed.pending_effects()[0], denied_settlement);
+        permit.deny();
+        assert!(super::select_issue_monitor_effect(
+            &prefs_path,
+            &mut monitor,
+            &project_permit,
+            now
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn denied_project_settlement_never_posts_a_comment_or_closes_an_issue() {
+        use gwt_github::{
+            client::RepositoryIdentity, FakeIssueClient, IssueNumber, IssueSnapshot, IssueState,
+            UpdatedAt,
+        };
+        let temp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            temp.path().to_path_buf(),
+            RuntimeTarget::Host,
+        )
+        .unwrap();
+        let client = FakeIssueClient::new();
+        client.seed(IssueSnapshot {
+            author_login: None,
+            number: IssueNumber(42),
+            title: "Merged work".into(),
+            body: String::new(),
+            labels: Vec::new(),
+            state: IssueState::Open,
+            updated_at: UpdatedAt::new("2026-11-05T00:00:00Z"),
+            comments: Vec::new(),
+        });
+        let effect = crate::PendingIssueMonitorEffect::prepared(
+            "settle:42:99",
+            7,
+            crate::IssueMonitorEffectPayload::SettleMergedIssue {
+                issue_number: 42,
+                pr_number: 99,
+                merge_sha: Some("abc123".into()),
+                action: crate::MergedIssueSettlementAction::AwaitClose { unmet: Vec::new() },
+            },
+        );
+        let result = super::execute_merged_issue_settlement(
+            &client,
+            &RepositoryIdentity::new("example", "repo"),
+            &scope,
+            &effect,
+            false,
+        );
+        assert!(matches!(
+            result,
+            Err(gwt_github::client::OwnerMutationError::RemoteOutcomeUnknown(_))
+        ));
+        assert!(
+            client.call_log().is_empty(),
+            "a denied settlement must not enter its mutation executor"
+        );
+        assert!(client.owner_mutation_call_log().is_empty());
     }
 
     #[test]
@@ -24111,7 +24501,19 @@ exit 1
         let fenced = super::fence_next_issue_monitor_effect(&prefs_path, &mut monitor)
             .expect("rerun receives a durable fence");
         let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload fence");
-        assert_eq!(persisted.pending_effects, vec![fenced]);
+        assert_eq!(persisted.pending_effects, vec![fenced.clone()]);
+        let (replayed, allow_submit) = super::select_issue_monitor_effect(
+            &prefs_path,
+            &mut monitor,
+            &super::IssueMonitorEffectPermitToken::always_open(),
+            "2026-11-05T00:01:00Z",
+        )
+        .unwrap();
+        assert_eq!(replayed, fenced);
+        assert!(
+            !allow_submit,
+            "an uncertain non-idempotent CI rerun remains read-only"
+        );
         let saved = serde_json::to_value(persisted).expect("serialize fence");
         assert_eq!(
             saved["consumed_ci_reruns"],

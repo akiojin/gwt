@@ -51,6 +51,10 @@ struct StoredHostBinding {
 }
 
 impl HostBinding {
+    pub(crate) fn host_id(&self) -> &str {
+        &self.host_id
+    }
+
     pub fn new(host_id: &str, coordinator_origin: &str) -> io::Result<Self> {
         let host_id = Uuid::parse_str(host_id)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid mobile Host ID"))?;

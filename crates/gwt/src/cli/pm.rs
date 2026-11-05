@@ -30,10 +30,15 @@ use crate::pm_registry;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PmCommand {
     /// Read a summary, bounded IDs or one record, without a raw-store dump.
-    RequestTasksRead { selector: RequestTaskSelector },
+    RequestTasksRead {
+        selector: RequestTaskSelector,
+    },
     /// Mutate tracking state as the current PM, never as an intake/user actor.
     RequestTasksApply {
         request: Box<gwt_core::pm_request_tasks::Request>,
+    },
+    ProjectExecutionStatus {
+        operation_id: Option<String>,
     },
     /// Read the canonical project's durable planning snapshot.
     PlanStatus,
@@ -62,7 +67,9 @@ pub enum PmCommand {
         submission: Box<pm_report::Submission>,
     },
     /// Read the project's reports in posting order.
-    ReportList { project_root: Option<String> },
+    ReportList {
+        project_root: Option<String>,
+    },
     /// Replace the displayed PM status while retaining its authored history.
     StatusSet {
         project_root: Option<String>,
@@ -71,7 +78,9 @@ pub enum PmCommand {
     /// `pm.status` — optional explicit `project_root`; defaults to the
     /// current repository path (container/bare setups must pass it
     /// explicitly, same convention as the Issue Monitor queue operations).
-    Status { project_root: Option<String> },
+    Status {
+        project_root: Option<String>,
+    },
     /// Persistently pause or resume the autonomous resident loop.
     SetPaused {
         project_root: Option<String>,
@@ -250,6 +259,10 @@ const CAPABILITY_GAPS: &[(&str, &str, CapabilityGapReason, &str)] = &[
         "Read actions.release_policy.status and use fresh exact scoped authority plus added_by naming the successful add; its post-state must be unchanged and preexisting permission cannot be removed",
     ),
     (
+        "project.execution.choose", r#"{}"#, CapabilityGapReason::Permission,
+        "Use project.execution.status, then a scoped instruction_id or pm.approval.request bound to this operation_id, revision, generation and choice",
+    ),
+    (
         "discussion.create",
         r#"{}"#,
         CapabilityGapReason::Permission,
@@ -378,6 +391,14 @@ pub(super) fn run<E: CliEnv>(
         }
         PmCommand::RequestTasksApply { request } => {
             request_tasks(env.repo_path(), None, Some(&request), out)
+        }
+        PmCommand::ProjectExecutionStatus { operation_id } => {
+            let status =
+                super::project_execution_policy::status(env.repo_path(), operation_id.as_deref())
+                    .map_err(super::io_as_api_error)?;
+            out.push_str(&serde_json::to_string(&status).map_err(super::serde_as_api_error)?);
+            out.push('\n');
+            Ok(0)
         }
         PmCommand::PlanStatus => {
             let state = crate::pm_planning::load_planning_state(

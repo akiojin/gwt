@@ -2476,10 +2476,12 @@ fn set_pm_loop_interval_accepts_minimum_and_preserves_live_pm() {
                 .into_owned()
         })
         .collect::<Vec<_>>();
+    // The open Project fixture also persists its observation and advisory lock.
     assert!(
-        state_files
-            .iter()
-            .all(|name| name == "pm.json" || name == "pm.lock"),
+        state_files.iter().all(|name| matches!(
+            name.as_str(),
+            "pm.json" | "pm.lock" | "project-window-runtime.json" | "project-window-runtime.lock"
+        )),
         "the shared durable prefs writer must clean up scratch files: {state_files:?}"
     );
 }

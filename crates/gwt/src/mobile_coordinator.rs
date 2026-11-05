@@ -1,9 +1,11 @@
 //! Unpublished coordinator Host credential registry foundation (Issue #6476).
 //!
-//! No listener, file I/O, device approval or PTY authority lives here. A trusted
-//! offline administrator must hold a separate registry lock, save the candidate
-//! secret to a private file first, atomically persist the registry second, and
-//! only then reload it. Preparing a candidate is not successful issuance.
+//! No listener, device approval or PTY authority lives here. The unpublished
+//! storage module holds a separate registry lock, saves candidate secrets to
+//! private files first, atomically persists the registry second, and reloads
+//! before reporting success. Preparing a candidate is not successful issuance.
+
+pub mod storage;
 
 use gwt_core::repo_hash::ProjectKey;
 use ring::rand::{SecureRandom, SystemRandom};

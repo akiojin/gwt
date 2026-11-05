@@ -37,6 +37,7 @@ pub mod process;
 pub mod process_console;
 pub mod process_executor;
 pub mod process_tree;
+pub mod project_execution_policy;
 pub mod recovery;
 mod release_contract;
 pub mod release_notes;
