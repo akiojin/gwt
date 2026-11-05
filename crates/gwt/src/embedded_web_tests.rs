@@ -1554,7 +1554,7 @@ fn embedded_web_window_worktree_form_module_is_registered_and_wired() {
 fn embedded_web_apply_status_keeps_catalog_and_badges_in_sync() {
     let js = app_js();
     let apply_status_source = js
-        .split("function applyStatus(windowId, status, detail)")
+        .split("function applyStatus(")
         .nth(1)
         .expect("applyStatus function")
         .split("\n      function ")

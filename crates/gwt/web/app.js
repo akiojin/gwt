@@ -2608,7 +2608,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         return item;
       }
 
-      function applyStatus(windowId, status, detail) {
+      function applyStatus(windowId, status, detail, source = "snapshot", retryable = false) {
         return traceMeasure(
           UI_TRACE_EVENT.applyStatus,
           { window_id: windowId, status },
@@ -2635,6 +2635,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             if (detail) {
               detailMap.set(windowId, detail);
             } else if (
+              (source === "terminal_status" && runtimeState === "error") ||
               runtimeState === "running" ||
               runtimeState === "starting" ||
               runtimeState === "idle" ||
@@ -2651,6 +2652,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
                 runtimeState,
                 windowData,
                 statusDetail: effectiveDetail,
+                projectKey: windowContext?.tab.project_key || windowContext?.tab.id,
+                source,
+                retryable,
               });
             }
             const nextRuntimeStatusKey = windowRuntimeStatusRenderKey(
@@ -3761,7 +3765,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         const level = flavor === "error" ? "error" : flavor === "done" ? "done" : "warn";
         const timeoutMs = flavor === "error" ? 0 : flavor === "done" ? 8_000 : 14_000;
         const alert = {
-          id: `attention-${notice.windowId}`,
+          id: notice.id,
           level,
           title: notice.title || "Agent attention",
           message: notice.body || "",
@@ -3771,7 +3775,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         };
         // FR-011: recorded regardless of the toast; the history row keeps the
         // jump-to (Sc 7) and survives the window's toast being dismissed.
-        notificationCenter.record({ kind: "attention", ...alert });
+        if (flavor === "error") {
+          notificationCenter.recordSurfaceNotice({ key: notice.id, ...alert });
+        } else {
+          notificationCenter.record({ kind: "attention", ...alert });
+        }
         alertsToasts.push(alert);
       }
 
@@ -4776,7 +4784,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       const terminalStatusModel = createUiStateStore(null);
       terminalStatusModel.subscribe(state => state, state => {
         if (!state) return;
-        applyStatus(state.id, state.status, state.detail);
+        applyStatus(state.id, state.status, state.detail, state.kind, state.retryable);
         if (state.kind === "terminal_status") {
           startupMetrics.onTerminalStatus(state.id, state.status, terminalMap.get(state.id));
         }
@@ -4836,6 +4844,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // SPEC-2356 Anshin Addendum (FR-040): the always-on, in-app counterpart.
       const agentAttentionToaster = createAgentAttentionToaster({
         showToast: showAttentionToast,
+        dismissToast: (id) => {
+          alertsToasts.dismiss(id);
+          notificationCenter.resolveError(id);
+        },
       });
 
       const workspaceWindowManager = Object.freeze({
@@ -5133,6 +5145,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           case "terminal_status":
             terminalStatusModel.update(() => ({
               kind: event.kind, id: event.id, status: event.status, detail: event.detail,
+              retryable: event.retryable,
             }));
             break;
           case "attachment_progress":
