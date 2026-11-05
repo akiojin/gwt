@@ -33,10 +33,83 @@ const MAX_CHALLENGES_PER_DEVICE: usize = 4;
 const MAX_DEVICES: usize = 64;
 const MAX_SNAPSHOT_BYTES: u64 = 128 * 1024;
 
+/// Non-secret identity of the Host and its trusted HTTPS coordinator origin.
+/// Credential rotation preserves this binding; changing either part requires
+/// new pairing rather than transplanting existing approvals.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "StoredHostBinding")]
+pub struct HostBinding {
+    host_id: String,
+    coordinator_origin: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredHostBinding {
+    host_id: String,
+    coordinator_origin: String,
+}
+
+impl HostBinding {
+    pub fn new(host_id: &str, coordinator_origin: &str) -> io::Result<Self> {
+        let host_id = Uuid::parse_str(host_id)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid mobile Host ID"))?;
+        let origin = reqwest::Url::parse(coordinator_origin)
+            .ok()
+            .filter(|url| {
+                url.scheme() == "https"
+                    && url.host_str().is_some()
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && url.path() == "/"
+                    && url.query().is_none()
+                    && url.fragment().is_none()
+                    // URL parsing removes empty userinfo and dot segments.
+                    // An origin must contain only its original authority.
+                    && coordinator_origin.split_once("://").is_some_and(|(_, rest)| {
+                        !rest.strip_suffix('/').unwrap_or(rest).contains(['@', '/', '\\'])
+                    })
+                    && coordinator_origin.trim() == coordinator_origin
+                    && !coordinator_origin.chars().any(char::is_control)
+            })
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid mobile coordinator origin",
+                )
+            })?;
+        Ok(Self {
+            host_id: host_id.to_string(),
+            coordinator_origin: origin.origin().ascii_serialization(),
+        })
+    }
+}
+
+impl TryFrom<StoredHostBinding> for HostBinding {
+    type Error = io::Error;
+
+    fn try_from(stored: StoredHostBinding) -> Result<Self, Self::Error> {
+        Self::new(&stored.host_id, &stored.coordinator_origin)
+    }
+}
+
+fn deserialize_host_binding<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<HostBinding>, D::Error> {
+    // Missing is legacy schema1; an explicitly present null is never a binding.
+    HostBinding::deserialize(deserializer).map(Some)
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredDevices {
     schema_version: u32,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_host_binding"
+    )]
+    host_binding: Option<HostBinding>,
     devices: Vec<DeviceRecord>,
 }
 
@@ -529,6 +602,7 @@ impl MobileInputRequest {
 pub struct MobileAuthorization {
     enabled: bool,
     host_epoch: Uuid,
+    host_binding: Option<HostBinding>,
     devices: HashMap<String, DeviceRecord>,
     pending: HashMap<String, Pairing>,
     challenges: HashMap<String, Challenge>,
@@ -540,6 +614,7 @@ impl Default for MobileAuthorization {
         Self {
             enabled: false,
             host_epoch: Uuid::new_v4(),
+            host_binding: None,
             devices: HashMap::new(),
             pending: HashMap::new(),
             challenges: HashMap::new(),
@@ -829,14 +904,53 @@ impl MobileAuthorization {
         self.devices().into_iter().cloned().collect()
     }
 
-    /// Load public device records, disabled and with a fresh Host epoch.
+    /// Load legacy schema1 records, disabled and with a fresh Host epoch.
     /// Only a missing file starts empty; corrupt or unreadable state fails closed.
-    /// The owner supplies a path in its private, trusted directory.
+    /// Bound snapshots require [`Self::load_bound`], never a binding-free fallback.
+    /// The owner supplies a path in its private, trusted directory and holds its
+    /// single-writer fence for all snapshot operations.
     pub fn load(path: &Path) -> io::Result<Self> {
+        Self::load_snapshot(path, None)
+    }
+
+    /// Restore only schema2 with the expected Host/origin. A missing snapshot
+    /// starts empty and bound, without writing or implicitly enabling access.
+    /// Legacy records require an explicit trusted-PC migration first.
+    pub fn load_bound(path: &Path, expected: &HostBinding) -> io::Result<Self> {
+        Self::load_snapshot(path, Some(expected))
+    }
+
+    /// Explicit trusted-PC binding of an existing schema1 snapshot in place.
+    /// Never rebind schema2, create a missing snapshot, or enable access. The
+    /// caller must hold the same private-path/single-writer fence as `save`.
+    pub fn bind_legacy_snapshot(path: &Path, binding: &HostBinding) -> io::Result<Self> {
+        let stored = Self::read_snapshot(path)?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "legacy mobile snapshot does not exist",
+            )
+        })?;
+        let mut authority = Self::restore_stored(stored, None)?;
+        authority.host_binding = Some(binding.clone());
+        authority.save(path)?;
+        Ok(authority)
+    }
+
+    fn load_snapshot(path: &Path, expected: Option<&HostBinding>) -> io::Result<Self> {
+        match Self::read_snapshot(path)? {
+            Some(stored) => Self::restore_stored(stored, expected),
+            None => Ok(Self {
+                host_binding: expected.cloned(),
+                ..Self::default()
+            }),
+        }
+    }
+
+    fn read_snapshot(path: &Path) -> io::Result<Option<StoredDevices>> {
         gwt_config::home::assert_test_path(path);
         let file = match File::open(path) {
             Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
         };
         let mut bytes = Vec::new();
@@ -847,16 +961,31 @@ impl MobileAuthorization {
                 "mobile device snapshot exceeds size limit",
             ));
         }
-        let stored: StoredDevices = serde_json::from_slice(&bytes)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        if stored.schema_version != 1 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "unsupported mobile device snapshot schema",
-            ));
-        }
-        Self::restore(stored.devices)
+        serde_json::from_slice(&bytes)
+            .map(Some)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+    }
+
+    fn restore_stored(stored: StoredDevices, expected: Option<&HostBinding>) -> io::Result<Self> {
+        let problem = match (
+            stored.schema_version,
+            stored.host_binding.as_ref(),
+            expected,
+        ) {
+            (1, None, None) => None,
+            (1, None, Some(_)) => Some("legacy mobile snapshot requires explicit PC binding"),
+            (2, Some(binding), Some(expected)) if binding == expected => None,
+            (2, Some(_), Some(_)) => Some("mobile snapshot Host/origin binding mismatch"),
+            (2, Some(_), None) => Some("mobile snapshot requires an expected Host/origin binding"),
+            _ => Some("invalid or unsupported mobile device snapshot schema"),
+        };
+        if let Some(problem) = problem {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, problem));
+        }
+        let mut authority = Self::restore(stored.devices)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        authority.host_binding = stored.host_binding;
+        Ok(authority)
     }
 
     /// Atomically replace the public device snapshot, including revoked records.
@@ -878,11 +1007,18 @@ impl MobileAuthorization {
         serde_json::to_writer(
             &mut temp,
             &StoredDevices {
-                schema_version: 1,
+                schema_version: if self.host_binding.is_some() { 2 } else { 1 },
+                host_binding: self.host_binding.clone(),
                 devices: self.snapshot(),
             },
         )
         .map_err(io::Error::other)?;
+        if temp.as_file().metadata()?.len() > MAX_SNAPSHOT_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "mobile device snapshot exceeds size limit",
+            ));
+        }
         temp.as_file().sync_all()?;
         temp.persist(path).map_err(|error| error.error)?;
         #[cfg(unix)]
@@ -1532,6 +1668,180 @@ mod tests {
             MobileAuthorization::restore(vec![invalid_key]),
             Err(AuthorizationError::InvalidDevice)
         ));
+    }
+
+    #[test]
+    fn host_bound_snapshot_requires_explicit_migration_and_preserves_device_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("devices.json");
+        let binding =
+            HostBinding::new(&Uuid::new_v4().to_string(), "https://EXAMPLE.com:443/").unwrap();
+        let mut auth = MobileAuthorization::default();
+        auth.enable();
+        let key = key();
+        let device = paired(&mut auth, &key);
+        let revoked = paired(&mut auth, &self::key());
+        auth.revoke(&revoked.id).unwrap();
+        let mut old = session(&mut auth, &device, &key);
+        auth.save(&path).unwrap();
+        let legacy = std::fs::read(&path).unwrap();
+        assert!(MobileAuthorization::load_bound(&path, &binding).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), legacy);
+
+        let migrated = MobileAuthorization::bind_legacy_snapshot(&path, &binding).unwrap();
+        assert_eq!(migrated.check_enabled(), Err(AuthorizationError::Disabled));
+        assert_eq!(migrated.snapshot().len(), 2);
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["schema_version"], 2);
+        let legacy: serde_json::Value = serde_json::from_slice(&legacy).unwrap();
+        assert_eq!(saved["devices"], legacy["devices"]);
+        assert_eq!(
+            saved["host_binding"]["coordinator_origin"],
+            "https://example.com"
+        );
+        assert!(MobileAuthorization::load(&path).is_err());
+        let mut restored = MobileAuthorization::load_bound(&path, &binding).unwrap();
+        assert_eq!(restored.check_enabled(), Err(AuthorizationError::Disabled));
+        restored.enable();
+        assert_eq!(
+            restored.dispatch(&mut old, &project(), 0, NOW, || ()),
+            Err(AuthorizationError::StaleSession)
+        );
+        assert_eq!(
+            restored
+                .challenge(&revoked.id, &project(), NOW)
+                .unwrap_err(),
+            AuthorizationError::Revoked
+        );
+        let pending = restored
+            .request_pairing("Tablet", self::key().public_key().as_ref(), project(), NOW)
+            .unwrap();
+        let added = restored.approve_and_save(&pending.id, NOW, &path).unwrap();
+        let missing = dir.path().join("missing/devices.json");
+        assert!(matches!(
+            restored.revoke_and_save(&added.id, &missing),
+            Err(DeviceUpdateError::Storage(_))
+        ));
+        assert_eq!(restored.check_enabled(), Err(AuthorizationError::Disabled));
+        restored.save(&path).unwrap();
+        let recovered = MobileAuthorization::load_bound(&path, &binding).unwrap();
+        assert_eq!(recovered.snapshot().len(), 3);
+        assert!(recovered
+            .devices()
+            .iter()
+            .find(|d| d.id() == added.id)
+            .unwrap()
+            .is_revoked());
+        assert_eq!(recovered.check_enabled(), Err(AuthorizationError::Disabled));
+    }
+
+    #[test]
+    fn host_bound_snapshot_rejects_mismatch_rebinding_and_invalid_envelopes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("devices.json");
+        let id = Uuid::new_v4().to_string();
+        let binding = HostBinding::new(&id, "https://example.com").unwrap();
+        assert!(MobileAuthorization::bind_legacy_snapshot(&path, &binding).is_err());
+        let fresh = MobileAuthorization::load_bound(&path, &binding).unwrap();
+        assert!(!path.exists());
+        assert_eq!(fresh.check_enabled(), Err(AuthorizationError::Disabled));
+        fresh.save(&path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        for other in [
+            HostBinding::new(&Uuid::new_v4().to_string(), "https://example.com").unwrap(),
+            HostBinding::new(&id, "https://other.example.com").unwrap(),
+            HostBinding::new(&id, "https://example.com:8443").unwrap(),
+        ] {
+            assert!(MobileAuthorization::load_bound(&path, &other).is_err());
+            assert!(MobileAuthorization::bind_legacy_snapshot(&path, &other).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        }
+        assert!(MobileAuthorization::bind_legacy_snapshot(&path, &binding).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let valid: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        for (field, value) in [
+            ("schema_version", serde_json::json!(1)),
+            ("schema_version", serde_json::json!(3)),
+            ("host_binding", serde_json::Value::Null),
+            (
+                "host_binding",
+                serde_json::json!({"host_id": "invalid", "coordinator_origin": "https://example.com"}),
+            ),
+            (
+                "host_binding",
+                serde_json::json!({"host_id": id, "coordinator_origin": "http://example.com"}),
+            ),
+            ("unexpected", serde_json::json!(true)),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = value;
+            let encoded = serde_json::to_vec(&invalid).unwrap();
+            std::fs::write(&path, &encoded).unwrap();
+            assert!(MobileAuthorization::load_bound(&path, &binding).is_err());
+            assert!(MobileAuthorization::load(&path).is_err());
+            assert!(MobileAuthorization::bind_legacy_snapshot(&path, &binding).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), encoded);
+        }
+        std::fs::write(&path, br#"{"schema_version":2,"devices":[]}"#).unwrap();
+        assert!(MobileAuthorization::load_bound(&path, &binding).is_err());
+    }
+
+    #[test]
+    fn host_bound_snapshot_oversize_migration_preserves_legacy_and_can_recover() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("devices.json");
+        let mut auth = MobileAuthorization::default();
+        auth.enable();
+        paired(&mut auth, &key());
+        auth.save(&path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let id = Uuid::new_v4().to_string();
+        let oversized =
+            HostBinding::new(&id, &format!("https://{}.example", "a".repeat(128 * 1024))).unwrap();
+        assert!(MobileAuthorization::bind_legacy_snapshot(&path, &oversized).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let binding = HostBinding::new(&id, "https://example.com").unwrap();
+        MobileAuthorization::bind_legacy_snapshot(&path, &binding).unwrap();
+        assert_eq!(
+            MobileAuthorization::load_bound(&path, &binding)
+                .unwrap()
+                .devices()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn host_binding_validates_origins_and_normalizes_identity_on_deserialization() {
+        let id = Uuid::new_v4().to_string();
+        let expected = HostBinding::new(&id, "https://example.com").unwrap();
+        let encoded = serde_json::json!({"host_id": id.to_uppercase(), "coordinator_origin": "https://EXAMPLE.com:443/"});
+        assert_eq!(
+            serde_json::from_value::<HostBinding>(encoded).unwrap(),
+            expected
+        );
+        assert!(HostBinding::new("invalid", "https://example.com").is_err());
+        assert!(serde_json::from_value::<HostBinding>(serde_json::json!({
+            "host_id": "invalid", "coordinator_origin": "https://example.com"
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<HostBinding>(serde_json::json!({
+            "host_id": id, "coordinator_origin": "http://example.com"
+        }))
+        .is_err());
+        for origin in [
+            "http://example.com",
+            "https://@example.com",
+            "https://user:password@example.com",
+            "https://example.com/mobile/",
+            "https://example.com/mobile/..",
+            "https://example.com?secret=x",
+            "https://example.com#secret",
+            "https://example.com\n",
+        ] {
+            assert!(HostBinding::new(&id, origin).is_err(), "{origin:?}");
+        }
     }
 
     #[test]
