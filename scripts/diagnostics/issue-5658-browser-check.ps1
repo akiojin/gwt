@@ -11,6 +11,7 @@ param(
     [ValidateRange(0, 1000)][double]$MaxDaemonCpuCores = 0,
     [ValidateRange(0, 120)][int]$NativeProfileSeconds = 0,
     [string]$SessionsFixture,
+    [string]$SourceAuditDirectory,
     [Parameter(ValueFromRemainingArguments = $true)][string[]]$PlaywrightArguments
 )
 
@@ -111,6 +112,28 @@ function Invoke-CheckoutEnvelope($operation, $parameters, [switch]$SourceContext
         }
         throw "$operation failed (exit $nativeExitCode): $diagnostic"
     }
+}
+function Invoke-SourceHookAudit($parameters) {
+    if (!$SourceAuditDirectory) {
+        return Invoke-CheckoutEnvelope 'hook.doctor' $parameters -SourceContext
+    }
+    # The recovered verification worker has no native ancestry in the managed
+    # caller. Only hook auditing crosses this rendezvous; measured children stay
+    # under the worker's observed Job. No source environment is serialized.
+    $requestId = [Guid]::NewGuid().ToString('N')
+    $requestPath = Join-Path $SourceAuditDirectory "$requestId.request.json"
+    $responsePath = Join-Path $SourceAuditDirectory "$requestId.response.json"
+    $request = @{schema_version=1;operation='hook.doctor';params=$parameters} | ConvertTo-Json -Depth 8 -Compress
+    [IO.File]::WriteAllText("$requestPath.tmp", $request, [Text.UTF8Encoding]::new($false))
+    [IO.File]::Move("$requestPath.tmp", $requestPath)
+    $deadline = [DateTime]::UtcNow.AddSeconds(180)
+    while (!(Test-Path -LiteralPath $responsePath)) {
+        if ([DateTime]::UtcNow -ge $deadline) { throw 'Managed source hook audit timed out.' }
+        Start-Sleep -Milliseconds 100
+    }
+    $response = Get-Content -LiteralPath $responsePath -Raw | ConvertFrom-Json
+    if ($response.ok -isnot [bool] -or !$response.ok) { throw "Managed source hook audit failed: $($response.output)" }
+    return $response
 }
 function Assert-HookHealth($doctor) {
     $preflight = $doctor.preflight
@@ -351,10 +374,10 @@ agentType = "command"
 command = "$nodeToml"
 defaultArgs = ["$providerToml", "$receiptsToml"]
 "@, [Text.UTF8Encoding]::new($false))
-    $hookBinary = ((Invoke-CheckoutEnvelope 'hook.doctor' @{} -SourceContext).output | ConvertFrom-Json).managed_hook_bin
+    $hookBinary = ((Invoke-SourceHookAudit @{}).output | ConvertFrom-Json).managed_hook_bin
     if (!$hookBinary -or $hookBinary -match '[/\\]target[/\\].*[/\\]gwtd(\.exe)?$') { throw 'Stable hook fallback missing' }
     $hookParams = @{purpose='managed_browser';repair=$true;expected_hook_bin=$hookBinary}
-    $doctor = (Invoke-CheckoutEnvelope 'hook.doctor' $hookParams -SourceContext).output | ConvertFrom-Json
+    $doctor = (Invoke-SourceHookAudit $hookParams).output | ConvertFrom-Json
     $hookEvidence.before = $doctor.preflight
     Assert-HookHealth $doctor
     # Launch children without the calling agent's capability, Session, execution,
@@ -416,7 +439,7 @@ defaultArgs = ["$providerToml", "$receiptsToml"]
     Write-Host 'Checkout Hub ready: seeded project catalog entry is present.'
     $healthParams = @{purpose='managed_browser';expected_hook_bin=$hookBinary}
     # Only the doctor child receives the original managed source context.
-    $doctor = (Invoke-CheckoutEnvelope 'hook.doctor' $healthParams -SourceContext).output | ConvertFrom-Json
+    $doctor = (Invoke-SourceHookAudit $healthParams).output | ConvertFrom-Json
     $hookEvidence.after = $doctor.preflight
     Assert-HookHealth $doctor
     $hashes = @{}
