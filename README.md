@@ -1080,6 +1080,18 @@ Task tracking and never consume candidates or modify storage. Returned originals
 remain untrusted input. Native identity reconciliation and authenticated Task
 intake remain separate work.
 
+Candidate detail reads accept at most 4 MiB of serialized JSON (including escapes),
+matching the PM native conversation record budget. Larger records return
+`candidate_too_large` with `limit_bytes` and a recovery selector. Use
+`selector:{kind:"candidate_chunk",id:"<session digest>/<observation UUID>",offset:0}`
+to recover raw JSON bytes in chunks of at most 48 KiB, encoded in `bytes_base64`.
+Continue at `next_offset` until it is null; an offset beyond the observed file length
+returns `invalid_request` with a restart selector. Each response is `unverified_raw`:
+assemble the bytes and validate the full schema, identity and content hash before
+using the record. `observed_total_bytes` is a length observation, not a snapshot;
+restart if the stored file changes while recovering it. Recovery retains the same
+registered-PM check and never changes the stored original or creates a Task.
+
 `policy.dependency_observations` retains every supplied Monitor inbox row, including
 repeated Issues, with its state and canonical dependency blockers, cycle flag and bundle
 references. Absent typed status stays null with `dependency_status` named as missing.

@@ -101,6 +101,10 @@ pub enum RequestTaskSelector {
     Candidate {
         id: String,
     },
+    CandidateChunk {
+        id: String,
+        offset: Option<u64>,
+    },
     Pending {
         limit: Option<usize>,
         expected_revision: Option<u64>,
@@ -147,7 +151,7 @@ impl RequestTaskSelector {
                 }
                 return Ok(());
             }
-            Self::Candidate { id } => {
+            Self::Candidate { id } | Self::CandidateChunk { id, .. } => {
                 return if crate::cli::hook::pm_reporting::candidate_id_valid(id) {
                     Ok(())
                 } else {
@@ -830,7 +834,8 @@ fn request_tasks(
         }
         if let Some(
             selector @ (RequestTaskSelector::Candidates { .. }
-            | RequestTaskSelector::Candidate { .. }),
+            | RequestTaskSelector::Candidate { .. }
+            | RequestTaskSelector::CandidateChunk { .. }),
         ) = &selector
         {
             selector
@@ -924,7 +929,9 @@ fn request_tasks(
         }
         let Some(state) = state else {
             return match selector {
-                RequestTaskSelector::Candidates { .. } | RequestTaskSelector::Candidate { .. } => {
+                RequestTaskSelector::Candidates { .. }
+                | RequestTaskSelector::Candidate { .. }
+                | RequestTaskSelector::CandidateChunk { .. } => {
                     unreachable!("candidate reads precede TaskStore")
                 }
                 RequestTaskSelector::Pending { .. } | RequestTaskSelector::Tasks { .. } => {
@@ -942,7 +949,9 @@ fn request_tasks(
         };
         let mut value = json!({"schema_version":1,"ok":true,"state":"ready","project_key":state.project_key,"revision":state.revision});
         match selector {
-            RequestTaskSelector::Candidates { .. } | RequestTaskSelector::Candidate { .. } => {
+            RequestTaskSelector::Candidates { .. }
+            | RequestTaskSelector::Candidate { .. }
+            | RequestTaskSelector::CandidateChunk { .. } => {
                 unreachable!("candidate reads precede TaskStore")
             }
             RequestTaskSelector::Pending { .. } | RequestTaskSelector::Tasks { .. } => {
@@ -1048,9 +1057,29 @@ fn read_candidates(
                 "inventory_sha256":digest,"ids":ids,"next_after":next_after}),
             )
         }
-        RequestTaskSelector::Candidate { id } => {
-            match pm_reporting::read_intake_candidate(repo, id) {
-                Ok(candidate) => Ok(json!({"schema_version":1,"ok":true,"candidate":candidate})),
+        RequestTaskSelector::Candidate { id } | RequestTaskSelector::CandidateChunk { id, .. } => {
+            let result = match selector {
+                RequestTaskSelector::CandidateChunk { offset, .. } => {
+                    pm_reporting::read_intake_candidate_chunk(repo, id, offset.unwrap_or(0))
+                }
+                _ => pm_reporting::read_intake_candidate(repo, id)
+                    .map(|candidate| json!({"schema_version":1,"ok":true,"candidate":candidate})),
+            };
+            match result {
+                Ok(value) => Ok(value),
+                Err(error) if error.kind() == std::io::ErrorKind::FileTooLarge => {
+                    Ok(json!({"schema_version":1,"ok":false,
+                        "error":{"code":"candidate_too_large","message":"Serialized candidate exceeds detail byte limit; recover raw chunks and validate the assembled record",
+                        "limit_bytes":pm_reporting::MAX_CANDIDATE_RECORD_BYTES,
+                        "recovery_operation":"pm.request_tasks.read",
+                        "recovery_selector":{"kind":"candidate_chunk","id":id,"offset":0}}}))
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => {
+                    Ok(json!({"schema_version":1,"ok":false,
+                        "error":{"code":"invalid_request","message":error.to_string(),
+                        "recovery_operation":"pm.request_tasks.read",
+                        "recovery_selector":{"kind":"candidate_chunk","id":id,"offset":0}}}))
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     Ok(json!({"schema_version":1,"ok":false,
                 "error":{"code":"missing_candidate","message":"PM candidate not found","recovery_operation":"pm.request_tasks.read"}}))
@@ -1392,6 +1421,62 @@ mod tests {
             originals,
             vec!["同じ依頼\n原文を保持", "同じ依頼\n原文を保持", "状況は？"]
         );
+        // Oversize legacy records remain recoverable without changing storage.
+        let mut large: Value = serde_json::from_slice(&saved[0].1).unwrap();
+        large["original"] = json!("大\n".repeat(1024 * 1024));
+        large["prompt_sha256"] = json!(gwt_core::pm_authorization::digest(
+            large["original"].as_str().unwrap().as_bytes()
+        ));
+        let large = serde_json::to_vec(&large).unwrap();
+        fs::write(&saved[0].0, &large).unwrap();
+        let rejected = invoke(&repo, json!({"kind":"candidate","id":ids[0]}));
+        assert_eq!(rejected.0, 1, "oversize detail must fail before decoding");
+        assert_eq!(rejected.1["error"]["code"], "candidate_too_large");
+        assert_eq!(rejected.1["error"]["limit_bytes"], 4 * 1024 * 1024);
+        assert_eq!(
+            rejected.1["error"]["recovery_operation"],
+            "pm.request_tasks.read"
+        );
+        let mut selector = rejected.1["error"]["recovery_selector"].clone();
+        assert_eq!(
+            selector,
+            json!({"kind":"candidate_chunk","id":ids[0],"offset":0})
+        );
+        let mut recovered = Vec::new();
+        loop {
+            use base64::Engine;
+            let chunk = invoke(&worktree, selector.clone());
+            assert_eq!(chunk.0, 0);
+            assert_eq!(chunk.1["state"], "unverified_raw");
+            assert!(chunk.1.get("candidate").is_none());
+            assert_eq!(chunk.1["offset"], recovered.len());
+            assert_eq!(chunk.1["observed_total_bytes"], large.len());
+            let encoded = chunk.1["bytes_base64"].as_str().unwrap();
+            assert!(encoded.len() <= 64 * 1024);
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .unwrap();
+            assert!(bytes.len() <= 48 * 1024);
+            recovered.extend(bytes);
+            if chunk.1["next_offset"].is_null() {
+                break;
+            }
+            assert_eq!(chunk.1["next_offset"], recovered.len());
+            selector["offset"] = chunk.1["next_offset"].clone();
+        }
+        assert_eq!(recovered, large);
+        assert_eq!(fs::read(&saved[0].0).unwrap(), large);
+        let invalid = invoke(
+            &repo,
+            json!({"kind":"candidate_chunk","id":ids[0],"offset":u64::MAX}),
+        );
+        assert_eq!(invalid.0, 1);
+        assert_eq!(invalid.1["error"]["code"], "invalid_request");
+        {
+            let _foreign = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-old");
+            assert_eq!(invoke(&repo, selector).1["error"]["code"], "unauthorized");
+        }
+        fs::write(&saved[0].0, &saved[0].1).unwrap();
         // Candidate recovery is independent of unavailable task tracking.
         let task_dir = project.join("project-state/request-tasks");
         assert!(!task_dir.exists());
