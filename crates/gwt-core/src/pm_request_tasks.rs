@@ -76,7 +76,7 @@ pub struct Task {
     pub completion: Option<Completion>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
     pub operation_id: String,
@@ -85,7 +85,7 @@ pub struct Request {
     pub action: Action,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Action {
     Capture {
@@ -192,10 +192,14 @@ pub struct TaskStore {
 
 impl TaskStore {
     pub fn for_repo(repo: &Path) -> Self {
+        let project = crate::pm_peer::project_dir(repo);
         Self {
-            path: crate::paths::gwt_project_dir_for_repo_path(repo)
-                .join("project-state/request-tasks/state.json"),
-            project_key: crate::paths::project_scope_hash(repo).to_string(),
+            path: project.join("project-state/request-tasks/state.json"),
+            project_key: project
+                .file_name()
+                .expect("project directory has an identity")
+                .to_string_lossy()
+                .into_owned(),
         }
     }
 

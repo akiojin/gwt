@@ -18,6 +18,8 @@ pub const OPERATIONS: &[&str] = &[
     "update.settings.set",
     "actions.release_policy.add",
     "actions.release_policy.rollback",
+    "actions.diagnostic.policy.add",
+    "actions.diagnostic.policy.rollback",
     "pr.close",
     "worktree.gc_build_artifacts",
     "pm.message.send",
@@ -293,7 +295,11 @@ fn select_authority(
     // exact policy request/CAS instead of granting future, different effects.
     let exact_scope_required = matches!(
         scope.operation.as_str(),
-        "pr.auto_merge.enable" | "actions.release_policy.add" | "actions.release_policy.rollback"
+        "pr.auto_merge.enable"
+            | "actions.release_policy.add"
+            | "actions.release_policy.rollback"
+            | "actions.diagnostic.policy.add"
+            | "actions.diagnostic.policy.rollback"
     );
     let (index, approval) = store
         .approvals
@@ -576,6 +582,8 @@ mod tests {
         for operation in [
             "actions.release_policy.add",
             "actions.release_policy.rollback",
+            "actions.diagnostic.policy.add",
+            "actions.diagnostic.policy.rollback",
         ] {
             let intent = OperationIntent {
                 operation: operation.into(),

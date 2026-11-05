@@ -113,6 +113,7 @@ test("agent fullscreen terminal wheel sends PageUp and PageDown when xterm has n
     APPLICATION_SCROLL_PAGE_UP,
     APPLICATION_SCROLL_PAGE_DOWN,
   ]);
+  assert.deepEqual(fixture.inputOptions, [{ focus: true }, { focus: true }]);
   assert.deepEqual(fixture.scrollCalls, []);
   assert.equal(fixture.bubbledWheelCount, 0);
   fixture.dispose();
@@ -188,6 +189,95 @@ test("dispose removes the terminal wheel listener", () => {
   assert.equal(event.defaultPrevented, false);
   assert.deepEqual(fixture.scrollCalls, []);
   assert.equal(fixture.bubbledWheelCount, 1);
+});
+
+// SPEC #6476 T-005 (FR-002): a phone scrolls the terminal with a finger. The
+// swipe is routed through the same wheel policy so fullscreen agents receive
+// exactly what a wheel would send them, and retained history scrolls locally.
+test("swipe over a fullscreen agent without mouse tracking sends PageUp/PageDown via the wheel policy", () => {
+  const fixture = mountFixture({
+    isWindowsHost: () => false,
+    applicationScrollFallback: true,
+    terminalOptions: { buffer: { active: { baseY: 0 } } },
+  });
+
+  // The first 4px jitter is below the axis lock but must stay cancelable.
+  const moves = fixture.swipe([100, 104, 124, 148]);
+  fixture.swipe([300, 252]);
+
+  assert.deepEqual(fixture.inputCalls, [
+    APPLICATION_SCROLL_PAGE_UP,
+    APPLICATION_SCROLL_PAGE_DOWN,
+  ]);
+  assert.deepEqual(fixture.inputOptions, [{ focus: false }, { focus: false }],
+    "scrolling must not focus the terminal and open a software keyboard");
+  assert.ok(moves.every((event) => event.defaultPrevented), "handled swipe must not scroll the page");
+  assert.deepEqual(fixture.scrollCalls, []);
+  fixture.dispose();
+});
+
+test("swipe over a mouse-tracking fullscreen agent reaches xterm as a wheel event", () => {
+  const fixture = mountFixture({
+    isWindowsHost: () => false,
+    applicationScrollFallback: true,
+    terminalOptions: {
+      buffer: { active: { baseY: 0 } },
+      modes: { mouseTrackingMode: "any" },
+    },
+  });
+
+  fixture.swipe([100, 148]);
+
+  assert.deepEqual(fixture.inputCalls, [], "mouse-tracking agents must not get PageUp");
+  assert.equal(fixture.bubbledWheelCount, 1);
+  assert.ok(fixture.bubbledWheels[0].deltaY < 0, "finger moving down asks for earlier output");
+  fixture.dispose();
+});
+
+test("swipe over retained history scrolls xterm lines without application input", () => {
+  const fixture = mountFixture({
+    isWindowsHost: () => false,
+    applicationScrollFallback: true,
+    terminalOptions: { buffer: { active: { baseY: 180 } } },
+  });
+
+  fixture.swipe([100, 132]);
+  fixture.swipe([300, 284]);
+
+  assert.deepEqual(fixture.scrollCalls, [-2, 1]);
+  assert.deepEqual(fixture.inputCalls, []);
+  assert.equal(fixture.bubbledWheelCount, 0);
+  fixture.dispose();
+});
+
+test("horizontal and multi-finger gestures are left to the browser", () => {
+  const fixture = mountFixture({
+    isWindowsHost: () => false,
+    applicationScrollFallback: true,
+    terminalOptions: { buffer: { active: { baseY: 180 } } },
+  });
+
+  const horizontal = fixture.swipe([100, 104, 108], { xs: [100, 160, 220] });
+  const pinch = fixture.swipe([100, 160], { fingers: 2 });
+
+  assert.ok(horizontal.every((event) => !event.defaultPrevented));
+  assert.ok(pinch.every((event) => !event.defaultPrevented));
+  assert.deepEqual(fixture.scrollCalls, []);
+  assert.deepEqual(fixture.inputCalls, []);
+  fixture.dispose();
+});
+
+test("dispose removes the terminal touch listeners", () => {
+  const fixture = mountFixture({
+    isWindowsHost: () => false,
+    terminalOptions: { buffer: { active: { baseY: 180 } } },
+  });
+  fixture.dispose();
+
+  const moves = fixture.swipe([100, 160]);
+
+  assert.ok(moves.every((event) => !event.defaultPrevented));
+  assert.deepEqual(fixture.scrollCalls, []);
 });
 
 test("wheelDeltaToScrollLines handles pixel, line, and page units", () => {
@@ -287,7 +377,7 @@ test("app.js wires application wheel fallback only through agent window presets"
   );
   assert.match(
     appSource,
-    /sendTerminalInput:\s*\(data\)\s*=>\s*\{[\s\S]*?send\(\{\s*kind:\s*"terminal_input",\s*id:\s*windowId,\s*data\s*\}\);[\s\S]*?\}/,
+    /sendTerminalInput:\s*\(data,\s*\{\s*focus\s*=\s*true\s*\}\s*=\s*\{\}\)\s*=>\s*\{[\s\S]*?send\(\{\s*kind:\s*"terminal_input",\s*id:\s*windowId,\s*data\s*\}\);[\s\S]*?\}/,
     "agent fullscreen wheel fallback must send PageUp/PageDown through terminal_input",
   );
 });
@@ -306,9 +396,12 @@ function mountFixture({
   const terminalRoot = new FakeTerminalRoot();
   const scrollCalls = [];
   const inputCalls = [];
-  let bubbledWheelCount = 0;
-  terminalRoot.setBubbleHandler(() => {
-    bubbledWheelCount += 1;
+  const inputOptions = [];
+  const bubbledWheels = [];
+  terminalRoot.setBubbleHandler((event) => {
+    if (event.type === "wheel") {
+      bubbledWheels.push(event);
+    }
   });
 
   const controller = createTerminalWheelScrollController({
@@ -318,8 +411,11 @@ function mountFixture({
       ...terminalOptions,
     },
     isApplicationScrollFallbackEnabled: () => applicationScrollFallback,
-    sendTerminalInput: (data) => inputCalls.push(data),
-    window: { navigator: { platform: "Win32" } },
+    sendTerminalInput: (data, options) => {
+      inputCalls.push(data);
+      inputOptions.push(options);
+    },
+    window: { navigator: { platform: "Win32" }, WheelEvent: FakeWheelEvent },
     isWindowsHost,
   });
 
@@ -327,8 +423,24 @@ function mountFixture({
     terminalRoot,
     scrollCalls,
     inputCalls,
+    inputOptions,
+    bubbledWheels,
     get bubbledWheelCount() {
-      return bubbledWheelCount;
+      return bubbledWheels.length;
+    },
+    // Dispatches touchstart at ys[0], a touchmove per remaining y, then
+    // touchend. Returns the touchmove events.
+    swipe(ys, { xs, fingers = 1 } = {}) {
+      const point = (index) => ({ clientX: xs ? xs[index] : 100, clientY: ys[index] });
+      const touches = (index) => Array.from({ length: fingers }, () => point(index));
+      terminalRoot.dispatchEvent(touchEvent("touchstart", touches(0), terminalRoot));
+      const moves = ys.slice(1).map((_, offset) => {
+        const event = touchEvent("touchmove", touches(offset + 1), terminalRoot);
+        terminalRoot.dispatchEvent(event);
+        return event;
+      });
+      terminalRoot.dispatchEvent(touchEvent("touchend", [], terminalRoot));
+      return moves;
     },
     dispose() {
       controller.dispose();
@@ -376,6 +488,28 @@ function wheelEvent(_window, options = {}) {
     ctrlKey: false,
     metaKey: false,
     ...options,
+    defaultPrevented: false,
+    propagationStopped: false,
+    preventDefault() {
+      this.defaultPrevented = true;
+    },
+    stopPropagation() {
+      this.propagationStopped = true;
+    },
+  };
+}
+
+class FakeWheelEvent {
+  constructor(type, init = {}) {
+    Object.assign(this, wheelEvent(null, { ...init, type }));
+  }
+}
+
+function touchEvent(type, touches, target) {
+  return {
+    type,
+    target,
+    touches,
     defaultPrevented: false,
     propagationStopped: false,
     preventDefault() {

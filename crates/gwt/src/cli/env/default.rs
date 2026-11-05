@@ -744,6 +744,14 @@ impl CliEnv for DefaultCliEnv {
         } else {
             call.workflow.clone()
         };
+        if self.owner.eq_ignore_ascii_case("akiojin")
+            && self.repo.eq_ignore_ascii_case("gwt")
+            && filename == super::super::actions::diagnostic::WORKFLOW
+        {
+            return Err(io::Error::other(
+                "use actions.diagnostic.request to reserve the fixed diagnostic profile",
+            ));
+        }
         if !allowed.contains(&filename) {
             return Err(io::Error::other(format!(
                 "workflow dispatch denied: filename is not in allowed_workflows for this repository; allowed filenames: {}",
@@ -770,6 +778,42 @@ impl CliEnv for DefaultCliEnv {
         Ok("workflow dispatch requested".into())
     }
 
+    fn diagnostic_workflow_context(&mut self) -> io::Result<serde_json::Value> {
+        self.github_repository()?;
+        self.client
+            .resolve()
+            .map_err(|_| super::super::actions::diagnostic::unavailable())?
+            .diagnostic_workflow_context()
+            .map_err(|_| super::super::actions::diagnostic::unavailable())
+    }
+    fn diagnostic_run_snapshot(&mut self, run_id: u64) -> io::Result<serde_json::Value> {
+        self.github_repository()?;
+        self.client
+            .resolve()
+            .map_err(|_| super::super::actions::diagnostic::unavailable())?
+            .diagnostic_run_snapshot(run_id)
+            .map_err(|_| super::super::actions::diagnostic::unavailable())
+    }
+    fn diagnostic_artifact(&mut self, run_id: u64, artifact_id: u64) -> io::Result<Vec<u8>> {
+        self.github_repository()?;
+        self.client
+            .resolve()
+            .map_err(|_| super::super::actions::diagnostic::unavailable())?
+            .diagnostic_artifact(run_id, artifact_id)
+            .map_err(|_| super::super::actions::diagnostic::unavailable())
+    }
+    fn dispatch_diagnostic_workflow(
+        &mut self,
+        git_ref: &str,
+        inputs: &serde_json::Map<String, serde_json::Value>,
+    ) -> io::Result<gwt_github::client::http::DiagnosticDispatchAck> {
+        self.github_repository()?;
+        self.client
+            .resolve()
+            .map_err(|_| super::super::actions::diagnostic::unavailable())?
+            .dispatch_diagnostic_workflow(git_ref, inputs)
+            .map_err(|_| super::super::actions::diagnostic::unavailable())
+    }
     fn cancel_actions(&mut self, run_id: u64) -> io::Result<String> {
         crate::cli::pr::edit_or_create_repo_guard(&self.owner, &self.repo)?;
         crate::cli::actions::cancel_actions_via_gh(&self.owner, &self.repo, &self.repo_path, run_id)
