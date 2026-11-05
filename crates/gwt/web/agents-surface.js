@@ -1,3 +1,4 @@
+import { mountProjectExecutionStatus } from "./project-execution-policy-model.js";
 const finite = value => typeof value === "number" && Number.isFinite(value);
 const number = value => finite(value) ? new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value) : "—";
 const hours = value => finite(value) ? `${Math.round(value / 3600 * 10) / 10}h` : "—";
@@ -6,7 +7,7 @@ const activityPresentation = state => JSON.stringify([state.count, (state.agents
   .sort((left, right) => String(left[0]).localeCompare(String(right[0])))]);
 const date = value => value && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString().replace("T", " ").slice(0, 16) : "—";
 
-export function createAgentsSurface({ document, rosterModel, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
+export function createAgentsSurface({ document, executionModel, projectTitle, rosterModel, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
   scheduleModel, switchModel, onSwitch = () => {}, onOpenSavedWork = () => {}, onContinueSavedWork = () => {}, isContinuePending = () => false, onReassign = () => {}, onRefreshSchedule = () => {},
   onAddMember = () => {}, onRestMember = () => {}, onRenameMember = () => {}, onRetryName = () => {}, onOpenWork = () => {} }) {
   const element = document.createElement("section"); element.className = "agents-surface"; element.setAttribute("aria-label", "Agents");
@@ -15,6 +16,14 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
     <p class="roster-error" role="status" hidden></p><section class="roster-team" id="roster-team" role="tabpanel" aria-labelledby="roster-tab-team"><div class="roster-capacity"><div><b class="roster-count">—</b><span> enabled members<br>Concurrent capacity <b class="roster-capacity-value">—</b></span></div><div class="roster-capacity-scale"><div class="roster-capacity-bar" role="meter" aria-label="Enabled members"><span class="roster-capacity-fill"></span><span class="roster-capacity-limit"></span></div><small class="roster-capacity-note"></small></div><button type="button" data-action="rest">− Rest member</button><label class="settings-field">Name for new member<input class="settings-input" type="text" aria-label="Name for new member" aria-describedby="roster-registration-error" autocomplete="off" required></label><label class="settings-field">Tool for new member<select aria-label="Tool for new member"></select></label><button type="button" data-action="add">Register</button><p id="roster-registration-error" class="roster-error" role="status" hidden></p></div>
     <p class="roster-description">Named members are reused across issues with their registered tool. Current work and terminals are in Works.</p><div class="roster-split"><div><div class="roster-list" role="list" aria-label="Team members"></div><button type="button" class="roster-add" data-action="add"><span aria-hidden="true">＋</span> Register a member · Choose a name and tool above</button></div><aside class="roster-detail" aria-label="Selected member"></aside></div></section>
     <section class="roster-past" id="roster-past" role="tabpanel" aria-labelledby="roster-tab-past" hidden><div class="roster-past-kpis"></div><p class="roster-description">Previous contributors recorded in sessions and Board. Periods are shown in UTC.</p><table><thead><tr><th>Agent</th><th>Kind</th><th>Issues</th><th>Period (UTC)</th><th>Posts</th></tr></thead><tbody></tbody></table><p class="roster-past-empty">No previous contributors are recorded.</p></section>`;
+  let releaseExecution = null;
+  if (executionModel) {
+    const execution = document.createElement("section"); execution.className = "settings-section";
+    execution.setAttribute("aria-label", "Project execution"); element.querySelector(".roster-heading").after(execution);
+    releaseExecution = mountProjectExecutionStatus(execution, executionModel, { projectTitle, onSettings: () => {
+      document.dispatchEvent(new document.defaultView.CustomEvent("settings:open", { detail: { target: "project-manager", surface_owner: "pm" } }));
+    } });
+  }
   const toolSelect = element.querySelector('[aria-label="Tool for new member"]');
   const nameInput = element.querySelector('[aria-label="Name for new member"]');
   let nameTouched = false, registeredDraft = null;
@@ -467,5 +476,5 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
   if (customAgentsModel) unsubscribers.push(customAgentsModel.subscribeFrame(state => state.catalog, syncTools));
   if (scheduleModel) unsubscribers.push(scheduleModel.subscribeFrame(state => state, value => { if (value !== renderedSchedule) { scheduleNotice = ""; sync(); } }));
   if (switchModel) unsubscribers.push(switchModel.subscribeFrame(state => state, value => { if (value !== renderedSwitch) sync(); }));
-  return { element, sync, selectMember, setPreviewHost, dispose() { if (disposed) return; for (const unsubscribe of unsubscribers) unsubscribe(); setPreviewHost(null); disposed = true; } };
+  return { element, sync, selectMember, setPreviewHost, dispose() { if (disposed) return; releaseExecution?.(); for (const unsubscribe of unsubscribers) unsubscribe(); setPreviewHost(null); disposed = true; } };
 }

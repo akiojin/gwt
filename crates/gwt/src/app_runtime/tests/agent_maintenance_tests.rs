@@ -584,6 +584,12 @@ fn startup_surface_ready_preserves_pm_queue_until_maintenance_finishes() {
             workspace_resume_context: None,
         },
     );
+    assert!(runtime.startup_auto_resume_ready_events().is_empty());
+    assert_eq!(
+        runtime.pending_startup_auto_resume_sessions.len(),
+        1,
+        "bootstrap and accepted-view drains must also wait for maintenance"
+    );
     let immediate =
         runtime.handle_frontend_event("canvas".into(), FrontendEvent::StartupAutoResumeReady {});
     assert!(immediate.is_empty());

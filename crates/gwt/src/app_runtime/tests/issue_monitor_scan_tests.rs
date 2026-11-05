@@ -1063,6 +1063,8 @@ fn scheduled_scan_keeps_fail_open_for_an_ordinary_probe_error() {
     let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "ok");
     let (repo, prefs_path) =
         seed_scheduled_scan_claim_fixture(&temp, Some(sample_issue_monitor_launch_profile()));
+    gwt::project_runtime::test_support::seed_actual_project_view(&repo)
+        .expect("the normal fail-open scan belongs to an opened Project");
     let _hook = super::super::set_local_completion_probe_test_hook(|_| {
         Err(
             gwt::issue_monitor_worker::IssueMonitorCompletionProbeFailure::Operation(

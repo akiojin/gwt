@@ -36,7 +36,8 @@ function fixture({ routeProjectKey = null } = {}) {
     socketReceiveDispatcher: null, recoveryCenterController: null,
     closeResetCount: 0, attentionReportCount: 0,
     agentCompletionNotifier: { reset() {} },
-    closeProjectController: { connectionLost() { context.closeResetCount += 1; } },
+    closeProjectController: { connectionLost() { context.closeResetCount += 1; }, reconnect() {} },
+    projectViewReadiness: { connectionLost() {} }, projectExecutionPolicy: { connectionLost() {}, applyStatus() {} },
     projectPageMetadata: { resetConnection() {}, reportAttention() { context.attentionReportCount += 1; } },
     requestVisiblePmReports() {}, requestSupportedAgentRefresh() {}, pmChatViews: new Map(),
     activeWorkspace: () => ({ windows: [{ id: "pane-a" }] }),
@@ -270,6 +271,7 @@ test("native foreground recovery does not require an observed hidden event", () 
   const handlerSource = source.split('document.addEventListener("visibilitychange", ')[1].split("\n      });")[0] + "\n}";
   const context = {
     document,
+    projectViewReadiness: { visible() {} },
     socketReceiveDispatcher: { resume() { resumes++; } },
     socketProjectKey: projectA.project_key,
     connectSocket: force => reconnects.push(force),
@@ -568,4 +570,15 @@ test("first project connection reads saved Works settings without a Settings hos
   const { sockets, select } = fixture();
   select("0123456789abcdef"); sockets.at(-1).open();
   assert.equal(sockets.at(-1).sent.filter(message => message.kind === "get_system_settings").length, 1);
+});
+
+
+test("close choices and view receipts belong to their exact live connection and never queue", () => {
+  const { context, sockets } = fixture({ routeProjectKey: projectA.project_key }); context.connectSocket();
+  for (const kind of ['preview_close_project', 'confirm_close_project', 'cancel_close_project', 'project_view_ready']) {
+    assert.equal(context.send({ kind }), 'unavailable');
+  }
+  assert.deepEqual(context.pendingMessages, []);
+  sockets.at(-1).open();
+  assert.equal(sockets.at(-1).sent.some(event => /close_project|project_view_ready/.test(event.kind)), false);
 });

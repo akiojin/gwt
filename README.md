@@ -243,7 +243,8 @@ from other hosts on the same LAN or VPN-extended LAN; pair it with an explicit
 `--port` when you need an operator-selected, well-known port. `--no-tray`
 starts a temporary server without registering a tray icon. It exits when its
 launching parent ends, or five seconds after its last browser session closes
-(reloads can reconnect during that grace). Before any browser connects, the
+(reloads can reconnect during that grace). An explicit Continue keeps it alive
+while that project's admitted work remains unfinished. Before any browser connects, the
 server follows its parent's lifetime. `--no-open` explicitly suppresses browser
 auto-open; startup already suppresses it by default.
 
@@ -316,14 +317,20 @@ Every HTTP / WebSocket request is mirrored to `tracing::info!(target =
 real time on stderr and in `~/.gwt/logs/<date>/`. `/healthz` is demoted to
 `debug!` to avoid drowning the stream with health probes.
 
-Lifecycle: the running `gwt` process owns the agent / PTY lifetime. In the default
-tray mode, closing a browser tab leaves the project and its running agents active;
-reopen its project URL to return to the same workspace. To stop a project, choose
-**Close Project**
-in its page header or beside it in the Hub's open-project list. If agents are
-running, a confirmation dialog lists them: **Cancel** keeps them running, while
-**Close Project** stops that project's runtime and agents. Other projects keep
-running, and every browser tab showing the closed project returns to the Hub.
+Lifecycle: new project work starts after its Project screen is displayed.
+Restored tabs and background connections alone do not start it. **Close Project**
+in the page header closes that view; if another view remains, its work continues.
+Closing the last view, or choosing Close in the Hub, offers **Continue**, **Stop**,
+and **Cancel**. Continue saves the choice for that project's admitted work across
+restarts. Stop blocks new starts and drains its running work while retaining work,
+conversations, and history. Cancel keeps the screen open. Other projects are unaffected.
+
+A browser's own close button or a lost connection does not choose Continue or
+Stop. Return to the Hub to resolve a pending choice. The project list and
+project-scoped PM settings show execution state, its reason, observation time,
+and unavailable observations. An uncertain stop remains Stopping or Unknown until
+the runtime confirms it. Agents can inspect `project.execution.status`; a registered
+PM can use `project.execution.choose` with an exact human instruction or approval.
 
 To stop the whole server, choose **Quit** in the tray menu or send `Ctrl-C` /
 `SIGTERM`; gwt drains its PTYs and exits gracefully. The tray-resident process
@@ -474,7 +481,8 @@ Managed hooks and project runtime delegation use `gwtd`. Opening a project
 starts or reconnects to its shared daemon, which owns agent panes and the Issue
 Monitor. A connection failure affects that project; the Hub and other projects
 remain available. GUI-managed daemons drain after the last GUI disconnects and
-a reconnect grace period expires. Closing one GUI does not kill a shared daemon.
+a reconnect grace period expires. An explicit Continue retains that project's
+runtime while admitted work is unfinished. Closing one GUI does not kill a shared daemon.
 An explicit JSON `daemon.start` keeps the daemon resident until it is stopped;
 it also makes an already GUI-managed daemon resident. `daemon.status` reports
 the current endpoint for diagnostics.

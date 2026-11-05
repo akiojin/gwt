@@ -271,6 +271,9 @@ impl TransportState {
     }
 }
 pub enum TransportEvent {
+    BrowserDisconnected {
+        client_id: String,
+    },
     MobileInput(Arc<crate::mobile_connection::MobileInputRequest>),
     FreshExecutionReadyResend {
         grant: AgentCapabilityGrant,
@@ -3094,6 +3097,9 @@ async fn client_session_with_scope(
     }
 
     state.clients.unregister(&client_id);
+    if matches!(scope, ClientSessionScope::Browser(_)) {
+        state.send(TransportEvent::BrowserDisconnected { client_id });
+    }
 }
 
 #[cfg(any(test, feature = "test-gh-guard"))]
@@ -4737,6 +4743,22 @@ mod tests {
     }
 
     // SPEC-2359 W-17 (FR-395): lossless events must survive any lossy flood.
+    #[test]
+    fn client_queue_keeps_project_view_closed_under_saturation() {
+        let queue = ClientQueue::default();
+        for index in 0..LOSSY_HIGH_WATER {
+            queue.enqueue(&prepare_outbound(&lossless_error(&format!("fill-{index}"))));
+        }
+        queue.enqueue(&prepare_outbound(&BackendEvent::ProjectViewClosed {
+            project_key: "0123456789abcdef".into(),
+        }));
+        let (payloads, _) = drain_all(&queue);
+        assert!(payloads
+            .iter()
+            .any(|payload| payload.contains("project_view_closed")));
+        assert_eq!(queue.dropped_lossy(), 0);
+    }
+
     #[test]
     fn client_queue_keeps_lossless_under_lossy_flood() {
         let queue = ClientQueue::default();

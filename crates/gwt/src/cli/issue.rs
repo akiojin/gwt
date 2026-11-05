@@ -154,6 +154,27 @@ pub(super) fn run<E: CliEnv>(
             guard_pm_owner_check(env.repo_path(), owner_check.as_ref())?;
             guard_autonomous_acceptance_block(&labels, &body)?;
             let snapshot = env.client().create_issue(&title, &body, &labels)?;
+            let lineage_error = if super::pm::caller_is_registered_pm(env.repo_path()) {
+                owner_check
+                    .as_ref()
+                    .and_then(|check| check.owner_spec)
+                    .zip(super::pm::ambient_session_id())
+                    .and_then(|(parent, issuer)| {
+                        crate::project_execution_policy::record_derived_owner(
+                            env.repo_path(),
+                            snapshot.number.0,
+                            parent.get(),
+                            &issuer,
+                            &format!(
+                                "issue.create:{}:{}",
+                                snapshot.number.0, snapshot.updated_at.0
+                            ),
+                        )
+                        .err()
+                    })
+            } else {
+                None
+            };
             super::intake_outcome::auto_record_issue_operation(
                 env.repo_path(),
                 "issue.create",
@@ -162,6 +183,10 @@ pub(super) fn run<E: CliEnv>(
             );
             let renewal = Cache::new(env.cache_root()).write_snapshot_with_receipt(&snapshot)?;
             let code = finish_issue_create(&snapshot, renewal, out);
+            if let Some(error) = lineage_error {
+                out.push_str(&format!("warning: Issue #{} was created, but its continued-parent receipt could not be saved: {error}. Do not create this Issue again. Render this Project or capture a new normal human instruction for this existing child Issue to continue it. project.execution.status is diagnostic only; it does not repair the receipt.\n", snapshot.number.0));
+                return Ok(1);
+            }
             finish_urgent_issue_mutation(env, &snapshot, code, out)
         }
         IssueCommand::CacheRepair { number } => {
@@ -18914,6 +18939,20 @@ command = "my-agent-cli"
         .unwrap();
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "registration-pm");
         let mut env = crate::cli::TestEnv::new(repo);
+        let continued_repo = env.repo_path().to_path_buf();
+        gwt_core::project_execution_policy::choose(
+            &continued_repo,
+            &gwt_core::project_execution_policy::ChoiceRequest {
+                operation_id: uuid::Uuid::new_v4().to_string(),
+                expected_revision: 0,
+                generation: 1,
+                choice: gwt_core::project_execution_policy::Choice::Continue,
+                consent_source_id: "explicit-test-choice".into(),
+                actor: "human".into(),
+                authorized_work_lineage: vec!["issue:3431".into()],
+            },
+        )
+        .unwrap();
         let error = run(
             &mut env,
             IssueCommand::CreateBody {
@@ -18955,6 +18994,29 @@ command = "my-agent-cli"
                 .filter(|call| call.starts_with("create_issue:"))
                 .count(),
             2
+        );
+        let created: Vec<u64> = env
+            .client
+            .call_log()
+            .iter()
+            .filter_map(|call| call.strip_prefix("create_issue:#")?.parse().ok())
+            .collect();
+        assert_eq!(created.len(), 2);
+        assert!(
+            crate::project_execution_policy::admission(
+                &continued_repo,
+                &[format!("issue:{}", created[0])]
+            )
+            .is_err(),
+            "an unrelated Issue is not a continued child"
+        );
+        assert!(
+            crate::project_execution_policy::admission(
+                &continued_repo,
+                &[format!("issue:{}", created[1])]
+            )
+            .is_ok(),
+            "typed PM child of the admitted parent remains runnable"
         );
     }
 

@@ -303,18 +303,33 @@ test("manual open and clone destination work without a native picker", () => {
   assert.deepEqual(sockets[0].sent.at(-1), { kind: 'clone_project_start', url: url.value, parent_path: parent.value });
 });
 
-test("Hub Close Project previews the selected key and removes only a closed project", () => {
+test("Hub Close Project requires a choice and preserves the project execution row", () => {
   const { document, sockets } = fixture();
-  sockets[0].open();
-  sockets[0].deliver(hubState([projectA, projectB]));
+  sockets[0].open(); sockets[0].deliver(hubState([projectA, projectB]));
   document.querySelector(`[data-close-project="${projectA.project_key}"]`).click();
-  assert.deepEqual(sockets[0].sent.at(-1), { kind: 'preview_close_project', project_key: projectA.project_key });
+  assert.deepEqual(sockets[0].sent.at(-1), { kind: 'preview_close_project', project_key: projectA.project_key, project_wide: true });
   const token = { project_key: projectA.project_key, generation: 1, nonce: 'test' };
-  sockets[0].deliver({ kind: 'close_project_preview', token, title: 'Alpha', running_agents: [] });
-  assert.deepEqual(sockets[0].sent.at(-1), { kind: 'confirm_close_project', token });
+  sockets[0].deliver({ kind: 'close_project_preview', token, title: 'Alpha', running_agents: [], choice_required: true,
+    policy_revision: 1, view_set_revision: 2, view_count: 2, project_wide: true });
+  assert.equal(sockets[0].sent.length, 2);
+  document.querySelector('[data-role="close-project-continue"]').click();
+  assert.equal(sockets[0].sent.at(-1).choice, 'continue');
   sockets[0].deliver({ kind: 'project_closed', project_key: projectA.project_key });
-  assert.equal(document.querySelector(`[data-close-project="${projectA.project_key}"]`), null);
+  assert.ok(document.querySelector(`[data-close-project="${projectA.project_key}"]`));
   assert.ok(document.querySelector(`[data-close-project="${projectB.project_key}"]`));
+});
+
+test("Hub shares project execution observations and marks a disconnect unknown", () => {
+  const { document, sockets } = fixture(); sockets[0].open();
+  sockets[0].deliver(hubState([{ ...projectA, execution: { project_key: projectA.project_key, generation: 2, revision: 4,
+    choice: 'continue', effective_state: 'waiting', start_reason: 'user_continue', observed_at: '2026-11-03T10:00:00Z', degraded: false } }, projectB], [{ ...projectA, path: '/fixture/alpha' }]));
+  const a = document.querySelector(`[data-project-execution="${projectA.project_key}"]`);
+  assert.match(a?.textContent || '', /Alpha.*Waiting.*Continue.*2026-11-03/);
+  assert.equal(a.querySelector('[data-project-execution-status]').dataset.state, 'waiting');
+  const b = document.querySelector(`[data-project-execution="${projectB.project_key}"]`);
+  assert.match(b?.textContent || '', /Unknown/);
+  sockets[0].handlers.close();
+  assert.match(a.textContent, /Unknown.*Last known: Waiting/);
 });
 
 test("Hub retries Close after its preview connection is lost", () => {
@@ -327,7 +342,7 @@ test("Hub retries Close after its preview connection is lost", () => {
   timers.at(-1)();
   sockets[1].open();
   close.click();
-  assert.deepEqual(sockets[1].sent.at(-1), { kind: 'preview_close_project', project_key: projectA.project_key });
+  assert.deepEqual(sockets[1].sent.at(-1), { kind: 'preview_close_project', project_key: projectA.project_key, project_wide: true });
 });
 
 

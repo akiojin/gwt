@@ -1651,7 +1651,7 @@ fn embedded_web_socket_open_replays_frontend_ready_before_flushing_pending_messa
     // Readiness and the ephemeral attention report precede queue replay, and
     // replay must match the immutable connection scope.
     let open_flow = regex::Regex::new(
-        r#"function handleSocketOpen\(recoverSnapshots = false\)\s*\{[\s\S]*?setConnectionState\(true\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*if \(socketProjectKey\) projectPageMetadata\.reportAttention\(\);\s*recoveryCenterController\?\.reconnect\(\);\s*for \(let index = 0; index < pendingMessages\.length;\) \{\s*const pending = pendingMessages\[index\];\s*if \(pending\.projectKey !== socketProjectKey\) \{\s*index \+= 1;\s*continue;\s*\}\s*pendingMessages\.splice\(index, 1\);\s*socket\.send\(JSON\.stringify\(pending\.message\)\);\s*\}"#,
+        r#"function handleSocketOpen\(recoverSnapshots = false\)\s*\{[\s\S]*?setConnectionState\(true\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*closeProjectController\.reconnect\(\);\s*if \(socketProjectKey\) projectPageMetadata\.reportAttention\(\);\s*recoveryCenterController\?\.reconnect\(\);\s*for \(let index = 0; index < pendingMessages\.length;\) \{\s*const pending = pendingMessages\[index\];\s*if \(pending\.projectKey !== socketProjectKey\) \{\s*index \+= 1;\s*continue;\s*\}\s*pendingMessages\.splice\(index, 1\);\s*socket\.send\(JSON\.stringify\(pending\.message\)\);\s*\}"#,
     )
     .expect("valid regex");
 
