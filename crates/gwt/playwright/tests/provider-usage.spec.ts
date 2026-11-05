@@ -4,6 +4,7 @@
  */
 import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { gotoLiveGwt } from "./_helpers/live-gwt";
 
 const liveUrl = process.env.GWT_PLAYWRIGHT_BASE_URL;
 
@@ -347,7 +348,8 @@ test.describe("Provider usage status summary", () => {
     page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
     if (!liveUrl) await installEmbeddedRoutes(page);
     await installProviderUsageBackend(page);
-    await page.goto(liveUrl || APP_URL);
+    if (liveUrl) await gotoLiveGwt(page, liveUrl);
+    else await page.goto(APP_URL);
     const account = {
       provider: "claude_code", state: { kind: "ok" }, limit_reached: false,
       windows: [
