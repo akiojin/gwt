@@ -6,6 +6,8 @@
 //! Network failure/EOF must invalidate it and disable the Host with a new epoch.
 //! Renewal scheduling (every ten seconds) and that runtime wiring are separate.
 
+pub mod credential;
+
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 

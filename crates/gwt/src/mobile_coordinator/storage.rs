@@ -20,6 +20,8 @@ use std::{
 };
 use uuid::Uuid;
 
+const MAX_CREDENTIAL_BYTES: usize = 128 * 1024;
+
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("mobile storage requires an owned 0700 directory and owned, single-link regular 0600 files; repair storage before reopening")]
@@ -30,6 +32,8 @@ pub enum StoreError {
     UnsupportedPrivateStorage,
     #[error("invalid mobile coordinator HTTPS origin")]
     InvalidOrigin,
+    #[error("mobile Host credential file exceeds the 128 KiB limit")]
+    CredentialTooLarge,
     #[error("mobile registry commit outcome is uncertain; drop the store and explicitly reopen to inspect current authority")]
     CommitUncertain,
     #[error("mobile store is unusable after an uncertain commit; drop it and explicitly reopen")]
@@ -239,6 +243,9 @@ impl CoordinatorStore {
             secret: hex::encode(credential.secret_bytes()),
         })
         .map_err(|_| CredentialError::InvalidRegistry)?;
+        if bytes.len() > MAX_CREDENTIAL_BYTES {
+            return Err(StoreError::CredentialTooLarge);
+        }
         let path = self
             .guard
             .path
@@ -282,6 +289,37 @@ impl CoordinatorStore {
         self.usable = true;
         Ok(())
     }
+}
+
+/// Shared producer/consumer bound and private-file checks. Ancestors must be
+/// trusted by the caller; the immediate directory and file are rechecked after
+/// reading. No registry lock or registration authority is acquired.
+#[cfg(unix)]
+pub(crate) fn read_private_credential(path: &Path) -> Result<Vec<u8>, StoreError> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or(StoreError::UnsafeStorage)?;
+    let directory = open_directory(parent)?;
+    let file = open_private_file(path, false)?;
+    let mut bytes = Vec::new();
+    (&file)
+        .take(MAX_CREDENTIAL_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_CREDENTIAL_BYTES {
+        return Err(StoreError::CredentialTooLarge);
+    }
+    if !same_file(&directory, &open_directory(parent)?)?
+        || !same_file(&file, &open_private_file(path, false)?)?
+    {
+        return Err(StoreError::UnsafeStorage);
+    }
+    Ok(bytes)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn read_private_credential(_: &Path) -> Result<Vec<u8>, StoreError> {
+    Err(StoreError::UnsupportedPrivateStorage)
 }
 
 #[cfg(unix)]
@@ -370,6 +408,39 @@ mod tests {
             serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         let secret = hex::decode(data["secret"].as_str().unwrap()).unwrap();
         (data, secret)
+    }
+
+    #[test]
+    fn oversized_credential_is_refused_before_secret_or_registry_publication() {
+        let dir = private_dir();
+        let mut store = CoordinatorStore::initialize(dir.path(), 100).unwrap();
+        let first = store
+            .issue(
+                "https://coordinator.example",
+                Uuid::new_v4(),
+                &[project()],
+                200,
+                100,
+            )
+            .unwrap();
+        let before = std::fs::read(dir.path().join("registry.json")).unwrap();
+        let files_before = std::fs::read_dir(dir.path()).unwrap().count();
+        let origin = format!("https://{}.example", "a".repeat(128 * 1024));
+        assert!(matches!(
+            store.issue(&origin, Uuid::new_v4(), &[project()], 200, 100),
+            Err(StoreError::CredentialTooLarge)
+        ));
+        assert_eq!(
+            std::fs::read(dir.path().join("registry.json")).unwrap(),
+            before
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), files_before);
+        let (_, secret) = read_secret(&first.path);
+        store
+            .registry()
+            .unwrap()
+            .verify(&first.identity, &project(), &secret, 100)
+            .unwrap();
     }
 
     #[test]
