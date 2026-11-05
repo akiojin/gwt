@@ -2483,8 +2483,16 @@ If the GUI was started separately, also set `GWT_VERIFY_TARGET_PIDS=1234`
 On Windows, verification waits for the CPU hard caps on its gwt pane Jobs to
 clear before measuring. All canonical slots and the legacy verification lane
 participate; configured caps return after their holders leave. Process priority
-and pane-close cleanup remain in effect. Restart gwt with the updated runtime
-if an older GUI's Job ancestry cannot be inspected.
+and pane-close cleanup remain in effect.
+
+If an ancestor GUI has no registered Job, `verify.run` automatically retries
+the same measured request in a hidden worker without restarting that GUI.
+Windows must confirm that the worker starts outside all Jobs before gwt puts
+it in a dedicated cleanup Job. The worker keeps the same session, environment,
+working directory, and complete verification matrix; its temporary context is
+encrypted for the current Windows user and removed after transfer. If Windows
+cannot provide that environment, recovery refuses and reports the cause.
+Separately nominated GUI targets still need their own readable, uncapped Jobs.
 
 The command's `measurement` evidence records target PIDs and start times,
 observed Job caps, sampled CPU time/utilization, admission wait, and cap-relief
