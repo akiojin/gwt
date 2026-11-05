@@ -1118,6 +1118,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       updateRestartImpactModel.subscribe(impact => impact, impact => {
         if (impact) updateCtaController.handleUpdateRestartImpact(impact);
       });
+      const updateCheckResultModel = createUiStateStore(null);
+      updateCheckResultModel.subscribe(event => event, event => {
+        if (event) updateCtaController.handleUpdateCheckResult(event);
+      });
 
       // SPEC-2359 W-17 (FR-399): explicit full-screen overlay while the
       // WebSocket bridge is down — a tiny status-strip label alone reads as
@@ -5302,7 +5306,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             }
             break;
           case "update_check_result":
-            updateCtaController.handleUpdateCheckResult(event);
+            updateCheckResultModel.update(() => event);
             break;
           case "update_progress":
             applyUpdateProgress({
