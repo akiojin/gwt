@@ -133,6 +133,8 @@ pub enum AuthorizationError {
     Revoked,
     #[error("device is not authorized for this project")]
     WrongProject,
+    #[error("mobile peer binding mismatch; reconnect using a fresh peer-bound challenge")]
+    WrongPeer,
     #[error("invalid device signature")]
     InvalidSignature,
     #[error("session belongs to a previous Host epoch")]
@@ -213,6 +215,38 @@ struct Pairing {
     issued_at: u64,
 }
 
+/// Connection-specific public identity supplied by the trusted Host adapter.
+/// The adapter must first validate the actual DTLS certificates against these
+/// SHA-256 fingerprints. Constructing this value is not peer verification or
+/// proof that a connection/registration lease is still live. Never deserialize
+/// it from a mobile request or persist it as part of a device approval.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerBinding {
+    host: HostBinding,
+    connection_id: Uuid,
+    host_fingerprint: [u8; 32],
+    mobile_fingerprint: [u8; 32],
+}
+
+impl PeerBinding {
+    pub fn new(
+        host: HostBinding,
+        connection_id: Uuid,
+        host_fingerprint: [u8; 32],
+        mobile_fingerprint: [u8; 32],
+    ) -> Result<Self, AuthorizationError> {
+        if connection_id.is_nil() || host_fingerprint == [0; 32] || mobile_fingerprint == [0; 32] {
+            return Err(AuthorizationError::WrongPeer);
+        }
+        Ok(Self {
+            host,
+            connection_id,
+            host_fingerprint,
+            mobile_fingerprint,
+        })
+    }
+}
+
 /// Sign these exact bytes, without reserializing them on the client.
 #[derive(Debug)]
 pub struct AuthenticationChallenge {
@@ -222,6 +256,7 @@ pub struct AuthenticationChallenge {
 
 struct Challenge {
     public: AuthenticationChallenge,
+    peer_binding: Option<PeerBinding>,
     device_id: String,
     project: ProjectKey,
     issued_at: u64,
@@ -231,6 +266,7 @@ struct Challenge {
 /// Host-only, non-cloneable session. Never deserialize client-supplied sessions.
 #[derive(Debug)]
 pub struct AuthenticatedSession {
+    peer_binding: Option<PeerBinding>,
     host_epoch: Uuid,
     device_id: String,
     project: ProjectKey,
@@ -327,6 +363,37 @@ impl MobileConnection {
             order_failed: AtomicBool::new(false),
             native_revocation,
         }
+    }
+
+    /// Authorize a peer-bound read without consuming an input sequence.
+    /// Session and authority locks cover the synchronous effect, just as for
+    /// input. The adapter must check the current registration lease, live client,
+    /// Project/pane payload allowlist inside `effect`, then synchronously accept
+    /// the DataChannel write. Peer equality alone proves none of those checks.
+    /// Do not await, enqueue a later unauthenticated effect, or reenter these locks.
+    pub fn with_authorized_read<T>(
+        &self,
+        project: &ProjectKey,
+        peer: &PeerBinding,
+        now: impl FnOnce() -> u64,
+        effect: impl FnOnce() -> Result<T, AuthorizationError>,
+    ) -> Result<T, AuthorizationError> {
+        let session = self
+            .session
+            .lock()
+            .map_err(|_| AuthorizationError::Unavailable)?;
+        let authorization = self
+            .authorization
+            .read()
+            .map_err(|_| AuthorizationError::Unavailable)?;
+        if self.native_revocation.revoked.load(Ordering::Acquire) {
+            return Err(AuthorizationError::Revoked);
+        }
+        if session.peer_binding.as_ref() != Some(peer) {
+            return Err(AuthorizationError::WrongPeer);
+        }
+        authorization.check_session(&session, project, now())?;
+        effect()
     }
 
     /// Call at the synchronous effect, never just to enqueue it. Read trusted
@@ -779,13 +846,40 @@ impl MobileAuthorization {
         Ok(())
     }
 
+    /// Legacy unbound challenge for existing callers, never a mobile transport fallback.
     pub fn challenge(
         &mut self,
         device_id: &str,
         project: &ProjectKey,
         now: u64,
     ) -> Result<AuthenticationChallenge, AuthorizationError> {
+        self.issue_challenge(device_id, project, None, now)
+    }
+
+    /// Reauthenticate an approved device on the exact verified transport peer.
+    /// The authority must have been loaded/bound explicitly to this Host/origin.
+    /// A new certificate/connection uses a fresh challenge and the same device key.
+    pub fn challenge_peer_bound(
+        &mut self,
+        device_id: &str,
+        project: &ProjectKey,
+        peer: &PeerBinding,
+        now: u64,
+    ) -> Result<AuthenticationChallenge, AuthorizationError> {
+        self.issue_challenge(device_id, project, Some(peer), now)
+    }
+
+    fn issue_challenge(
+        &mut self,
+        device_id: &str,
+        project: &ProjectKey,
+        peer: Option<&PeerBinding>,
+        now: u64,
+    ) -> Result<AuthenticationChallenge, AuthorizationError> {
         self.check_enabled()?;
+        if peer.is_some_and(|peer| self.host_binding.as_ref() != Some(&peer.host)) {
+            return Err(AuthorizationError::WrongPeer);
+        }
         let device = self
             .devices
             .get(device_id)
@@ -804,20 +898,51 @@ impl MobileAuthorization {
             return Err(AuthorizationError::Capacity);
         }
         let id = Uuid::new_v4().to_string();
-        // JSON tuple gives unambiguous UTF-8 encoding and explicit protocol/Host binding.
-        let signing_payload = serde_json::to_vec(&(
-            "gwt-mobile-auth-v1",
-            self.host_epoch.to_string(),
-            device_id,
-            project.as_str(),
-            &id,
-            now,
-            expires_at,
-        ))
+        // Fixed tuple order is the wire signing contract. The browser must
+        // validate every field against its own trusted bootstrap/local+remote
+        // peer descriptions before signing; never blindly sign arbitrary bytes.
+        let signing_payload = if let Some(peer) = peer {
+            use ring::rand::SecureRandom;
+            let mut nonce = [0; 32];
+            ring::rand::SystemRandom::new()
+                .fill(&mut nonce)
+                .map_err(|_| AuthorizationError::Unavailable)?;
+            serde_json::to_vec(&(
+                "gwt-mobile-auth-v2",
+                "pc-host",
+                "mobile-client",
+                &peer.host,
+                self.host_epoch.to_string(),
+                device_id,
+                hex::encode(ring::digest::digest(
+                    &ring::digest::SHA256,
+                    &device.public_key,
+                )),
+                project.as_str(),
+                peer.connection_id.to_string(),
+                hex::encode(peer.host_fingerprint),
+                hex::encode(peer.mobile_fingerprint),
+                hex::encode(nonce),
+                &id,
+                now,
+                expires_at,
+            ))
+        } else {
+            serde_json::to_vec(&(
+                "gwt-mobile-auth-v1",
+                self.host_epoch.to_string(),
+                device_id,
+                project.as_str(),
+                &id,
+                now,
+                expires_at,
+            ))
+        }
         .expect("string/integer tuple is serializable");
         self.challenges.insert(
             id.clone(),
             Challenge {
+                peer_binding: peer.cloned(),
                 public: AuthenticationChallenge {
                     id: id.clone(),
                     signing_payload: signing_payload.clone(),
@@ -842,11 +967,36 @@ impl MobileAuthorization {
         signature: &[u8],
         now: u64,
     ) -> Result<AuthenticatedSession, AuthorizationError> {
+        self.authenticate_challenge(challenge_id, None, signature, now)
+    }
+
+    /// Consume one challenge on this exact peer; failure also consumes it.
+    /// Legacy challenges are rejected rather than upgraded to peer-bound sessions.
+    pub fn authenticate_peer_bound(
+        &mut self,
+        challenge_id: &str,
+        peer: &PeerBinding,
+        signature: &[u8],
+        now: u64,
+    ) -> Result<AuthenticatedSession, AuthorizationError> {
+        self.authenticate_challenge(challenge_id, Some(peer), signature, now)
+    }
+
+    fn authenticate_challenge(
+        &mut self,
+        challenge_id: &str,
+        peer: Option<&PeerBinding>,
+        signature: &[u8],
+        now: u64,
+    ) -> Result<AuthenticatedSession, AuthorizationError> {
         self.check_enabled()?;
         let challenge = self
             .challenges
             .remove(challenge_id)
             .ok_or(AuthorizationError::UnknownRequest)?;
+        if challenge.peer_binding.as_ref() != peer {
+            return Err(AuthorizationError::WrongPeer);
+        }
         check_time(challenge.issued_at, challenge.expires_at, now)?;
         let device = self
             .devices
@@ -857,6 +1007,7 @@ impl MobileAuthorization {
             .verify(&challenge.public.signing_payload, signature)
             .map_err(|_| AuthorizationError::InvalidSignature)?;
         Ok(AuthenticatedSession {
+            peer_binding: challenge.peer_binding,
             host_epoch: self.host_epoch,
             device_id: device.id.clone(),
             project: challenge.project,
@@ -880,6 +1031,20 @@ impl MobileAuthorization {
         now: u64,
         effect: impl FnOnce() -> T,
     ) -> Result<T, AuthorizationError> {
+        self.check_session(session, project, now)?;
+        if sequence != session.next_sequence {
+            return Err(AuthorizationError::Replay);
+        }
+        session.next_sequence = sequence.checked_add(1).ok_or(AuthorizationError::Replay)?;
+        Ok(effect())
+    }
+
+    fn check_session(
+        &self,
+        session: &AuthenticatedSession,
+        project: &ProjectKey,
+        now: u64,
+    ) -> Result<(), AuthorizationError> {
         self.check_enabled()?;
         if session.host_epoch != self.host_epoch {
             return Err(AuthorizationError::StaleSession);
@@ -893,11 +1058,7 @@ impl MobileAuthorization {
             return Err(AuthorizationError::WrongProject);
         }
         check_time(session.issued_at, session.expires_at, now)?;
-        if sequence != session.next_sequence {
-            return Err(AuthorizationError::Replay);
-        }
-        session.next_sequence = sequence.checked_add(1).ok_or(AuthorizationError::Replay)?;
-        Ok(effect())
+        Ok(())
     }
 
     pub fn snapshot(&self) -> Vec<DeviceRecord> {
@@ -1125,6 +1286,304 @@ mod tests {
             .unwrap();
         auth.authenticate(&challenge.id, signature.as_ref(), NOW)
             .unwrap()
+    }
+
+    fn bound_authority() -> (MobileAuthorization, PeerBinding) {
+        let binding =
+            HostBinding::new(&Uuid::new_v4().to_string(), "https://mobile.example").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut auth =
+            MobileAuthorization::load_bound(&dir.path().join("devices.json"), &binding).unwrap();
+        auth.enable();
+        let peer = PeerBinding::new(binding, Uuid::new_v4(), [1; 32], [2; 32]).unwrap();
+        (auth, peer)
+    }
+
+    fn peer_session(
+        auth: &mut MobileAuthorization,
+        peer: &PeerBinding,
+        device: &DeviceRecord,
+        key: &EcdsaKeyPair,
+    ) -> AuthenticatedSession {
+        let challenge = auth
+            .challenge_peer_bound(&device.id, &project(), peer, NOW)
+            .unwrap();
+        let signature = key
+            .sign(&SystemRandom::new(), &challenge.signing_payload)
+            .unwrap();
+        auth.authenticate_peer_bound(&challenge.id, peer, signature.as_ref(), NOW)
+            .unwrap()
+    }
+
+    #[test]
+    fn peer_challenge_signs_exact_context_and_reconnects_with_same_device() {
+        let (mut auth, peer) = bound_authority();
+        let key = key();
+        let device = paired(&mut auth, &key);
+        let challenge = auth
+            .challenge_peer_bound(&device.id, &project(), &peer, NOW)
+            .unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&challenge.signing_payload).unwrap();
+        let nonce = payload[11].as_str().unwrap();
+        assert_eq!(hex::decode(nonce).unwrap().len(), 32);
+        assert_eq!(
+            payload,
+            serde_json::json!([
+                "gwt-mobile-auth-v2",
+                "pc-host",
+                "mobile-client",
+                peer.host,
+                auth.host_epoch.to_string(),
+                device.id,
+                hex::encode(ring::digest::digest(
+                    &ring::digest::SHA256,
+                    key.public_key().as_ref()
+                )),
+                project().as_str(),
+                peer.connection_id.to_string(),
+                hex::encode([1; 32]),
+                hex::encode([2; 32]),
+                nonce,
+                challenge.id,
+                NOW,
+                NOW + CHALLENGE_TTL_SECS
+            ])
+        );
+        let signature = key
+            .sign(&SystemRandom::new(), &challenge.signing_payload)
+            .unwrap();
+        let mut session = auth
+            .authenticate_peer_bound(&challenge.id, &peer, signature.as_ref(), NOW)
+            .unwrap();
+        assert_eq!(session.peer_binding.as_ref(), Some(&peer));
+        assert_eq!(auth.dispatch(&mut session, &project(), 0, NOW, || 7), Ok(7));
+        let mut next_peer = peer.clone();
+        next_peer.connection_id = Uuid::new_v4();
+        next_peer.host_fingerprint = [3; 32];
+        next_peer.mobile_fingerprint = [4; 32];
+        let next = auth
+            .challenge_peer_bound(&device.id, &project(), &next_peer, NOW)
+            .unwrap();
+        let next_payload: serde_json::Value =
+            serde_json::from_slice(&next.signing_payload).unwrap();
+        assert_ne!(next_payload[11], payload[11]);
+        let signature = key
+            .sign(&SystemRandom::new(), &next.signing_payload)
+            .unwrap();
+        assert!(auth
+            .authenticate_peer_bound(&next.id, &next_peer, signature.as_ref(), NOW)
+            .is_ok());
+        assert_eq!(auth.devices().len(), 1);
+    }
+
+    #[test]
+    fn peer_authentication_rejects_substitution_versions_and_consumes_failures() {
+        let (mut auth, peer) = bound_authority();
+        let key = key();
+        let device = paired(&mut auth, &key);
+        let mut foreign = peer.clone();
+        foreign.host =
+            HostBinding::new(&Uuid::new_v4().to_string(), "https://mobile.example").unwrap();
+        let mut origin = peer.clone();
+        origin.host = HostBinding::new(&peer.host.host_id, "https://other.example").unwrap();
+        let mut connection = peer.clone();
+        connection.connection_id = Uuid::new_v4();
+        let mut host_fp = peer.clone();
+        host_fp.host_fingerprint = [5; 32];
+        let mut mobile_fp = peer.clone();
+        mobile_fp.mobile_fingerprint = [6; 32];
+        for wrong_peer in [foreign, origin, connection, host_fp, mobile_fp] {
+            let c = auth
+                .challenge_peer_bound(&device.id, &project(), &peer, NOW)
+                .unwrap();
+            let signature = key.sign(&SystemRandom::new(), &c.signing_payload).unwrap();
+            assert_eq!(
+                auth.authenticate_peer_bound(&c.id, &wrong_peer, signature.as_ref(), NOW)
+                    .unwrap_err(),
+                AuthorizationError::WrongPeer
+            );
+            assert_eq!(
+                auth.authenticate_peer_bound(&c.id, &peer, signature.as_ref(), NOW)
+                    .unwrap_err(),
+                AuthorizationError::UnknownRequest
+            );
+        }
+        let c = auth
+            .challenge_peer_bound(&device.id, &project(), &peer, NOW)
+            .unwrap();
+        let signature = key.sign(&SystemRandom::new(), &c.signing_payload).unwrap();
+        assert_eq!(
+            auth.authenticate(&c.id, signature.as_ref(), NOW)
+                .unwrap_err(),
+            AuthorizationError::WrongPeer
+        );
+        let c = auth.challenge(&device.id, &project(), NOW).unwrap();
+        let signature = key.sign(&SystemRandom::new(), &c.signing_payload).unwrap();
+        assert_eq!(
+            auth.authenticate_peer_bound(&c.id, &peer, signature.as_ref(), NOW)
+                .unwrap_err(),
+            AuthorizationError::WrongPeer
+        );
+        let c = auth
+            .challenge_peer_bound(&device.id, &project(), &peer, NOW)
+            .unwrap();
+        assert_eq!(
+            auth.authenticate_peer_bound(&c.id, &peer, &[0; 64], NOW)
+                .unwrap_err(),
+            AuthorizationError::InvalidSignature
+        );
+        assert_eq!(
+            auth.authenticate_peer_bound(&c.id, &peer, &[0; 64], NOW)
+                .unwrap_err(),
+            AuthorizationError::UnknownRequest
+        );
+        let c = auth
+            .challenge_peer_bound(&device.id, &project(), &peer, NOW)
+            .unwrap();
+        assert_eq!(
+            auth.authenticate_peer_bound(&c.id, &peer, &[0; 64], NOW + CHALLENGE_TTL_SECS)
+                .unwrap_err(),
+            AuthorizationError::Expired
+        );
+        assert_eq!(
+            auth.challenge_peer_bound(&device.id, &other_project(), &peer, NOW)
+                .unwrap_err(),
+            AuthorizationError::WrongProject
+        );
+        assert_eq!(
+            MobileAuthorization::default()
+                .challenge_peer_bound(&device.id, &project(), &peer, NOW)
+                .unwrap_err(),
+            AuthorizationError::Disabled
+        );
+        let mut legacy = MobileAuthorization::default();
+        legacy.enable();
+        let legacy_device = paired(&mut legacy, &key);
+        assert_eq!(
+            legacy
+                .challenge_peer_bound(&legacy_device.id, &project(), &peer, NOW)
+                .unwrap_err(),
+            AuthorizationError::WrongPeer
+        );
+    }
+
+    #[test]
+    fn peer_challenges_share_legacy_capacity_and_revocation() {
+        let (mut auth, peer) = bound_authority();
+        let key = key();
+        let device = paired(&mut auth, &key);
+        let old = auth.challenge(&device.id, &project(), NOW).unwrap();
+        for _ in 0..3 {
+            auth.challenge_peer_bound(&device.id, &project(), &peer, NOW)
+                .unwrap();
+        }
+        assert_eq!(
+            auth.challenge_peer_bound(&device.id, &project(), &peer, NOW)
+                .unwrap_err(),
+            AuthorizationError::Capacity
+        );
+        assert_eq!(
+            auth.challenge(&device.id, &project(), NOW).unwrap_err(),
+            AuthorizationError::Capacity
+        );
+        let signature = key
+            .sign(&SystemRandom::new(), &old.signing_payload)
+            .unwrap();
+        auth.authenticate(&old.id, signature.as_ref(), NOW).unwrap();
+        let c = auth
+            .challenge_peer_bound(&device.id, &project(), &peer, NOW)
+            .unwrap();
+        auth.revoke(&device.id).unwrap();
+        assert_eq!(
+            auth.authenticate_peer_bound(&c.id, &peer, &[0; 64], NOW)
+                .unwrap_err(),
+            AuthorizationError::UnknownRequest
+        );
+        assert_eq!(
+            auth.challenge_peer_bound(&device.id, &project(), &peer, NOW)
+                .unwrap_err(),
+            AuthorizationError::Revoked
+        );
+        assert!(PeerBinding::new(peer.host.clone(), Uuid::nil(), [1; 32], [2; 32]).is_err());
+        assert!(PeerBinding::new(peer.host, Uuid::new_v4(), [0; 32], [2; 32]).is_err());
+    }
+
+    #[test]
+    fn peer_read_fence_preserves_sequence_and_rechecks_authority() {
+        let (mut auth, peer) = bound_authority();
+        let key = key();
+        let device = paired(&mut auth, &key);
+        let session = peer_session(&mut auth, &peer, &device, &key);
+        let auth = Arc::new(RwLock::new(auth));
+        let connection = MobileConnection::new(auth.clone(), session);
+        let effects = std::cell::Cell::new(0);
+        let read = |scope: &ProjectKey, peer: &PeerBinding, now| {
+            connection.with_authorized_read(
+                scope,
+                peer,
+                || now,
+                || {
+                    assert!(connection.session.try_lock().is_err());
+                    assert!(auth.try_write().is_err());
+                    effects.set(effects.get() + 1);
+                    Ok(7)
+                },
+            )
+        };
+        assert_eq!(read(&project(), &peer, NOW), Ok(7));
+        assert_eq!(read(&project(), &peer, NOW), Ok(7));
+        assert_eq!(connection.dispatch(&project(), 0, || NOW, || 9), Ok(9));
+        assert_eq!(
+            read(&other_project(), &peer, NOW),
+            Err(AuthorizationError::WrongProject)
+        );
+        assert_eq!(
+            read(&project(), &peer, NOW + SESSION_TTL_SECS),
+            Err(AuthorizationError::Expired)
+        );
+        let mut wrong = peer.clone();
+        wrong.connection_id = Uuid::new_v4();
+        assert_eq!(
+            read(&project(), &wrong, NOW),
+            Err(AuthorizationError::WrongPeer)
+        );
+        auth.write().unwrap().revoke(&device.id).unwrap();
+        assert_eq!(
+            read(&project(), &peer, NOW),
+            Err(AuthorizationError::Revoked)
+        );
+        assert_eq!(effects.get(), 2);
+    }
+
+    #[test]
+    fn peer_read_rejects_logical_abandon_legacy_and_previous_epoch_sessions() {
+        let (mut auth, peer) = bound_authority();
+        let key = key();
+        let device = paired(&mut auth, &key);
+        let legacy_session = session(&mut auth, &device, &key);
+        let abandoned_session = peer_session(&mut auth, &peer, &device, &key);
+        let stale_session = peer_session(&mut auth, &peer, &device, &key);
+        let auth = Arc::new(RwLock::new(auth));
+        let legacy = MobileConnection::new(auth.clone(), legacy_session);
+        let abandoned = MobileConnection::new(auth.clone(), abandoned_session);
+        let stale = MobileConnection::new(auth.clone(), stale_session);
+        let read = |connection: &MobileConnection| {
+            connection.with_authorized_read(
+                &project(),
+                &peer,
+                || NOW,
+                || panic!("unauthorized read"),
+            )
+        };
+        assert_eq!(read(&legacy), Err::<(), _>(AuthorizationError::WrongPeer));
+        abandoned.native_revocation.revoke();
+        assert_eq!(read(&abandoned), Err(AuthorizationError::Revoked));
+        auth.write().unwrap().host_epoch = Uuid::new_v4();
+        assert_eq!(read(&stale), Err(AuthorizationError::StaleSession));
+        auth.write().unwrap().disable();
+        auth.write().unwrap().enable();
+        assert!(read(&stale).is_err());
     }
 
     #[test]
