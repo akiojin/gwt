@@ -7070,6 +7070,14 @@ fn select_issue_monitor_effect(
         .iter()
         .filter(|effect| {
             issue_monitor_effect_permitted(effect, permit)
+                // Settlement has no denied readback; its no-op result would
+                // fence scans and starve other eligible effects.
+                && !(effect.state == crate::IssueMonitorEffectState::Attempting
+                    && matches!(
+                        effect.payload,
+                        crate::IssueMonitorEffectPayload::SettleMergedIssue { .. }
+                    )
+                    && !issue_monitor_project_submission_permitted(effect, permit))
                 && monitor.effect_attempt_is_ready(effect, now)
         })
         .min_by_key(|effect| {
@@ -22872,18 +22880,30 @@ exit 1
         );
         claim.state = crate::IssueMonitorEffectState::Attempting;
         claim.attempt = 1;
-        let monitor_for = |effect| {
+        let monitor_for = |effects| {
             test_monitor_with_prefs(
                 crate::IssueMonitorConfig::default(),
                 crate::IssueMonitorPrefs {
                     enabled: true,
                     effect_authority_epoch: 7,
-                    pending_effects: vec![effect],
+                    pending_effects: effects,
                     ..Default::default()
                 },
             )
         };
-        let mut monitor = monitor_for(claim.clone());
+        let mut settlement = crate::PendingIssueMonitorEffect::prepared(
+            "settle:42:99",
+            7,
+            crate::IssueMonitorEffectPayload::SettleMergedIssue {
+                issue_number: 42,
+                pr_number: 99,
+                merge_sha: Some("abc123".into()),
+                action: crate::MergedIssueSettlementAction::AwaitClose { unmet: Vec::new() },
+            },
+        );
+        settlement.state = crate::IssueMonitorEffectState::Attempting;
+        settlement.attempt = 1;
+        let mut monitor = monitor_for(vec![claim.clone()]);
         let permit = super::IssueMonitorEffectPermit::new();
         let project_permit = permit.capture_for_project(temp.path());
         let now = "2026-11-05T00:01:00Z";
@@ -22908,6 +22928,21 @@ exit 1
         assert!(
             !allow_submit,
             "Stop permits only readback of this exact Attempting claim"
+        );
+        let mut stopped_settlement = monitor_for(vec![settlement.clone()]);
+        assert!(
+            super::select_issue_monitor_effect(
+                &prefs_path,
+                &mut stopped_settlement,
+                &project_permit,
+                now,
+            )
+            .is_none(),
+            "a denied settlement cannot perform readback and must remain unselected"
+        );
+        assert_eq!(
+            stopped_settlement.pending_effects(),
+            std::slice::from_ref(&settlement)
         );
         gwt_core::project_execution_policy::record_effect(
             temp.path(),
@@ -22940,19 +22975,7 @@ exit 1
             allow_submit,
             "the same admitted claim must recover after missing readback"
         );
-        let mut settlement = crate::PendingIssueMonitorEffect::prepared(
-            "settle:42:99",
-            7,
-            crate::IssueMonitorEffectPayload::SettleMergedIssue {
-                issue_number: 42,
-                pr_number: 99,
-                merge_sha: Some("abc123".into()),
-                action: crate::MergedIssueSettlementAction::AwaitClose { unmet: Vec::new() },
-            },
-        );
-        settlement.state = crate::IssueMonitorEffectState::Attempting;
-        settlement.attempt = 1;
-        let mut monitor = monitor_for(settlement.clone());
+        let mut monitor = stopped_settlement;
         let (resumed, allow_submit) =
             super::select_issue_monitor_effect(&prefs_path, &mut monitor, &project_permit, now)
                 .unwrap();
@@ -22961,6 +22984,24 @@ exit 1
             allow_submit,
             "an idempotent settlement resumes its existing marker readback"
         );
+        let mut denied_settlement = settlement.clone();
+        denied_settlement.effect_id = "settle:43:99".into();
+        if let crate::IssueMonitorEffectPayload::SettleMergedIssue { issue_number, .. } =
+            &mut denied_settlement.payload
+        {
+            *issue_number = 43;
+        }
+        let mut prepared_claim = claim.clone();
+        prepared_claim.state = crate::IssueMonitorEffectState::Prepared;
+        let mut mixed = monitor_for(vec![denied_settlement.clone(), prepared_claim]);
+        mixed.terminal_queue_push(&[42], "test", now);
+        crate::save_issue_monitor_prefs(&prefs_path, &mixed.prefs()).unwrap();
+        let (selected, allow_submit) =
+            super::select_issue_monitor_effect(&prefs_path, &mut mixed, &project_permit, now)
+                .expect("an admitted claim must not wait behind an unadmitted settlement");
+        assert_eq!(selected, claim);
+        assert!(allow_submit);
+        assert_eq!(mixed.pending_effects()[0], denied_settlement);
         permit.deny();
         assert!(super::select_issue_monitor_effect(
             &prefs_path,
