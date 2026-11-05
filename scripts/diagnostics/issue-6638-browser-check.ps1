@@ -97,7 +97,7 @@ try {
     $testVariables = @{GWT_PLAYWRIGHT_BASE_URL=$baseUrl;GWT_PLAYWRIGHT_CHECK_HOME=$checkHome;
         GWT_PLAYWRIGHT_PID=[string]$process.Id;GWT_PLAYWRIGHT_CHECKOUT_ROOT=$checkout;
         GWT_PLAYWRIGHT_PROJECT_ROOT=$checkout;GWT_PLAYWRIGHT_NODE_MODULES="$deps/node_modules";
-        NODE_OPTIONS="--require $($deps.Replace('\','/'))/resolve-playwright.cjs";NODE_PATH="$deps/node_modules"}
+        NODE_OPTIONS="--require `"$($deps.Replace('\','/'))/resolve-playwright.cjs`"";NODE_PATH="$deps/node_modules"}
     foreach ($key in $testVariables.Keys) {
         if (!$savedEnvironment.ContainsKey($key)) { $savedEnvironment[$key] = [Environment]::GetEnvironmentVariable($key) }
         [Environment]::SetEnvironmentVariable($key, $testVariables[$key])
@@ -105,6 +105,7 @@ try {
     & node "$deps/node_modules/@playwright/test/cli.js" test --config crates/gwt/playwright/playwright.config.ts --workers=1 provider-usage.spec.ts @PlaywrightArguments
     if ($LASTEXITCODE -ne 0) { throw "Playwright failed with exit $LASTEXITCODE" }
 } finally {
+    foreach ($key in $savedEnvironment.Keys) { [Environment]::SetEnvironmentVariable($key, $savedEnvironment[$key]) }
     if ($keeper) { $keeper.Dispose() }
     if ($process -and !$process.HasExited) { $null = $process.WaitForExit(12000) }
     if ($process -and !$process.HasExited) {
@@ -112,5 +113,4 @@ try {
         $null = $process.WaitForExit(5000)
         if (!$process.HasExited) { throw "Owned checkout PID $($process.Id) survived cleanup." }
     }
-    foreach ($key in $savedEnvironment.Keys) { [Environment]::SetEnvironmentVariable($key, $savedEnvironment[$key]) }
 }
