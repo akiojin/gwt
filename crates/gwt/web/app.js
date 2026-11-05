@@ -1347,6 +1347,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         else if (socketProjectKey) {
           send({ kind: "get_system_settings" });
           resyncHookDoctor();
+          // frontend_ready omits Board/Logs; release reads lost with the old client.
+          resyncBoardLogs((activeWorkspace()?.windows || []).map(entry => entry.id));
         }
         syncRunningBranchCleanups();
         requestVisiblePmReports(true);
