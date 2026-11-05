@@ -5576,7 +5576,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
               if (worksSurface.isVisible(id)) scheduleInitialFitHandshake(id);
             }
           }
-          requestAnimationFrame(() => {
+          scheduleTerminalInitialFit(() => {
             if (!worksHost) return;
             for (const id of terminalMap.keys()) {
               if (worksSurface.isVisible(id)) {

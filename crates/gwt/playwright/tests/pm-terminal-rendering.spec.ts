@@ -2,6 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { withNativeHiddenPage } from "./_helpers/native-chromium";
 import { gotoLiveGwt, sendLiveGwtEvent, withLiveGwtBackendLock } from "./_helpers/live-gwt";
 
 const liveBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
@@ -301,7 +302,7 @@ async function settle(page: Page): Promise<void> {
   await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
 }
 
-async function installPmBackend(page: Page): Promise<void> {
+async function installPmBackend(page: Pick<Page, "addInitScript">): Promise<void> {
   await page.addInitScript(() => {
     (window as any).__gwtPlaywrightTestBridge = true;
     sessionStorage.setItem("gwt:ui:briefing", "1");
@@ -322,6 +323,11 @@ async function installPmBackend(page: Page): Promise<void> {
       connections: () => connections,
       emit: (packet: unknown) => socket.emit(packet),
       emitWorkspace: () => socket.emit(workspace()),
+      updateTitle: (id: string, title: string) => {
+        const entry = windows.find(window => window.id === id);
+        if (!entry) throw new Error(`Missing fixture window ${id}`);
+        Object.assign(entry, { dynamic_title: title }); socket.emit(workspace());
+      },
       addColdWindow: () => windows.push({ ...windows[0], id: "cold-retention", title: "Cold agent", preset: "agent", is_pm: false, session_id: "cold-retention-session" }),
       reconnect: () => socket.close(),
     };
@@ -469,4 +475,68 @@ test("real PTY receives one input and converges with the visible terminal grid",
       }
     }
   });
+});
+
+test("ready Works terminal follows model header layout while native hidden", async ({ page, playwright }, info) => {
+  test.setTimeout(60_000);
+  test.skip(!liveBase, "Requires the isolated browser-check checkout server");
+  await page.goto("about:blank");
+  const theme = info.project.name.includes("light") ? "light" : "dark";
+  const title = "Model task update " + "implement shared rendering and recover terminal state ".repeat(6).trim();
+  const result = await withNativeHiddenPage(playwright.chromium, info, async nativePage => {
+    await nativePage.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
+    await installPmBackend(nativePage);
+    await nativePage.goto(appUrl);
+    await expect.poll(() => nativePage.evaluate(() => document.documentElement.dataset.theme)).toBe(theme);
+    await expect.poll(() => nativePage.evaluate(() => !!(window as any).__pmTerminalFixture)).toBe(true);
+    await nativePage.evaluate(() => { const fixture = (window as any).__pmTerminalFixture; fixture.addColdWindow(); fixture.reconnect(); });
+    await nativePage.evaluate(() => (document.querySelector('[data-surface="works"]') as HTMLElement).click());
+    await expect.poll(() => nativePage.evaluate(() => !!document.querySelector('.work-row[data-window-id="cold-retention"] .work-open'))).toBe(true);
+    await nativePage.evaluate(() => (document.querySelector('.work-row[data-window-id="cold-retention"] .work-open') as HTMLElement).click());
+    await expect.poll(() => nativePage.evaluate(() => (window as any).__gwtTerminalTestApi.metrics("cold-retention").isReady)).toBe(true);
+    await nativePage.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  }, async title => {
+    const selector = '.works-surface:not(.works-surface--preview) .works-terminal[data-window-id="cold-retention"]';
+    const host = document.querySelector(selector)!, xterm = host.querySelector(".xterm");
+    const capture = () => ({ ...(window as any).__gwtTerminalTestApi.metrics("cold-retention"),
+      hostHeight: host.getBoundingClientRect().height, screenHeight: host.querySelector(".xterm-screen")!.getBoundingClientRect().height,
+      header: document.querySelector('.works-surface:not(.works-surface--preview) .works-full-meta')!.textContent,
+      sameHost: document.querySelector(selector) === host, sameXterm: host.querySelector(".xterm") === xterm,
+      hidden: document.hidden, focused: document.hasFocus(),
+      published: (window as any).__pmTerminalFixture.sent.filter((event: any) => event.kind === "update_terminal_grid" && event.id === "cold-retention").at(-1) });
+    const before = capture(), started = performance.now();
+    let focusEvents = 0, visibilityEvents = 0;
+    const focus = () => focusEvents++, visibility = () => visibilityEvents++;
+    window.addEventListener("focus", focus); host.addEventListener("focusin", focus); document.addEventListener("visibilitychange", visibility);
+    return new Promise<any>(resolve => {
+      const finish = (timedOut: boolean) => {
+        observer.disconnect(); clearTimeout(timer);
+        window.removeEventListener("focus", focus); host.removeEventListener("focusin", focus); document.removeEventListener("visibilitychange", visibility);
+        resolve({ before, after: capture(), elapsedMs: performance.now() - started, timedOut, focusEvents, visibilityEvents });
+      };
+      const observer = new MutationObserver(() => {
+        const after = capture(), cellHeight = before.screenHeight / before.rows;
+        if (after.header?.includes(title) && after.hostHeight < before.hostHeight && after.rows < before.rows
+          && after.screenHeight <= after.hostHeight && after.hostHeight - after.screenHeight < cellHeight + 1
+          && after.published?.rows === after.rows && after.published?.cols === after.cols) finish(false);
+      });
+      const timer = setTimeout(() => finish(true), 1000);
+      observer.observe(host.closest(".works-full")!, { childList: true, subtree: true, attributes: true, characterData: true });
+      (window as any).__pmTerminalFixture.updateTitle("cold-retention", title);
+    });
+  }, title);
+  await info.attach("native-ready-model-reflow.json", { contentType: "application/json", body: JSON.stringify(result) });
+  expect(result.before.isReady).toBe(true); expect(result.after.isReady).toBe(true);
+  expect(result.before.published).toMatchObject({ rows: result.before.rows, cols: result.before.cols });
+  expect(result.before.screenHeight).toBeLessThanOrEqual(result.before.hostHeight);
+  expect(result.before.hostHeight - result.before.screenHeight).toBeLessThan(result.before.screenHeight / result.before.rows + 1);
+  expect(result.after.sameHost).toBe(true); expect(result.after.sameXterm).toBe(true);
+  expect(result.after.header).toContain(title);
+  expect(result.after.hostHeight).toBeGreaterThan(30); expect(result.after.hostHeight).toBeLessThan(result.before.hostHeight);
+  expect(result.after.rows).toBeLessThan(result.before.rows);
+  expect(result.after.published).toMatchObject({ rows: result.after.rows, cols: result.after.cols });
+  expect(result.timedOut).toBe(false); expect(result.elapsedMs).toBeLessThanOrEqual(1000);
+  expect([result.before.hidden, result.after.hidden]).toEqual([true, true]);
+  expect([result.before.focused, result.after.focused]).toEqual([false, false]);
+  expect(result.focusEvents).toBe(0); expect(result.visibilityEvents).toBe(0);
 });

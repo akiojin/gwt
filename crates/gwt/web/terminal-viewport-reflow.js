@@ -10,10 +10,7 @@ const DEFAULT_MAX_TERMINAL_FITS_PER_FRAME = 4;
 const DEFAULT_MAX_TERMINAL_REFRESHES_PER_FRAME = 4;
 
 function defaultScheduleFrame(callback) {
-  if (typeof requestAnimationFrame === "function") {
-    return requestAnimationFrame(callback);
-  }
-  return setTimeout(callback, 0);
+  return scheduleTerminalTask(callback, globalThis);
 }
 
 // Initial readiness must advance even when an inactive window receives no
