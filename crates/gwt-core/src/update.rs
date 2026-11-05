@@ -404,6 +404,32 @@ pub fn clear_pending_update_manifest_if_unchanged_in(
         .map_err(|err| format!("Failed to remove pending manifest: {err}"))
 }
 
+/// A failed apply is terminal. Discard only its own staged release, keeping
+/// any replacement published by another window. Never delete arbitrary payload
+/// paths from the manifest; downloads live in the versioned managed directory.
+pub fn discard_failed_pending_update(version: &str) -> Result<(), String> {
+    let version =
+        parse_tag_version(version).ok_or_else(|| "Invalid failed update version".to_string())?;
+    let pending_dir = pending_update_dir();
+    let _lock = pending_update_manifest_lock(&pending_dir)?;
+    let manifest = fs::read(pending_dir.join("manifest.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<PendingUpdateManifest>(&bytes).ok());
+    if manifest
+        .is_some_and(|manifest| parse_tag_version(&manifest.version) == Some(version.clone()))
+    {
+        fs::remove_file(pending_dir.join("manifest.json"))
+            .map_err(|err| format!("Failed to remove failed pending manifest: {err}"))?;
+    }
+    let directory = crate::paths::gwt_updates_dir().join(format!("v{version}"));
+    gwt_config::home::assert_test_path(&directory);
+    match fs::remove_dir_all(directory) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(format!("Failed to remove failed staged update: {err}")),
+    }
+}
+
 /// Issue #4038 (AC-3): one project the GUI had open when the update apply
 /// began. `update_drain` records whether the Issue Monitor of that project
 /// was holding new launches (#4037) so the post-restart bootstrap can release
@@ -655,8 +681,8 @@ fn write_json_atomically<T: Serialize>(
 pub enum UpdateResumeOutcome {
     /// The running binary is `to_version`; the marker was removed.
     Applied,
-    /// The running binary is not `to_version` (#3807 no-op apply); the
-    /// marker stays with `attempt` incremented.
+    /// The running binary is not `to_version` (#3807 no-op apply).
+    /// The failed attempt is consumed; apply-result retains its diagnostic.
     VersionMismatch { observed_version: String },
 }
 
@@ -693,12 +719,24 @@ pub fn settle_update_resume_marker(
     current_version: &str,
     now: DateTime<Utc>,
 ) -> Option<UpdateResumeSettlement> {
-    settle_update_resume_marker_in(
+    let settlement = settle_update_resume_marker_in(
         &update_resume_dir(),
         &crate::paths::gwt_updates_dir(),
         current_version,
         now,
-    )
+    )?;
+    if matches!(
+        settlement.outcome,
+        UpdateResumeOutcome::VersionMismatch { .. }
+    ) {
+        if let Err(err) = discard_failed_pending_update(&settlement.marker.to_version) {
+            log_update_event(
+                "fail",
+                &[("stage", "discard_failed_pending"), ("reason", &err)],
+            );
+        }
+    }
+    Some(settlement)
 }
 
 /// Test-friendly variant of [`settle_update_resume_marker`].
@@ -750,13 +788,7 @@ pub fn settle_update_resume_marker_in(
             &[("stage", "record_apply_result"), ("reason", &err)],
         );
     }
-    let marker_write = if applied {
-        clear_update_resume_marker_in(resume_dir)
-    } else {
-        let mut retry = marker.clone();
-        retry.attempt = retry.attempt.saturating_add(1);
-        persist_update_resume_marker_in(resume_dir, &retry)
-    };
+    let marker_write = clear_update_resume_marker_in(resume_dir);
     if let Err(err) = marker_write {
         log_update_event(
             "fail",
@@ -1258,7 +1290,7 @@ impl UpdateManager {
                 };
                 let _ = write_cache(&self.cache_path, &cache_file);
 
-                if latest_ver > self.current_version {
+                if self.is_normal_update_candidate(&latest_ver) {
                     UpdateState::Available {
                         current: self.current_version.to_string(),
                         latest: latest_ver.to_string(),
@@ -1840,6 +1872,14 @@ impl UpdateManager {
         })
     }
 
+    fn is_normal_update_candidate(&self, version: &Version) -> bool {
+        *version > self.current_version
+            && !load_update_apply_result_in(&self.updates_dir).is_some_and(|result| {
+                result.outcome == UpdateApplyOutcome::Failure
+                    && parse_tag_version(&result.to_version).as_ref() == Some(version)
+            })
+    }
+
     fn state_from_cache(&self, cache: &UpdateCacheFile, current_exe: Option<&Path>) -> UpdateState {
         let checked_at = cache.checked_at;
 
@@ -1854,7 +1894,7 @@ impl UpdateManager {
             };
         };
 
-        if latest_ver > self.current_version {
+        if self.is_normal_update_candidate(&latest_ver) {
             let release_url = cache.release_url.clone().unwrap_or_else(|| {
                 format!(
                     "https://github.com/{}/{}/releases/tag/v{}",
@@ -5924,10 +5964,9 @@ mod tests {
         );
     }
 
-    // Issue #4038 (AC-5): a version mismatch (#3807 no-op apply) records a
-    // failure, bumps `attempt`, and keeps the marker.
+    // Issue #6757: a failed attempt is terminal, with its diagnostic retained.
     #[test]
-    fn settle_update_resume_marker_records_failure_and_keeps_marker_on_mismatch() {
+    fn settle_update_resume_marker_records_failure_and_consumes_marker_on_mismatch() {
         let resume_dir = tempfile::tempdir().expect("resume dir");
         let updates_dir = tempfile::tempdir().expect("updates dir");
         persist_update_resume_marker_in(resume_dir.path(), &sample_resume_marker())
@@ -5943,9 +5982,7 @@ mod tests {
                 observed_version: "9.30.0".to_string()
             }
         );
-        let remaining = load_update_resume_marker_in(resume_dir.path()).expect("marker kept");
-        assert_eq!(remaining.attempt, 2, "each failed restart bumps attempt");
-        assert_eq!(remaining.to_version, "9.31.0");
+        assert!(load_update_resume_marker_in(resume_dir.path()).is_none());
         let result = load_update_apply_result_in(updates_dir.path()).expect("apply result");
         assert_eq!(result.outcome, UpdateApplyOutcome::Failure);
         assert_eq!(result.observed_version, "9.30.0");
@@ -5958,6 +5995,86 @@ mod tests {
                 .contains("9.31.0"),
             "failure message names the expected version: {result:?}"
         );
+    }
+
+    #[test]
+    fn issue_6757_mismatch_discards_pending_and_does_not_reoffer_failed_release() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::ScopedGwtHome::set(home.path());
+        let updates = crate::paths::gwt_updates_dir();
+        let payload = updates.join("v999.0.0").join("gwt");
+        fs::create_dir_all(payload.parent().unwrap()).unwrap();
+        fs::write(&payload, "prepared").unwrap();
+        let manifest = PendingUpdateManifest {
+            version: "999.0.0".into(),
+            asset_url: "https://example.invalid/gwt.zip".into(),
+            payload: PreparedPayload::PortableBinary {
+                path: payload.clone(),
+            },
+            downloaded_at: Utc::now().to_rfc3339(),
+            origin: PendingUpdateOrigin::Automatic,
+            auto_apply_deferred: false,
+        };
+        persist_pending_update_manifest(&manifest).unwrap();
+        let marker = UpdateResumeMarker {
+            to_version: manifest.version.clone(),
+            ..sample_resume_marker()
+        };
+        persist_update_resume_marker(&marker).unwrap();
+        let now = Utc::now();
+        let result = settle_update_resume_marker(env!("CARGO_PKG_VERSION"), now).unwrap();
+        assert!(matches!(
+            result.outcome,
+            UpdateResumeOutcome::VersionMismatch { .. }
+        ));
+        assert!(
+            !pending_update_manifest_path().exists(),
+            "failed pending must be removed"
+        );
+        assert!(!payload.exists(), "failed staged payload must be removed");
+        assert!(settle_update_resume_marker(env!("CARGO_PKG_VERSION"), now).is_none());
+        let manager = UpdateManager::new();
+        let cache = UpdateCacheFile {
+            checked_at: now,
+            latest_version: Some(manifest.version.clone()),
+            release_url: None,
+            portable_asset_url: None,
+            installer_asset_url: None,
+            asset_url: Some(manifest.asset_url.clone()),
+        };
+        write_cache(manager.cache_path(), &cache).unwrap();
+        assert!(matches!(manager.check(false), UpdateState::UpToDate { .. }));
+        let newer = UpdateCacheFile {
+            latest_version: Some("999.0.1".into()),
+            ..cache
+        };
+        assert!(matches!(
+            manager.state_from_cache(&newer, None),
+            UpdateState::Available { .. }
+        ));
+
+        // Cleanup must consume a failed manifest even when the helper already
+        // moved its payload, and must preserve a different staged release.
+        fs::create_dir_all(payload.parent().unwrap()).unwrap();
+        fs::write(&payload, "prepared again").unwrap();
+        persist_pending_update_manifest(&manifest).unwrap();
+        fs::remove_file(&payload).unwrap();
+        discard_failed_pending_update(&manifest.version).unwrap();
+        assert!(!pending_update_manifest_path().exists());
+        let other_payload = updates.join("v999.0.1").join("gwt");
+        fs::create_dir_all(other_payload.parent().unwrap()).unwrap();
+        fs::write(&other_payload, "other release").unwrap();
+        let replacement = PendingUpdateManifest {
+            version: "999.0.1".into(),
+            payload: PreparedPayload::PortableBinary {
+                path: other_payload.clone(),
+            },
+            ..manifest
+        };
+        persist_pending_update_manifest(&replacement).unwrap();
+        discard_failed_pending_update("999.0.0").unwrap();
+        assert_eq!(load_pending_update_manifest(), Some(replacement));
+        assert!(other_payload.exists());
     }
 
     // Issue #3906 AC-6: the elevation probe is a write test on the install

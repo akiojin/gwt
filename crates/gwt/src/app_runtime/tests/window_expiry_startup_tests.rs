@@ -1568,7 +1568,7 @@ fn bootstrap_settles_update_resume_marker_and_bypasses_auto_resume_freshness() {
 
 // Issue #4038 (AC-5 / AC-7): when the restarted binary is not `to_version`
 // (#3807 no-op apply), bootstrap still releases the drain, records a failure,
-// notifies, bumps `attempt`, and keeps the marker. Sessions keep the normal
+// notifies, and consumes the failed marker (Issue #6757). Sessions keep the normal
 // freshness gate because nothing was actually applied.
 #[test]
 fn bootstrap_records_failed_update_resume_when_version_mismatches() {
@@ -1593,8 +1593,7 @@ fn bootstrap_records_failed_update_resume_when_version_mismatches() {
         !update_drain_is_raised(&worktree),
         "a failed apply still releases the update_drain hold (AC-5)"
     );
-    let remaining = gwt_core::update::load_update_resume_marker().expect("marker kept");
-    assert_eq!(remaining.attempt, 2);
+    assert!(gwt_core::update::load_update_resume_marker().is_none());
     let result = gwt_core::update::load_update_apply_result().expect("apply result recorded");
     assert_eq!(
         result.outcome,

@@ -2130,7 +2130,7 @@ impl AppRuntime {
     /// Success (running `to_version`) and version mismatch (#3807) both
     /// release the projects' `update_drain` holds and queue a notice; only
     /// success bypasses the auto-resume freshness gate. Idempotent: a settled
-    /// marker is gone, a mismatched one is re-read with `attempt` bumped.
+    /// marker is gone; a failed attempt stays only in the apply result.
     fn settle_update_resume_marker_at_bootstrap(&mut self, now: chrono::DateTime<chrono::Utc>) {
         let Some(settlement) =
             gwt_core::update::settle_update_resume_marker(env!("CARGO_PKG_VERSION"), now)

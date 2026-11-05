@@ -10832,7 +10832,13 @@ impl AppRuntime {
             ),
             UpdateAutoApplyRelease::PreviousFailure => (
                 "warn",
-                format!("Update v{version} was not applied automatically because its previous apply failed; the update stays staged for manual retry."),
+                if gwt_core::update::load_pending_update_manifest()
+                    .is_some_and(|manifest| manifest.version == version)
+                {
+                    format!("Update v{version} was not applied automatically because its previous apply failed; the update stays staged for manual retry.")
+                } else {
+                    format!("Update v{version} failed; its staged payload was discarded and the drain released.")
+                },
             ),
         };
         self.record_update_apply_observation(
