@@ -2062,6 +2062,7 @@ fn sample_runtime_with_events(
         knowledge_monitor_snapshot: Default::default(),
         issue_client_factory: super::default_issue_client_factory(),
         pending_update: None,
+        update_check_in_flight: false,
         update_download_in_flight: None,
         deferred_update_discovery: None,
         attachment_uploads: AttachmentUploadStore::new(temp_root.join("attachment-uploads")),

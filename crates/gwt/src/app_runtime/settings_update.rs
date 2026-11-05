@@ -696,6 +696,58 @@ impl AppRuntime {
         });
     }
 
+    pub(super) fn check_for_updates_events(&mut self) -> Vec<OutboundEvent> {
+        if !self.update_check_in_flight {
+            self.update_check_in_flight = true;
+            let proxy = self.proxy.clone();
+            self.blocking_tasks.spawn(move || {
+                let current_exe = std::env::current_exe().ok();
+                let result = gwt_core::update::UpdateManager::new()
+                    .check_manual_for_executable(current_exe.as_deref());
+                let previous_failure =
+                    gwt_core::update::load_update_apply_result().filter(|result| {
+                        result.outcome == gwt_core::update::UpdateApplyOutcome::Failure
+                    });
+                proxy.send(UserEvent::ManualUpdateChecked {
+                    result,
+                    previous_failure,
+                });
+            });
+        }
+        vec![OutboundEvent::broadcast(BackendEvent::UpdateCheckResult {
+            checking: true,
+            offer_update: false,
+            result: None,
+            previous_failure: None,
+        })]
+    }
+
+    pub(crate) fn complete_manual_update_check(
+        &mut self,
+        result: gwt_core::update::UpdateState,
+        previous_failure: Option<gwt_core::update::UpdateApplyResult>,
+    ) -> Vec<OutboundEvent> {
+        self.update_check_in_flight = false;
+        let offer_update = self.update_download_in_flight.is_none();
+        // Keep an active download's identity intact. Checking never starts or
+        // replaces a payload; explicit Update still uses shared stage admission.
+        if offer_update {
+            match &result {
+                gwt_core::update::UpdateState::Available { .. } => {
+                    self.pending_update = Some(result.clone());
+                }
+                gwt_core::update::UpdateState::UpToDate { .. } => self.pending_update = None,
+                gwt_core::update::UpdateState::Failed { .. } => {}
+            }
+        }
+        vec![OutboundEvent::broadcast(BackendEvent::UpdateCheckResult {
+            checking: false,
+            offer_update,
+            result: Some(result),
+            previous_failure,
+        })]
+    }
+
     pub(super) fn apply_pending_update_events(&self, client_id: &str) -> Vec<OutboundEvent> {
         match self.pending_update.clone() {
             Some(

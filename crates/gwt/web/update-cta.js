@@ -70,6 +70,79 @@ export function createUpdateCtaController({
   let restartRequestSequence = 0;
   let releaseModalFocus = null;
   let modalReturnFocus = null;
+  const checkButton = document.getElementById("update-check-button");
+  const checkStatus = document.getElementById("update-check-status");
+  const checkDetail = document.getElementById("update-check-detail");
+  const checkReason = document.getElementById("update-check-reason");
+  const checkFailure = document.getElementById("update-check-failure");
+  const checkRetry = document.getElementById("update-check-retry");
+  const checkInstall = document.getElementById("update-check-install");
+  let checking = false;
+
+  checkButton?.addEventListener("click", () => {
+    if (checking) return;
+    handleUpdateCheckResult({ checking: true });
+    send({ kind: "check_for_updates" });
+  });
+  checkRetry?.addEventListener("click", handleClick);
+
+  function handleUpdateCheckResult(payload) {
+    if (!payload) return;
+    checking = Boolean(payload.checking);
+    if (checkButton) checkButton.disabled = checking;
+    if (checkRetry) checkRetry.disabled = checking;
+    const result = payload.result;
+    const offerUpdate = payload.offer_update !== false;
+    let label = "Checking…";
+    if (!checking) {
+      switch (result?.state) {
+        case "available":
+          label = `Update available: v${result.latest}`;
+          if (offerUpdate) handleUpdateState(result);
+          else label += " — Check again after the current download finishes.";
+          break;
+        case "failed":
+          label = `Check failed: ${result.message}`;
+          if (result.retry_at) label += ` — Retry after ${result.retry_at}`;
+          break;
+        default:
+          label = "Up to date";
+      }
+    }
+    if (checkStatus) {
+      checkStatus.textContent = label;
+      checkStatus.title = label;
+      checkStatus.dataset.state = checking ? "checking" : result?.state || "up_to_date";
+    }
+    if (checking) return;
+    const failure = payload.previous_failure;
+    const mismatch = failure?.outcome === "failure"
+      && failure.to_version !== failure.observed_version;
+    const detailReason = result?.state === "failed" || (result?.state === "available" && !offerUpdate)
+      ? label : "";
+    if (checkDetail) checkDetail.hidden = !mismatch && !detailReason;
+    if (checkReason) {
+      checkReason.hidden = !detailReason;
+      checkReason.textContent = detailReason;
+    }
+    if (checkFailure) {
+      checkFailure.hidden = !mismatch;
+      checkFailure.textContent = mismatch
+        ? `Previous update failed: expected v${failure.to_version}, running v${failure.observed_version}.`
+        : "";
+    }
+    if (checkRetry) checkRetry.hidden = !offerUpdate || !mismatch || result?.state !== "available" || !result.asset_url;
+    if (checkInstall) {
+      checkInstall.hidden = !mismatch;
+      if (mismatch) {
+        checkInstall.href = result?.state === "available"
+          ? `https://github.com/akiojin/gwt/releases/tag/v${encodeURIComponent(result.latest)}`
+          : "https://github.com/akiojin/gwt/releases/latest";
+      } else {
+        checkInstall.removeAttribute("href");
+      }
+    }
+  }
 
   function removeLegacyUpdateSurfaces() {
     document.querySelectorAll(".update-toast, .update-button").forEach((node) => {
@@ -964,6 +1037,7 @@ export function createUpdateCtaController({
   }
 
   return {
+    handleUpdateCheckResult,
     handleUpdateState,
     handleUpdateProgress,
     handleUpdateReady,

@@ -127,6 +127,7 @@ impl OutboundEvent {
                     | BackendEvent::SupportedAgentList { .. }
                     | BackendEvent::SupportedAgentMaintenance { .. }
                     | BackendEvent::UpdateState(_)
+                    | BackendEvent::UpdateCheckResult { .. }
                     | BackendEvent::UpdateProgress { .. }
                     | BackendEvent::UpdateReady { .. }
                     | BackendEvent::UpdateAutoApply { .. }
