@@ -8202,6 +8202,8 @@ mod tests {
             json!({"kind":"candidates"}),
             json!({"kind":"candidates","limit":100,"after":id,"expected_inventory_sha256":digest}),
             json!({"kind":"candidate","id":id}),
+            json!({"kind":"candidate_chunk","id":id}),
+            json!({"kind":"candidate_chunk","id":id,"offset":u64::MAX}),
         ] {
             ok("pm.request_tasks.read", json!({"selector":selector}));
         }
@@ -8214,6 +8216,10 @@ mod tests {
             json!({"kind":"candidate","id":"../foreign"}),
             json!({"kind":"candidate","id":id.to_uppercase()}),
             json!({"kind":"candidate","id":id,"session_id":"forged"}),
+            json!({"kind":"candidate_chunk","id":"../foreign"}),
+            json!({"kind":"candidate_chunk","id":id,"offset":-1}),
+            json!({"kind":"candidate_chunk","id":id,"offset":1.5}),
+            json!({"kind":"candidate_chunk","id":id,"limit":1000000}),
             json!({"kind":"candidates","path":"/tmp/foreign"}),
         ] {
             assert!(matches!(

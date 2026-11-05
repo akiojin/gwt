@@ -7,6 +7,7 @@ use std::{
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use std::io::{Read, Seek, SeekFrom};
 
 use super::HookOutput;
 
@@ -209,7 +210,13 @@ struct IntakeObservation {
     turn_id: String,
 }
 
-pub(crate) fn read_intake_candidate(project: &Path, id: &str) -> io::Result<serde_json::Value> {
+// Match the existing PM native-conversation record budget. This limits the
+// serialized record, including JSON escaping, rather than the decoded prompt.
+pub(crate) const MAX_CANDIDATE_RECORD_BYTES: u64 = 4 * 1024 * 1024;
+// Base64 expands this to at most the existing PM report text budget (64 KiB).
+const CANDIDATE_CHUNK_BYTES: u64 = 48 * 1024;
+
+fn open_intake_candidate(project: &Path, id: &str) -> io::Result<fs::File> {
     if !candidate_id_valid(id) {
         return Err(io::Error::other("invalid PM candidate identity"));
     }
@@ -224,8 +231,28 @@ pub(crate) fn read_intake_candidate(project: &Path, id: &str) -> io::Result<serd
     if !fs::symlink_metadata(&path)?.is_file() {
         return Err(io::Error::other("invalid PM candidate file"));
     }
+    fs::File::open(path)
+}
+
+fn read_candidate_record(reader: impl Read) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_CANDIDATE_RECORD_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_CANDIDATE_RECORD_BYTES {
+        return Err(io::Error::from(io::ErrorKind::FileTooLarge));
+    }
+    Ok(bytes)
+}
+
+pub(crate) fn read_intake_candidate(project: &Path, id: &str) -> io::Result<serde_json::Value> {
+    let file = open_intake_candidate(project, id)?;
+    if file.metadata()?.len() > MAX_CANDIDATE_RECORD_BYTES {
+        return Err(io::Error::from(io::ErrorKind::FileTooLarge));
+    }
+    let (session, turn) = id.split_once('/').expect("validated composite ID");
     let candidate: IntakeCandidate =
-        serde_json::from_slice(&fs::read(path)?).map_err(io::Error::other)?;
+        serde_json::from_slice(&read_candidate_record(file)?).map_err(io::Error::other)?;
     if candidate.schema_version != 1
         || candidate.state != "unverified"
         || Some(candidate.project_key.as_str())
@@ -241,6 +268,35 @@ pub(crate) fn read_intake_candidate(project: &Path, id: &str) -> io::Result<serd
         ));
     }
     serde_json::to_value(candidate).map_err(io::Error::other)
+}
+
+/// Recovery bytes only: no candidate schema/hash validation or snapshot claim.
+pub(crate) fn read_intake_candidate_chunk(
+    project: &Path,
+    id: &str,
+    offset: u64,
+) -> io::Result<serde_json::Value> {
+    use base64::Engine;
+    let mut file = open_intake_candidate(project, id)?;
+    let observed_total_bytes = file.metadata()?.len();
+    if offset > observed_total_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "candidate offset exceeds observed file length; restart at offset 0",
+        ));
+    }
+    file.seek(SeekFrom::Start(offset))?;
+    let mut bytes = Vec::new();
+    file.take(CANDIDATE_CHUNK_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    let more = bytes.len() as u64 > CANDIDATE_CHUNK_BYTES;
+    bytes.truncate(CANDIDATE_CHUNK_BYTES as usize);
+    Ok(serde_json::json!({
+        "schema_version": 1, "ok": true, "state": "unverified_raw", "id": id,
+        "offset": offset, "observed_total_bytes": observed_total_bytes,
+        "next_offset": more.then_some(offset + bytes.len() as u64),
+        "bytes_base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+    }))
 }
 
 fn with_receipt_lock<T>(
@@ -486,6 +542,24 @@ pub(crate) fn monitor_reminder(worktree: &Path) -> Option<String> {
 mod tests {
     use super::*;
     use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+
+    #[test]
+    fn candidate_record_read_bounds_growth_after_metadata_check() {
+        let mut source = io::Cursor::new(vec![b' '; MAX_CANDIDATE_RECORD_BYTES as usize]);
+        assert_eq!(
+            read_candidate_record(&mut source).unwrap().len() as u64,
+            MAX_CANDIDATE_RECORD_BYTES
+        );
+        // Deterministic append after a successful length check, without racing
+        // a filesystem thread or depending on scheduler timing.
+        source.get_mut().extend_from_slice(b"  ");
+        source.set_position(0);
+        let error = read_candidate_record(&mut source)
+            .map(|bytes| bytes.len())
+            .expect_err("growth must be limited during the read");
+        assert_eq!(error.kind(), io::ErrorKind::FileTooLarge);
+        assert_eq!(source.position(), MAX_CANDIDATE_RECORD_BYTES + 1);
+    }
 
     fn instruction_capture() -> Box<gwt_core::user_instruction::UserInstructionInput> {
         Box::new(gwt_core::user_instruction::UserInstructionInput {
