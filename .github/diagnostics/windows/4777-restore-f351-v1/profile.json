@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "profile_id": "windows-4777-restore-f351-v1",
+  "repository": "akiojin/gwt",
+  "owner_issue": 4777,
+  "source_commit": "f351dc97c6a3ef805ecac75987dd43246b268c22",
+  "source_tree": "0feeb960e85a754d0470c07fbb896f9151028602",
+  "target_path": "crates/gwt/tests/windows_agent_launch_e2e.rs",
+  "source_lock": {
+    "bytes": 133039,
+    "sha256": "ffed4bf4c526a87d0c0d39712adf4311368a254eb028f5fbe9109f7b1167b83d"
+  },
+  "before": {
+    "bytes": 101079,
+    "sha256": "65fefc3132f0b63ca3d319fea381aa07547e28cfc13dcb8d43ab6e3e46d2addb"
+  },
+  "patch": {
+    "bytes": 7535,
+    "sha256": "8cf3285aa97e628d0d52bd95924bec5ce71461302e3ada5de4daa5e39cd3fc98",
+    "hunks": 1,
+    "added_lines": 109,
+    "removed_lines": 0
+  },
+  "after": {
+    "bytes": 108166,
+    "sha256": "3bac0c47d62f95239100b3a1f9fe218f5157df321cd0d346bdab27b271429f9f"
+  },
+  "toolchain": {
+    "rust_version": "1.99.1",
+    "node_major": 22,
+    "fixture_version": "75.0.0"
+  },
+  "inventory": {
+    "contracts": [
+      "hub_bootstrap_reply_names_the_scope_violation_instead_of_timing_out"
+    ],
+    "ignored": [
+      "windows_official_provider_launch_uses_installed_direct_runner",
+      "windows_startup_restored_provider_tree_closes_through_public_gui"
+    ],
+    "providers": [
+      "codex",
+      "claude"
+    ]
+  },
+  "timeouts": {
+    "setup_minutes": 5,
+    "compile_minutes": 30,
+    "contracts_minutes": 5,
+    "providers_minutes": 60,
+    "restore_minutes": 5,
+    "result_minutes": 5,
+    "job_minutes": 110,
+    "fixture_install_seconds": 180,
+    "agent_ready_seconds": 180,
+    "provider_exit_seconds": 30,
+    "gwt_ready_seconds": 45,
+    "restore_ws_yield_ms": 500,
+    "owned_wait_seconds": 5
+  },
+  "provider_threads": 1,
+  "providers_concurrent": true,
+  "retry": 0,
+  "diagnostic_only": true,
+  "ready_evidence": false
+}

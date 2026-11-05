@@ -1527,12 +1527,6 @@ fn periodic_wake_uses_the_scheduled_snapshot_for_queue_only_work() {
     )
     .expect("seed quiet loop");
 
-    assert!(
-        runtime
-            .pm_periodic_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
-            .is_none(),
-        "prefs reconstruction has no ephemeral queue"
-    );
     runtime
         .project_state_mut(&runtime.test_context())
         .unwrap()
@@ -1712,12 +1706,12 @@ fn a_resolved_escalation_leaves_the_wake_prompts_unchanged() {
     resolution.resolves_entry_ids = vec![entry_id];
     gwt_core::coordination::post_entry(&repo, resolution).expect("post resolution");
 
-    assert!(
-        runtime
-            .pm_periodic_wake_decision_at(&repo, "2026-08-18T01:05:00Z")
-            .is_none(),
-        "a resolved escalation must stop counting as supervision work"
-    );
+    let periodic = runtime
+        .pm_periodic_wake_decision_at(&repo, "2026-08-18T01:05:00Z")
+        .expect("an active PM keeps reconciling after the escalation is resolved");
+    assert!(!periodic
+        .delivery_prompt()
+        .contains("UNRESOLVED BLOCKED ESCALATIONS"));
 }
 
 #[test]

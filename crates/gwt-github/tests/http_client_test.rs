@@ -8,8 +8,8 @@
 
 use gwt_github::client::{
     http::{
-        FakeTransport, HttpError, HttpIssueClient, HttpMethod, HttpRequest, HttpResponse,
-        HttpTransport, ReqwestTransport,
+        BinaryHttpResponse, FakeTransport, HttpError, HttpIssueClient, HttpMethod, HttpRequest,
+        HttpResponse, HttpTransport, ReqwestTransport,
     },
     ApiError, CommentId, CommitComparisonStatus, CreateRepositoryIssue, FetchResult, IssueClient,
     IssueNumber, IssueState, OwnerMutationError, OwnerRepositoryClient, RepositoryActorType,
@@ -2035,6 +2035,387 @@ fn workflow_dispatch_posts_inputs_and_accepts_no_content() {
     assert!(requests[0]
         .headers
         .contains(&("Content-Type".into(), "application/json".into())));
+    assert!(requests[0]
+        .headers
+        .contains(&("X-GitHub-Api-Version".into(), "2022-11-28".into())));
+}
+
+#[test]
+fn diagnostic_workflow_dispatch_returns_the_exact_run_with_a_dedicated_version() {
+    let transport = FakeTransport::new();
+    transport.enqueue(ok_body(
+        r#"{"workflow_run_id":42,"run_url":"https://api.github.com/repos/octo/gwt/actions/runs/42","html_url":"https://github.com/octo/gwt/actions/runs/42"}"#,
+    ));
+    let client = client_with(transport);
+    let inputs = serde_json::json!({"request_id": "fixed-request"})
+        .as_object()
+        .unwrap()
+        .clone();
+
+    let ack = client
+        .dispatch_diagnostic_workflow("develop", &inputs)
+        .unwrap();
+
+    assert_eq!(ack.workflow_run_id, 42);
+    assert_eq!(
+        ack.run_url,
+        "https://api.github.com/repos/octo/gwt/actions/runs/42"
+    );
+    assert_eq!(ack.html_url, "https://github.com/octo/gwt/actions/runs/42");
+    let requests = client.transport().recorded();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request.method, HttpMethod::Post);
+    assert_eq!(
+        request.url,
+        "https://api.github.com/repos/octo/gwt/actions/workflows/windows-diagnostic.yml/dispatches"
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(request.body.as_deref().unwrap()).unwrap(),
+        serde_json::json!({"ref": "develop", "inputs": inputs})
+    );
+    assert!(request
+        .headers
+        .contains(&("Authorization".into(), "Bearer test-token".into())));
+    assert!(request
+        .headers
+        .contains(&("Content-Type".into(), "application/json".into())));
+    assert_eq!(
+        request
+            .headers
+            .iter()
+            .filter(|(key, _)| key == "X-GitHub-Api-Version")
+            .collect::<Vec<_>>(),
+        vec![&("X-GitHub-Api-Version".into(), "2026-03-10".into())]
+    );
+}
+
+#[test]
+fn diagnostic_workflow_dispatch_rejects_unbound_or_malformed_acknowledgments_without_retry() {
+    for (status, body) in [
+        (200, "secret-input-value"),
+        (
+            200,
+            r#"{"workflow_run_id":0,"run_url":"https://api.github.com/repos/octo/gwt/actions/runs/0","html_url":"https://github.com/octo/gwt/actions/runs/0"}"#,
+        ),
+        (
+            200,
+            r#"{"workflow_run_id":42,"run_url":"https://secret-input-value.invalid/repos/octo/gwt/actions/runs/42","html_url":"https://github.com/octo/gwt/actions/runs/42"}"#,
+        ),
+        (
+            200,
+            r#"{"workflow_run_id":42,"run_url":"https://api.github.com/repos/octo/gwt/actions/runs/42","html_url":"https://github.com/secret-input-value/gwt/actions/runs/42"}"#,
+        ),
+        (204, "secret-input-value"),
+    ] {
+        let transport = FakeTransport::new();
+        transport.enqueue(HttpResponse {
+            status,
+            headers: vec![],
+            body: body.into(),
+        });
+        let client = client_with(transport);
+        let error = client
+            .dispatch_diagnostic_workflow("develop", &serde_json::Map::new())
+            .unwrap_err();
+        assert!(matches!(error, ApiError::Unexpected(_)));
+        assert!(!format!("{error:?} {error}").contains("secret-input-value"));
+        assert_eq!(client.transport().recorded().len(), 1);
+    }
+}
+
+#[test]
+fn diagnostic_workflow_dispatch_refuses_empty_refs_before_submission() {
+    let client = client_with(FakeTransport::new());
+    assert!(client
+        .dispatch_diagnostic_workflow("  ", &serde_json::Map::new())
+        .is_err());
+    assert!(client.transport().recorded().is_empty());
+}
+
+#[test]
+fn diagnostic_workflow_context_hashes_fixed_assets_at_the_exact_default_head() {
+    use sha2::{Digest, Sha256};
+    let transport = FakeTransport::new();
+    let commit = "a".repeat(40);
+    for body in [
+        serde_json::json!({"full_name":"octo/gwt","default_branch":"develop"}).to_string(),
+        serde_json::json!({"object":{"type":"commit","sha":commit}}).to_string(),
+        serde_json::json!({"id":7,"path":".github/workflows/windows-diagnostic.yml","state":"active"}).to_string(),
+        "{\"fixed\":true}\n".into(),
+        "fixed-patch\n".into(),
+        "fixed-workflow\n".into(),
+        "fixed-harness\n".into(),
+    ] {
+        transport.enqueue(ok_body(&body));
+    }
+    let client = client_with(transport);
+    let context = client.diagnostic_workflow_context().unwrap();
+    assert_eq!(
+        context,
+        serde_json::json!({
+            "repository":"octo/gwt", "default_branch":"develop", "workflow_commit":commit,
+            "workflow_id":7, "published":true,
+            "profile_sha256":hex::encode(Sha256::digest(b"{\"fixed\":true}\n")),
+            "patch_sha256":hex::encode(Sha256::digest(b"fixed-patch\n")),
+            "workflow_sha256":hex::encode(Sha256::digest(b"fixed-workflow\n")),
+            "harness_sha256":hex::encode(Sha256::digest(b"fixed-harness\n")),
+        })
+    );
+    let requests = client.transport().recorded();
+    assert_eq!(requests.len(), 7);
+    for request in &requests {
+        assert_eq!(request.method, HttpMethod::Get);
+        assert!(request.body.is_none());
+    }
+    for (request, path) in requests[3..].iter().zip([
+        ".github/diagnostics/windows/4777-restore-f351-v1/profile.json",
+        ".github/diagnostics/windows/4777-restore-f351-v1/diagnostic.patch",
+        ".github/workflows/windows-diagnostic.yml",
+        ".github/diagnostics/windows/4777-restore-f351-v1/run.ps1",
+    ]) {
+        assert_eq!(
+            request.url,
+            format!("https://api.github.com/repos/octo/gwt/contents/{path}?ref={commit}")
+        );
+    }
+}
+
+fn diagnostic_run_metadata() -> serde_json::Value {
+    serde_json::json!({"id":42,"repository":{"full_name":"octo/gwt"},"workflow_id":7,
+        "path":".github/workflows/windows-diagnostic.yml","event":"workflow_dispatch",
+        "head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","run_attempt":1,"status":"completed","conclusion":"success"})
+}
+
+fn diagnostic_artifacts() -> serde_json::Value {
+    serde_json::json!({"total_count":1,"artifacts":[{"id":99,"name":"windows-diagnostic-result","size_in_bytes":4,
+        "expired":false,"workflow_run":{"id":42}}]})
+}
+
+fn enqueue_diagnostic_run(transport: &FakeTransport, path: &str) -> serde_json::Value {
+    let mut run = diagnostic_run_metadata();
+    run["path"] = serde_json::json!(path);
+    transport.enqueue(ok_body(&run.to_string()));
+    enqueue_diagnostic_workflow(transport);
+    transport.enqueue(ok_body(&diagnostic_artifacts().to_string()));
+    enqueue_diagnostic_assets(transport);
+    run
+}
+
+fn enqueue_diagnostic_workflow(transport: &FakeTransport) {
+    transport.enqueue(ok_body(
+        r#"{"id":7,"path":".github/workflows/windows-diagnostic.yml"}"#,
+    ));
+}
+
+fn enqueue_diagnostic_assets(transport: &FakeTransport) {
+    for body in [
+        "fixed-profile",
+        "fixed-patch",
+        "fixed-workflow",
+        "fixed-harness",
+    ] {
+        transport.enqueue(ok_body(body));
+    }
+}
+
+#[test]
+fn diagnostic_run_snapshot_hashes_assets_at_the_actual_run_head() {
+    use sha2::{Digest, Sha256};
+    for path in [
+        ".github/workflows/windows-diagnostic.yml",
+        ".github/workflows/windows-diagnostic.yml@refs/heads/develop",
+        ".github/workflows/windows-diagnostic.yml@refs/heads/fix@canary",
+    ] {
+        let transport = FakeTransport::new();
+        let run = enqueue_diagnostic_run(&transport, path);
+        let client = client_with(transport);
+        let snapshot = client.diagnostic_run_snapshot(42).unwrap();
+        assert_eq!(snapshot["run"], run);
+        for (key, body) in [
+            ("profile_sha256", "fixed-profile"),
+            ("patch_sha256", "fixed-patch"),
+            ("workflow_sha256", "fixed-workflow"),
+            ("harness_sha256", "fixed-harness"),
+        ] {
+            assert_eq!(snapshot[key], hex::encode(Sha256::digest(body.as_bytes())));
+        }
+        assert!(client.transport().recorded()[3..]
+            .iter()
+            .all(|request| request
+                .url
+                .ends_with("?ref=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")));
+    }
+}
+
+#[test]
+fn diagnostic_artifact_binds_a_fresh_run_and_drops_credentials_on_the_signed_download() {
+    let transport = FakeTransport::new();
+    transport.enqueue(ok_body(&diagnostic_run_metadata().to_string()));
+    enqueue_diagnostic_workflow(&transport);
+    transport.enqueue(ok_body(&diagnostic_artifacts().to_string()));
+    let signed = "https://productionresultssa19.blob.core.windows.net/actions-results/fixed.zip?sig=secret-input-value";
+    transport.enqueue(HttpResponse {
+        status: 302,
+        headers: vec![("Location".into(), signed.into())],
+        body: String::new(),
+    });
+    transport.enqueue_binary(BinaryHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: vec![0x50, 0x4b, 0xff, 0x00],
+    });
+    let client = client_with(transport);
+    assert_eq!(
+        client.diagnostic_artifact(42, 99).unwrap(),
+        vec![0x50, 0x4b, 0xff, 0x00]
+    );
+    let requests = client.transport().recorded();
+    assert_eq!(requests.len(), 5);
+    assert_eq!(
+        requests[3].url,
+        "https://api.github.com/repos/octo/gwt/actions/artifacts/99/zip"
+    );
+    assert_eq!(requests[4].url, signed);
+    assert!(requests[3]
+        .headers
+        .iter()
+        .any(|(key, _)| key == "Authorization"));
+    assert!(!requests[4]
+        .headers
+        .iter()
+        .any(|(key, value)| key.eq_ignore_ascii_case("authorization")
+            || value.contains("test-token")));
+    assert!(requests
+        .iter()
+        .all(|request| request.method == HttpMethod::Get));
+}
+
+#[test]
+fn diagnostic_run_snapshot_refuses_foreign_identity_and_incomplete_artifact_lists() {
+    for case in ["repository", "workflow", "workflow_id", "artifacts"] {
+        let transport = FakeTransport::new();
+        let mut run = diagnostic_run_metadata();
+        let mut artifacts = diagnostic_artifacts();
+        if case == "repository" {
+            run["repository"]["full_name"] = serde_json::json!("secret-input-value/foreign");
+        } else if case == "workflow" {
+            run["path"] = serde_json::json!(".github/workflows/foreign.yml@refs/heads/develop");
+        } else if case == "workflow_id" {
+            run["workflow_id"] = serde_json::json!(8);
+            run["path"] = serde_json::json!(
+                ".github/workflows/windows-diagnostic.yml@canary.yml@refs/heads/develop"
+            );
+        } else {
+            artifacts["total_count"] = serde_json::json!(101);
+        }
+        transport.enqueue(ok_body(&run.to_string()));
+        enqueue_diagnostic_workflow(&transport);
+        transport.enqueue(ok_body(&artifacts.to_string()));
+        enqueue_diagnostic_assets(&transport);
+        let client = client_with(transport);
+        let error = client.diagnostic_run_snapshot(42).unwrap_err();
+        assert!(!format!("{error:?} {error}").contains("secret-input-value"));
+        assert!(client.transport().recorded().len() <= 3);
+    }
+}
+
+#[test]
+fn diagnostic_artifact_refuses_untrusted_downloads_and_invalid_membership() {
+    for case in ["host", "private", "redirect", "size", "foreign", "expired"] {
+        let transport = FakeTransport::new();
+        transport.enqueue(ok_body(&diagnostic_run_metadata().to_string()));
+        enqueue_diagnostic_workflow(&transport);
+        let mut artifacts = diagnostic_artifacts();
+        if case == "size" {
+            artifacts["artifacts"][0]["size_in_bytes"] = serde_json::json!(1024 * 1024 + 1);
+        } else if case == "foreign" {
+            artifacts["artifacts"][0]["workflow_run"]["id"] = serde_json::json!(43);
+        } else if case == "expired" {
+            artifacts["artifacts"][0]["expired"] = serde_json::json!(true);
+        }
+        transport.enqueue(ok_body(&artifacts.to_string()));
+        let location = match case {
+            "host" => "https://secret-input-value.invalid/fixed.zip",
+            "private" => "https://127.0.0.1/secret-input-value.zip",
+            _ => "https://productionresultssa19.blob.core.windows.net/actions-results/fixed.zip",
+        };
+        transport.enqueue(HttpResponse {
+            status: 302,
+            headers: vec![("Location".into(), location.into())],
+            body: String::new(),
+        });
+        transport.enqueue(HttpResponse {
+            status: 302,
+            headers: vec![(
+                "Location".into(),
+                "https://secret-input-value.invalid/second".into(),
+            )],
+            body: String::new(),
+        });
+        let client = client_with(transport);
+        let error = client.diagnostic_artifact(42, 99).unwrap_err();
+        assert!(!format!("{error:?} {error}").contains("secret-input-value"));
+        assert_eq!(
+            client.transport().recorded().len(),
+            match case {
+                "foreign" => 3,
+                "size" | "expired" => 3,
+                "host" | "private" => 4,
+                _ => 5,
+            }
+        );
+    }
+}
+
+#[test]
+fn reqwest_binary_transport_preserves_non_utf8_and_bounds_the_response() {
+    use std::io::{Read, Write};
+    for case in ["bytes", "declared", "stream"] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request).unwrap();
+            let body = [0x50, 0x4b, 0xff, 0x00];
+            let length = if case == "declared" {
+                1024 * 1024 + 1
+            } else {
+                body.len()
+            };
+            if case == "stream" {
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+                    .unwrap();
+                let _ = stream.write_all(&vec![0; 1024 * 1024 + 1]);
+            } else {
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n"
+                )
+                .unwrap();
+            }
+            if case == "bytes" {
+                stream.write_all(&body).unwrap();
+            }
+        });
+        let response = ReqwestTransport::new().unwrap().execute_binary(
+            HttpRequest {
+                method: HttpMethod::Get,
+                url: format!("http://{address}/fixed"),
+                headers: vec![],
+                body: None,
+            },
+            1024 * 1024,
+        );
+        if case != "bytes" {
+            assert!(response.is_err());
+        } else {
+            assert_eq!(response.unwrap().body, vec![0x50, 0x4b, 0xff, 0x00]);
+        }
+        server.join().unwrap();
+    }
 }
 
 #[test]
@@ -2085,10 +2466,12 @@ fn workflow_path_rejects_malformed_metadata_without_exposing_the_body() {
     }
 }
 
-struct SecretWorkflowFailureTransport;
+#[derive(Default)]
+struct SecretWorkflowFailureTransport(std::sync::atomic::AtomicUsize);
 
 impl HttpTransport for SecretWorkflowFailureTransport {
     fn execute(&self, _request: HttpRequest) -> Result<HttpResponse, HttpError> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Err(HttpError::Transport("secret-input-value".into()))
     }
 
@@ -2104,7 +2487,7 @@ impl HttpTransport for SecretWorkflowFailureTransport {
 #[test]
 fn workflow_errors_do_not_expose_transport_messages() {
     let client = HttpIssueClient::with_transport(
-        SecretWorkflowFailureTransport,
+        SecretWorkflowFailureTransport::default(),
         "test-token".into(),
         "octo",
         "gwt",
@@ -2122,6 +2505,28 @@ fn workflow_errors_do_not_expose_transport_messages() {
         assert!(matches!(error, ApiError::Network(_)));
         assert!(!format!("{error:?} {error}").contains("secret-input-value"));
     }
+}
+
+#[test]
+fn diagnostic_workflow_dispatch_sanitizes_transport_failure_without_retry() {
+    let client = HttpIssueClient::with_transport(
+        SecretWorkflowFailureTransport::default(),
+        "test-token".into(),
+        "octo",
+        "gwt",
+    );
+    let error = client
+        .dispatch_diagnostic_workflow("develop", &serde_json::Map::new())
+        .unwrap_err();
+    assert!(matches!(error, ApiError::Network(_)));
+    assert!(!format!("{error:?} {error}").contains("secret-input-value"));
+    assert_eq!(
+        client
+            .transport()
+            .0
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
 }
 
 #[test]

@@ -4,13 +4,17 @@ use gwt_github::SpecOpsError;
 
 use crate::cli::{CliEnv, CliParseError};
 
+pub(crate) mod diagnostic;
 pub(crate) mod release_policy;
+pub use diagnostic::DiagnosticCommand;
 pub use release_policy::ReleasePolicyContext;
 
 /// SPEC-1942 command model for `actions.*` JSON operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionsCommand {
+    Diagnostic(DiagnosticCommand),
     ReleasePolicyStatus,
+    DiagnosticPolicyStatus,
     /// Issue #4249: submit an explicitly permitted workflow dispatch.
     Dispatch {
         call: ActionsDispatchCall,
@@ -251,8 +255,15 @@ pub(super) fn run<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let code = match cmd {
+        ActionsCommand::Diagnostic(command) => diagnostic::run(env, command, out)?,
         ActionsCommand::ReleasePolicyStatus => {
             let status = release_policy::status(env).map_err(super::io_as_api_error)?;
+            out.push_str(&serde_json::to_string(&status).map_err(super::serde_as_api_error)?);
+            out.push('\n');
+            0
+        }
+        ActionsCommand::DiagnosticPolicyStatus => {
+            let status = release_policy::diagnostic_status(env).map_err(super::io_as_api_error)?;
             out.push_str(&serde_json::to_string(&status).map_err(super::serde_as_api_error)?);
             out.push('\n');
             0
@@ -557,7 +568,73 @@ pub(super) fn rerun_actions_via_gh(
     target: &ActionsRerunTarget,
 ) -> io::Result<String> {
     let slug = format!("{owner}/{repo}");
-    lookup_owned_actions_target(&slug, repo_path, target, "rerun")?;
+    let payload = lookup_owned_actions_target(&slug, repo_path, target, "rerun")?;
+    let described = describe_rerun_target(target);
+    if slug.eq_ignore_ascii_case("akiojin/gwt") {
+        let unavailable = || {
+            io::Error::other(format!(
+                "actions.rerun refused for {described}: current workflow identity is unavailable; inspect the original run. Fixed diagnostics must use actions.diagnostic.observe and cannot be rerun"
+            ))
+        };
+        let mut run: serde_json::Value =
+            serde_json::from_str(&payload).map_err(|_| unavailable())?;
+        let expected_id = match target {
+            ActionsRerunTarget::Run { run_id, .. } => *run_id,
+            ActionsRerunTarget::Job { job_id } => *job_id,
+        };
+        if run["id"].as_u64() != Some(expected_id) {
+            return Err(unavailable());
+        }
+        if matches!(target, ActionsRerunTarget::Job { .. }) {
+            let run_id = run["run_id"]
+                .as_u64()
+                .filter(|id| *id > 0)
+                .ok_or_else(unavailable)?;
+            if run["run_url"]
+                != format!("https://api.github.com/repos/{slug}/actions/runs/{run_id}")
+            {
+                return Err(unavailable());
+            }
+            let parent = ActionsRerunTarget::Run {
+                run_id,
+                failed_only: false,
+            };
+            let payload = lookup_owned_actions_target(&slug, repo_path, &parent, "rerun")
+                .map_err(|_| unavailable())?;
+            run = serde_json::from_str(&payload).map_err(|_| unavailable())?;
+            if run["id"].as_u64() != Some(run_id) {
+                return Err(unavailable());
+            }
+        }
+        let workflow_id = run["workflow_id"]
+            .as_u64()
+            .filter(|id| *id > 0)
+            .ok_or_else(unavailable)?;
+        let endpoint = format!("/repos/{slug}/actions/workflows/{workflow_id}");
+        let (ok, payload, _) = gh_api(
+            repo_path,
+            &["api", endpoint.as_str()],
+            format!("gh api {endpoint}"),
+        )?;
+        if !ok {
+            return Err(unavailable());
+        }
+        let workflow: serde_json::Value =
+            serde_json::from_str(&payload).map_err(|_| unavailable())?;
+        if workflow["id"].as_u64() != Some(workflow_id) {
+            return Err(unavailable());
+        }
+        let filename = workflow["path"]
+            .as_str()
+            .and_then(|path| path.strip_prefix(".github/workflows/"))
+            .filter(|name| is_workflow_filename(name))
+            .ok_or_else(unavailable)?;
+        if filename == diagnostic::WORKFLOW {
+            return Err(io::Error::other(format!(
+                "actions.rerun refused for {described}: fixed diagnostic runs cannot be rerun; use actions.diagnostic.observe with the original request_id"
+            )));
+        }
+    }
 
     let rerun_endpoint = match target {
         ActionsRerunTarget::Run {
@@ -582,7 +659,6 @@ pub(super) fn rerun_actions_via_gh(
         )));
     }
 
-    let described = describe_rerun_target(target);
     let scope = match target {
         ActionsRerunTarget::Run {
             failed_only: true, ..
