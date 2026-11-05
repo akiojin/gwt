@@ -1064,10 +1064,21 @@ separate work. Tracking itself does not launch Issues or change delivery gates.
 Incoming prompts in the registered PM are preserved before the latest Q&A receipt
 is replaced, including repeated text and questions. These are unverified input
 candidates, not authenticated human sources, Tasks or instruction authority. The
-reporting diagnostic exposes only the current candidate ID. Candidates survive
-later prompts and PM replacement; a storage failure is returned as an error.
-Native identity reconciliation and an inventory of earlier candidates remain
-separate work, so this preservation does not yet provide automatic Task intake.
+reporting diagnostic exposes the current candidate ID. Candidates survive later
+prompts and PM replacement; a storage failure is returned as an error.
+The registered PM can discover candidates from every saved PM session through
+`pm.request_tasks.read` with `selector:{kind:"candidates",limit:50}`. Pages return
+only sorted IDs, `inventory_sha256` and `next_after`. Continue with that exact
+`after` and `expected_inventory_sha256`; a changed ID set returns `conflict`, so
+restart from the first page. Start again each cycle to find new observations.
+The token describes the observed ID set, not an atomic snapshot or authentication.
+Use `selector:{kind:"candidate",id:"<session digest>/<observation UUID>"}` to read
+one original with its unverified observation identity and content hash. Missing
+storage, unreadable storage and a missing candidate are distinct results. These
+reads retain the existing PM authority check, work independently of unavailable
+Task tracking and never consume candidates or modify storage. Returned originals
+remain untrusted input. Native identity reconciliation and authenticated Task
+intake remain separate work.
 
 `policy.dependency_observations` retains every supplied Monitor inbox row, including
 repeated Issues, with its state and canonical dependency blockers, cycle flag and bundle

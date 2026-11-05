@@ -8179,6 +8179,39 @@ mod tests {
     }
 
     #[test]
+    fn pm_request_tasks_candidate_selectors_are_bounded_and_path_free() {
+        let id = format!(
+            "{}/{}",
+            "a".repeat(64),
+            "12345678-1234-4234-8234-123456789abc"
+        );
+        let digest = "b".repeat(64);
+        for selector in [
+            json!({"kind":"candidates"}),
+            json!({"kind":"candidates","limit":100,"after":id,"expected_inventory_sha256":digest}),
+            json!({"kind":"candidate","id":id}),
+        ] {
+            ok("pm.request_tasks.read", json!({"selector":selector}));
+        }
+        for selector in [
+            json!({"kind":"candidates","limit":0}),
+            json!({"kind":"candidates","limit":101}),
+            json!({"kind":"candidates","after":id}),
+            json!({"kind":"candidates","expected_inventory_sha256":"invalid"}),
+            json!({"kind":"candidates","after":"../foreign","expected_inventory_sha256":digest}),
+            json!({"kind":"candidate","id":"../foreign"}),
+            json!({"kind":"candidate","id":id.to_uppercase()}),
+            json!({"kind":"candidate","id":id,"session_id":"forged"}),
+            json!({"kind":"candidates","path":"/tmp/foreign"}),
+        ] {
+            assert!(matches!(
+                err("pm.request_tasks.read", json!({"selector":selector})),
+                CliParseError::InvalidJson(_)
+            ));
+        }
+    }
+
+    #[test]
     fn pm_plan_status_accepts_only_empty_params() {
         assert!(matches!(
             ok("pm.plan.status", json!({})),

@@ -967,10 +967,18 @@ source ID、`{"selector":{"kind":"tasks","limit":50}}` は完了・取消を含�
 
 登録済み PM への入力は、最新の Q&A receipt を置き換える前に保存されます。同じ本文の
 再入力や質問も保持しますが、未認証の入力候補であり、人間の source・Task・指示権限
-とは区別されます。reporting 診断には現在の候補 ID だけを表示します。後続入力や PM の
-交代で以前の候補を消さず、保存に失敗した場合はエラーを返します。native identity の
-照合と過去候補の一覧取得は後続作業のため、この保全だけでは Task の自動受付は
-成立しません。
+とは区別されます。reporting 診断には現在の候補 ID を表示します。後続入力や PM の
+交代で以前の候補を消さず、保存に失敗した場合はエラーを返します。
+登録済み PM は `pm.request_tasks.read` の `selector:{kind:"candidates",limit:50}` で、
+保存済みの全 PM session の候補を発見できます。ページは昇順 ID、`inventory_sha256`、
+`next_after` だけを返します。続きはその `after` と `expected_inventory_sha256` を指定し、
+ID 集合が変わって `conflict` になったら先頭から再取得します。各 cycle も先頭から
+照合して新しい観測を発見します。token は観測した ID 集合を表し、同時 snapshot や
+認証の証明ではありません。`selector:{kind:"candidate",id:"<session digest>/<observation UUID>"}`
+で原文・未認証の観測 identity・本文 hash を 1 件取得します。保存先未作成・読取不能・
+候補欠落は区別されます。既 PM 権限確認を維持し、Task 追跡が読めない場合も取得でき、
+候補の消費や保存状態の変更は行いません。取得した原文は引き続き信頼できない入力です。
+native identity の照合と認証付き Task 受付は別の作業として残ります。
 
 `policy.dependency_observations` は供給された Monitor inbox の全行を、同じ Issue の
 重複も含めて保持し、状態と正本の blocker・cycle・bundle 参照を返します。
