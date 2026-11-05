@@ -102,11 +102,16 @@ for (const stage of ["merge", "write"]) {
     assert.equal(batcher.enqueue("pm", "INTERVENING"), false);
     assert.equal(batcher.schedulePending("pm"), false);
     assert.equal(batcher.flushNow("pm"), false);
-    batcher.clear("pm"); // The existing snapshot replacement releases the stop.
+    batcher.clear("pm", { preserveFailure: true }); // Receipt is not success.
+    assert.equal(batcher.enqueue("pm", "AFTER FAILED SNAPSHOT"), false);
+    const snapshotFault = new Error("replacement snapshot failed");
+    batcher.invalidate("pm", snapshotFault);
+    assert.deepEqual(failures.at(-1), [snapshotFault, "pm", false]);
+    batcher.clear("pm"); // Successful replacement releases the stop.
     assert.equal(batcher.enqueue("pm", "RECOVERED"), true);
     scheduler.runAll();
     assert.deepEqual(writes, [["peer", "OK"], ["pm", "RECOVERED"]]);
-    assert.equal(failures.length, 1);
+    assert.equal(failures.length, 2);
   });
 }
 

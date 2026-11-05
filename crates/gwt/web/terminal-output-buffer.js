@@ -197,7 +197,7 @@ export function createTerminalOutputBatcher({
 
   function failWindow(windowId, error) {
     // A decoder/write may have consumed only part of an ANSI stream. Discard
-    // its suffix and reject new output until snapshot replacement calls clear.
+    // its suffix and reject new output until a snapshot applies successfully.
     pendingByWindow.delete(windowId);
     quiescedWindows.delete(windowId);
     failedWindows.add(windowId);
@@ -306,8 +306,8 @@ export function createTerminalOutputBatcher({
     return flushed;
   }
 
-  function clear(windowId) {
-    failedWindows.delete(windowId);
+  function clear(windowId, { preserveFailure = false } = {}) {
+    if (!preserveFailure) failedWindows.delete(windowId);
     quiescedWindows.delete(windowId);
     return pendingByWindow.delete(windowId);
   }
@@ -341,6 +341,7 @@ export function createTerminalOutputBatcher({
     enqueue,
     flushNow,
     clear,
+    invalidate: failWindow,
     schedulePending,
     pendingCount,
     pendingWindowCount,
