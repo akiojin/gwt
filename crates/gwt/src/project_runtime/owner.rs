@@ -13366,6 +13366,7 @@ mod drop_tests {
             }
         }
         let root = home.path().join("repo");
+        super::super::test_support::seed_actual_project_view(&root).unwrap();
         let project_key = gwt_core::paths::project_scope_hash(&root).to_string();
         let id = format!("{project_key}::logical-cursor-fence");
         let (entered, observed_query) = mpsc::channel();

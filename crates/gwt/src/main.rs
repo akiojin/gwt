@@ -4797,8 +4797,18 @@ mod tests {
         let persist_dispatcher = Arc::new(
             crate::app_runtime::persist_dispatcher::PersistDispatcher::new(&blocking_tasks),
         );
-        let (project_tab_incarnations, next_project_incarnation) =
+        let (mut project_tab_incarnations, _) =
             crate::app_runtime::initial_project_tab_incarnations(&tabs);
+        // Historical wizard fixtures use generations 1..; production boot
+        // uniqueness is verified directly by the project navigation tests.
+        let mut next_project_incarnation = 1;
+        for tab in &tabs {
+            project_tab_incarnations
+                .get_mut(&tab.id)
+                .unwrap()
+                .generation = next_project_incarnation;
+            next_project_incarnation += 1;
+        }
         let mut runtime = AppRuntime {
             test_project_owners: HashMap::new(),
             _runtime_namespace_gc: None,
@@ -4938,6 +4948,7 @@ mod tests {
         };
         runtime.rebuild_window_lookup();
         runtime.seed_window_pty_statuses();
+        runtime.seed_fixture_project_views();
         (runtime, events)
     }
 

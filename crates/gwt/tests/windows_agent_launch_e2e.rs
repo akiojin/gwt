@@ -599,6 +599,14 @@ async fn assert_public_ws_conpty_boundary_async(
         ))
         .await
         .map_err(|error| format!("send project frontend_ready: {error}"))?;
+    let board_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    synchronize_public_project_view(
+        &mut socket,
+        &project_key,
+        &canonical_workspace,
+        board_deadline,
+    )
+    .await?;
 
     socket
         .send(tokio_tungstenite::tungstenite::Message::Text(
@@ -606,7 +614,6 @@ async fn assert_public_ws_conpty_boundary_async(
         ))
         .await
         .map_err(|error| format!("send create Board window: {error}"))?;
-    let board_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let mut board_id = None;
     while board_id.is_none() && tokio::time::Instant::now() < board_deadline {
         let remaining = board_deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -1946,6 +1953,118 @@ impl RestoreTree {
 type RestoreSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
+// These protocol fixtures stand in for the browser's rendered Project view.
+// Readiness is bound to this connection's real challenge, never a saved choice.
+async fn synchronize_public_project_view(
+    socket: &mut RestoreSocket,
+    project_key: &str,
+    canonical_workspace: &Path,
+    deadline: tokio::time::Instant,
+) -> Result<(), String> {
+    let mut workspace_ready = false;
+    let mut challenge = None;
+    let mut initial_status = None;
+    let mut acknowledged = false;
+    let view_id = uuid::Uuid::new_v4().to_string();
+    loop {
+        // test-hygiene: allow-wall-clock-deadline the caller's existing public WebSocket synchronization budget also bounds view readiness
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Err("Project view never synchronized and opened before its deadline".into());
+        }
+        let remaining = deadline.duration_since(now);
+        // test-hygiene: allow-wall-clock-deadline the unchanged caller deadline bounds this read; buffered frames cannot extend it
+        let message = tokio::time::timeout(remaining, socket.next())
+            .await
+            .map_err(|_| {
+                "Project view never synchronized and opened before its deadline".to_string()
+            })?
+            .ok_or_else(|| "public websocket closed before Project view readiness".to_string())?
+            .map_err(|error| format!("read Project view readiness: {error}"))?;
+        let Some(payload) = message.to_text().ok() else {
+            continue;
+        };
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(payload) else {
+            continue;
+        };
+        match event["kind"].as_str() {
+            Some("workspace_state") => {
+                let tab = &event["workspace"]["tabs"][0];
+                let root = tab["project_root"]
+                    .as_str()
+                    .and_then(|path| std::fs::canonicalize(Path::new(path)).ok());
+                if tab["project_key"].as_str() != Some(project_key)
+                    || root.as_deref() != Some(canonical_workspace)
+                {
+                    return Err("Project view connection served another workspace".into());
+                }
+                workspace_ready = true;
+            }
+            Some("project_view_challenge") => {
+                if event["project_key"].as_str() != Some(project_key) {
+                    return Err("Project view challenge belongs to another project".into());
+                }
+                challenge = Some((
+                    event["generation"]
+                        .as_u64()
+                        .ok_or("Project view generation missing")?,
+                    event["nonce"]
+                        .as_str()
+                        .ok_or("Project view nonce missing")?
+                        .to_string(),
+                ));
+            }
+            Some("project_execution_status") => {
+                let status = &event["status"];
+                if status["project_key"].as_str() != Some(project_key) {
+                    return Err("Project view status belongs to another project".into());
+                }
+                let generation = status["generation"]
+                    .as_u64()
+                    .ok_or("Project status generation missing")?;
+                let revision = status["view_set_revision"]
+                    .as_u64()
+                    .ok_or("Project view revision missing")?;
+                if let Some((initial_generation, initial_revision)) = initial_status {
+                    if generation != initial_generation {
+                        return Err("Project view generation changed during readiness".into());
+                    }
+                    if acknowledged && revision > initial_revision && status["view_state"] == "open"
+                    {
+                        return Ok(());
+                    }
+                } else {
+                    initial_status = Some((generation, revision));
+                }
+            }
+            Some("close_project_error" | "project_not_found") => {
+                return Err(format!("Project view readiness rejected: {event}"));
+            }
+            _ => {}
+        }
+        if !acknowledged && workspace_ready {
+            if let (Some((generation, nonce)), Some((initial_generation, _))) =
+                (&challenge, initial_status)
+            {
+                if *generation != initial_generation {
+                    return Err(
+                        "Project view challenge generation does not match its status".into(),
+                    );
+                }
+                restore_send(
+                    socket,
+                    serde_json::json!({
+                        "kind":"project_view_ready", "generation":generation,
+                        "nonce":nonce, "view_id":view_id,
+                    }),
+                )
+                .await?;
+                acknowledged = true;
+            }
+        }
+    }
+}
+
 async fn restore_send(socket: &mut RestoreSocket, value: serde_json::Value) -> Result<(), String> {
     socket
         .send(tokio_tungstenite::tungstenite::Message::Text(
@@ -2001,34 +2120,18 @@ async fn connect_saved_restore_project(
         .await
         .map_err(|error| format!("connect restored project: {error}"))?;
     restore_send(&mut socket, serde_json::json!({"kind":"frontend_ready"})).await?;
-    loop {
-        // test-hygiene: allow-wall-clock-deadline the original startup discovery deadline also bounds the browser's saved-workspace synchronization before its one readiness ACK
-        if Instant::now() >= deadline {
-            return Err("saved project workspace never synchronized at startup".into());
-        }
-        let Some(event) = restore_event(&mut socket).await? else {
-            continue;
-        };
-        if event["kind"] != "workspace_state" {
-            continue;
-        }
-        let tab = &event["workspace"]["tabs"][0];
-        let tab_root = tab["project_root"]
-            .as_str()
-            .and_then(|path| std::fs::canonicalize(Path::new(path)).ok());
-        if tab["project_key"].as_str() != Some(key.as_str())
-            || tab_root.as_deref() != Some(canonical_workspace.as_path())
-        {
-            return Err("restored project connection served another saved workspace".into());
-        }
-        // The browser sends this once after applying workspace_state.
-        restore_send(
-            &mut socket,
-            serde_json::json!({"kind":"startup_auto_resume_ready"}),
-        )
-        .await?;
-        break;
-    }
+    synchronize_public_project_view(
+        &mut socket,
+        &key,
+        &canonical_workspace,
+        tokio::time::Instant::from_std(deadline),
+    )
+    .await?;
+    restore_send(
+        &mut socket,
+        serde_json::json!({"kind":"startup_auto_resume_ready"}),
+    )
+    .await?;
     Ok(socket)
 }
 

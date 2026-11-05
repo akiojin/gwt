@@ -2085,44 +2085,57 @@ fn sample_runtime_with_events(
     };
     runtime.rebuild_window_lookup();
     runtime.seed_window_pty_statuses();
-    // This long-standing UI fixture represents Projects already open to a user.
-    // Cold-start policy tests explicitly remove this accepted fixture receipt.
-    for context in runtime.project_contexts() {
-        let receipt = gwt::project_execution_policy::ActualViewReceipt {
-            receipt_id: uuid::Uuid::new_v4().to_string(),
-            accepted_at: chrono::Utc::now(),
-            admitted_policy_revision: gwt_core::project_execution_policy::load(
-                &context.project_root,
-            )
-            .map_or(0, |policy| policy.revision),
-        };
-        runtime
-            .project_state_mut(&context)
-            .unwrap()
-            .project_views
-            .seed_fixture_view(receipt.clone());
-        gwt::project_execution_policy::write_observation(
-            &context.project_root,
-            &gwt::project_execution_policy::RuntimeObservation {
-                schema_version: 1,
-                project_key: context.project_key.to_string(),
-                project_root: context.project_root.clone(),
-                generation: context.generation,
-                host_pid: std::process::id(),
-                host_started_at: gwt::process::host_process_start_time(std::process::id()).unwrap(),
-                view_set_revision: 0,
-                views: std::collections::BTreeMap::from([(
-                    "fixture-visible-view".into(),
-                    receipt.clone(),
-                )]),
-                last_open_receipt: Some(receipt),
-                close_intents: Default::default(),
-                observed_at: chrono::Utc::now(),
-            },
-        )
-        .expect("accepted visible Project fixture receipt");
-    }
+    runtime.seed_fixture_project_views();
     (runtime, _events)
+}
+
+impl AppRuntime {
+    /// These UI fixtures represent Projects already open to a user. Cold-start
+    /// policy tests explicitly remove this accepted fixture receipt.
+    pub(crate) fn seed_fixture_project_views(&mut self) {
+        // Legacy layout aliases share one canonical state per ProjectKey.
+        let contexts: Vec<_> = self
+            .project_states
+            .values()
+            .map(|state| state.context.clone())
+            .collect();
+        for context in contexts {
+            assert!(self.project_context_is_current(&context));
+            let receipt = gwt::project_execution_policy::ActualViewReceipt {
+                receipt_id: uuid::Uuid::new_v4().to_string(),
+                accepted_at: chrono::Utc::now(),
+                admitted_policy_revision: gwt_core::project_execution_policy::load(
+                    &context.project_root,
+                )
+                .map_or(0, |policy| policy.revision),
+            };
+            self.project_state_mut(&context)
+                .expect("current canonical Project fixture state")
+                .project_views
+                .seed_fixture_view(receipt.clone());
+            gwt::project_execution_policy::write_observation(
+                &context.project_root,
+                &gwt::project_execution_policy::RuntimeObservation {
+                    schema_version: 1,
+                    project_key: context.project_key.to_string(),
+                    project_root: context.project_root.clone(),
+                    generation: context.generation,
+                    host_pid: std::process::id(),
+                    host_started_at: gwt::process::host_process_start_time(std::process::id())
+                        .unwrap(),
+                    view_set_revision: 0,
+                    views: std::collections::BTreeMap::from([(
+                        "fixture-visible-view".into(),
+                        receipt.clone(),
+                    )]),
+                    last_open_receipt: Some(receipt),
+                    close_intents: Default::default(),
+                    observed_at: chrono::Utc::now(),
+                },
+            )
+            .expect("accepted visible Project fixture receipt");
+        }
+    }
 }
 
 /// Seed the window-keyed maps that an ordinary close used to leave behind.
@@ -3767,6 +3780,7 @@ fn issue_monitor_final_spawn_rejects_a_saturated_cap_without_delivery() {
         "tab-1".to_string(),
         runtime.project_tab_incarnations["tab-1"].clone(),
     )]));
+    runtime.seed_fixture_project_views();
     runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
     runtime.launch_wizard_cache = LaunchWizardMemoryCache::load(&runtime.sessions_dir);
     // Both layout aliases share the one current project owner context.

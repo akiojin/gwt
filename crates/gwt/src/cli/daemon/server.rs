@@ -6999,7 +6999,7 @@ impl IssueMonitorEffectPermit {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn capture(&self) -> IssueMonitorEffectPermitToken {
         IssueMonitorEffectPermitToken {
             generation_open: Arc::clone(&self.current_generation),
@@ -19293,6 +19293,8 @@ exit 0
             RuntimeTarget::Host,
         )
         .expect("scope");
+        crate::project_runtime::test_support::seed_actual_project_view(&scope.project_root)
+            .expect("the controller has opened this Project");
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
         let mut seeded = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
@@ -19485,6 +19487,8 @@ exit 0
             RuntimeTarget::Host,
         )
         .expect("scope");
+        crate::project_runtime::test_support::seed_actual_project_view(&scope.project_root)
+            .expect("the controller has opened this Project");
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
         let mut seeded = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
@@ -22454,6 +22458,8 @@ exit 1
         let home = temp.path().join("home");
         fs::create_dir_all(&home).expect("create home");
         let _home = ScopedGwtHome::set(&home);
+        let _process_home = ScopedEnvVar::set("HOME", &home);
+        let _process_profile = ScopedEnvVar::set("USERPROFILE", &home);
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         init_git_repo(&repo);
@@ -22466,6 +22472,8 @@ exit 1
             RuntimeTarget::Host,
         )
         .expect("scope");
+        crate::project_runtime::test_support::seed_actual_project_view(&scope.project_root)
+            .expect("the controller has opened this Project");
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
         let grant = crate::PendingIssueMonitorEffect::prepared(
             "claim:42:abort",
