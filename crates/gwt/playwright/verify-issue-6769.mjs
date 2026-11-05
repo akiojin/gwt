@@ -169,6 +169,7 @@ try {
     branch: (await finish(start("git", ["branch", "--show-current"], process.env))).trim(),
     sha: (await finish(start("git", ["rev-parse", "HEAD"], process.env))).trim() }, null, 2));
   const testEnv = { ...process.env, NODE_PATH: deps, GWT_PLAYWRIGHT_BASE_URL: url,
+    GWT_PLAYWRIGHT_UNREACHABLE_UPDATE_API: "1",
     GWT_PLAYWRIGHT_CHECKOUT_ROOT: root, GWT_PLAYWRIGHT_CHECK_HOME: home, GWT_PLAYWRIGHT_PROJECT_ROOT: root };
   const args = [cli, "test", "--config", join(root, "crates/gwt/playwright/playwright.config.ts"), "manual-update-check-live.spec.ts", "update-drain-cta-live.spec.ts", "update-modal.spec.ts",
     "--output", join(evidence, "playwright"), "--trace=on", "--workers=1", "--retries=0", ...process.argv.slice(2)];

@@ -2117,17 +2117,22 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
         .parent()
         .ok_or_else(|| io::Error::other("invalid path"))?;
     let tmp = parent.join(format!(
-        ".{}.tmp",
+        ".{}.{}.tmp",
         path.file_name()
             .and_then(|s| s.to_str())
-            .unwrap_or("update")
+            .unwrap_or("update"),
+        uuid::Uuid::new_v4()
     ));
     gwt_config::home::assert_test_path(&tmp);
     let bytes = serde_json::to_vec(value).map_err(|e| io::Error::other(e.to_string()))?;
-    fs::write(&tmp, bytes)?;
-    let _ = fs::remove_file(path); // Remove existing file first (needed on Windows)
-    fs::rename(&tmp, path)?;
-    Ok(())
+    let result = fs::write(&tmp, bytes).and_then(|()| {
+        let _ = fs::remove_file(path); // Remove existing file first (needed on Windows)
+        fs::rename(&tmp, path)
+    });
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
 }
 
 fn parse_tag_version(tag: &str) -> Option<Version> {
@@ -4857,6 +4862,45 @@ mod tests {
         let _ = fs::set_permissions(&unreadable, restore_perms);
 
         assert_eq!(found.unwrap(), Some(expected));
+    }
+
+    #[test]
+    fn cache_write_keeps_another_writers_temporary_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("update.json");
+        let other_writer = temp.path().join(".update.json.tmp");
+        fs::write(&other_writer, b"another writer's payload").unwrap();
+        fs::write(&path, b"old cache").unwrap();
+        let value = serde_json::json!({ "latest_version": "99.0.0" });
+
+        write_json_atomic(&path, &value).unwrap();
+
+        assert_eq!(
+            fs::read(&other_writer).unwrap(),
+            b"another writer's payload"
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&fs::read(path).unwrap()).unwrap(),
+            value
+        );
+    }
+
+    #[test]
+    fn failed_cache_write_removes_its_temporary_file_and_preserves_the_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("update.json");
+        fs::create_dir(&path).unwrap();
+        let probe = temp.path().join("rename-probe");
+        fs::write(&probe, b"probe").unwrap();
+        let expected = fs::rename(&probe, &path).unwrap_err();
+        fs::remove_file(probe).unwrap();
+
+        let error =
+            write_json_atomic(&path, &serde_json::json!({ "version": "99.0.0" })).unwrap_err();
+
+        assert_eq!(error.raw_os_error(), expected.raw_os_error());
+        assert!(path.is_dir());
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
     }
 
     #[test]

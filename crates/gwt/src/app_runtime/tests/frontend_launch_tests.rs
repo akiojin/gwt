@@ -2049,8 +2049,27 @@ fn app_runtime_frontend_ready_replies_launch_wizard_tombstone_when_closed() {
 
 #[test]
 fn manual_update_check_coalesces_and_publishes_without_staging() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
+    let _api = ScopedEnvVar::set("GWT_UPDATE_API_BASE_URL", "http://127.0.0.1:1");
+    let cache = gwt_core::paths::gwt_update_cache_path();
+    fs::create_dir_all(cache.parent().unwrap()).unwrap();
+    fs::write(
+        &cache,
+        serde_json::to_vec(&serde_json::json!({
+            "checked_at": chrono::Utc::now(), "latest_version": "999.0.0",
+            "release_url": "https://example.invalid/cached-release"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        matches!(gwt_core::update::UpdateManager::new().check(false),
+        gwt_core::update::UpdateState::Available { latest, .. } if latest == "999.0.0")
+    );
     let (mut runtime, queued) = sample_runtime_with_events(temp.path(), vec![], None);
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
@@ -2095,6 +2114,16 @@ fn manual_update_check_coalesces_and_publishes_without_staging() {
         queued.lock().unwrap().is_empty(),
         "manual discovery must wait for confirmation"
     );
+    let mut without_asset = state.clone();
+    if let gwt_core::update::UpdateState::Available { asset_url, .. } = &mut without_asset {
+        *asset_url = None;
+    }
+    runtime.complete_manual_update_check(without_asset, None);
+    assert!(
+        runtime.pending_update.is_none(),
+        "an idle offer must not return on reconnect"
+    );
+    runtime.pending_update = Some(state.clone());
     runtime.update_download_in_flight = Some("client-1".into());
     let mut newer = state.clone();
     if let gwt_core::update::UpdateState::Available { latest, .. } = &mut newer {
@@ -2109,6 +2138,220 @@ fn manual_update_check_coalesces_and_publishes_without_staging() {
             ..
         }
     )));
+    let task = tasks.lock().unwrap().pop().expect("queued manual check");
+    task();
+    assert!(
+        queued.lock().unwrap().iter().any(|event| matches!(
+            recorded_project_payload(event),
+            UserEvent::ManualUpdateChecked {
+                result: gwt_core::update::UpdateState::Failed { .. },
+                ..
+            }
+        )),
+        "manual worker must query the network instead of returning the fresh cache"
+    );
+    assert!(fs::read_to_string(gwt_core::update::update_log_path())
+        .unwrap()
+        .lines()
+        .any(|line| {
+            let event: serde_json::Value = serde_json::from_str(line).unwrap();
+            event["stage"] == "check_started" && event["source"] == "manual"
+        }));
+}
+
+#[test]
+fn manual_update_check_replaces_staged_release_and_releases_its_drain() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            update_drain: Some(gwt::IssueMonitorUpdateDrain {
+                version: "99.0.0".into(),
+                since: chrono::Utc::now().to_rfc3339(),
+                reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+                automatic: None,
+                blocking: Vec::new(),
+            }),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let old_dir = gwt_core::paths::gwt_updates_dir().join("v99.0.0");
+    fs::create_dir_all(&old_dir).unwrap();
+    let payload = old_dir.join("gwt");
+    fs::write(&payload, "old payload").unwrap();
+    let manifest = gwt_core::update::PendingUpdateManifest {
+        version: "99.0.0".into(),
+        asset_url: "https://example.invalid/gwt.tar.gz".into(),
+        payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
+        downloaded_at: chrono::Utc::now().to_rfc3339(),
+        origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
+        auto_apply_deferred: false,
+    };
+    gwt_core::update::persist_pending_update_manifest(&manifest).unwrap();
+    let replacement = gwt_core::update::UpdateState::Available {
+        current: "9.150.0".into(),
+        latest: "100.0.0".into(),
+        release_url: "https://example.invalid/release".into(),
+        asset_url: Some(manifest.asset_url.clone()),
+        checked_at: chrono::Utc::now(),
+    };
+    let mut old = replacement.clone();
+    if let gwt_core::update::UpdateState::Available { latest, .. } = &mut old {
+        *latest = manifest.version.clone();
+    }
+    runtime.pending_update = Some(old.clone());
+    let original_prefs = fs::read(&prefs_path).unwrap();
+    let mut without_asset = replacement.clone();
+    if let gwt_core::update::UpdateState::Available { asset_url, .. } = &mut without_asset {
+        *asset_url = None;
+    }
+    let unavailable = runtime.complete_manual_update_check(without_asset.clone(), None);
+    assert_eq!(runtime.pending_update, Some(old.clone()));
+    assert_eq!(
+        gwt_core::update::load_pending_update_manifest(),
+        Some(manifest.clone())
+    );
+    assert_eq!(fs::read(&prefs_path).unwrap(), original_prefs);
+    assert!(unavailable.iter().any(|event| matches!(
+        &event.event, BackendEvent::UpdateCheckResult { offer_update: true, result: Some(state), .. }
+            if state == &without_asset
+    )));
+
+    let timeout = runtime.issue_monitor_fallback_commit_timeout;
+    runtime.issue_monitor_fallback_commit_timeout = Duration::ZERO;
+    let failed = runtime.complete_manual_update_check(replacement.clone(), None);
+    assert_eq!(
+        gwt_core::update::load_pending_update_manifest(),
+        Some(manifest)
+    );
+    assert_eq!(runtime.pending_update, Some(old));
+    assert_eq!(fs::read(&prefs_path).unwrap(), original_prefs);
+    assert!(!runtime
+        .project_state(&runtime.test_context())
+        .unwrap()
+        .update_auto_apply
+        .is_cancelled("99.0.0"));
+    assert!(!failed
+        .iter()
+        .any(|event| matches!(&event.event, BackendEvent::UpdateAutoApply { .. })));
+    assert!(failed.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::UpdateCheckResult {
+            offer_update: false,
+            result: Some(gwt_core::update::UpdateState::Failed { .. }),
+            ..
+        }
+    )));
+    runtime.issue_monitor_fallback_commit_timeout = timeout;
+    let events = runtime.complete_manual_update_check(replacement.clone(), None);
+    assert_eq!(runtime.pending_update, Some(replacement));
+    assert!(gwt_core::update::load_pending_update_manifest().is_none());
+    assert!(!old_dir.exists());
+    assert!(gwt::load_issue_monitor_prefs(&prefs_path)
+        .unwrap()
+        .update_drain
+        .is_none());
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::UpdateAutoApply { version, phase: gwt::protocol::UpdateAutoApplyPhase::Cancelled, .. }
+            if version == "99.0.0"
+    )));
+    assert!(runtime.update_download_in_flight.is_none());
+}
+
+#[test]
+fn manual_update_check_preserves_pending_release_when_cleanup_fails() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let mut runtime = sample_runtime(temp.path(), vec![], None);
+    let payload = temp.path().join("gwt");
+    fs::write(&payload, "old payload").unwrap();
+    fs::create_dir_all(gwt_core::paths::gwt_updates_dir()).unwrap();
+    fs::write(
+        gwt_core::paths::gwt_updates_dir().join("v99.0.0"),
+        "not a directory",
+    )
+    .unwrap();
+    let manifest = gwt_core::update::PendingUpdateManifest {
+        version: "99.0.0".into(),
+        asset_url: "https://example.invalid/gwt.tar.gz".into(),
+        payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
+        downloaded_at: chrono::Utc::now().to_rfc3339(),
+        origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
+        auto_apply_deferred: false,
+    };
+    gwt_core::update::persist_pending_update_manifest(&manifest).unwrap();
+    let old = gwt_core::update::UpdateState::Available {
+        current: "9.150.0".into(),
+        latest: "99.0.0".into(),
+        release_url: "https://example.invalid/release".into(),
+        asset_url: Some(manifest.asset_url.clone()),
+        checked_at: chrono::Utc::now(),
+    };
+    runtime.pending_update = Some(old.clone());
+    let mut replacement = old.clone();
+    if let gwt_core::update::UpdateState::Available { latest, .. } = &mut replacement {
+        *latest = "100.0.0".into();
+    }
+    runtime.update_check_in_flight = true;
+    let events = runtime.complete_manual_update_check(replacement, None);
+    assert_eq!(runtime.pending_update, Some(old));
+    assert!(!runtime.update_check_in_flight);
+    assert_eq!(
+        gwt_core::update::load_pending_update_manifest(),
+        Some(manifest)
+    );
+    assert!(events.iter().any(|event| matches!(
+        &event.event, BackendEvent::UpdateAutoApply { version,
+            phase: gwt::protocol::UpdateAutoApplyPhase::Cancelled, .. }
+            if version == "99.0.0"
+    )));
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::UpdateCheckResult { checking: false, offer_update: false,
+            result: Some(gwt_core::update::UpdateState::Failed { message, .. }), .. }
+            if message.contains("Failed to remove superseded update")
+    )));
+}
+
+#[test]
+fn manual_update_check_reconnect_replays_in_flight_state_in_hub_and_project() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        temp.path().join("repo"),
+        ProjectKind::Git,
+        &[],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    for checking in [true, false] {
+        runtime.update_check_in_flight = checking;
+        let context = runtime.test_context();
+        for events in [
+            runtime.frontend_sync_events("client-1"),
+            runtime.frontend_project_sync_events("client-1", &context),
+        ] {
+            let snapshot = events
+                .iter()
+                .find(|event| matches!(event.event, BackendEvent::UpdateCheckResult { .. }))
+                .expect("every reconnect hydrates the check latch");
+            assert!(
+                matches!(&snapshot.target, DispatchTarget::Client(client) if client == "client-1")
+            );
+            assert!(matches!(&snapshot.event, BackendEvent::UpdateCheckResult {
+                checking: actual, offer_update: false, result: None, previous_failure: None
+            } if *actual == checking));
+        }
+    }
 }
 
 #[test]

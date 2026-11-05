@@ -88,11 +88,11 @@ test("manual update check offers mismatch retry through the existing modal and m
   const fixture = createManualCheckFixture();
   fixture.controller.handleUpdateCheckResult({
     checking: false,
-    result: { state: "available", current: "9.149.0", latest: "9.150.0", release_url: "https://github.com/akiojin/gwt/releases/tag/v9.150.0", asset_url: "https://github.com/akiojin/gwt/releases/download/v9.150.0/gwt.dmg" },
+    result: { state: "available", current: "9.149.5", latest: "9.150.0", release_url: "https://github.com/akiojin/gwt/releases/tag/v9.150.0", asset_url: "https://github.com/akiojin/gwt/releases/download/v9.150.0/gwt.dmg" },
     previous_failure: { outcome: "failure", to_version: "9.150.0", observed_version: "9.149.0" },
   });
   assert.match(fixture.document.getElementById("update-check-status").textContent, /Update available: v9.150.0/);
-  assert.match(fixture.document.getElementById("update-check-failure").textContent, /expected v9.150.0.*running v9.149.0/);
+  assert.equal(fixture.document.getElementById("update-check-failure").textContent, "Previous update failed: expected v9.150.0, observed v9.149.0 after restart.");
   const detail = fixture.document.getElementById("update-check-detail");
   assert.equal(detail.hidden, false);
   assert.equal(detail.contains(fixture.document.getElementById("update-check-failure")), true);
@@ -134,6 +134,82 @@ test("manual discovery during a download keeps the active update identity until 
   assert.match(fixture.document.getElementById("update-check-status").textContent, /Update available: v9.151.0.*Check again after the current download finishes/);
   assert.equal(fixture.document.getElementById("update-check-retry").hidden, true);
   assert.deepEqual(fixture.sent, [{ kind: "apply_update_start" }]);
+});
+
+test("manual sync restores the checking latch without claiming an unobserved result", () => {
+  const fixture = createManualCheckFixture();
+  const button = fixture.document.getElementById("update-check-button");
+  const label = fixture.document.getElementById("update-check-status");
+  button.click();
+  fixture.controller.handleUpdateCheckResult({ checking: true, offer_update: false, result: null, previous_failure: null });
+  assert.equal(button.disabled, true);
+  assert.equal(label.textContent, "Checking…");
+  fixture.controller.handleUpdateCheckResult({ checking: false, offer_update: false, result: null, previous_failure: null });
+  assert.equal(button.disabled, false);
+  assert.equal(label.textContent, "");
+  assert.equal(label.dataset.state, "idle");
+  button.click();
+  assert.equal(fixture.sent.length, 2);
+});
+
+test("manual unavailable outcomes retract idle offers and preserve the active download", () => {
+  const fixture = createManualCheckFixture();
+  const controller = fixture.controller;
+  const available = { state: "available", current: "9.149.0", latest: "9.150.0", asset_url: "https://github.com/akiojin/gwt/releases/download/v9.150.0/gwt.dmg" };
+  controller.handleUpdateState(available);
+  controller.handleUpdateCheckResult({ checking: false, offer_update: true, result: { ...available, asset_url: null } });
+  assert.equal(Boolean(fixture.document.getElementById("update-cta")), false);
+  assert.match(fixture.document.getElementById("update-check-status").textContent, /v9.150.0.*[Nn]o applicable asset/);
+  assert.equal(fixture.versionUpdates.at(-1).latest, null);
+  controller.handleUpdateState(available);
+  controller.handleUpdateCheckResult({ checking: false, offer_update: true, result: { state: "up_to_date" } });
+  assert.equal(Boolean(fixture.document.getElementById("update-cta")), false);
+  assert.equal(fixture.versionUpdates.at(-1).latest, null);
+  controller.handleUpdateState(available);
+  fixture.document.getElementById("update-cta").click();
+  const modal = fixture.document.getElementById("update-modal");
+  controller.handleUpdateCheckResult({ checking: false, offer_update: true, result: { ...available, asset_url: null } });
+  controller.handleUpdateCheckResult({ checking: false, offer_update: false, result: { state: "up_to_date" } });
+  assert.equal(fixture.document.getElementById("update-modal") === modal, true);
+  assert.equal(modal.dataset.state, "downloading");
+  assert.equal(modal.dataset.version, "9.150.0");
+  assert.equal(fixture.document.getElementById("update-cta").dataset.status, "applying");
+  assert.deepEqual(fixture.sent, [{ kind: "apply_update_start" }]);
+});
+
+test("manual rediscovery preserves the active phase and scheduled Retry never cancels", () => {
+  const fixture = createManualCheckFixture();
+  const controller = fixture.controller;
+  const result = { state: "available", current: "9.149.0", latest: "9.150.0", asset_url: "https://github.com/akiojin/gwt/releases/download/v9.150.0/gwt.dmg" };
+  const manual = { checking: false, result, previous_failure: { outcome: "failure", to_version: "9.150.0", observed_version: "9.149.0" } };
+  controller.handleUpdateCheckResult(manual);
+  const retry = fixture.document.getElementById("update-check-retry");
+  assert.equal(retry.hidden, false);
+  controller.handleUpdateApplyPendingPersisted({ version: "9.150.0" });
+  const stagedCta = fixture.document.getElementById("update-cta");
+  controller.handleUpdateCheckResult({ ...manual, result: { ...result, latest: "9.151.0", asset_url: null } });
+  assert.equal(fixture.document.getElementById("update-cta") === stagedCta, true);
+  assert.equal(stagedCta.dataset.status, "ready");
+  assert.equal(stagedCta.textContent, "Update v9.150.0 ready — Restart now");
+  assert.deepEqual(fixture.sent, [], "assetless discovery must preserve the staged offer without a new download");
+  controller.handleUpdateCheckResult(manual);
+  assert.equal(fixture.document.getElementById("update-cta").dataset.status, "ready");
+  controller.handleUpdateAutoApply({ version: "9.150.0", phase: "scheduled", grace_secs: 60 });
+  assert.equal(retry.hidden, true);
+  controller.handleUpdateCheckResult(manual);
+  const cta = fixture.document.getElementById("update-cta");
+  assert.equal(cta.dataset.status, "scheduled");
+  assert.equal(retry.hidden, true);
+  retry.click();
+  assert.deepEqual(fixture.sent, [], "Retry must never invoke scheduled cancellation");
+  cta.click();
+  assert.deepEqual(fixture.sent, [{ kind: "cancel_update_auto_apply" }]);
+  controller.handleUpdateAutoApply({ version: "9.150.0", phase: "postponed" });
+  controller.handleUpdateCheckResult(manual);
+  assert.equal(cta.dataset.status, "draining");
+  controller.handleUpdateAutoApply({ version: "9.150.0", phase: "applying" });
+  controller.handleUpdateCheckResult(manual);
+  assert.equal(cta.dataset.status, "applying");
 });
 
 test("update_state renders one reusable update CTA", () => {

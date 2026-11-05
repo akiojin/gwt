@@ -722,30 +722,83 @@ impl AppRuntime {
         })]
     }
 
+    fn supersede_manual_update_stage(
+        &mut self,
+        latest: &str,
+    ) -> Result<Vec<OutboundEvent>, (String, Vec<OutboundEvent>)> {
+        let released = match gwt_core::update::load_pending_update_manifest().filter(|manifest| {
+            gwt_core::update::pending_version_is_newer(latest, &manifest.version)
+        }) {
+            Some(manifest) => self.try_release_update_auto_apply_events(
+                &manifest.version,
+                super::UpdateAutoApplyRelease::Superseded,
+            )?,
+            None => Vec::new(),
+        };
+        // Clear the durable hold before deleting the only usable payload.
+        // Publish successful hold release even if payload cleanup then fails.
+        match crate::update_front_door::discard_superseded_pending_update(latest) {
+            Ok(_) => Ok(released),
+            Err(error) => Err((error, released)),
+        }
+    }
+
     pub(crate) fn complete_manual_update_check(
         &mut self,
-        result: gwt_core::update::UpdateState,
+        mut result: gwt_core::update::UpdateState,
         previous_failure: Option<gwt_core::update::UpdateApplyResult>,
     ) -> Vec<OutboundEvent> {
         self.update_check_in_flight = false;
-        let offer_update = self.update_download_in_flight.is_none();
-        // Keep an active download's identity intact. Checking never starts or
-        // replaces a payload; explicit Update still uses shared stage admission.
+        let mut offer_update = self.update_download_in_flight.is_none();
+        let mut events = Vec::new();
+        // Keep an active download's identity intact. Discovery can discard an
+        // obsolete stage, but explicit Update still owns download admission.
         if offer_update {
             match &result {
-                gwt_core::update::UpdateState::Available { .. } => {
-                    self.pending_update = Some(result.clone());
+                gwt_core::update::UpdateState::Available {
+                    latest,
+                    asset_url: Some(_),
+                    ..
+                } => match self.supersede_manual_update_stage(latest) {
+                    Ok(released) => {
+                        events.extend(released);
+                        self.pending_update = Some(result.clone());
+                    }
+                    Err((error, refused)) => {
+                        events.extend(refused);
+                        events.push(crate::update_download_failure(
+                            "Replace staged update",
+                            error.clone(),
+                            gwt_core::update::update_log_path()
+                                .to_string_lossy()
+                                .into_owned(),
+                        ));
+                        offer_update = false;
+                        result = gwt_core::update::UpdateState::Failed {
+                            message: error,
+                            failed_at: chrono::Utc::now(),
+                            retry_at: None,
+                        };
+                    }
+                },
+                gwt_core::update::UpdateState::Available {
+                    asset_url: None, ..
+                } => {
+                    if gwt_core::update::load_pending_update_manifest().is_none() {
+                        self.pending_update = None;
+                    }
                 }
                 gwt_core::update::UpdateState::UpToDate { .. } => self.pending_update = None,
                 gwt_core::update::UpdateState::Failed { .. } => {}
             }
         }
-        vec![OutboundEvent::broadcast(BackendEvent::UpdateCheckResult {
+        events.push(OutboundEvent::broadcast(BackendEvent::UpdateCheckResult {
             checking: false,
             offer_update,
             result: Some(result),
             previous_failure,
-        })]
+        }));
+        events
     }
 
     pub(super) fn apply_pending_update_events(&self, client_id: &str) -> Vec<OutboundEvent> {
@@ -916,7 +969,16 @@ impl AppRuntime {
                 if let Some((prefs, drain)) = self.project_auto_update_drain(&context) {
                     if drain.automatic.unwrap_or(prefs.autonomous_mode) {
                         events.extend(
-                            self.release_update_auto_apply_for_project(&context, &drain.version),
+                            self.release_update_auto_apply_for_project(&context, &drain.version)
+                                .unwrap_or_else(|error| {
+                                    self.issue_monitor_control_error_events(
+                                        Some(&context.project_root),
+                                        None,
+                                        error,
+                                        "update-drain",
+                                        None,
+                                    )
+                                }),
                         );
                     }
                 }
