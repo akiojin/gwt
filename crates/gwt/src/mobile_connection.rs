@@ -13,10 +13,11 @@ use std::{
     path::Path,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Condvar, Mutex, RwLock,
+        Arc, Condvar, Mutex, RwLock, Weak,
     },
 };
 
+use crate::mobile_input_permit::NativeInputPermit;
 use gwt_core::repo_hash::ProjectKey;
 use ring::signature::{UnparsedPublicKey, ECDSA_P256_SHA256_FIXED};
 use serde::{Deserialize, Serialize};
@@ -67,6 +68,10 @@ pub enum AuthorizationError {
     Replay,
     #[error("mobile authorization synchronization is unavailable")]
     Unavailable,
+    #[error("mobile input was abandoned with an unknown physical outcome; do not retry")]
+    AbandonedUnknown,
+    #[error("native owner does not support revocable mobile input; reconnect after the project owner restarts with the current gwt")]
+    UnsupportedNativeOwner,
 }
 
 /// Authorization rejection does not write; a storage error disables access.
@@ -171,6 +176,42 @@ pub struct MobileConnection {
     current_turn: Mutex<u64>,
     turns_changed: Condvar,
     order_failed: AtomicBool,
+    native_revocation: Arc<NativeRevocation>,
+}
+
+#[derive(Default)]
+struct NativeRevocation {
+    revoked: AtomicBool,
+    permits: Mutex<Vec<Weak<NativeInputPermit>>>,
+}
+
+impl NativeRevocation {
+    fn register(&self, permit: &Arc<NativeInputPermit>) -> Result<(), AuthorizationError> {
+        let mut permits = self
+            .permits
+            .lock()
+            .map_err(|_| AuthorizationError::Unavailable)?;
+        if self.revoked.load(Ordering::Acquire) {
+            permit.revoke();
+            return Err(AuthorizationError::Revoked);
+        }
+        permits.retain(|permit| permit.strong_count() != 0);
+        permits.push(Arc::downgrade(permit));
+        Ok(())
+    }
+
+    fn revoke(&self) {
+        self.revoked.store(true, Ordering::Release);
+        // Only short registration code takes this mutex, never a native worker
+        // or an RPC. Poisoning must also revoke every retained permit.
+        let mut permits = self
+            .permits
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        for permit in permits.drain(..).filter_map(|permit| permit.upgrade()) {
+            permit.revoke();
+        }
+    }
 }
 
 impl MobileConnection {
@@ -181,6 +222,29 @@ impl MobileConnection {
         authorization: Arc<RwLock<MobileAuthorization>>,
         session: AuthenticatedSession,
     ) -> Self {
+        let native_revocation = Arc::new(NativeRevocation::default());
+        if let Ok(authority) = authorization.read() {
+            if !authority.enabled
+                || authority.host_epoch != session.host_epoch
+                || authority
+                    .devices
+                    .get(&session.device_id)
+                    .is_none_or(|device| device.revoked)
+            {
+                native_revocation.revoke();
+            }
+            let mut connections = authority
+                .native_connections
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            connections.retain(|(_, connection)| connection.strong_count() != 0);
+            connections.push((
+                session.device_id.clone(),
+                Arc::downgrade(&native_revocation),
+            ));
+        } else {
+            native_revocation.revoke();
+        }
         Self {
             authorization,
             session: Mutex::new(session),
@@ -188,6 +252,7 @@ impl MobileConnection {
             current_turn: Mutex::new(0),
             turns_changed: Condvar::new(),
             order_failed: AtomicBool::new(false),
+            native_revocation,
         }
     }
 
@@ -196,6 +261,8 @@ impl MobileConnection {
     /// Neither callback may reenter this connection or mutate its authority;
     /// never call dispatch while holding that authority's write lock.
     /// The adapter must also recheck the live client and current Project binding.
+    /// Native owner RPC must instead use `MobileInputRequest::authorize_native_with`
+    /// and the shared permit, never retain this synchronous fence while waiting.
     pub fn dispatch<T>(
         &self,
         project: &ProjectKey,
@@ -366,6 +433,76 @@ impl MobileInputRequest {
         &self.data
     }
 
+    /// Create an unarmed native permit. Registration grants no input authority,
+    /// but lets revoke interrupt even a preparation whose owner never replies.
+    #[doc(hidden)]
+    pub fn native_permit(&self) -> Result<Arc<NativeInputPermit>, AuthorizationError> {
+        let permit = NativeInputPermit::new().map_err(|_| AuthorizationError::Unavailable)?;
+        self.connection.native_revocation.register(&permit)?;
+        Ok(permit)
+    }
+
+    /// An unknown result ends this connection's input stream. Recovery needs a
+    /// fresh authenticated connection, never a replay of the abandoned request.
+    #[doc(hidden)]
+    pub fn abandon_native(&self) {
+        self.connection.order_failed.store(true, Ordering::Release);
+        self.connection.native_revocation.revoke();
+        self.connection.turns_changed.notify_all();
+    }
+
+    /// Consume the sequence and arm one immutable native input under the short
+    /// Host/session fence. The physical owner accepts it using its shared CAS;
+    /// no network wait or physical write belongs in this authorization callback.
+    #[doc(hidden)]
+    pub fn authorize_native(
+        &self,
+        permit: &NativeInputPermit,
+        current_project: impl FnOnce() -> Option<ProjectKey>,
+        now: impl FnOnce() -> u64,
+    ) -> Result<(), AuthorizationError> {
+        self.authorize_native_with(current_project, now, |issued, expires, time| {
+            permit
+                .arm(issued, expires, time)
+                .map_err(|_| AuthorizationError::Unavailable)
+        })
+    }
+
+    /// A trusted adapter can add its short client-binding fence around arming.
+    /// Lock order remains session, Host authority, client binding, atomic arm.
+    #[doc(hidden)]
+    pub fn authorize_native_with<T>(
+        &self,
+        current_project: impl FnOnce() -> Option<ProjectKey>,
+        now: impl FnOnce() -> u64,
+        arm: impl FnOnce(u64, u64, u64) -> Result<T, AuthorizationError>,
+    ) -> Result<T, AuthorizationError> {
+        let mut session = self
+            .connection
+            .session
+            .lock()
+            .map_err(|_| AuthorizationError::Unavailable)?;
+        let authority = self
+            .connection
+            .authorization
+            .read()
+            .map_err(|_| AuthorizationError::Unavailable)?;
+        let time = now();
+        let issued_at = session.issued_at;
+        let expires_at = session.expires_at.min(
+            authority
+                .devices
+                .get(&session.device_id)
+                .map_or(0, |device| device.expires_at),
+        );
+        authority.dispatch(&mut session, &self.project, self.sequence, time, || {
+            if current_project().as_ref() != Some(&self.project) {
+                return Err(AuthorizationError::WrongProject);
+            }
+            arm(issued_at, expires_at, time)
+        })?
+    }
+
     /// Accept an operation at final synchronous dispatch, using current time
     /// after the authorization locks. Retain those locks until the effect ends.
     /// Recheck the live client here, and the current window owner in `effect`.
@@ -395,6 +532,7 @@ pub struct MobileAuthorization {
     devices: HashMap<String, DeviceRecord>,
     pending: HashMap<String, Pairing>,
     challenges: HashMap<String, Challenge>,
+    native_connections: Mutex<Vec<(String, Weak<NativeRevocation>)>>,
 }
 
 impl Default for MobileAuthorization {
@@ -405,6 +543,7 @@ impl Default for MobileAuthorization {
             devices: HashMap::new(),
             pending: HashMap::new(),
             challenges: HashMap::new(),
+            native_connections: Mutex::default(),
         }
     }
 }
@@ -416,6 +555,7 @@ impl MobileAuthorization {
     }
 
     pub fn disable(&mut self) {
+        self.revoke_native_connections(None);
         self.enabled = false;
         self.host_epoch = Uuid::new_v4();
         self.pending.clear();
@@ -502,9 +642,26 @@ impl MobileAuthorization {
             .get_mut(device_id)
             .ok_or(AuthorizationError::UnknownDevice)?
             .revoked = true;
+        self.revoke_native_connections(Some(device_id));
         self.challenges
             .retain(|_, challenge| challenge.device_id != device_id);
         Ok(())
+    }
+
+    fn revoke_native_connections(&self, device_id: Option<&str>) {
+        let mut connections = self
+            .native_connections
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        connections.retain(|(device, connection)| {
+            let Some(connection) = connection.upgrade() else {
+                return false;
+            };
+            if device_id.is_none_or(|id| id == device) {
+                connection.revoke();
+            }
+            true
+        });
     }
 
     /// Approve on the trusted PC control plane, returning success only after save.
@@ -1003,6 +1160,40 @@ mod tests {
         let queued = || connection.dispatch(&project(), 0, || NOW, || panic!("revoked effect"));
         auth.write().unwrap().revoke(device.id()).unwrap();
         assert_eq!(queued(), Err(AuthorizationError::Revoked));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_permits_are_revoked_without_waiting_for_the_session_or_owner() {
+        let mut authority = MobileAuthorization::default();
+        authority.enable();
+        let key = key();
+        let device = paired(&mut authority, &key);
+        let session = session(&mut authority, &device, &key);
+        let authority = Arc::new(RwLock::new(authority));
+        let connection = Arc::new(MobileConnection::new(authority.clone(), session));
+        let request = MobileInputRequest::new(
+            connection.clone(),
+            "phone".into(),
+            project(),
+            0,
+            "pane".into(),
+            "input".into(),
+        );
+        let permit = request.native_permit().unwrap();
+        request
+            .authorize_native(&permit, || Some(project()), || NOW)
+            .unwrap();
+        // A native RPC may hold the connection's session on its own worker;
+        // PC revocation must depend only on the short Host writer operation.
+        let _session = connection.session.lock().unwrap();
+        authority
+            .try_write()
+            .expect("native authorization releases the Host fence")
+            .revoke(device.id())
+            .unwrap();
+        assert!(permit.is_revoked());
+        assert!(permit.arm(NOW, NOW + SESSION_TTL_SECS, NOW).is_err());
     }
 
     #[test]
