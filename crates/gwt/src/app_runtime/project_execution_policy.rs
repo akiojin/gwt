@@ -476,12 +476,8 @@ impl AppRuntime {
                 .filter(|(client, (_, receipt))| expected.get(*client) == Some(&receipt.receipt_id))
                 .map(|(client, _)| client.clone())
                 .collect::<Vec<_>>(),
-            None => state
-                .project_views
-                .views
-                .contains_key(client)
-                .then(|| vec![client.to_string()])
-                .unwrap_or_default(),
+            None if state.project_views.views.contains_key(client) => vec![client.to_string()],
+            None => Vec::new(),
         };
         for closing_client in &closing {
             state.project_views.views.remove(closing_client);

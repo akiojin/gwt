@@ -2635,19 +2635,17 @@ impl OwnerState {
             && self.agent_dispatch_jobs == 0
             && self.readiness.is_empty()
             && self.pending_agent_self_closes.is_empty()
-        {
-            if store::record_effect(
+            && store::record_effect(
                 &self.root,
                 &receipt.operation_id,
                 EffectState::Confirmed,
                 None,
             )
             .is_ok()
-            {
-                let _ = self.events.send(OwnerEvent::ProjectExecutionStatus {
-                    status: self.project_execution_status(Some(&receipt.operation_id)),
-                });
-            }
+        {
+            let _ = self.events.send(OwnerEvent::ProjectExecutionStatus {
+                status: self.project_execution_status(Some(&receipt.operation_id)),
+            });
         }
     }
 
