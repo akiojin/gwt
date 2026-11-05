@@ -672,6 +672,8 @@ fn scheduled_scan_completion_stays_silent_after_disable_or_project_close() {
 /// planner only walks far enough to fill the free claim slots, so the scan
 /// must probe exactly that far and no further.
 fn completion_probes_stop_once_the_free_claim_slots_are_filled() {
+    use gwt::issue_monitor::ClaimProbeOutcome;
+
     let candidates = (1..=50).collect::<Vec<u64>>();
     let probed = std::cell::RefCell::new(Vec::new());
 
@@ -680,7 +682,7 @@ fn completion_probes_stop_once_the_free_claim_slots_are_filled() {
         candidates.clone(),
         |issue_number| {
             probed.borrow_mut().push(issue_number);
-            Ok::<_, std::convert::Infallible>(false)
+            Ok::<_, std::convert::Infallible>(ClaimProbeOutcome::Claimable)
         },
     )
     .expect("infallible probe");
@@ -692,19 +694,23 @@ fn completion_probes_stop_once_the_free_claim_slots_are_filled() {
         "one free slot must cost exactly one probe, not one per open issue"
     );
 
-    // A completed candidate frees no slot, so the walk continues past it
-    // exactly like the claim planner does. Every answer is kept by identity.
+    // Completed and deferred candidates consume no slot. A deferred answer
+    // cannot authorize a claim, so only confirmed answers are kept by identity.
     let probed = std::cell::RefCell::new(Vec::new());
     let observed =
         super::super::claim_candidate_completion_observations(1, candidates, |issue_number| {
             probed.borrow_mut().push(issue_number);
-            Ok::<_, std::convert::Infallible>(issue_number <= 2)
+            Ok::<_, std::convert::Infallible>(match issue_number {
+                1 => ClaimProbeOutcome::Completed,
+                2 => ClaimProbeOutcome::Deferred,
+                _ => ClaimProbeOutcome::Claimable,
+            })
         })
         .expect("infallible probe");
 
     assert_eq!(
         observed,
-        std::collections::BTreeMap::from([(1, true), (2, true), (3, false)])
+        std::collections::BTreeMap::from([(1, true), (3, false)])
     );
     assert_eq!(probed.into_inner(), vec![1, 2, 3]);
 }
@@ -752,6 +758,47 @@ fn dependency_completion_fixture() -> (
         urgent_assignments: Default::default(),
     };
     (monitor, loaded)
+}
+
+#[test]
+fn issue_6746_local_completion_timeout_defers_only_its_candidate() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (mut monitor, mut loaded) = dependency_completion_fixture();
+    monitor.set_max_active_agents(1);
+    monitor.terminal_queue_push(&[44], "test", "2026-10-23T00:00:00Z");
+    loaded.issues[0].body = None;
+    loaded.issues[0].labels = vec!["gwt-spec".to_string()];
+    loaded.issues[0].readiness = gwt::IssueMonitorReadiness::ReadyWithCompletedTasks;
+    loaded.issues[1].labels.clear();
+    gwt::scan_issue_monitor_candidates(&mut monitor, &loaded.issues, "2026-10-23T00:00:00Z");
+    let probed = Arc::new(Mutex::new(Vec::new()));
+    let _hook = super::super::set_local_completion_probe_test_hook({
+        let probed = Arc::clone(&probed);
+        move |number| {
+            probed.lock().expect("probe log").push(number);
+            if number == 42 {
+                return Err(
+                    gwt::issue_monitor_worker::IssueMonitorCompletionProbeFailure::Operation(
+                        gwt::issue_monitor_worker::IssueMonitorScanFailure::new(
+                            gwt::issue_monitor_worker::IssueMonitorScanStage::ClaimCompletionReadback,
+                            "process deadline expired",
+                        ),
+                    ),
+                );
+            }
+            Ok(false)
+        }
+    });
+
+    let observed =
+        super::super::observe_local_claim_candidates(&monitor, &loaded, "example", "repo")
+            .expect("one local timeout must not discard the scan")
+            .expect("authorized live scan");
+
+    assert_eq!(observed.1, BTreeMap::from([(44, false)]));
+    assert_eq!(probed.lock().expect("probe log").as_slice(), &[42, 44]);
 }
 
 #[test]
