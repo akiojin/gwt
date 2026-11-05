@@ -41,6 +41,16 @@ test("PM terminal keeps redraw, grid and input consistent across view changes", 
           }
         }`);
     }
+    const snapshotDecode = "decodeTerminalSnapshotBoundary(decodeBase64(snapshot))";
+    expect(source.split(snapshotDecode)).toHaveLength(2);
+    source = source.replace(snapshotDecode, `(() => {
+      const fault = window.__terminalBatchFault;
+      if (fault?.snapshotFailures > 0) {
+        fault.snapshotFailures--;
+        throw new Error("one-shot replacement snapshot decode failure");
+      }
+      return ${snapshotDecode};
+    })()`);
     const needle = "const packet = state.terminal;";
     expect(source.split(needle)).toHaveLength(2);
     await route.fulfill({ response, contentType: "text/javascript", body: source.replace(needle, `${needle}
@@ -160,20 +170,26 @@ test("PM terminal keeps redraw, grid and input consistent across view changes", 
     await emit(page, "terminal_output", `\r\nRecovered ${kind}`);
     await expect.poll(() => text(page)).toContain(`Recovered ${kind}`);
   }
-  for (const stage of ["merge", "write"]) {
-    const before = await page.evaluate(stage => {
-      (window as any).__terminalBatchFault = { stage, armed: true, seen: [] };
+  for (const scenario of ["merge", "write", "replacement-snapshot"]) {
+    const stage = scenario === "replacement-snapshot" ? "write" : scenario;
+    const recoveries = scenario === "replacement-snapshot" ? 2 : 1;
+    const before = await page.evaluate(({ stage, recoveries }) => {
+      (window as any).__terminalBatchFault = { stage, armed: true, seen: [], snapshotFailures: recoveries - 1 };
       const fixture = (window as any).__pmTerminalFixture;
       const connections = fixture.connections();
       fixture.emit({ kind: "terminal_output", id: "pm-terminal", data_base64: btoa("FAILED BATCH") });
       fixture.emit({ kind: "terminal_output", id: "pm-terminal", data_base64: btoa("TORN BATCH SUFFIX") });
       return connections;
-    }, stage);
-    await expect.poll(() => page.evaluate(() => (window as any).__pmTerminalFixture.connections())).toBe(before + 1);
+    }, { stage, recoveries });
+    await expect.poll(() => page.evaluate(() => (window as any).__pmTerminalFixture.connections())).toBe(before + recoveries);
     await expect.poll(async () => (await text(page)).trim()).toBe("Reconnected status");
-    await emit(page, "terminal_output", `\r\nRecovered batch ${stage}`);
-    await expect.poll(() => text(page)).toContain(`Recovered batch ${stage}`);
-    expect(await page.evaluate(() => (window as any).__pmTerminalFixture.connections())).toBe(before + 1);
+    const seen = await page.evaluate(() => (window as any).__terminalBatchFault.seen);
+    const failed = seen.findIndex((entry: any) => entry.stage === stage && entry.bytes.includes("FAILED BATCH"));
+    expect(failed).toBeGreaterThanOrEqual(0);
+    expect(seen.slice(failed + 1).some((entry: any) => entry.bytes.includes("TORN BATCH SUFFIX"))).toBe(false);
+    await emit(page, "terminal_output", `\r\nRecovered batch ${scenario}`);
+    await expect.poll(() => text(page)).toContain(`Recovered batch ${scenario}`);
+    expect(await page.evaluate(() => (window as any).__pmTerminalFixture.connections())).toBe(before + recoveries);
   }
   await expect(page.locator(".render-degradation-banner")).toBeVisible();
 

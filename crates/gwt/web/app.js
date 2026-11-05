@@ -3216,6 +3216,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           },
           onLatestSnapshotWritten: () => {
             try {
+              terminalOutputBatcher.clear(windowId);
               forceTerminalViewportRefresh(windowId, { shouldPersistGeometry: true });
             } finally {
               flushDeferredTerminalWrites(windowId, runtime);
@@ -3223,6 +3224,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           },
           onError: (error, stage) => {
             console.warn(`terminal snapshot ${stage} failed for ${windowId}`, error);
+            if (["take", "decode", "reset", "barrier-write", "snapshot-write"].includes(stage)) {
+              terminalOutputBatcher.invalidate(windowId, error);
+            }
           },
         });
         // SPEC-2008 Phase 26.A / FR-057: schedule the initial fit
@@ -3366,7 +3370,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           windowId,
           runtime,
           pendingOutputMap,
-          clearBatchedOutput: (id) => terminalOutputBatcher.clear(id),
+          clearBatchedOutput: (id) => terminalOutputBatcher.clear(id, { preserveFailure: true }),
         });
         pendingSnapshotMap.set(windowId, base64);
         if (base64 && runtime) {
