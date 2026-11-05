@@ -1382,6 +1382,18 @@ mod tests {
             OwnerMobileInputPhase::Prevented
         );
         drop(gates.remove(0));
+        // A concurrent fork can retain the creator's descriptor until its
+        // child closes it; Drop alone does not establish lease release.
+        // test-hygiene: allow-wall-clock-deadline Observe the real kernel lease release; this existing hang guard does not establish ordering by elapsed time.
+        let deadline = Instant::now() + gwt_core::deadline_budget::HANG_GUARD;
+        while !old_transaction.native_permit.creator_released() {
+            assert!(
+                // test-hygiene: allow-wall-clock-deadline Only bounds a stuck inherited descriptor; lease observation controls progress.
+                Instant::now() < deadline,
+                "dropped creator's native input lease was not released"
+            );
+            thread::sleep(Duration::from_millis(100));
+        }
         let (_, created) = permits.prepare_mobile(&new_identity).unwrap();
         assert!(created);
         assert_eq!(permits.0.len(), MAX_UNSETTLED_MOBILE_INPUTS);
