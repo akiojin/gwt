@@ -341,6 +341,29 @@ test("issue #4933: a newer release removes the failed update modal", () => {
   assert.match(fixture.document.getElementById("update-cta").textContent, /v9\.27\.0/);
 });
 
+test("issue #6757: up_to_date clears the failed staged target and restores the running version", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+  controller.handleUpdateState({ state: "available", current: "9.149.0", latest: "9.147.0" });
+  fixture.document.getElementById("update-cta").click();
+  controller.handleUpdateProgress({ downloaded: 100, total: 100 });
+  controller.handleUpdateReady({ version: "9.147.0" });
+  controller.handleUpdateApplyPendingPersisted({ version: "9.147.0" });
+  fixture.document.getElementById("update-cta").click();
+  assert.equal(fixture.document.getElementById("update-modal").dataset.state, "ready");
+
+  controller.handleUpdateState({ state: "up_to_date" });
+  controller.handleUpdateState({ state: "up_to_date" });
+  controller.handleIssueMonitorStatus({ update_drain: null });
+
+  assert.equal(Boolean(fixture.document.getElementById("update-cta-shell")), false);
+  assert.equal(Boolean(fixture.document.getElementById("update-modal")), false);
+  assert.deepEqual(fixture.versionUpdates.at(-1), { current: undefined, latest: null });
+  controller.handleUpdateState({ state: "available", current: "9.149.0", latest: "9.150.0" });
+  fixture.document.getElementById("update-cta").click();
+  assert.equal(fixture.document.querySelector("[data-update-modal-progress]").getAttribute("aria-valuenow"), "0");
+});
+
 test("update CTA dismiss hides available state without applying", () => {
   const fixture = createFixture();
   const controller = createUpdateCtaController(fixture.options);

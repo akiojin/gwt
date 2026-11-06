@@ -45,6 +45,7 @@ export function createProfileWindowSurface({
             draft: null,
             saveTimer: null,
             saveInFlight: false,
+            renamePending: false,
           });
         }
         return profileStateMap.get(windowId);
@@ -65,7 +66,9 @@ export function createProfileWindowSurface({
       function resyncProfile(windowIds) {
         for (const windowId of windowIds) {
           const state = profileStateMap.get(windowId);
-          if (!state) continue;
+          // A read cannot acknowledge an uncertain rename or rebase its draft.
+          // Keep the draft/error until a reply or an explicit refresh resolves it.
+          if (!state || state.renamePending) continue;
           updateProfileData(windowId, { loading: false });
           requestProfile(windowId);
         }
@@ -365,6 +368,7 @@ export function createProfileWindowSurface({
           return;
         }
         state.saveInFlight = true;
+        if (state.draft.name !== state.draft.currentName) state.renamePending = true;
         updateProfileData(windowId, { loading: true, saving: true, error: "" });
         const payload = profileDraftPayload(state.draft);
         send({
@@ -766,6 +770,7 @@ export function createProfileWindowSurface({
             state.saveInFlight = false;
             if (reply.kind === "snapshot") {
               state.selectedProfile = profileData(windowId).snapshot?.selected_profile || null;
+              if (state.selectedProfile !== previousProfile) state.renamePending = false;
               const selectedProfileUnchanged =
                 !previousProfile || previousProfile === state.selectedProfile;
               const hasNewerDraft =
@@ -834,6 +839,9 @@ export function createProfileWindowSurface({
             .querySelector("[data-action='refresh-profile']")
             .addEventListener("click", (event) => {
               event.stopPropagation();
+              const state = ensureProfileState(windowData.id);
+              if (state.renamePending) updateProfileData(windowData.id, { loading: false });
+              state.renamePending = false;
               updateProfileData(windowData.id, { error: "" });
               requestProfile(windowData.id);
               renderProfile(windowData.id, true);
