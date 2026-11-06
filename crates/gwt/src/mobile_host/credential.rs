@@ -91,7 +91,7 @@ pub fn load_host_credential(
     decode_host_credential(&bytes, expected_binding, expected_project, now)
 }
 
-fn decode_host_credential(
+pub(super) fn decode_host_credential(
     bytes: &[u8],
     expected_binding: &HostBinding,
     expected_project: &ProjectKey,
