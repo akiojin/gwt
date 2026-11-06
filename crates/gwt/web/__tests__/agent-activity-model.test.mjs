@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleModel } from "../agent-activity-model.js";
+import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleModel, createMemberTuningModel } from "../agent-activity-model.js";
 
 test("plans accept only canonical project revisions and keep the current plan until readback", () => {
   const { model, applyAgentScheduleSnapshot, applyAgentScheduleError,
@@ -67,6 +67,164 @@ function nameController(sent) {
   return { ...controller, flush() { for (const callback of [...frames]) { frames.delete(callback); callback(); } } };
 }
 
+test("PM member names use the shared writer with lossless roster revisions", () => {
+  const sent = [], { model, editAgentMemberName, applyAgentRosterSnapshot } = nameController(sent);
+  const snapshot = (revision, name = "Project Manager") => ({ project_key: "project",
+    revision: Number(revision), revision_decimal: revision,
+    members: [{ agent_member_id: "pm", name, enabled: true, is_pm: true,
+      pm_eligible: true, pm_project_key: "project", assignment: { role: "pm", session_id: "pm-session" } }] });
+  applyAgentRosterSnapshot(snapshot("18446744073709551614"));
+  editAgentMemberName("pm", "Maple");
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].expected_revision, "18446744073709551614");
+  assert.deepEqual(sent[0].action, { kind: "rename", member_id: "pm", name: "Maple" });
+  applyAgentRosterSnapshot(snapshot("18446744073709551615", "Maple"), sent[0].request_id);
+  assert.equal(model.read().name_edits.pm.status, "saved");
+  assert.equal(model.read().members[0].assignment.session_id, "pm-session");
+  applyAgentRosterSnapshot(snapshot("18446744073709551614", "Older name"));
+  applyAgentRosterSnapshot(snapshot("18446744073709551616", "Overflow"));
+  assert.equal(model.read().members[0].name, "Maple");
+});
+
+test("shared member tuning serializes each role and preserves drafts through conflict, IME and reconnect", () => {
+  const sent = [], frames = new Set();
+  const controller = createMemberTuningModel("project", { onSave: request => sent.push(request),
+    scheduleFrame: callback => { frames.add(callback); return () => frames.delete(callback); } });
+  const { model, applyTuningSnapshot, editTuning, applyTuningError, retryTuning, disconnectTuning } = controller;
+  const saved = (role, revision, model = null, reasoning = null) => ({ project_key: "project", role,
+    member_id: "m1", agent_id: "codex", model, reasoning, revision });
+  const flush = () => { for (const callback of [...frames]) { frames.delete(callback); callback(); } };
+  applyTuningSnapshot(saved("implementation", "core-1"));
+  controller.applyPmTuningStatus({ project_key: "project", available: true, configured_member_id: "m1",
+    profile_revision: "pm-1", configured_agent_id: "codex", configured_model: null, configured_reasoning: null });
+  editTuning("implementation", "m1", { model: "custom/model", reasoning: "high" });
+  assert.deepEqual(sent[0].action, { kind: "set_tuning", member_id: "m1", model: "custom/model",
+    reasoning: "high", expected_core_revision: "core-1" });
+  assert.equal(sent[0].expected_revision, undefined, "a target core token is the only tuning CAS");
+  editTuning("implementation", "m1", { model: "newer/model" });
+  editTuning("pm", "m1", { model: "pm/model" });
+  assert.equal(sent.length, 2, "different roles have independent serialized writers");
+  assert.equal(sent[1].kind, "set_pm_launch_profile");
+  assert.equal(sent[1].project_key, "project");
+  assert.equal(sent[1].member_id, "m1");
+  assert.equal(sent[1].expected_profile_revision, "pm-1");
+  applyTuningError({ project_key: "other", role: "pm", member_id: "m1", request_id: sent[1].request_id, message: "foreign" });
+  assert.equal(model.read().targets["pm:m1"].status, "saving");
+  applyTuningSnapshot(saved("implementation", "core-2", "custom/model", "high"), sent[0].request_id);
+  flush();
+  assert.equal(sent.length, 3);
+  assert.equal(sent[2].action.model, "newer/model");
+  assert.equal(sent[2].action.expected_core_revision, "core-2");
+  editTuning("implementation", "m1", { model: "ま" }, { composing: true });
+  applyTuningSnapshot(saved("implementation", "core-3", "newer/model", "high"), sent[2].request_id);
+  flush();
+  assert.equal(model.read().targets["implementation:m1"].draft.model, "ま");
+  assert.equal(model.read().targets["implementation:m1"].status, "editing");
+  applyTuningError({ project_key: "project", role: "pm", member_id: "m1", request_id: "old", message: "stale" });
+  assert.equal(model.read().targets["pm:m1"].status, "saving");
+  applyTuningError({ project_key: "project", role: "pm", member_id: "m1", request_id: sent[1].request_id,
+    message: "Unsupported reasoning", field: "reasoning" });
+  applyTuningSnapshot(saved("pm", "pm-2", "pm/model"));
+  assert.equal(model.read().targets["pm:m1"].status, "error", "equal readback cannot validate a rejected profile");
+  retryTuning("pm", "m1");
+  assert.equal(sent[3].expected_profile_revision, "pm-2", "Retry is backend validation even for equal values");
+  disconnectTuning(); flush();
+  assert.equal(sent.length, 4, "reconnect never blindly replays a CAS write");
+  assert.match(model.read().targets["pm:m1"].error, /Connection lost/);
+  applyTuningSnapshot(saved("pm", "pm-3", "other/model"), sent[1].request_id);
+  assert.equal(model.read().targets["pm:m1"].draft.model, "pm/model");
+});
+
+test("PM tuning normalizes Grok auto and retains newer observed canonical against a late ACK", () => {
+  const sent = [], c = createMemberTuningModel("project", { onSave: request => sent.push(request) });
+  const saved = (revision, model, reasoning = null) => ({ project_key: "project", role: "pm", member_id: "m", agent_id: "grok", revision, model, reasoning });
+  c.applyTuningSnapshot(saved("a", "old")); c.editTuning("pm", "m", { model: "new", reasoning: " AuTo " });
+  assert.equal(sent[0].reasoning, null);
+  c.applyTuningSnapshot(saved("c", "other"));
+  c.applyTuningSnapshot(saved("b", "new"), sent[0].request_id);
+  assert.equal(c.model.read().targets["pm:m"].canonical.revision, "c");
+  assert.equal(c.model.read().targets["pm:m"].blocked, true);
+  c.retryTuning("pm", "m"); const request = sent.at(-1);
+  c.setPmMember("replacement");
+  c.applyTuningSnapshot(saved("d", "new"), request.request_id);
+  assert.equal(c.model.read().targets["pm:m"].canonical.revision, "c");
+  assert.equal(c.model.read().targets["pm:m"].pending, null);
+  assert.match(c.model.read().targets["pm:m"].error, /Project Manager.*changed/);
+});
+
+test("tuning receipts reject foreign, unrelated and old results before canonical hydration", () => {
+  const sent = [], c = createMemberTuningModel("project", { onSave: request => sent.push(request) });
+  const core = (revision, model) => ({ agent_member_id: "m", saved_implementation_core: { agent_id: "codex", model }, saved_implementation_core_revision: revision });
+  c.applyRosterTuningSnapshot({ project_key: "project", members: [core("a", "old")] });
+  c.editTuning("implementation", "m", { model: "new" });
+  c.applyRosterTuningSnapshot({ project_key: "other", members: [core("foreign", "bad")] }, sent[0].request_id);
+  c.applyRosterTuningSnapshot({ project_key: "project", members: [core("old-ack", "bad")] }, "unrelated");
+  assert.equal(c.model.read().targets["implementation:m"].canonical.revision, "a");
+  c.applyRosterTuningSnapshot({ project_key: "project", members: [core("b", "new")] }, sent[0].request_id);
+  assert.equal(c.model.read().targets["implementation:m"].status, "saved");
+  c.setPmMember("m"); c.applyTuningSnapshot({ project_key: "project", role: "pm", member_id: "m", revision: "p-a", agent_id: "grok", model: "old" });
+  c.editTuning("pm", "m", { model: "new" }); const request = sent.at(-1);
+  const result = { project_key: "project", member_id: "m", request_id: request.request_id, success: true, profile_revision: "p-b", profile: { agent_id: "grok", model: "new", reasoning: null } };
+  c.applyPmTuningResult({ ...result, request_id: "old", profile_revision: "bad" });
+  assert.equal(c.model.read().targets["pm:m"].canonical.revision, "p-a");
+  c.applyPmTuningResult(result); assert.equal(c.model.read().targets["pm:m"].status, "saved");
+  c.editTuning("pm", "m", { reasoning: "invalid" });
+  c.applyPmTuningResult({ ...result, request_id: sent.at(-1).request_id, success: false, message: "Unsupported", field: "reasoning" });
+  assert.equal(c.model.read().targets["pm:m"].status, "error");
+  assert.equal(c.model.read().targets["pm:m"].draft.reasoning, "invalid");
+});
+
+test("accepted roster generations hydrate Read receipts and reject late tuning ACK rollback", () => {
+  const sent = [], c = createMemberTuningModel("project", { onSave: request => sent.push(request) });
+  const roster = createAgentRosterModel("project");
+  const snapshot = (revision, token, model) => ({ project_key: "project", revision, members: [{ agent_member_id: "m", name: "Member", saved_implementation_core_revision: token, saved_implementation_core: { agent_id: "codex", model } }] });
+  const receive = (view, requestId) => c.applyRosterTuningSnapshot(view, requestId, { accepted: roster.applyAgentRosterSnapshot(view, requestId) });
+  receive(snapshot(10, "a", "old"), "initial-read");
+  assert.ok(c.model.read().targets["implementation:m"], "accepted Read hydrates the core");
+  assert.equal(c.model.read().targets["implementation:m"].canonical.revision, "a");
+  c.editTuning("implementation", "m", { model: "new" }); const request = sent[0];
+  receive(snapshot(12, "c", "other-writer"), "eligibility-receipt");
+  assert.equal(c.model.read().targets["implementation:m"].canonical.revision, "c");
+  assert.equal(c.model.read().targets["implementation:m"].pending.request_id, request.request_id);
+  receive(snapshot(11, "b", "new"), request.request_id);
+  assert.equal(c.model.read().targets["implementation:m"].canonical.revision, "c");
+  assert.equal(c.model.read().targets["implementation:m"].pending, null);
+  assert.equal(c.model.read().targets["implementation:m"].blocked, true);
+  receive(snapshot(13, "d", "reload"), "explicit-reload");
+  receive(snapshot(12, "old", "stale"), "old-read");
+  assert.equal(c.model.read().targets["implementation:m"].canonical.revision, "d");
+  receive({ ...snapshot(14, "foreign", "bad"), project_key: "foreign" }, "foreign-read");
+  assert.equal(c.model.read().targets["implementation:m"].canonical.revision, "d");
+});
+
+test("fresh missing implementation core revokes shared mutation authority without losing the draft", () => {
+  const sent = [], c = createMemberTuningModel("project", { onSave: request => sent.push(request) });
+  const member = { agent_member_id: "m", saved_implementation_core_revision: "known", saved_implementation_core: { agent_id: "codex", model: "saved" } };
+  c.applyRosterTuningSnapshot({ project_key: "project", members: [member] });
+  c.editTuning("implementation", "m", { model: "draft" });
+  c.applyRosterTuningError({ project_key: "project", request_id: sent[0].request_id, message: "Refused" });
+  c.applyRosterTuningSnapshot({ project_key: "project", members: [{ agent_member_id: "m" }] });
+  assert.equal(c.model.read().targets["implementation:m"].available, false);
+  c.editTuning("implementation", "m", { model: "unsafe" }); c.retryTuning("implementation", "m");
+  assert.equal(sent.length, 1); assert.equal(c.model.read().targets["implementation:m"].draft.model, "draft");
+  c.applyRosterTuningSnapshot({ project_key: "project", members: [{ ...member, saved_implementation_core_revision: "fresh" }] });
+  assert.equal(c.model.read().targets["implementation:m"].available, true);
+});
+
+test("a correlated roster refusal remains an error even when canonical readback equals the submitted values", () => {
+  const sent = [], c = createMemberTuningModel("project", { onSave: request => sent.push(request) });
+  const member = (token, model) => ({ agent_member_id: "m", saved_implementation_core_revision: token, saved_implementation_core: { agent_id: "codex", model } });
+  c.applyRosterTuningSnapshot({ project_key: "project", members: [member("a", "saved")] });
+  c.editTuning("implementation", "m", { model: "intended" });
+  c.applyRosterTuningSnapshot({ project_key: "project", members: [member("b", "intended")], error: "Prepared registry: reload before retrying" }, sent[0].request_id, { accepted: true });
+  const target = c.model.read().targets["implementation:m"];
+  assert.equal(target.canonical.revision, "b"); assert.equal(target.draft.model, "intended");
+  assert.equal(target.status, "error"); assert.equal(target.blocked, true); assert.equal(target.pending, null);
+  assert.match(target.error, /Prepared registry/);
+  c.retryTuning("implementation", "m"); assert.equal(sent.length, 2);
+  assert.equal(sent[1].action.expected_core_revision, "b");
+});
+
 test("member name autosave serializes latest drafts and accepts only correlated receipts", () => {
   const sent = [], { model, editAgentMemberName, applyAgentRosterSnapshot, applyAgentRosterError, flush } = nameController(sent);
   applyAgentRosterSnapshot(namedRoster(3));
@@ -93,6 +251,23 @@ test("member name autosave serializes latest drafts and accepts only correlated 
   assert.deepEqual(model.read().members[0].history, [{ name: "Ada" }]);
   applyAgentRosterSnapshot(namedRoster(6, "Current canonical name"));
   assert.equal(model.read().name_edits.m1.value, "Current canonical name", "a completed draft follows a later canonical rename");
+});
+
+test("shared tuning preserves a raw word separator through ACK and equal readback", () => {
+  const sent = [], c = createMemberTuningModel("project", { onSave: request => sent.push(request) });
+  const snapshot = (revision, model) => ({ project_key: "project", role: "implementation", member_id: "m", agent_id: "codex", revision, model });
+  c.applyTuningSnapshot(snapshot("a", "saved"));
+  c.editTuning("implementation", "m", { model: "private" });
+  c.editTuning("implementation", "m", { model: "private " });
+  c.applyTuningSnapshot(snapshot("b", "private"), sent[0].request_id);
+  assert.equal(c.model.read().targets["implementation:m"].draft.model, "private ", "ACK keeps raw input");
+  c.applyTuningSnapshot(snapshot("b", "private"));
+  assert.equal(c.model.read().targets["implementation:m"].draft.model, "private ", "equal readback keeps the next word separator");
+  c.editTuning("implementation", "m", { model: `${c.model.read().targets["implementation:m"].draft.model}model` });
+  assert.equal(sent[1].action.model, "private model");
+  c.applyTuningSnapshot(snapshot("c", "private model"), sent[1].request_id);
+  c.applyTuningSnapshot(snapshot("d", "changed elsewhere"));
+  assert.equal(c.model.read().targets["implementation:m"].draft.model, "changed elsewhere", "changed canonical still updates an untouched saved target");
 });
 
 test("member name autosave preserves a word separator through ACK, no-op and readback", () => {
@@ -151,6 +326,55 @@ test("stale or failed name receipts retain drafts until explicit retry at the cu
   retryAgentMemberName("m1");
   applyAgentRosterSnapshot(namedRoster(7, "Cedar"), sent[2].request_id);
   assert.equal(model.read().name_edits.m1.status, "saved");
+});
+
+test("a rejected rename converges when its exact canonical member already has the requested name", () => {
+  const sent = [], { model, editAgentMemberName, applyAgentRosterSnapshot, applyAgentRosterError,
+    applyAgentRosterUsage, retryAgentMemberName } = nameController(sent);
+  applyAgentRosterSnapshot(namedRoster(3)); editAgentMemberName("m1", "Maple");
+  const rejected = namedRoster(4, "Maple", { error: "Agent roster changed; reload before retrying" });
+  applyAgentRosterSnapshot(rejected, sent[0].request_id);
+  assert.equal(model.read().name_edits.m1.status, "saved", "canonical equality confirms the desired result despite the rejected CAS");
+  assert.equal(model.read().name_edits.m1.blocked, false);
+  assert.equal(model.read().name_edits.m1.error, "");
+  assert.equal(model.read().error, null);
+  retryAgentMemberName("m1");
+  assert.equal(sent.length, 1, "a confirmed name needs no duplicate write");
+  applyAgentRosterSnapshot(rejected, sent[0].request_id);
+  applyAgentRosterUsage([], "/project");
+  assert.equal(model.read().error, null, "late failed receipts and usage updates cannot resurrect the error");
+  assert.equal(model.read().name_edits.m1.status, "saved");
+  applyAgentRosterError({ project_key: "project", message: "Registration failed" });
+  editAgentMemberName("m1", "Maple");
+  assert.equal(model.read().error, "Registration failed", "a name no-op must preserve unrelated operation errors");
+});
+
+test("fresh canonical readback clears a lost rename's retry while preserving a newer draft and IME", () => {
+  const sent = [], { model, editAgentMemberName, applyAgentRosterSnapshot, applyAgentRosterError } = nameController(sent);
+  applyAgentRosterSnapshot(namedRoster(3)); editAgentMemberName("m1", "Maple");
+  applyAgentRosterError({ project_key: "project", request_id: sent[0].request_id, message: "Connection lost" });
+  applyAgentRosterSnapshot(namedRoster(4, "Another writer"));
+  assert.equal(model.read().name_edits.m1.status, "error");
+  applyAgentRosterSnapshot(namedRoster(5, "Maple"));
+  assert.equal(model.read().name_edits.m1.status, "saved");
+  assert.equal(model.read().name_edits.m1.blocked, false);
+  editAgentMemberName("m1", "Cedar");
+  editAgentMemberName("m1", "ま", { composing: true });
+  applyAgentRosterSnapshot(namedRoster(6, "Cedar", { error: "Agent roster changed; reload before retrying" }), sent[1].request_id);
+  assert.equal(model.read().name_edits.m1.value, "ま");
+  assert.equal(model.read().name_edits.m1.status, "editing", "the old request cannot mark unfinished IME as saved");
+  assert.equal(model.read().name_edits.m1.error, "");
+  assert.equal(model.read().error, null);
+  editAgentMemberName("m1", "Pine");
+  applyAgentRosterError({ project_key: "project", request_id: sent[2].request_id, message: "Connection lost" });
+  editAgentMemberName("m1", "ま", { composing: true });
+  applyAgentRosterSnapshot(namedRoster(7, "Pine"));
+  assert.equal(model.read().name_edits.m1.status, "editing");
+  editAgentMemberName("m1", "Pine ");
+  assert.equal(model.read().name_edits.m1.value, "Pine ");
+  assert.equal(model.read().name_edits.m1.status, "saved", "finishing IME at the confirmed name clears the retry");
+  assert.equal(model.read().name_edits.m1.blocked, false);
+  assert.equal(sent.length, 3);
 });
 
 test("the name writer preserves other member drafts and revalidates coalesced edits after readback", () => {

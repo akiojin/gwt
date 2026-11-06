@@ -49,6 +49,10 @@ pub struct AgentLaunchInput {
     pub prepared_manual_launch_claim: Option<gwt_agent::SessionActiveLaunchHandshake>,
     pub issue_monitor_trust_candidate: Option<IssueMonitorTrustCandidate>,
     pub issue_monitor_launch: bool,
+    pub pm_restore_prior: Option<(
+        gwt_agent::Session,
+        Option<crate::agent_names::AgentMemberAssignment>,
+    )>,
 }
 
 /// Public display updates emitted while owner-local launch preparation runs.
@@ -200,6 +204,7 @@ pub fn prepare_agent_launch(
         prepared_manual_launch_claim,
         issue_monitor_trust_candidate,
         issue_monitor_launch,
+        pm_restore_prior,
     } = input;
     // SPEC-2014 FR-139..142 — while a Docker launch prepares (preflight,
     // compose ps/up incl. image build, exec probes), mirror docker-kind
@@ -222,11 +227,23 @@ pub fn prepare_agent_launch(
         .get("GWT_AGENT_MEMBER_ID")
         .zip(config.env_vars.get("GWT_AGENT_RESERVATION_ID"))
         .map(|(member, reservation)| (member.clone(), reservation.clone()));
+    let pm_launch = config
+        .working_dir
+        .as_deref()
+        .is_some_and(gwt::pm_registry::is_canonical_pm_worktree);
+    let pm_profile_revision = config.env_vars.get("GWT_PM_PROFILE_REVISION").cloned();
+    type PmCandidate = (gwt_agent::Session, Result<Option<Vec<u8>>, String>);
+    let mut pm_candidate: Option<PmCandidate> = None;
     let mut active_launch_handshake_cleanup = prepared_manual_launch_claim;
     // Issue #4283 AC-5: attribute the pane-create route to its phases so
     // the next regression is read from the perf stream, not guessed.
     let mut phases = gwt::perf::RoutePhaseClock::start(gwt::perf::PerfRoute::PaneCreate);
-    let result: AgentLaunchResult = (|| {
+    let mut result: AgentLaunchResult = (|| {
+        if pm_launch && (member_reservation.is_none() || pm_profile_revision.is_none()) {
+            return Err(
+                "PM launch requires its exact owner-prepared member and profile reservation".into(),
+            );
+        }
         emit(AgentLaunchEvent::Progress {
             message: "Preparing worktree...".to_string(),
         });
@@ -389,13 +406,16 @@ pub fn prepare_agent_launch(
         // i.e. every Issue that had progressed far enough to push — died
         // before the PTY. Both outcomes carry Active authority.
         let mut rebound_continuation: Option<gwt_agent::SessionExecutionBinding> = None;
-        if matches!(
-            &config.execution_intent,
-            gwt_agent::ExecutionLaunchIntent::Automatic
-        ) && matches!(
-            config.session_mode,
-            gwt_agent::SessionMode::Resume | gwt_agent::SessionMode::Continue
-        ) {
+        if !pm_launch
+            && matches!(
+                &config.execution_intent,
+                gwt_agent::ExecutionLaunchIntent::Automatic
+            )
+            && matches!(
+                config.session_mode,
+                gwt_agent::SessionMode::Resume | gwt_agent::SessionMode::Continue
+            )
+        {
             if let Some(predecessor) = config.predecessor_session_id.clone() {
                 // Issue #4783 AC-2: an automatic restore never reactivates
                 // a terminal predecessor generation; see the coordinator.
@@ -733,7 +753,7 @@ pub fn prepare_agent_launch(
             .as_deref()
             .or(config.working_dir.as_deref())
             .and_then(|cwd| config.validated_codex_auth_root_for_cwd(cwd));
-        if let Err(error) = persist_finalized_launch_session(
+        let persisted = persist_finalized_launch_session(
             &sessions_dir,
             // Monitor's shared admission census must not mistake a
             // prepared no-child runtime for an unknown live worker. Its
@@ -741,7 +761,16 @@ pub fn prepare_agent_launch(
             (!issue_monitor_launch).then_some(runtime_path.as_path()),
             &mut session,
             None,
-        ) {
+        );
+        if pm_launch {
+            let runtime = match std::fs::read(&runtime_path) {
+                Ok(bytes) => Ok(Some(bytes)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error.to_string()),
+            };
+            pm_candidate = Some((session.clone(), runtime));
+        }
+        if let Err(error) = persisted {
             let rollback = if is_fresh_execution_install {
                 Some(rollback_materialized_fresh_execution_launch(
                     &sessions_dir,
@@ -768,12 +797,23 @@ pub fn prepare_agent_launch(
             .into());
         }
         if let Some((member, reservation)) = member_reservation.as_ref() {
-            gwt::agent_names::bind_project_member_session(
-                Path::new(&project_root),
-                member,
-                reservation,
-                &session.id,
-            )?;
+            if pm_launch {
+                crate::agent_registry::bind_prepared_pm_member_session(
+                    Path::new(&project_root),
+                    member,
+                    reservation,
+                    &session.id,
+                    pm_profile_revision.as_deref(),
+                )
+                .map_err(|error| error.to_string())?;
+            } else {
+                gwt::agent_names::bind_project_member_session(
+                    Path::new(&project_root),
+                    member,
+                    reservation,
+                    &session.id,
+                )?;
+            }
         }
         let expected_execution_identity =
             gwt_agent::SessionExecutionIdentity::from_session(&session)?;
@@ -842,14 +882,59 @@ pub fn prepare_agent_launch(
 
     if result.is_err() {
         if let Some((member, reservation)) = member_reservation.as_ref() {
-            let _ = gwt::agent_names::release_project_member(
-                Path::new(&project_root),
-                &sessions_dir,
-                member,
-                reservation,
-            );
+            if pm_launch {
+                let cleanup = (|| -> Result<(), String> {
+                    if let Some(handshake) = active_launch_handshake_cleanup.as_ref() {
+                        gwt::cli::execution_state::finish_active_session_launch_handshake(
+                            &sessions_dir,
+                            handshake,
+                        )
+                        .map_err(|error| error.to_string())?;
+                    }
+                    let stopped = pm_candidate
+                        .as_ref()
+                        .map(|(candidate, runtime)| {
+                            super::owner::retire_unspawned_launch_runtime(
+                                &sessions_dir,
+                                candidate,
+                                Some(runtime),
+                            )
+                        })
+                        .transpose()?;
+                    crate::agent_registry::cancel_unspawned_pm_member(
+                        Path::new(&project_root),
+                        &sessions_dir,
+                        member,
+                        reservation,
+                        stopped.as_ref(),
+                        pm_restore_prior
+                            .as_ref()
+                            .map(|(source, prior)| (source, prior.as_ref())),
+                    )
+                    .map_err(|error| error.to_string())?;
+                    Ok(())
+                })();
+                if let Err(cleanup) = cleanup {
+                    if let Err(error) = &mut result {
+                        error.detail = format!(
+                            "{}; PM reservation retained pending exact reconciliation: {cleanup}",
+                            error.detail
+                        );
+                    }
+                }
+            } else {
+                let _ = gwt::agent_names::release_project_member(
+                    Path::new(&project_root),
+                    &sessions_dir,
+                    member,
+                    reservation,
+                );
+            }
         }
-        if let Some(handshake) = active_launch_handshake_cleanup.as_ref() {
+        if let Some(handshake) = active_launch_handshake_cleanup
+            .as_ref()
+            .filter(|_| !pm_launch)
+        {
             let _ = gwt::cli::execution_state::finish_active_session_launch_handshake(
                 &sessions_dir,
                 handshake,

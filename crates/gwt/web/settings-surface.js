@@ -22,10 +22,10 @@
 //   imported as a sibling module.
 // - getIndexStatus: per-project shared index status snapshot owned by the
 //   Project Index surface instance created in app.js (E3).
-import { createInteractionGuard } from "/interaction-guard.js";
-import { renderIndexSettingsPanel } from "/index-settings-panel.js";
-import { renderCustomAgentEnvEditor } from "/custom-agent-env-editor.js";
-import { renderHookCenterPanel, hookRepairUnavailableReason } from "/hook-center-panel.js";
+import { createInteractionGuard } from "./interaction-guard.js";
+import { renderIndexSettingsPanel } from "./index-settings-panel.js";
+import { renderCustomAgentEnvEditor } from "./custom-agent-env-editor.js";
+import { renderHookCenterPanel, hookRepairUnavailableReason } from "./hook-center-panel.js";
 import { createUiStateStore } from "./ui-state-store.js";
 import { bindControlExplanations, setControlExplanation } from "./control-explanations.js";
 
@@ -214,25 +214,7 @@ function scopeSettingsControlIds(panel) {
   }
 }
 
-export function mountProjectManagerSettingsPanel(
-  document,
-  parent,
-  pmSettingsPanel,
-  windowId = "shared",
-) {
-  const panel = document.createElement("section");
-  panel.className = "settings-panel hidden";
-  panel.setAttribute("role", "tabpanel");
-  panel.dataset.settingsPanel = "project-manager";
-  panel.id = `settings-${windowId}-panel-project-manager`;
-  panel.setAttribute(
-    "aria-labelledby",
-    `settings-${windowId}-tab-project-manager`,
-  );
-  parent.appendChild(panel);
-  pmSettingsPanel?.mount?.(panel);
-  return panel;
-}
+
 
 function renderIssuesSettingsPanel(panel, options) {
   const { project, status, send, launchControls = [] } = options;
@@ -371,6 +353,7 @@ function reconcileCandidateSave(panel, event) {
       // Even a successful normalization must not move a live text cursor.
       if (input === focused) continue;
       const key = input.dataset.profileField;
+      if (key === "model" || key === "reasoning") continue;
       if (input.dataset.inheritedDefault !== undefined && !input.dataset.profileEdited && profile[key] == null) continue;
       if (input.type === "checkbox") input.checked = profile[key] === true;
       else {
@@ -398,13 +381,67 @@ function reconcileCandidateSave(panel, event) {
   }
 }
 
+export function renderMemberTuningControls(host, options) {
+  const { target, choices = null, available = true, onEdit = () => {}, onRetry = () => {}, onReload = null } = options;
+  const editable = available && target?.available !== false;
+  const document = host.ownerDocument;
+  host.dataset.memberTuningHost = "";
+  const identity = target ? `${target.canonical.role}:${target.canonical.member_id}` : "unavailable";
+  if (host.memberTuningIdentity !== identity) {
+    host.replaceChildren(); host.memberTuningIdentity = identity;
+    const owns = control => host.memberTuningIdentity === identity && host.isConnected && control.isConnected && host.contains(control);
+    const title = document.createElement("h4"); title.textContent = target?.canonical.role === "pm" ? "Saved Project Manager profile" : "Saved implementation settings"; host.append(title);
+    for (const [key, caption] of [["agent_id", "Tool"], ["model", "Model"], ["reasoning", "Reasoning"]]) {
+      const label = document.createElement("label"); label.className = "settings-field";
+      const text = document.createElement("span"); text.textContent = caption;
+      const input = document.createElement("input"); input.type = "text"; input.className = "settings-input";
+      input.dataset.memberTuningField = key; input.setAttribute("aria-label", caption);
+      const list = document.createElement("datalist"); list.id = `member-tuning-${key}-${Math.random().toString(36).slice(2)}`;
+      input.setAttribute("list", list.id); label.append(text, input, list); host.append(label);
+      const edit = composing => { if (owns(input) && !input.disabled) host.memberTuningOptions.onEdit({ [key]: input.value }, { composing }); };
+      input.addEventListener("compositionstart", () => { input.memberComposing = owns(input); if (input.memberComposing) edit(true); });
+      input.addEventListener("compositionend", () => { const completed = input.memberComposing && owns(input); input.memberComposing = false; if (completed) edit(false); });
+      input.addEventListener("input", event => edit(input.memberComposing || event.isComposing === true));
+    }
+    const revision = document.createElement("p"); revision.className = "settings-help"; revision.dataset.memberTuningRevision = ""; host.append(revision);
+    const status = document.createElement("p"); status.className = "settings-status"; status.dataset.memberTuningStatus = ""; status.setAttribute("role", "status"); host.append(status);
+    const retry = document.createElement("button"); retry.type = "button"; retry.className = "wizard-button"; retry.textContent = "Retry profile"; retry.dataset.action = "retry-tuning";
+    retry.addEventListener("click", () => { if (owns(retry) && !retry.disabled) host.memberTuningOptions.onRetry(); }); host.append(retry);
+    const reload = document.createElement("button"); reload.type = "button"; reload.className = "wizard-button"; reload.textContent = "Reload profile"; reload.dataset.action = "reload-tuning";
+    reload.addEventListener("click", () => { if (owns(reload) && !reload.disabled) host.memberTuningOptions.onReload?.(); }); host.append(reload);
+  }
+  host.memberTuningOptions = { onEdit, onRetry, onReload };
+  const catalog = Array.isArray(choices) ? choices : choices?.agents || [];
+  const agentChoices = target?.canonical.role === "pm" && target.canonical.agent_options
+    ? target.canonical.agent_options.map(option => catalog.find(agent => agent.id === option.id) || option) : catalog;
+  const entry = agentChoices.find(agent => agent.id === target?.draft.agent_id);
+  const selectedModel = entry?.models?.find(model => model.value === target?.draft.model);
+  for (const input of host.querySelectorAll("[data-member-tuning-field]")) {
+    const key = input.dataset.memberTuningField, value = target?.draft[key] ?? "";
+    if (!input.memberComposing && input.value !== value) input.value = value;
+    input.disabled = !target || !editable || (key === "agent_id" && target.canonical.role === "implementation");
+    input.setAttribute("aria-invalid", String(!!target?.error && (!target.field || target.field === key)));
+    const suggestions = key === "agent_id" ? agentChoices.map(agent => agent.id)
+      : key === "model" ? [...(entry?.models || []).map(model => model.value), ...(entry?.model_suggestions || [])]
+        : (selectedModel?.reasoning_options || entry?.reasoning_options || []).map(option => typeof option === "string" ? option : option.value);
+    const list = input.parentElement.querySelector("datalist"); list.replaceChildren();
+    for (const value of suggestions) { const option = document.createElement("option"); option.value = value; list.append(option); }
+  }
+  host.querySelector("[data-member-tuning-revision]").textContent = target ? `Revision: ${target.canonical.revision}` : "Settings unavailable. Reload registered members.";
+  host.querySelector("[data-member-tuning-status]").textContent = !editable ? "Settings unavailable. Reload the current profile; your draft is retained." : target?.error || ({ saving: "Saving…", queued: "Saving…", saved: "Saved" }[target?.status] || "");
+  const retry = host.querySelector('[data-action="retry-tuning"]'); retry.hidden = !target?.blocked; retry.disabled = !editable || !!target?.composing || !!target?.pending;
+  host.querySelector('[data-action="reload-tuning"]').disabled = !onReload;
+}
+
 export function renderAgentsSettingsPanel(panel, options) {
-  const { project, profiles, send, availableMembers = null, choices = null } = options;
+  const { project, profiles, send, availableMembers = null, choices = null, tuningController = null, onReloadProfile = null } = options;
   const document = panel.ownerDocument;
+  for (const unsubscribe of panel.candidateTuningUnsubscribers || []) unsubscribe();
+  panel.candidateTuningUnsubscribers = [];
   panel.replaceChildren();
   panel.dataset.dirty = "false";
-  panel.oninput = () => {
-    panel.dataset.dirty = "true";
+  panel.oninput = event => {
+    if (!event.target.closest("[data-member-tuning-host]")) panel.dataset.dirty = "true";
   };
   const heading = document.createElement("h3");
   heading.className = "settings-section-heading";
@@ -440,6 +477,7 @@ export function renderAgentsSettingsPanel(panel, options) {
     const id = String(agentId ?? "").trim().replace(/[A-Z]/g, character => character.toLowerCase());
     return providerAliases.get(id) || id;
   };
+  const implementationEligible = member => !member.is_pm && !member.pm_project_key && member.assignment?.role !== "pm";
   const rows = [];
   const setChoices = (input, options, value) => {
     input.replaceChildren();
@@ -480,9 +518,10 @@ export function renderAgentsSettingsPanel(panel, options) {
     return input;
   };
   const draft = () => rows.map(({ row, profile }) => {
-    const next = { ...profile };
+    const { model: _model, reasoning: _reasoning, ...next } = profile;
     for (const input of row.querySelectorAll("[data-profile-field]")) {
       const key = input.dataset.profileField;
+      if (key === "model" || key === "reasoning") continue;
       if (input.dataset.inheritedDefault !== undefined && !input.dataset.profileEdited) continue;
       next[key] = input.type === "checkbox" ? input.checked
         : key === "prefer_for" ? input.value.split(",").map(v => v.trim()).filter(Boolean)
@@ -502,6 +541,7 @@ export function renderAgentsSettingsPanel(panel, options) {
     panel.candidateDisabledControls = new Map();
     if (panel.candidateStructuralSave) {
       for (const control of panel.querySelectorAll("input, select, button")) {
+        if (control.closest("[data-member-tuning-host]")) continue;
         panel.candidateDisabledControls.set(control, control.disabled);
         control.disabled = true;
       }
@@ -536,9 +576,9 @@ export function renderAgentsSettingsPanel(panel, options) {
     row.appendChild(legend);
     panel.appendChild(row);
     rows.push({ row, profile });
-    const memberChoices = (availableMembers || []).map(member => ({ value: member.member_id || member.agent_member_id,
+    const memberChoices = (availableMembers || []).filter(implementationEligible).map(member => ({ value: member.member_id || member.agent_member_id,
       label: `${member.name} (${choices?.agents.find(tool => provider(tool.id) === provider(member.agent_id))?.name || member.agent_id})${member.enabled ? "" : " · Resting"}` }));
-    if (!savedMember && profile.agent_member_id) memberChoices.push({ value: profile.agent_member_id, label: `${profile.agent_member_id} · Unavailable member` });
+    if ((!savedMember || !implementationEligible(savedMember)) && profile.agent_member_id) memberChoices.push({ value: profile.agent_member_id, label: `${profile.agent_member_id} · Unavailable member` });
     const agent = field(row, "Agent", "agent_member_id", profile.agent_member_id || "", "text", memberChoices);
     agent.disabled = availableMembers === null;
     const toolField = document.createElement("label"); toolField.className = "settings-field";
@@ -550,10 +590,6 @@ export function renderAgentsSettingsPanel(panel, options) {
     let previousTool = provider(profile.agent_id);
     const capabilities = () => choices?.agents.find(entry => provider(entry.id) === provider(selectedMember()?.agent_id || profile.agent_id));
     const initial = capabilities();
-    let model = field(row, "Model", "model", profile.model ?? initial?.default_model ?? "", "text", []);
-    const initialModel = initial?.models.find(option => option.value === model.value);
-    const initialReasoning = initialModel ? initialModel.default_reasoning : initial?.default_reasoning;
-    const reasoning = field(row, "Reasoning", "reasoning", profile.reasoning ?? initialReasoning ?? "", "text", []);
     const docker = field(row, "Docker service", "docker_service", profile.docker_service ?? "", "text", [
       { value: "", label: choices?.default_docker_service ? `Auto (${choices.default_docker_service})` : "Auto" },
       ...(choices?.docker_services || []),
@@ -564,9 +600,15 @@ export function renderAgentsSettingsPanel(panel, options) {
     const shell = field(row, "Windows shell", "windows_shell", profile.windows_shell || "", "text", ["", "command_prompt", "windows_power_shell", "power_shell_7"]);
     const skip = field(row, "Skip permissions", "skip_permissions", profile.skip_permissions, "checkbox");
     const fast = field(row, "Fast mode", "fast_mode", profile.fast_mode, "checkbox");
-    const modelSuggestions = document.createElement("datalist");
-    modelSuggestions.id = `candidate-models-${Math.random().toString(36).slice(2)}`;
-    row.appendChild(modelSuggestions);
+    const tuning = document.createElement("section"); row.append(tuning);
+    const syncTuning = () => {
+      const memberId = agent.value, role = "implementation";
+      renderMemberTuningControls(tuning, { onReload: onReloadProfile, target: tuningController?.model.read().targets[`${role}:${memberId}`], choices,
+        onEdit: (patch, options) => tuningController?.editTuning(role, memberId, patch, options),
+        onRetry: () => tuningController?.retryTuning(role, memberId) });
+    };
+    panel.candidateTuningUnsubscribers ||= [];
+    if (tuningController) panel.candidateTuningUnsubscribers.push(tuningController.model.subscribeFrame(state => state, syncTuning));
     row.updateCandidateChoices = changed => {
       const entry = capabilities();
       const member = selectedMember();
@@ -591,49 +633,21 @@ export function renderAgentsSettingsPanel(panel, options) {
       toolValue.textContent = entry?.name || tool;
       memberStatus.textContent = availableMembers === null ? "Loading registered members…" : !member
         ? "Selected member is unavailable. Choose a registered member; no substitute will be launched."
-        : !member.enabled ? "Resting member. Future launches wait until this member is enabled." : "";
+        : !implementationEligible(member) ? "This member holds a Project Manager role and is unavailable for implementation launches." : !member.enabled ? "Resting member. Future launches wait until this member is enabled." : "";
       memberStatus.hidden = !memberStatus.textContent;
       if (!changed || agentChanged) {
-        const value = agentChanged ? entry?.default_model ?? "" : model.value;
-        const freeText = Boolean(entry?.supports_model_input && !entry.models.length);
-        if (freeText !== (model.localName === "input")) {
-          const previous = model.closest("label");
-          model = field(row, "Model", "model", value, "text", freeText ? null : []);
-          previous.replaceWith(model.closest("label"));
-        }
-        if (freeText) model.value = value;
-        else setChoices(model, entry?.models || [], value);
-        modelSuggestions.replaceChildren();
-        for (const value of freeText ? entry?.model_suggestions || [] : []) {
-          const option = document.createElement("option");
-          option.value = value;
-          modelSuggestions.appendChild(option);
-        }
-        if (modelSuggestions.children.length) model.setAttribute("list", modelSuggestions.id);
-        else model.removeAttribute("list");
-        if (agentChanged) model.dataset.profileEdited = "true";
-        model.disabled = !entry || (!freeText && !entry.models.length);
         setChoices(mode, entry?.session_modes || ["Normal"], agentChanged ? "Normal" : mode.value);
         mode.disabled = !entry || entry.session_modes.length <= 1;
         if (agentChanged) fast.checked = false;
         if (agentChanged && !entry?.supports_skip_permissions) skip.checked = false;
       }
-      const selectedModel = entry?.models.find(option => option.value === model.value);
-      const levels = selectedModel?.reasoning_options || entry?.reasoning_options || [];
-      const defaultReasoning = selectedModel ? selectedModel.default_reasoning : entry?.default_reasoning;
-      const level = agentChanged || changed === "model"
-        ? defaultReasoning ?? "" : reasoning.value;
-      if (agentChanged || changed === "model") reasoning.dataset.profileEdited = "true";
-      setChoices(reasoning, levels, level);
-      reasoning.disabled = levels.length === 0;
+      syncTuning();
       skip.disabled = !entry?.supports_skip_permissions;
       fast.disabled = !entry?.supports_fast_mode;
       docker.disabled = runtime.value !== "Docker";
       shell.disabled = runtime.value === "Docker" || !choices?.windows_shell_supported;
     };
     row.updateCandidateChoices();
-    if (profile.model == null) model.dataset.inheritedDefault = model.value;
-    if (profile.reasoning == null) reasoning.dataset.inheritedDefault = reasoning.value;
     for (const [direction, offset] of [["up", -1], ["down", 1]]) {
       const move = button(row, `Move ${direction} ${row.dataset.profileLabel}`, direction, () => {
         const next = draft();
@@ -648,7 +662,7 @@ export function renderAgentsSettingsPanel(panel, options) {
   const add = document.createElement("section");
   add.className = "settings-section";
   panel.appendChild(add);
-  const remaining = (availableMembers || []).filter(member => !profiles.some(profile => profile.agent_member_id === (member.member_id || member.agent_member_id)));
+  const remaining = (availableMembers || []).filter(member => implementationEligible(member) && !profiles.some(profile => profile.agent_member_id === (member.member_id || member.agent_member_id)));
   const candidate = field(add, "Add candidate", "new", "", "text", [{ value: "", label: "Select a registered member…" },
     ...remaining.map(member => ({ value: member.member_id || member.agent_member_id, label: `${member.name} (${member.agent_id})${member.enabled ? "" : " · Resting"}` }))]);
   const addButton = button(add, "Add candidate", "add-candidate", () => {
@@ -705,6 +719,10 @@ export function installSettingsOpenHandler(options) {
     const target = event?.detail?.section || event?.detail?.target || "system";
     const projectRoot = event?.detail?.project_root || activeProjectTab?.()?.project_root || "";
     const surfaceOwner = event?.detail?.surface_owner === "pm" ? "pm" : null;
+    if (target === "project-manager") {
+      (options.onOpenAgents || (() => focusOrSpawnPreset("agents")))();
+      return;
+    }
     if (target === "index") {
       focusOrSpawnPreset("index");
       return;
@@ -732,8 +750,10 @@ export function createSettingsSurface({
   focusOrSpawnPreset,
   renderUsagePanel,
   getIndexStatus,
-  pmSettingsPanel,
+  onOpenAgents,
   rosterModel,
+  tuningController,
+  onReloadProfile,
   scheduleFrame,
 }) {
       // Issue #2698 PR 4 — same guard applied to the System Settings
@@ -1075,7 +1095,7 @@ export function createSettingsSurface({
           if (editing) body.dataset.issuesRenderDeferred = "true";
           if (panel && !editing && !(section === "agents" && panel.dataset.dirty === "true")) render(panel, {
             project, status: current.status, profiles: current.profiles, choices: current.choices, send: dispatch, launchControls,
-            availableMembers,
+            availableMembers, tuningController, onReloadProfile,
           });
         }
         focusedLaunchControl?.focus({ preventScroll: true });
@@ -1278,11 +1298,20 @@ export function createSettingsSurface({
         return el;
       }
 
+      function disposeSettingsBody(body) {
+        if (!body) return;
+        body.settingsExplanations?.dispose();
+        for (const panel of body.querySelectorAll("[data-settings-candidates]")) {
+          for (const unsubscribe of panel.candidateTuningUnsubscribers || []) unsubscribe();
+          panel.candidateTuningUnsubscribers = [];
+        }
+        settingsWindowBodies.delete(body);
+      }
+
       function purgeDetachedSettingsBodies() {
         for (const body of Array.from(settingsWindowBodies)) {
           if (!body.isConnected) {
-            body.settingsExplanations?.dispose();
-            settingsWindowBodies.delete(body);
+            disposeSettingsBody(body);
           }
         }
       }
@@ -1295,6 +1324,7 @@ export function createSettingsSurface({
         // Sweep detached bodies up-front so repeated open/close cycles do
         // not accumulate references.
         purgeDetachedSettingsBodies();
+        disposeSettingsBody(body);
         while (body.firstChild) body.removeChild(body.firstChild);
         const project = activeProjectTab();
         body.dataset.settingsSection = "system";
@@ -1304,7 +1334,6 @@ export function createSettingsSurface({
         body.dataset.settingsProjectName = project?.name || project?.title || project?.project_root?.split(/[\\/]/).pop() || "No project";
 
         const root = createDiv("settings-root");
-        body.settingsExplanations?.dispose();
         body.settingsExplanations = bindControlExplanations({ document, root, id: `settings-control-explanation-${windowData.id}` });
 
         const toolbar = document.createElement("header");
@@ -1325,14 +1354,6 @@ export function createSettingsSurface({
           buildSettingsTab("supported-agents", "Supported Agents", false, windowData.id),
         );
         tabs.appendChild(
-          buildSettingsTab(
-            "project-manager",
-            "Project Manager",
-            false,
-            windowData.id,
-          ),
-        );
-        tabs.appendChild(
           buildSettingsTab("custom-agents", "Custom Agents", false, windowData.id),
         );
         // SPEC-1921 2026-05-18 amendment / FR-099: Agent Backends tab is the
@@ -1349,8 +1370,6 @@ export function createSettingsSurface({
         tabs.appendChild(createNode("span", "settings-label", `Project settings · ${body.dataset.settingsProjectName}`));
         tabs.appendChild(buildSettingsTab("issues", "Issues execution settings", false, windowData.id));
         tabs.appendChild(buildSettingsTab("hooks", "Hook Center", false, windowData.id));
-        // PM settings are also project-owned; keep all project tabs together.
-        tabs.appendChild(tabs.querySelector('[data-settings-tab="project-manager"]'));
 
         toolbar.appendChild(heading);
 
@@ -1416,12 +1435,6 @@ export function createSettingsSurface({
 
         bodyEl.appendChild(panelSystem);
         bodyEl.appendChild(panelSupportedAgents);
-        mountProjectManagerSettingsPanel(
-          document,
-          bodyEl,
-          pmSettingsPanel,
-          windowData.id,
-        );
         bodyEl.appendChild(panelAgents);
         bodyEl.appendChild(panelBackends);
         bodyEl.appendChild(panelUsage);
@@ -1479,6 +1492,7 @@ export function createSettingsSurface({
           const candidates = event.target.closest?.("[data-settings-candidates]");
           if (candidates && event.relatedTarget?.closest?.("[data-settings-candidates]") === candidates) return;
           queueMicrotask(() => {
+            if (!body.isConnected || !settingsWindowBodies.has(body)) return;
             if (body.dataset.issuesRenderDeferred === "true") {
               delete body.dataset.issuesRenderDeferred;
               renderProjectSettings(body);
@@ -1584,7 +1598,7 @@ export function createSettingsSurface({
       function renderAgentBackendsPanelInAllSettingsWindows(state = agentBackendsModel.read()) {
         for (const settingsBody of Array.from(settingsWindowBodies)) {
           if (!settingsBody.isConnected) {
-            settingsWindowBodies.delete(settingsBody);
+            disposeSettingsBody(settingsBody);
             continue;
           }
           const panel = settingsBody.querySelector(
@@ -1597,7 +1611,7 @@ export function createSettingsSurface({
       function renderIndexPanelInAllSettingsWindows() {
         for (const settingsBody of Array.from(settingsWindowBodies)) {
           if (!settingsBody.isConnected) {
-            settingsWindowBodies.delete(settingsBody);
+            disposeSettingsBody(settingsBody);
             continue;
           }
           const panel = settingsBody.querySelector(
@@ -1617,6 +1631,7 @@ export function createSettingsSurface({
         document,
         send,
         settingsWindowBodies,
+        onOpenAgents,
         focusOrSpawnPreset,
         activeProjectTab,
         setPendingTarget: (target, surfaceOwner) => {
@@ -2446,7 +2461,7 @@ export function createSettingsSurface({
         let deferred;
         for (const body of Array.from(settingsWindowBodies)) {
           if (!body.isConnected) {
-            settingsWindowBodies.delete(body);
+            disposeSettingsBody(body);
             continue;
           }
           const panel = body.querySelector("[data-system-settings-content]");
@@ -2461,7 +2476,7 @@ export function createSettingsSurface({
       function renderSettingsAgentList(state = customAgentsModel.read()) {
         for (const body of Array.from(settingsWindowBodies)) {
           if (!body.isConnected) {
-            settingsWindowBodies.delete(body);
+            disposeSettingsBody(body);
             continue;
           }
           const scroll = body.querySelector("[data-role='settings-scroll']");
@@ -2685,6 +2700,7 @@ export function createSettingsSurface({
         resyncHookDoctor,
         resyncSettings,
         renderSettingsWindow,
+        disposeSettingsBody,
         renderSettingsAgentList,
         renderAgentBackendsPanel,
         renderAgentBackendsPanelInAllSettingsWindows,

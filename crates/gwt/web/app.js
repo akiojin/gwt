@@ -1,7 +1,8 @@
+import { createLaunchOperationId } from "/launch-pending-controller.js";
 import { createProjectExecutionPolicyModel, createProjectViewReadiness } from "/project-execution-policy-model.js";
 import { createCloseProjectController } from "/close-project-confirm-modal.js";
 import { createUiStateStore } from "/ui-state-store.js";
-import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleModel, createAgentSwitchModel, selectWorksTelemetry } from "/agent-activity-model.js";
+import { createAgentActivityModel, createAgentRosterModel, createMemberTuningModel, createAgentScheduleModel, createAgentSwitchModel, selectWorksTelemetry } from "/agent-activity-model.js";
       import { Terminal } from "/assets/xterm/xterm.mjs";
       import { FitAddon } from "/assets/xterm/addon-fit.mjs";
       // SPEC-3064 Phase 3 (E7): the migration-modal / project-clone-modal /
@@ -446,12 +447,15 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       const projectViewReadiness = createProjectViewReadiness({ document, projectKey: routeProjectKey, send });
       const { model: agentActivityModel, applyAgentActivitySnapshot, clearAgentActivity } = createAgentActivityModel(routeProjectKey);
       const { model: rosterModel, applyAgentRosterSnapshot, applyAgentRosterError, applyAgentRosterUsage,
-        editAgentMemberName, retryAgentMemberName, clearAgentRosterRename } = createAgentRosterModel(routeProjectKey, {
+        editAgentMemberName, retryAgentMemberName, clearAgentRosterRename, beginAgentRosterRequest } = createAgentRosterModel(routeProjectKey, {
         onRename: request => {
           if (send(request) !== "sent") applyAgentRosterError({ project_key: routeProjectKey,
             request_id: request.request_id, message: "Name could not be sent. Retry when connected." });
         },
       });
+      const tuningController = createMemberTuningModel(routeProjectKey, { onSave: request => {
+        if (send(request) !== "sent") throw new Error("Profile could not be sent");
+      } });
       const { model: scheduleModel, applyAgentScheduleSnapshot, applyAgentScheduleError,
         beginAgentScheduleRequest, clearAgentSchedule } = createAgentScheduleModel(routeProjectKey);
       const { model: switchModel, beginAgentSwitchRequest, applyAgentSwitchSnapshot, applyAgentSwitchError, clearAgentSwitch } = createAgentSwitchModel(routeProjectKey);
@@ -908,6 +912,13 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       function sendOnSocket(message, socket) {
+        if (message.kind === "attach_files" || message.kind === "paste_image_uploaded") {
+          // Attachments belong to the captured target and this connection only.
+          if (!activeProjectKey() || message.expected_target?.project_key !== activeProjectKey()
+              || !socket || socket.readyState !== WebSocket.OPEN || socketProjectKey !== activeProjectKey()) return "unavailable";
+          try { socket.send(JSON.stringify(message)); return "sent"; }
+          catch { return "outcome_unknown"; }
+        }
         if (isHubNavigationMessage(message.kind)) {
           if (hubSocket?.readyState === WebSocket.OPEN) {
             hubSocket.send(JSON.stringify(message));
@@ -925,7 +936,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         // Never replay an unacknowledged write after reconnect.
         if (["confirm_close_project", "cancel_close_project", "preview_close_project", "project_view_ready"].includes(message.kind) ||
             (message.kind === "agent_switch" && message.action.kind !== "read") ||
-            (message.kind === "agent_roster" && message.action.kind === "rename") ||
+            (message.kind === "agent_roster" && message.action.kind !== "read") || message.kind === "set_pm_launch_profile" ||
             (message.kind === "get_hook_doctor" && message.repair === true)) {
           if (!socket || socket.readyState !== WebSocket.OPEN || socketProjectKey !== activeProjectKey()) return "unavailable";
           try { socket.send(JSON.stringify(message)); return "sent"; } catch (_err) { return "unavailable"; }
@@ -1186,7 +1197,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       });
 
       function setConnectionState(connected) {
-        if (!connected) { clearAgentActivity(); clearAgentSchedule(); clearAgentSwitch(); clearAgentRosterRename(); }
+        if (!connected) { clearAgentActivity(); clearAgentSchedule(); clearAgentSwitch(); clearAgentRosterRename(); tuningController.disconnectTuning(); }
         connectionOverlay.setConnected(connected);
         handleLaunchWizardTransportChange(connected);
         // SPEC #3170 AS-17.2: disconnect invalidates every silent semantic
@@ -1427,6 +1438,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       function handleSocketClose(recoverSnapshots = false) {
+        if (typeof handleAttachmentTransportChange === "function") handleAttachmentTransportChange(false);
         closeProjectController.connectionLost();
         projectViewReadiness.connectionLost();
         projectExecutionPolicy.connectionLost();
@@ -1513,6 +1525,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           return;
         }
         const previousSocket = socket;
+        if (typeof handleAttachmentTransportChange === "function") handleAttachmentTransportChange(false);
         if (force === true && socketProjectKey === projectKey) {
           if (previousSocket?.readyState === WebSocket.OPEN && previousSocket !== hubSocket) {
             closeSocketInputHandoff();
@@ -1825,13 +1838,15 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           UI_TRACE_EVENT.renderAppState,
           { tabs: Array.isArray(nextState?.tabs) ? nextState.tabs.length : 0 },
           () => {
-            if (nextState?.active_tab_id !== appState.active_tab_id) splitSurfaces?.close();
-            appState = mergeProjectCatalog(nextState || {
+            const nextAppState = mergeProjectCatalog(nextState || {
               app_version: "",
               tabs: [],
               active_tab_id: null,
               recent_projects: [],
             });
+            if (appState.active_tab_id !== null && nextAppState.active_tab_id !== appState.active_tab_id) splitSurfaces?.close();
+            worksSurface?.prepareWorkspaceReconciliation(nextAppState);
+            appState = nextAppState;
             // Runtime snapshots observe unmounted windows too. Reconcile
             // attention against the full catalog, never DOM membership.
             const currentWindowIds = allProjectWindowIdSet();
@@ -2109,6 +2124,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
                   windowId,
                   shouldFocus: false,
                   shouldPersistGeometry: persist,
+                  syncGeometryOnGridChange: true,
+                  allowFastPath: true,
+                  pendingOutputCount: terminalOutputBatcher.pendingCount(windowId),
+                  hasPendingRefresh: runtime.viewportRefreshPending === true
+                    || terminalViewportRefreshScheduler?.hasPending?.(windowId) === true,
                   sendGeometry,
                 }),
             });
@@ -2943,6 +2963,20 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // handling moved to /terminal-attachments.js. createTerminalRuntime,
       // applyStatus, mountWindowBody, receive(), and the boot-time bridge
       // installs keep their existing call sites wired through this factory.
+      function captureAttachmentTarget(windowId) {
+        const activity = agentActivityModel.read();
+        const snapshot = activity.snapshot;
+        const data = currentNativeWindow(windowId);
+        const agent = activity.agents.find(row => row.window_id === windowId && row.session_id === data?.session_id);
+        if (!snapshot || activity.count === null || snapshot.project_key !== routeProjectKey
+            || activeProjectKey() !== routeProjectKey || !snapshot.host_id || !data
+            || !isAgentWindowPreset(data.preset) || !agent || !agent.session_id
+            || !Number.isSafeInteger(agent.runtime_incarnation) || agent.runtime_incarnation < 1) return null;
+        return { expected_target: { project_key: routeProjectKey, session_id: agent.session_id,
+          host_id: snapshot.host_id, runtime_incarnation: agent.runtime_incarnation },
+          connection_epoch: socketReceiveDispatcherGeneration };
+      }
+
       const {
         updateTerminalOverlayCopyState,
         copyTerminalOverlayMessage,
@@ -2952,10 +2986,21 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         installTerminalContextMenuHandlers,
         installTerminalViewportRefreshHandlers,
         handleAttachmentProgress,
+        reconcileAttachmentProgress,
+        handleAttachmentTransportChange,
+        disposeAttachmentProgress,
         installBrowserFileDropBridge,
         installNativeFileDropBridge,
       } = createTerminalAttachments({
         send,
+        captureAttachmentTarget,
+        reportAttachmentNotice: ({ windowId, operationId, message }) => alertsToasts.push({
+          id: `attachment-${windowId}-${operationId}`, level: "warn", title: "Attachment status",
+          message, dismissible: true, timeoutMs: 0,
+        }),
+        dismissAttachmentNotice: (windowId, operationId) => {
+          if (operationId) alertsToasts.dismiss(`attachment-${windowId}-${operationId}`);
+        },
         terminalMap,
         windowMap,
         workspaceWindowById,
@@ -2964,6 +3009,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         scheduleTerminalViewportRefresh,
         TERMINAL_SELECTION_DRAG_THRESHOLD,
       });
+
+      agentActivityModel.subscribe(state => state, reconcileAttachmentProgress);
+      windowCatalogModel.subscribe(state => state.catalog, reconcileAttachmentProgress);
 
       // SPEC-2356 — xterm content stays on the Dark Operator palette even when
       // surrounding window chrome follows the app's light theme. High-contrast
@@ -3097,6 +3145,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           runtime.terminal,
           { readOnly },
         );
+        if (typeof reconcileAttachmentProgress === "function") reconcileAttachmentProgress();
         // Reparenting is a reveal even when Agents never selects this window.
         scheduleInitialFitHandshake(windowId);
         requestAnimationFrame(() => {
@@ -3111,7 +3160,107 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         }
       }
 
+      function currentNativeWindow(windowId, state = appState) {
+        return (state.tabs || []).filter(tab => tab.project_key === routeProjectKey)
+          .flatMap(tab => tab.workspace?.windows || []).find(data => data.id === windowId);
+      }
+
+      function nativeSessionIdentity(windowId, identity = null) {
+        const data = currentNativeWindow(windowId);
+        return { projectKey: routeProjectKey, window_id: windowId, session_id: identity?.session_id ?? data?.session_id,
+          hostId: identity?.hostId };
+      }
+
+      function sameNativeSession(left, right) {
+        return left?.projectKey === right?.projectKey && left?.window_id === right?.window_id
+          && left?.session_id === right?.session_id
+          && (!left?.hostId || !right?.hostId || left.hostId === right.hostId);
+      }
+
+      function disposeTerminalRuntime(windowId, expectedRuntime, expectedRoot) {
+        if (terminalMap.get(windowId) !== expectedRuntime || expectedRuntime?.terminalContainer !== expectedRoot) return false;
+        if (expectedRuntime.activationFrame !== null) cancelAnimationFrame(expectedRuntime.activationFrame);
+        terminalViewportRefreshScheduler?.clear(windowId);
+        expectedRuntime.cleanup?.();
+        expectedRuntime.terminal.dispose();
+        terminalMap.delete(windowId);
+        if (typeof reconcileAttachmentProgress === "function") reconcileAttachmentProgress();
+        decoderMap.delete(windowId);
+        pendingSnapshotMap.delete(windowId);
+        terminalOutputBatcher.clear(windowId);
+        renderedTerminalPackets.delete(windowId);
+        removePmWindowState(windowId);
+        const previous = worksPreviousHosts.get(windowId);
+        if (previous?.runtime === expectedRuntime) worksPreviousHosts.delete(windowId);
+        return true;
+      }
+
+      function recordWorksPreviousHost(windowId, runtime, root, container, readOnly, identity) {
+        const previous = worksPreviousHosts.get(windowId);
+        if (previous && previous.runtime !== runtime) return;
+        worksPreviousHosts.set(windowId, { runtime, root, container, readOnly, identity });
+      }
+
+      function capturedWorksOwner(windowId, root, identity) {
+        const runtime = terminalMap.get(windowId), previous = worksPreviousHosts.get(windowId);
+        const entryIdentity = worksSurface?.nativeIdentity(windowId, root);
+        if (!runtime || !previous || previous.runtime !== runtime || previous.root !== root
+            || !sameNativeSession(runtime.nativeIdentity, identity) || !sameNativeSession(previous.identity, identity)
+            || !sameNativeSession(entryIdentity, identity)
+            || previous.identity?.hostId !== identity?.hostId || entryIdentity?.hostId !== identity?.hostId
+            || previous.identity?.runtime_incarnation !== identity?.runtime_incarnation
+            || entryIdentity?.runtime_incarnation !== identity?.runtime_incarnation) return null;
+        const currentRoot = runtime.terminalContainer;
+        const returned = currentRoot === previous.container && previous.container?.isConnected
+          && windowMap.get(windowId)?.contains(previous.container);
+        return currentRoot === root || returned ? { runtime, previous, currentRoot } : null;
+      }
+
+      function revokeWorksTerminal(windowId, root, identity) {
+        const owner = capturedWorksOwner(windowId, root, identity);
+        if (owner) reparentTerminalRuntime(windowId, owner.runtime, root, { readOnly: true });
+      }
+
+      function settleWorksTerminal(windowId, root, identity, cause) {
+        const owner = capturedWorksOwner(windowId, root, identity);
+        if (!owner) return;
+        const { runtime, previous, currentRoot } = owner;
+        const data = currentNativeWindow(windowId);
+        const activity = agentActivityModel.read();
+        const hostMatches = !activity.snapshot?.host_id || !identity.hostId || activity.snapshot.host_id === identity.hostId;
+        const projectMatches = !activity.snapshot?.project_key || activity.snapshot.project_key === routeProjectKey;
+        const sessionMatches = data && sameNativeSession(identity, nativeSessionIdentity(windowId));
+        const live = hostMatches && projectMatches && activity.count !== null && sessionMatches
+          && activity.agents.some(agent => agent.window_id === windowId && agent.session_id === identity.session_id
+            && agent.runtime_incarnation === identity.runtime_incarnation);
+        const validHost = previous?.runtime === runtime && previous.root === root
+          && sameNativeSession(previous.identity, identity) && sessionMatches
+          && previous.container?.isConnected && windowMap.get(windowId)?.contains(previous.container);
+        if (cause === "departure" && hostMatches && projectMatches && sessionMatches && !live) {
+          reparentTerminalRuntime(windowId, runtime, root, { readOnly: true });
+          return;
+        }
+        if (cause !== "unload" && hostMatches && projectMatches && validHost) {
+          reparentTerminalRuntime(windowId, runtime, previous.container,
+            { readOnly: cause === "departure" && live && runtime.isReady === true ? previous.readOnly : true });
+          if (cause !== "departure" && worksPreviousHosts.get(windowId) === previous) worksPreviousHosts.delete(windowId);
+          return;
+        }
+        if (cause === "departure" && hostMatches && projectMatches && (!data || (sessionMatches && !validHost))) {
+          reparentTerminalRuntime(windowId, runtime, root, { readOnly: true });
+          return;
+        }
+        if (disposeTerminalRuntime(windowId, runtime, currentRoot) && cause !== "unload" && data
+            && (!sessionMatches || !hostMatches)) requestSocketSnapshots();
+      }
+
       function createTerminalRuntime(windowId, terminalContainer, options = {}) {
+        let replacedSession = false;
+        const nativeIdentity = nativeSessionIdentity(windowId, options.identity);
+        const existing = terminalMap.get(windowId);
+        if (existing && !sameNativeSession(existing.nativeIdentity, nativeIdentity)) {
+          replacedSession = disposeTerminalRuntime(windowId, existing, existing.terminalContainer);
+        }
         if (options.readOnly && !options.nativeHost && worksHost && surfaceForWindow(workspaceWindowById(windowId)) === "works") {
           const runtime = terminalMap.get(windowId) || createTerminalRuntime(windowId, terminalContainer);
           if (runtime) {
@@ -3124,12 +3273,14 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           }
         }
         if (terminalMap.has(windowId)) {
-          return reparentTerminalRuntime(
-            windowId,
-            terminalMap.get(windowId),
-            terminalContainer,
-            options,
-          );
+          const runtime = terminalMap.get(windowId);
+          const owned = worksSurface?.nativeIdentity(windowId, runtime.terminalContainer);
+          if (owned && !options.nativeHost && runtime.terminalContainer !== terminalContainer) {
+            recordWorksPreviousHost(windowId, runtime, runtime.terminalContainer, terminalContainer, options.readOnly === true, owned);
+            return runtime;
+          }
+          if (options.identity?.hostId) runtime.nativeIdentity = nativeIdentity;
+          return reparentTerminalRuntime(windowId, runtime, terminalContainer, options);
         }
         const terminal = new Terminal({
           cursorBlink: true,
@@ -3191,6 +3342,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           send({ kind: "terminal_input", id: windowId, data });
         });
         const runtime = {
+          nativeIdentity,
           terminal,
           fitAddon,
           cleanup,
@@ -3224,6 +3376,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           readOnly: options.readOnly === true,
         };
         terminalMap.set(windowId, runtime);
+        if (typeof reconcileAttachmentProgress === "function") reconcileAttachmentProgress();
         decoderMap.set(windowId, new TextDecoder());
         runtime.snapshotWriteCoordinator = createTerminalSnapshotWriteCoordinator({
           terminal,
@@ -3267,6 +3420,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         // handshake then completes on the next hidden → visible
         // transition via scheduleTerminalFocusActivation.
         scheduleInitialFitHandshake(windowId);
+        if (replacedSession) requestSocketSnapshots();
 
         return runtime;
       }
@@ -3954,8 +4108,16 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // The controller is created before Settings so pm_status may hydrate its
       // shared snapshot before the first Settings window is mounted.
       const { applyStatus: applyPmSettingsReceiveEvent, ...pmSettingsPanel } = createPmSettingsPanel({
-        document,
-        send,
+        document, send, projectKey: routeProjectKey,
+        projectName: () => {
+          const project = (appState?.tabs || []).find(tab => tab.project_key === routeProjectKey);
+          return project?.name || project?.title || project?.project_root?.split(/[\\/]/).pop() || "";
+        },
+        onReloadProfile: () => requestAgentRoster(),
+        onOpenAgents: memberId => { openSurface("agents"); agentsSurface?.openPmSettings(memberId); },
+        onRender: () => agentsSurface?.syncPreview(),
+        onOpenMember: memberId => { openSurface("agents"); agentsSurface.selectMember(memberId); },
+        onNavigateProject: projectKey => window.location.assign(projectUrlPath(projectKey)),
         confirm: (message) => window.confirm(message),
         executionModel: projectExecutionPolicy.model, projectTitle: () => activeProjectTab()?.title || routeProjectKey,
       });
@@ -4424,6 +4586,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         resyncHookDoctor,
         resyncSettings,
         renderSettingsWindow,
+        disposeSettingsBody,
         renderSettingsAgentList,
         renderAgentBackendsPanel,
         renderAgentBackendsPanelInAllSettingsWindows,
@@ -4441,8 +4604,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         focusOrSpawnPreset,
         renderUsagePanel,
         getIndexStatus,
-        pmSettingsPanel,
-        rosterModel,
+        onOpenAgents: () => pmSettingsPanel.openAgents(),
+        rosterModel, tuningController, onReloadProfile: () => requestAgentRoster(),
       });
 
       function ensureWindow(windowData) {
@@ -4591,6 +4754,15 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       function renderWorkspace(workspace) {
+        worksSurface?.prepareWorkspaceReconciliation(appState);
+        let replacedSession = false;
+        for (const [id, runtime] of terminalMap) {
+          const incoming = currentNativeWindow(id);
+          if (incoming && runtime.nativeIdentity?.session_id !== incoming.session_id) {
+            replacedSession = disposeTerminalRuntime(id, runtime, runtime.terminalContainer) || replacedSession;
+          }
+        }
+        if (replacedSession) requestSocketSnapshots();
         const wasReconciling = reconcilingWindowCatalog;
         reconcilingWindowCatalog = true;
         let result;
@@ -4634,17 +4806,16 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
                     const element = windowMap.get(windowId);
                     if (!element) return;
                     disposePmChat(windowId);
-                    removePmWindowState(windowId);
-                    renderedTerminalPackets.delete(windowId);
                     const runtime = terminalMap.get(windowId);
-                    if (runtime && runtime.activationFrame !== null) {
-                      cancelAnimationFrame(runtime.activationFrame);
+                    const retainNative = runtime && worksSurface?.retainsNativeRoot(windowId, runtime.terminalContainer, appState);
+                    if (runtime && !retainNative) disposeTerminalRuntime(windowId, runtime, runtime.terminalContainer);
+                    if (!runtime) {
+                      removePmWindowState(windowId);
+                      renderedTerminalPackets.delete(windowId);
+                      decoderMap.delete(windowId);
+                      pendingSnapshotMap.delete(windowId);
+                      terminalOutputBatcher.clear(windowId);
                     }
-                    terminalViewportRefreshScheduler?.clear(windowId);
-                    runtime?.cleanup?.();
-                    runtime?.terminal.dispose();
-                    terminalMap.delete(windowId);
-                    decoderMap.delete(windowId);
                     detailMap.delete(windowId);
                     windowRuntimeStateMap.delete(windowId);
                     windowRuntimeStateSinceMap.delete(windowId);
@@ -4658,8 +4829,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
                       return next;
                     });
                     renderedIssueWindowHeaderKeys.delete(windowId);
-                    pendingSnapshotMap.delete(windowId);
-                    terminalOutputBatcher.clear(windowId);
                     disposeProfileWindow(windowId);
                     branchListStateMap.delete(windowId);
                     boardStateMap.delete(windowId);
@@ -4669,8 +4838,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
                     workspaceOverviewSurface.deleteState(windowId);
                     clearBranchCleanupForWindow(windowId);
 
-                    pmSettingsPanel.unmount(element.querySelector('[data-settings-panel="project-manager"]'));
-                    element.querySelector(".window-body")?.settingsExplanations?.dispose();
+                    disposeSettingsBody(element.querySelector(".window-body"));
                     element.remove();
                     windowMap.delete(windowId);
                   });
@@ -5085,12 +5253,15 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             break;
           // The backend snapshot gates only the List; both views read the catalog.
           case "agent_roster_error":
+            tuningController.applyRosterTuningError(event);
             applyAgentRosterError(event);
             break;
-          case "agent_roster":
-            applyAgentRosterSnapshot(event.roster, event.request_id);
-            refreshProfilesAfterRoster(event.roster);
+          case "agent_roster": {
+            const accepted = applyAgentRosterSnapshot(event.roster, event.request_id);
+            tuningController.applyRosterTuningSnapshot(event.roster, event.request_id, { accepted });
+            if (accepted) refreshProfilesAfterRoster(event.roster);
             break;
+          }
           case "agent_switch":
             applyAgentSwitchSnapshot(event.snapshot);
             break;
@@ -5118,7 +5289,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             applyPmWindowReceiveEvent(event);
             break;
           }
+          case "pm_launch_profile_result":
+            tuningController.applyPmTuningResult(event);
+            break;
           case "pm_status":
+            tuningController.applyPmTuningStatus(event);
             // SPEC-3431 FR-026: the whole panel state arrives in one snapshot.
             applyPmSettingsReceiveEvent(event);
             pmLauncherModel.update(state => ({ ...state, paused: Boolean(event.paused) }));
@@ -5421,6 +5596,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       installNativeFileDropBridge();
 
       window.addEventListener("unload", () => {
+        disposeAttachmentProgress();
         disposeProjectShellSurface();
 
         worksSurface?.dispose();
@@ -5555,12 +5731,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         if (host) { worksSurface.sync(); requestAgentRoster(); }
         else {
           for (const [id, previous] of worksPreviousHosts) {
-            const runtime = terminalMap.get(id);
-            if (runtime && previous.container.isConnected) {
-              reparentTerminalRuntime(id, runtime, previous.container, { readOnly: previous.readOnly });
+            if (worksPreviousHosts.get(id) === previous) {
+              settleWorksTerminal(id, previous.root, previous.identity, "departure");
             }
           }
-          worksPreviousHosts.clear();
           cleanupTextPreviews(true);
         }
         worksSurface.setPreviewHost(previewHost);
@@ -5568,6 +5742,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         requestAnimationFrame(() => renderWorkspace(activeWorkspace()));
       }
       worksSurface = createWorksSurface({
+        projectKey: routeProjectKey,
         systemSettingsModel,
         document,
         windowCatalogModel,
@@ -5578,12 +5753,16 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           ...data, status: catalog.runtimeStates[data.id] ?? data.status,
         })),
         isMounted: () => Boolean(worksHost),
+        onRevokeTerminal: revokeWorksTerminal,
+        onReleaseTerminal: settleWorksTerminal,
         mountTerminal: (id, root, options = {}) => {
           const runtime = terminalMap.get(id);
-          if (runtime && runtime.terminalContainer !== root && !worksPreviousHosts.get(id)?.container.isConnected) {
-            worksPreviousHosts.set(id, { container: runtime.terminalContainer, readOnly: runtime.readOnly });
+          if (runtime && runtime.terminalContainer !== root && !worksPreviousHosts.get(id)?.container?.isConnected) {
+            recordWorksPreviousHost(id, runtime, root, runtime.terminalContainer, runtime.readOnly, options.identity);
           }
-          createTerminalRuntime(id, root, { ...options, nativeHost: true });
+          const mounted = createTerminalRuntime(id, root, { ...options, nativeHost: true });
+          if (mounted && !worksPreviousHosts.has(id)) recordWorksPreviousHost(id, mounted, root, null, true, options.identity);
+          return mounted;
         },
         mountPreview: (id, root, options = {}) => {
           const terminal = terminalMap.get(id)?.terminal;
@@ -5611,7 +5790,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
               if (worksSurface.isVisible(id)) {
                 terminalOutputBatcher.schedulePending(id);
                 completeInitialFitHandshake(id);
-                scheduleTerminalFit(id, true);
+                scheduleTerminalFit(id, terminalMap.get(id)?.viewportRefreshPending === true);
               }
             }
           });
@@ -5649,7 +5828,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       windowCatalogModel.subscribe(state => state.catalog, () => recomputeOperatorTelemetry());
       activeWorkProjectionModel.subscribe(state => state, () => updateWorksTelemetry());
       function requestAgentRoster(action = { kind: "read" }) {
-        send({ kind: "agent_roster", action, expected_revision: action.kind === "read" ? null : rosterModel.read().revision });
+        const request = { kind: "agent_roster", project_key: routeProjectKey, request_id: createLaunchOperationId("roster"), action, expected_revision: action.kind === "read" ? null : rosterModel.read().revision };
+        if (!beginAgentRosterRequest(request)) return;
+        if (send(request) !== "sent" && action.kind !== "read") applyAgentRosterError({ project_key: routeProjectKey,
+          request_id: request.request_id, message: "Member change could not be sent. Reload members and retry when connected." });
       }
       function requestAgentSchedule(action = { kind: "read" }) {
         if (action.kind !== "read" && action.expected_roster_revision !== rosterModel.read().revision) {
@@ -5678,13 +5860,16 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         openSurface("works");
         return worksSurface.openWork(live);
       }
-      agentsSurface = createAgentsSurface({ document, executionModel: projectExecutionPolicy.model,
-        projectTitle: () => activeProjectTab()?.title || routeProjectKey, rosterModel, scheduleModel, switchModel, activityModel: agentActivityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
+      agentsSurface = createAgentsSurface({ document, executionModel: projectExecutionPolicy.model, projectTitle: () => activeProjectTab()?.title || routeProjectKey, rosterModel, tuningController, pmSettingsPanel, scheduleModel, switchModel, activityModel: agentActivityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
+        onReloadProfile: () => requestAgentRoster(),
+        onSetPmEligibility: (memberId, eligible) => requestAgentRoster({ kind: "set_pm_eligibility", member_id: memberId, eligible }),
+        onSelectPm: memberId => requestAgentRoster({ kind: "select_pm", member_id: memberId }),
+        onNavigateProject: projectKey => window.location.assign(projectUrlPath(projectKey)),
         onRenameMember: editAgentMemberName,
         onRetryName: retryAgentMemberName,
-        onAddMember: (agentId, name) => {
+        onAddMember: (agentId, name, pmEligible) => {
           applyAgentRosterError({ project_key: routeProjectKey, message: null });
-          requestAgentRoster({ kind: "add", agent_id: agentId, name });
+          requestAgentRoster({ kind: "add", agent_id: agentId, name, pm_eligible: pmEligible });
         },
         onRestMember: memberId => requestAgentRoster({ kind: "rest", member_id: memberId }),
         onSwitch: requestAgentSwitch,
@@ -5756,8 +5941,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       windowCatalogModel.subscribe(model => model.catalog, catalog => {
         const tabId = catalog.appState.active_tab_id;
         if (tabId !== initialSurfaceTabId) {
+          // Preserve a rail choice made before the first project is hydrated.
+          if (initialSurfaceTabId !== null) initialSurfaceSelected = false;
           initialSurfaceTabId = tabId;
-          initialSurfaceSelected = false;
         }
         const pending = windowCatalogModel.read().pendingSurface;
         if (pending && pending.tabId === catalog.appState.active_tab_id) {

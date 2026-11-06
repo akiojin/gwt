@@ -653,8 +653,17 @@ fn pm_process_launch_isolates_discovery_and_keeps_project_data_readable() {
     fs::create_dir_all(worktree.join(".codex")).unwrap();
     fs::write(worktree.join(".codex/config.toml"), "project_marker = true").unwrap();
     let runtime_dir = worktree.parent().unwrap().join("runtime");
-    let sessions = temp.path().join("sessions");
+    let sessions = gwt_core::paths::gwt_sessions_dir();
     fs::create_dir_all(&sessions).unwrap();
+    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+    let mut prefs = gwt::pm_registry::PmPrefs::default();
+    prefs.settings.launch_profile = Some(gwt::pm_registry::PmLaunchProfile {
+        agent_id: "codex".into(),
+        model: None,
+        reasoning: None,
+        version: None,
+    });
+    gwt::pm_registry::save_pm_prefs(&prefs_path, &prefs).unwrap();
     let mut previous = None;
     for resumed in [false, true] {
         let mut config = if let Some(session) = previous.as_ref() {
@@ -677,25 +686,23 @@ fn pm_process_launch_isolates_discovery_and_keeps_project_data_readable() {
         config
             .env_vars
             .insert("CODEX_HOME".into(), codex_home.display().to_string());
-        let (proxy, events) = AppEventProxy::stub();
-        AppRuntime::spawn_agent_window_async(
-            proxy,
-            sessions.clone(),
-            repo.display().to_string(),
-            "tab-1::pm-isolation".into(),
-            config,
-            temp.path().join("missing-config.toml"),
-            None,
-        );
-        let recorded = events.lock().unwrap();
-        let result = recorded
-            .iter()
-            .find_map(|event| match event {
-                UserEvent::LaunchComplete { result, .. } => Some(result.as_ref()),
-                _ => None,
-            })
-            .expect("LaunchComplete");
-        let completion = result.as_ref().expect("successful PM process preparation");
+        let prepared = gwt::project_runtime::test_support::PreparedPmLaunchFixture::prepare(
+            gwt::project_runtime::launch::AgentLaunchInput {
+                sessions_dir: sessions.clone(),
+                project_root: repo.display().to_string(),
+                window_id: "tab-1::pm-isolation".into(),
+                config,
+                profile_config_path: temp.path().join("missing-config.toml"),
+                agent_capability_issuer: None,
+                prepared_manual_launch_claim: None,
+                issue_monitor_trust_candidate: None,
+                issue_monitor_launch: false,
+                pm_restore_prior: None,
+            },
+            previous.as_ref(),
+        )
+        .expect("successful PM process preparation");
+        let completion = &prepared.completion;
         assert_eq!(
             completion.0.cwd.as_deref(),
             Some(runtime_dir.as_path()),
@@ -731,6 +738,22 @@ fn pm_process_launch_isolates_discovery_and_keeps_project_data_readable() {
         );
         session.agent_session_id = Some("pm-isolation-resume".into());
         session.save(&sessions).unwrap();
+        let session = prepared
+            .retire_unspawned(&repo, &sessions, &session)
+            .expect("exact prepared-only PM cleanup before Resume");
+        gwt::pm_registry::try_register_pm(
+            &prefs_path,
+            gwt::pm_registry::PmRegistration {
+                session_id: session.id.clone(),
+                agent_id: "codex".into(),
+                worktree_path: worktree.to_string_lossy().into_owned(),
+                created_at: Some(session.created_at.to_rfc3339()),
+                consecutive_crashes: 0,
+                next_not_before: None,
+            },
+            |_| false,
+        )
+        .expect("registered original PM conversation");
         previous = Some(session);
     }
 }
@@ -883,16 +906,40 @@ fn set_pm_launch_profile_accepts_grok_and_persists_model_and_reasoning() {
     init_git_clone_with_origin(&repo);
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&repo);
+    fs::create_dir_all(&worktree).unwrap();
+    let selected_member = gwt::agent_registry::reserve_new_pm_member(
+        &repo,
+        &runtime.sessions_dir,
+        &worktree,
+        "profile-test-reservation",
+    )
+    .unwrap()
+    .member
+    .agent_member_id;
 
-    runtime.handle_frontend_event(
+    let events = runtime.handle_frontend_event(
         "client-1".to_string(),
         FrontendEvent::SetPmLaunchProfile {
+            project_key: Some(gwt_core::paths::project_scope_hash(&repo).to_string()),
+            member_id: Some(selected_member.clone()),
+            request_id: Some("profile-fixture".into()),
+            expected_profile_revision: Some(gwt::pm_registry::pm_profile_revision(
+                &gwt::pm_registry::load_pm_prefs(&gwt::pm_registry::pm_prefs_path_for_repo_path(
+                    &repo,
+                ))
+                .unwrap(),
+            )),
             agent_id: "grok".to_string(),
             model: Some("  grok-4.20-beta  ".to_string()),
             reasoning: Some("  xhigh  ".to_string()),
         },
     );
 
+    assert!(events.iter().any(|event| matches!(&event.event, BackendEvent::PmLaunchProfileResult {
+        project_key, member_id: Some(member), request_id: Some(request), success: true,
+        profile_revision: Some(_), profile: Some(_), ..
+    } if project_key == gwt_core::paths::project_scope_hash(&repo).as_str() && member == &selected_member && request == "profile-fixture")));
     let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
     let profile = gwt::pm_registry::load_pm_prefs(&prefs_path)
         .expect("load PM prefs")
@@ -967,6 +1014,22 @@ fn pm_status_projects_configured_and_running_agent_model_and_reasoning() {
     assert_eq!(status["running_model"], "claude-opus-4-1");
     assert_eq!(status["running_reasoning"], "high");
     assert_eq!(status["is_running"], true);
+    let prefs = gwt::pm_registry::load_pm_prefs(&prefs_path).unwrap();
+    let mut stale_registration = prefs.registration.clone().unwrap();
+    stale_registration.session_id = "replaced-pm-session".into();
+    let stale = serde_json::to_value(
+        gwt::project_runtime::pm_delivery::pm_status_from_launch_prefs(
+            &runtime.sessions_dir,
+            &repo,
+            &prefs,
+            Some(&stale_registration),
+        ),
+    )
+    .unwrap();
+    assert!(stale["running_session_id"].is_null());
+    assert!(stale["running_member_id"].is_null());
+    assert!(stale["running_agent_id"].is_null());
+    assert_eq!(stale["configured_agent_id"], "codex");
 }
 
 #[test]
@@ -1301,6 +1364,13 @@ fn pm_close_window_deregisters_pm() {
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let (repo, mut runtime, window_id) = pm_wake_fixture(&temp);
+    // Replace the wake-only fixture's known registration with an actual owner
+    // launch; its placeholder has no durable PM Session to resume or import.
+    gwt::pm_registry::deregister_pm(
+        &gwt::pm_registry::pm_prefs_path_for_repo_path(&repo),
+        "pm-session-live",
+    )
+    .expect("retire the known wake-only placeholder registration");
     let _pane = attach_live_pm_pane(&mut runtime, &window_id);
     let (spawner, finalizers) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
@@ -1407,6 +1477,13 @@ fn pm_close_completion_stays_with_owner_and_is_dropped_after_owner_closes() {
     ];
     let mut runtime = sample_runtime(temp.path(), tabs, Some("tab-b"));
     let stale_status = BackendEvent::PmStatus {
+        project_key: String::new(),
+        configured_member_id: None,
+        configured_member_name: None,
+        running_member_id: None,
+        running_session_id: None,
+        roster_revision_decimal: None,
+        profile_revision: None,
         available: true,
         auto_start: false,
         paused: false,
@@ -2858,6 +2935,18 @@ fn set_pm_launch_profile_rejects_an_unsupported_agent() {
         WindowProcessStatus::Running,
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&repo);
+    fs::create_dir_all(&worktree).unwrap();
+    let selected_member = gwt::agent_registry::reserve_new_pm_member(
+        &repo,
+        &runtime.sessions_dir,
+        &worktree,
+        "profile-test-reservation",
+    )
+    .unwrap()
+    .member
+    .agent_member_id;
+
     let window_id = "tab-1::agent-1".to_string();
     let mut session = sample_active_agent_session("tab-1", &window_id);
     session.session_id = "pm-session-live".to_string();
@@ -2875,6 +2964,15 @@ fn set_pm_launch_profile_rejects_an_unsupported_agent() {
     runtime.handle_frontend_event(
         "client-1".to_string(),
         FrontendEvent::SetPmLaunchProfile {
+            project_key: Some(gwt_core::paths::project_scope_hash(&repo).to_string()),
+            member_id: Some(selected_member.clone()),
+            request_id: Some("profile-fixture".into()),
+            expected_profile_revision: Some(gwt::pm_registry::pm_profile_revision(
+                &gwt::pm_registry::load_pm_prefs(&gwt::pm_registry::pm_prefs_path_for_repo_path(
+                    &repo,
+                ))
+                .unwrap(),
+            )),
             agent_id: "gemini".to_string(),
             model: Some("gemini-3-pro".to_string()),
             reasoning: None,
@@ -2890,6 +2988,15 @@ fn set_pm_launch_profile_rejects_an_unsupported_agent() {
     runtime.handle_frontend_event(
         "client-1".to_string(),
         FrontendEvent::SetPmLaunchProfile {
+            project_key: Some(gwt_core::paths::project_scope_hash(&repo).to_string()),
+            member_id: Some(selected_member.clone()),
+            request_id: Some("profile-fixture".into()),
+            expected_profile_revision: Some(gwt::pm_registry::pm_profile_revision(
+                &gwt::pm_registry::load_pm_prefs(&gwt::pm_registry::pm_prefs_path_for_repo_path(
+                    &repo,
+                ))
+                .unwrap(),
+            )),
             agent_id: "codex".to_string(),
             model: Some("gpt-5.1-codex-max".to_string()),
             reasoning: Some("high".to_string()),
@@ -3012,5 +3119,157 @@ fn restart_pm_agent_keeps_the_worktree_and_respawns() {
             .iter()
             .any(|outbound| matches!(outbound.event, BackendEvent::PmStatus { .. })),
         "the restart must broadcast pm_status"
+    );
+}
+
+#[test]
+fn unqualified_pm_profile_write_returns_visible_refusal_without_creating_prefs() {
+    let _pm_gate = super::super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let event = serde_json::from_value(serde_json::json!({"kind":"set_pm_launch_profile", "agent_id":"codex", "model":"legitimate-custom", "reasoning":"high"})).unwrap();
+    let events = runtime.handle_frontend_event("client-1".into(), event);
+    assert!(!gwt::pm_registry::pm_prefs_path_for_repo_path(&repo).exists());
+    assert!(events
+        .iter()
+        .any(|event| serde_json::to_value(&event.event).unwrap()["kind"]
+            == "pm_launch_profile_result"));
+}
+
+#[test]
+fn unreadable_pm_status_never_fabricates_a_default_profile_or_token() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let prefs = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+    fs::create_dir_all(prefs.parent().unwrap()).unwrap();
+    fs::write(&prefs, b"unreadable pm settings").unwrap();
+    let event = runtime.pm_status_event(&runtime.project_contexts()[0]);
+    assert!(
+        matches!(event, BackendEvent::PmStatus { available: false, profile_revision: None, configured_model: None, configured_agent_id, project_key, .. }
+        if configured_agent_id.is_empty() && project_key == gwt_core::paths::project_scope_hash(&repo).as_str())
+    );
+    assert_eq!(fs::read(&prefs).unwrap(), b"unreadable pm settings");
+    assert!(!gwt::issue_monitor_prefs_path_for_repo_path(&repo).exists());
+}
+
+#[test]
+fn ordinary_roster_read_refreshes_pm_profile_after_unavailable_retry() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (blocking_tasks, queued_tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = blocking_tasks;
+    let worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&repo);
+    fs::create_dir_all(&worktree).unwrap();
+    let member = gwt::agent_registry::reserve_new_pm_member(
+        &repo,
+        &runtime.sessions_dir,
+        &worktree,
+        "read-profile-test",
+    )
+    .unwrap()
+    .member;
+    let context = runtime.project_contexts()[0].clone();
+    let path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+    fs::write(&path, b"unreadable PM profile").unwrap();
+    for (id, available) in [("unknown-read", false), ("repaired-read", true)] {
+        if available {
+            gwt::pm_registry::save_pm_prefs(&path, &gwt::pm_registry::PmPrefs::default()).unwrap();
+        }
+        assert!(runtime
+            .handle_frontend_event(
+                "read-client".into(),
+                FrontendEvent::AgentRoster {
+                    action: gwt::agent_names::AgentRosterAction::Read,
+                    expected_revision: None,
+                    project_key: Some(context.project_key.to_string()),
+                    request_id: Some(id.into()),
+                }
+            )
+            .is_empty());
+        let matches_request = |event: &UserEvent| {
+            matches!(event, UserEvent::ProjectDispatch { events, .. } if events.iter().any(|event| matches!(&event.event,
+            BackendEvent::AgentRoster { request_id: Some(request), .. } | BackendEvent::AgentRosterError { request_id: Some(request), .. } if request == id)))
+        };
+        drain_queued_blocking_tasks(&queued_tasks);
+        let completion = recorded_events
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|event| matches_request(event))
+            .unwrap()
+            .clone();
+        let UserEvent::ProjectDispatch {
+            context: captured,
+            events,
+        } = completion
+        else {
+            unreachable!()
+        };
+        assert_eq!(captured, context);
+        let status = events
+            .iter()
+            .find_map(|event| match &event.event {
+                BackendEvent::PmStatus { .. } => Some(&event.event),
+                _ => None,
+            })
+            .expect("ordinary Read must refresh the PM editor without a PM transition");
+        match status {
+            BackendEvent::PmStatus {
+                project_key,
+                available: actual,
+                configured_member_id,
+                profile_revision,
+                running_member_id,
+                ..
+            } => {
+                assert_eq!(project_key, context.project_key.as_str());
+                assert_eq!(*actual, available);
+                assert!(running_member_id.is_none());
+                if available {
+                    assert_eq!(
+                        configured_member_id.as_deref(),
+                        Some(member.agent_member_id.as_str())
+                    );
+                    assert!(profile_revision.is_some());
+                } else {
+                    assert!(profile_revision.is_none());
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+    assert!(!gwt::issue_monitor_prefs_path_for_repo_path(&repo).exists());
+    let mut foreign = context.clone();
+    foreign.project_key = gwt_core::repo_hash::ProjectKey::parse("0123456789abcdef").unwrap();
+    assert!(!runtime.project_context_is_current(&foreign));
+    runtime.project_tab_incarnations.remove(&context.tab_id);
+    assert!(
+        !runtime.project_context_is_current(&context),
+        "the existing ProjectDispatch guard drops this completion after project retirement"
     );
 }

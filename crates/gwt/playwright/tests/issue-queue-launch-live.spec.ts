@@ -1,8 +1,32 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { mkdir, readFile, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { startIssueQueueLaunchFixture } from "./_helpers/issue-queue-launch";
 import { gotoLiveGwt, sendLiveGwtEvent } from "./_helpers/live-gwt";
+
+let rosterReadSequence = 0;
+async function readCanonicalRoster(page: Page): Promise<any> {
+  const requestId = `t814-roster-${++rosterReadSequence}`;
+  const projectKey = await page.evaluate(() => location.pathname.split("/")[2]);
+  expect(projectKey).toBeTruthy();
+  const after = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
+  await sendLiveGwtEvent(page, { kind: "agent_roster", project_key: projectKey, request_id: requestId, action: { kind: "read" } });
+  const reply = await page.waitForFunction(({ after, requestId }) => ((window as any).__gwtPlaywrightMessages || []).find((entry: any) =>
+    entry.sequence > after && entry.payload.request_id === requestId
+    && ["agent_roster", "agent_roster_error"].includes(entry.payload.kind))?.payload,
+  { after, requestId }, { timeout: 30_000 }).then(handle => handle.jsonValue());
+  expect(reply.kind, reply.message).toBe("agent_roster");
+  expect(reply.roster.project_key).toBe(projectKey);
+  expect(reply.roster.error).toBeFalsy();
+  expect(Array.isArray(reply.roster.members)).toBe(true);
+  return reply.roster;
+}
+function durableRoster(roster: any) {
+  const fields = ["agent_member_id", "agent_id", "name", "enabled", "pm_eligible", "pm_project_key", "created_at",
+    "origin_session_id", "last_issue_number", "last_spec_number", "last_owner_project_key", "assignment"];
+  return { revision: roster.revision, members: roster.members.map((member: any) =>
+    Object.fromEntries(fields.map(field => [field, member[field]]))) };
+}
 
 test.describe("Issue queue real backend launch", () => {
   test.skip(process.env.GWT_PLAYWRIGHT_QUEUE_LAUNCH !== "1", "requires checkout binaries and isolated provider fixture");
@@ -29,16 +53,39 @@ test.describe("Issue queue real backend launch", () => {
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       operation("issue.monitor.config.set", { max_active: 10 });
       operation("issue.monitor.schedule.read");
-      await expect.poll(async () => (await prefs()).agent_roster?.members.filter((member: any) => member.enabled).length).toBe(10);
-      const roster = (await prefs()).agent_roster;
-      // A separate, unregistered fixture scope uses the normal local ConfigSet
-      // path to establish an older machine limit without editing trusted state.
+      await expect.poll(async () => (await readCanonicalRoster(page)).members.filter((member: any) => member.enabled).length).toBe(10);
+      const canonical = await readCanonicalRoster(page);
+      expect(canonical.members).toHaveLength(10);
+      expect(canonical.total_enabled).toBe(10);
+      const originalMembers = durableRoster(canonical).members;
+      // The seed ConfigSet changes the shared roster as well as machine policy.
+      // Restore its ten existing members through the normal roster writer.
       const seed = join(fixture.home, "machine-policy-seed");
       await mkdir(seed);
       operation("issue.monitor.config.set", { max_active: 4 }, seed);
       const olderMachine = await machine();
       expect(olderMachine).toMatchObject({ mode: "manual", manual_limit: 4 });
-      expect(await prefs()).toMatchObject({ max_active_agents: 10, max_active_agents_mode: "manual", agent_roster: roster });
+      const reduced = await readCanonicalRoster(page);
+      const resizeRequestId = `t814-resize-${++rosterReadSequence}`;
+      const beforeResize = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
+      await sendLiveGwtEvent(page, { kind: "agent_roster", project_key: reduced.project_key, request_id: resizeRequestId,
+        expected_revision: reduced.revision, action: { kind: "resize", size: 10 } });
+      const resizedReply = await page.waitForFunction(({ after, requestId }) => ((window as any).__gwtPlaywrightMessages || []).find((entry: any) =>
+        entry.sequence > after && entry.payload.request_id === requestId
+        && ["agent_roster", "agent_roster_error"].includes(entry.payload.kind))?.payload,
+      { after: beforeResize, requestId: resizeRequestId }, { timeout: 30_000 }).then(handle => handle.jsonValue());
+      expect(resizedReply.kind, resizedReply.message).toBe("agent_roster");
+      expect(resizedReply.roster.project_key).toBe(reduced.project_key);
+      expect(resizedReply.roster.error).toBeFalsy();
+      expect(resizedReply.roster.revision).toBeGreaterThan(reduced.revision);
+      expect(resizedReply.roster.members).toHaveLength(10);
+      expect(resizedReply.roster.members.filter((member: any) => member.enabled)).toHaveLength(10);
+      expect(resizedReply.roster.total_enabled).toBe(10);
+      expect(durableRoster(resizedReply.roster).members).toEqual(originalMembers);
+      expect(await machine()).toEqual(olderMachine);
+      const roster = durableRoster(await readCanonicalRoster(page));
+      expect(roster).toEqual(durableRoster(resizedReply.roster));
+      expect(await prefs()).toMatchObject({ max_active_agents: 10, max_active_agents_mode: "manual" });
       const before = operation("issue.monitor.status");
       expect(before.envelope.project_store.identity_resolved).toBe(true);
       expect(before.output.autonomous_mode).toBe(true);
@@ -49,7 +96,7 @@ test.describe("Issue queue real backend launch", () => {
       // must not suppress the explicit write to the shared machine authority.
       expect(await machine()).toMatchObject({ mode: "manual", manual_limit: 10,
         last_change: { source: "json_operation", max_active_agents_override: 10 } });
-      expect((await prefs()).agent_roster).toEqual(roster);
+      expect(durableRoster(await readCanonicalRoster(page))).toEqual(roster);
       const saved = operation("issue.monitor.status").output;
       const capacity = saved.agent_capacity;
       const available = Math.max(0, 10 - Math.max(0, capacity.other_live_agents - capacity.other_pm_agents)
@@ -155,7 +202,7 @@ test.describe("Issue queue real backend launch", () => {
       expect(saved.stage).toBe("requested");
       const duplicate = await request({ kind: "agent_switch", action: { kind: "request", ...saved.request } }, "agent_switch");
       expect(duplicate.snapshot.intents.filter((value: any) => value.operation_id === operation)).toHaveLength(1);
-      expect((await preferences()).agent_roster.members.find((value: any) => value.agent_member_id === member.agent_member_id).assignment).toEqual(sourceAssignment);
+      expect((await readCanonicalRoster(current)).members.find((value: any) => value.agent_member_id === member.agent_member_id).assignment).toEqual(sourceAssignment);
       expect((await preferences()).monitor_runtime_stop_requests || []).toEqual([]);
       expect(fixture.processAlive(source.pid)).toBe(true);
       expect(await fixture.launches()).toHaveLength(1);
@@ -163,7 +210,7 @@ test.describe("Issue queue real backend launch", () => {
       await plans.getByRole("button", { name: "Cancel switch", exact: true }).click();
       await expect.poll(async () => (await intent(operation))?.stage).toBe("cancelled");
       expect(fixture.processAlive(source.pid)).toBe(true);
-      expect((await preferences()).agent_roster.members.find((value: any) => value.agent_member_id === member.agent_member_id).assignment).toEqual(sourceAssignment);
+      expect((await readCanonicalRoster(current)).members.find((value: any) => value.agent_member_id === member.agent_member_id).assignment).toEqual(sourceAssignment);
       await expect(change).toBeEnabled();
       await change.click();
       await expect.poll(async () => Object.keys((await preferences()).agent_switch_intents).length).toBe(2);
@@ -294,7 +341,7 @@ test.describe("Issue queue real backend launch", () => {
       expect(field(after, "agent_member_id")).toBe(member.agent_member_id);
       expect(field(after, "agent_name")).toBe(field(before, "agent_name"));
       expect(field(after, "agent_name")).toBe(member.name);
-      expect((await preferences()).agent_roster.members.find((value: any) => value.agent_member_id === member.agent_member_id)
+      expect((await readCanonicalRoster(page)).members.find((value: any) => value.agent_member_id === member.agent_member_id)
         .assignment.session_id).toBe(target.gwt_session_id);
       expect(fixture.executionStatus(source.cwd).ecr_status).toBe("active");
       const work = (await fixture.workItems()).work_items.find((value: any) => value.id === ack.work_id);
@@ -344,14 +391,18 @@ test.describe("Issue queue real backend launch", () => {
       target.on("pageerror", error => errors.push(error.message));
       target.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
     };
+    let rosterRequestSequence = 0;
     const request = async (event: unknown, kind: string) => {
+      const requestId = kind === "agent_roster" ? `t20a-roster-${++rosterRequestSequence}` : null;
       const after = await current.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
-      await sendLiveGwtEvent(current, event);
-      return (await current.waitForFunction(({ after, kind }) => {
+      await sendLiveGwtEvent(current, requestId
+        ? { ...(event as Record<string, unknown>), request_id: requestId } : event);
+      return (await current.waitForFunction(({ after, kind, requestId }) => {
         const entry = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) =>
-          entry.sequence > after && [kind, `${kind}_error`].includes(entry.payload.kind));
+          entry.sequence > after && [kind, `${kind}_error`].includes(entry.payload.kind)
+          && (requestId === null || entry.payload.request_id === requestId));
         return entry?.payload || null;
-      }, { after, kind }, { timeout: 30_000 })).jsonValue();
+      }, { after, kind, requestId }, { timeout: 30_000 })).jsonValue();
     };
     const schedule = () => {
       const reply = fixture.scheduleOperation("issue.monitor.schedule.read");
@@ -390,7 +441,8 @@ test.describe("Issue queue real backend launch", () => {
       expect(baseProfile.agent_member_id).toBe(initial.members[0].agent_member_id);
       const selectedProfiles = roster.members.filter((member: any) => member.enabled).map((member: any) => {
         expect(member.agent_id).toBe("codex");
-        return { ...baseProfile, agent_member_id: member.agent_member_id, agent_id: member.agent_id };
+        return { ...baseProfile, agent_member_id: member.agent_member_id, agent_id: member.agent_id,
+          skip_permissions: true, prefer_for: ["kind:issue"] };
       });
       const beforeProfiles = await current.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
       await sendLiveGwtEvent(current, { kind: "issue_monitor_profiles_set", request_id: 477727, profiles: selectedProfiles });
@@ -405,12 +457,29 @@ test.describe("Issue queue real backend launch", () => {
         "issue_monitor_queue_result");
       expect(queued.error).toBeNull();
       expect(await fixture.launches()).toEqual([]);
-      const observed = schedule();
+      let observed = schedule();
       const source = owner(observed);
       expect(source).toBeTruthy();
       const target = roster.members.find((member: any) => member.enabled
         && member.agent_member_id !== source.agent_member_id);
       expect(target).toBeTruthy();
+      // A separate project changes only this person's common saved core. The
+      // primary Monitor still owns its candidate order, permissions and routing.
+      const profileSourceRoot = join(fixture.home, "shared-profile-source");
+      await mkdir(profileSourceRoot);
+      const primaryScope = fixture.fixtureOperation("issue.monitor.status");
+      expect(primaryScope.ok, JSON.stringify(primaryScope)).toBe(true);
+      const sourceProfile = { agent_id: "codex", agent_member_id: target.agent_member_id,
+        model: "gpt-6-sol", reasoning: "high", fast_mode: true, runtime_target: "Host",
+        skip_permissions: false, prefer_for: ["label:source-only"] };
+      const sourceSave = fixture.fixtureOperation("issue.monitor.profiles.set", { profiles: [sourceProfile] }, profileSourceRoot);
+      expect(sourceSave.ok, JSON.stringify(sourceSave)).toBe(true);
+      expect(sourceSave.project_store.hash).not.toBe(primaryScope.project_store.hash);
+      expect(JSON.parse(sourceSave.output).launch_profiles).toContainEqual(expect.objectContaining(sourceProfile));
+      // The core save advances the shared settings CAS, so obtain a fresh plan
+      // before exercising the existing UI reassignment transaction.
+      observed = schedule();
+      expect(owner(observed).agent_member_id).toBe(source.agent_member_id);
       const reassignment = {
         issue_number: fixture.issueNumber,
         source_member_id: source.agent_member_id,
@@ -433,6 +502,7 @@ test.describe("Issue queue real backend launch", () => {
         issues: [{ issue_number: fixture.issueNumber, reason: "assigned_by_you" }] });
       await info.attach(`agent-schedule-ui-${theme}`, { body: await current.screenshot(), contentType: "image/png" });
       const beforeStale = await fixture.monitorPreferencesBytes();
+      const rosterBeforeStale = durableRoster(await readCanonicalRoster(current));
       const stale = fixture.scheduleOperation("issue.monitor.schedule.reassign", reassignment);
       expect(stale.ok).toBe(false);
       const afterStale = await fixture.monitorPreferencesBytes();
@@ -441,11 +511,12 @@ test.describe("Issue queue real backend launch", () => {
       }, null, 2), contentType: "application/json" });
       const plan = (bytes: Buffer) => {
         const prefs = JSON.parse(bytes.toString());
-        return { agent_issue_schedule: prefs.agent_issue_schedule, agent_roster: prefs.agent_roster,
+        return { agent_issue_schedule: prefs.agent_issue_schedule,
           terminal_queues: Object.fromEntries(Object.entries(prefs.terminal_queues)
             .map(([host, queue]) => [host, (queue as any).entries])) };
       };
-      expect(plan(afterStale), "rejected stale move preserves canonical member plans and queue order").toEqual(plan(beforeStale));
+      expect(plan(afterStale), "rejected stale move preserves project member plans and queue order").toEqual(plan(beforeStale));
+      expect(durableRoster(await readCanonicalRoster(current)), "rejected stale move preserves canonical roster").toEqual(rosterBeforeStale);
       expect(schedule()).toEqual(saved);
       const gui = await request({ kind: "agent_schedule", action: { kind: "read" } }, "agent_schedule");
       expect(gui.schedule, "GUI and JSON use the same canonical schedule").toEqual(saved);
@@ -516,14 +587,40 @@ test.describe("Issue queue real backend launch", () => {
       expect(field(record, "id")).toBe(launch.gwt_session_id);
       expect(field(record, "agent_member_id")).toBe(target.agent_member_id);
       expect(field(record, "agent_name")).toBe(target.name);
+      expect(field(record, "session_mode")).toBe("Normal");
+      expect(field(record, "model")).toBe(sourceProfile.model);
+      expect(field(record, "reasoning_level")).toBe(sourceProfile.reasoning);
+      expect(record).toMatch(/^fast_mode\s*=\s*true$/m);
+      expect(record).toMatch(/^codex_fast_mode\s*=\s*true$/m);
+      expect(record).toMatch(/^skip_permissions\s*=\s*true$/m);
+      expect(launch.argv).toContain(`--model=${sourceProfile.model}`);
+      expect(launch.argv).toContain(`model_reasoning_effort=${sourceProfile.reasoning}`);
+      expect(launch.argv).toContain("--yolo");
+      expect(launch.argv).not.toContain("resume");
+      const primaryTarget = JSON.parse((await fixture.monitorPreferencesBytes()).toString()).launch_profiles
+        .find((profile: any) => profile.agent_member_id === target.agent_member_id);
+      expect(primaryTarget).toMatchObject({ skip_permissions: true, prefer_for: ["kind:issue"] });
       expect(record).toMatch(new RegExp(`^linked_issue_number\\s*=\\s*${fixture.issueNumber}$`, "m"));
       const firstObservation = await assertObservedWork(launch.gwt_session_id!, target.agent_member_id);
       fixture.auditHooks(launch.cwd);
+      // Join the GUI input alias and Monitor's physical pane through the exact
+      // Session, rather than comparing IDs from different namespaces.
+      const primaryProjectKey = primaryScope.project_store.hash;
+      expect(firstObservation.activity.project_key).toBe(primaryProjectKey);
+      const physicalWorkspace = JSON.parse(await readFile(join(fixture.home, ".gwt", "projects",
+        primaryProjectKey, "workspace.json"), "utf8"));
+      const physicalRows = physicalWorkspace.windows.filter((row: any) => row.session_id === launch.gwt_session_id);
+      expect(physicalRows, "exact launched Session has one durable owner pane").toHaveLength(1);
+      expect(physicalRows[0]).toMatchObject({ preset: "agent", linked_issue_number: fixture.issueNumber });
+      const firstPhysicalWindowId = `${primaryProjectKey}::${physicalRows[0].id}`;
+      const beforeExit = JSON.parse((await fixture.monitorPreferencesBytes()).toString());
+      expect(beforeExit.launched_issues.filter((entry: any) => entry.issue_number === fixture.issueNumber),
+        "Monitor owns the same Session's exact physical pane before exit").toEqual([
+        { issue_number: fixture.issueNumber, window_id: firstPhysicalWindowId },
+      ]);
 
       // Stop only the owned provider, then recover through the real authenticated
       // Monitor path. No incoming census or roster frame is manufactured here.
-      await sendLiveGwtEvent(current, { kind: "set_issue_monitor_enabled", enabled: false });
-      await expect.poll(async () => JSON.parse((await fixture.monitorPreferencesBytes()).toString()).enabled).toBe(false);
       await sendLiveGwtEvent(current, { kind: "terminal_input", id: firstObservation.agent.window_id, data: "GWT_FIXTURE_EXIT\r" });
       await expect.poll(() => {
         try { process.kill(launch.pid, 0); return false; } catch { return true; }
@@ -536,8 +633,11 @@ test.describe("Issue queue real backend launch", () => {
         return !prefs.launched_issues?.some(ownsIssue)
           && !prefs.pending_launch_deliveries?.some(ownsIssue)
           && prefs.failed_issues?.some((entry: any) => ownsIssue(entry)
-            && entry.window_id === firstObservation.agent.window_id);
+            && entry.window_id === firstPhysicalWindowId);
       }, { timeout: 60_000, message: "the Host records the exact predecessor exit and releases its launch" }).toBe(true);
+      // OFF revokes the launch identity, so record its exact failure first.
+      await sendLiveGwtEvent(current, { kind: "set_issue_monitor_enabled", enabled: false });
+      await expect.poll(async () => JSON.parse((await fixture.monitorPreferencesBytes()).toString()).enabled).toBe(false);
       const after = await current.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
       const requeued = fixture.fixtureOperation("issue.monitor.requeue", {
         number: fixture.issueNumber, reason: "Issue #6362 real observer force-requeue regression", force: true,
@@ -562,7 +662,9 @@ test.describe("Issue queue real backend launch", () => {
       fixture.auditHooks(successor.cwd);
       await info.attach(`agent-schedule-${theme}`, { body: await current.screenshot(), contentType: "image/png" });
       await info.attach("agent-schedule-launch", { body: JSON.stringify({ observed, saved, stale,
-        target: { agent_member_id: target.agent_member_id, name: target.name }, launch, firstObservation,
+        target: { agent_member_id: target.agent_member_id, name: target.name }, launch, firstObservation, firstPhysicalWindowId,
+        shared_profile_source: { project_key: sourceSave.project_store.hash, profile: sourceProfile },
+        primary_project_key: primaryScope.project_store.hash, primary_target: primaryTarget,
         requeued, immediate, successor, successorObservation }, null, 2), contentType: "application/json" });
       expect(errors, "zero console/page errors across UI reassignment, GUI restart and real launch").toEqual([]);
     } finally {

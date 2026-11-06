@@ -2502,6 +2502,46 @@ pub fn write_current_raw_input(
     })
 }
 
+/// One attachment body on the reserved physical writer; ordinary protected queues
+/// are never used. A settled false flag proves refusal, never a timeout result.
+pub(crate) fn write_current_attachment_input(
+    writers: &PtyWriterRegistry,
+    id: &str,
+    entry: &Arc<PtyWriterEntry>,
+    session_current: &std::sync::atomic::AtomicBool,
+    bytes: &[u8],
+) -> super::events::OwnerAttachmentInputOutcome {
+    use super::events::OwnerAttachmentInputOutcome;
+    let mut attempted = false;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let reservation = with_current_writer(writers, id, entry, |handle| {
+            Arc::clone(handle)
+                .reserve_input_transaction()
+                .map_err(|error| error.to_string())
+        })?;
+        with_current_writer(writers, id, entry, |_| {
+            reservation
+                .write_ordinary_input_authorized(bytes, |commit| {
+                    if !entry.current.load(std::sync::atomic::Ordering::Acquire)
+                        || !session_current.load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        return Err(gwt_terminal::TerminalError::PtyIoError {
+                            details: "attachment target changed before physical input".into(),
+                        });
+                    }
+                    commit(&mut || attempted = true)
+                })
+                .map_err(|error| error.to_string())
+        })
+    }))
+    .unwrap_or_else(|_| Err("attachment physical writer panicked".into()));
+    match result {
+        Ok(()) => OwnerAttachmentInputOutcome::Written,
+        Err(_) if attempted => OwnerAttachmentInputOutcome::OutcomeUnknown,
+        Err(_) => OwnerAttachmentInputOutcome::NotStarted,
+    }
+}
+
 /// Synchronous accepted prompt delivery; the final CR stays inside its grant
 /// and durable Session lease, and rechecks the physical incarnation after settle.
 pub fn write_current_pane_input(

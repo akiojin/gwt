@@ -2780,11 +2780,16 @@ fn refresh_broker_resets_quiet_deadline_from_the_last_dirty_event() {
         "the first event's deadline must no longer admit work"
     );
     clock.advance(Duration::from_secs(29));
-    let claim = broker
-        .claim_next()
-        .expect("claim at reset deadline")
-        .expect("target becomes ready thirty seconds after the last event");
+    // Keep the manual deadline fixed while observing nonblocking admission.
+    let mut claim = None;
+    poll_until(Duration::from_secs(10), || {
+        claim = broker.claim_next().expect("claim at reset deadline");
+        claim.is_some()
+    });
+    let claim = claim.expect("target becomes ready thirty seconds after the last event");
+    assert_eq!(claim.intent().target, target);
     assert_eq!(claim.intent().desired_epoch, 2);
+    assert_eq!(claim.intent().desired_snapshot, "snapshot-2");
     claim.complete().expect("complete reset refresh");
 }
 
@@ -3114,6 +3119,11 @@ fn refresh_broker_background_claim_rest_matches_elapsed_time_across_repositories
             .expect("submit repo");
     }
     let first = broker.claim_next().expect("claim").expect("first repo");
+    let first_target = first.intent().target.clone();
+    let submitted_targets = [base_refresh_target("repo-a"), base_refresh_target("repo-b")];
+    assert!(submitted_targets.contains(&first_target));
+    assert_eq!(first.intent().desired_epoch, 1);
+    assert_eq!(first.intent().desired_snapshot, "snapshot-1");
     clock.advance(Duration::from_secs(46));
     first.complete().expect("complete first repo");
     let reopened =
@@ -3122,10 +3132,17 @@ fn refresh_broker_background_claim_rest_matches_elapsed_time_across_repositories
     clock.advance(Duration::from_secs(45));
     assert!(reopened.claim_next().expect("claim before rest").is_none());
     clock.advance(Duration::from_secs(1));
-    reopened
-        .claim_next()
-        .expect("claim after rest")
-        .expect("second repo");
+    // Keep the manual rest boundary fixed while observing nonblocking admission.
+    let mut claim = None;
+    poll_until(Duration::from_secs(10), || {
+        claim = reopened.claim_next().expect("claim after rest");
+        claim.is_some()
+    });
+    let second = claim.expect("second repo");
+    assert!(submitted_targets.contains(&second.intent().target));
+    assert_ne!(second.intent().target, first_target);
+    assert_eq!(second.intent().desired_epoch, 1);
+    assert_eq!(second.intent().desired_snapshot, "snapshot-1");
 }
 
 #[test]

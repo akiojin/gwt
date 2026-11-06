@@ -611,6 +611,10 @@ pub(crate) enum OwnerMessage {
         result: Result<(), String>,
         ack: mpsc::Sender<()>,
     },
+    AttachmentInputWritten {
+        reply: oneshot::Sender<OwnerReply>,
+        receipt: super::events::OwnerAttachmentInputReceipt,
+    },
     InputWritten {
         reply: oneshot::Sender<OwnerReply>,
         result: Result<Option<super::events::OwnerInputObservation>, String>,
@@ -992,6 +996,7 @@ pub(crate) struct OwnerState {
     #[cfg(any(test, feature = "test-gh-guard"))]
     test_pty_start_gate: Option<super::test_support::OwnerTestGate>,
     agent_registry: Result<super::agent_dispatch::OwnerWindowRegistry, String>,
+    shared_registry_initialization: Option<Result<(), String>>,
     registry_projection: crate::persistence::PersistedWindowRegistry,
     pty_writers: super::agent_dispatch::PtyWriterRegistry,
     agent_dispatch_jobs: usize,
@@ -1070,6 +1075,7 @@ impl OwnerState {
             policy_usage_accounts: Vec::new(),
             policy_capacity_resumes: HashMap::new(),
             agent_registry,
+            shared_registry_initialization: None,
             registry_projection,
             pty_writers: Arc::new(std::sync::RwLock::new(HashMap::new())),
             agent_dispatch_jobs: 0,
@@ -1115,20 +1121,9 @@ impl OwnerState {
             #[cfg(windows)]
             let _verification_cap_relief =
                 crate::verification_cap_relief::spawn(state.pty_writers.clone());
-            super::startup::reconcile_durable_launches(
-                &state.root,
-                &gwt_core::paths::gwt_sessions_dir(),
-            );
             let mut state = state;
-            if let Ok(registry) = &state.agent_registry {
-                match super::agent_dispatch::backfill_owner_pane_names(
-                    &state.root,
-                    &gwt_core::paths::gwt_sessions_dir(),
-                    registry,
-                ) {
-                    Ok(snapshot) => state.registry_projection = snapshot,
-                    Err(error) => tracing::warn!(%error, "owner Agent name backfill failed"),
-                }
+            if let Err(error) = state.initialize_shared_registry() {
+                tracing::warn!(%error, "owner startup waits for shared Agent registry recovery");
             }
             let writers = state.pty_writers.clone();
             let _monitor_reconciler = crate::monitor_duplicate_runtime::spawn(
@@ -1150,6 +1145,40 @@ impl OwnerState {
         });
         handle
     }
+
+    /// Initial activation takes Session leases before prefs/registry locks.
+    /// Run before any startup or request-specific Session lease, and retain a
+    /// failed attempt so Health can diagnose and retry after explicit recovery.
+    fn initialize_shared_registry(&mut self) -> Result<(), String> {
+        if matches!(self.shared_registry_initialization, Some(Ok(()))) {
+            return Ok(());
+        }
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            gwt_core::operation_deadline::now() + std::time::Duration::from_secs(5),
+        );
+        if let Err(error) = crate::agent_registry::ensure_active_for_owner(&self.root) {
+            let error = format!("Shared Agent registry initialization failed: {error}");
+            self.shared_registry_initialization = Some(Err(error.clone()));
+            return Err(error);
+        }
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        super::startup::reconcile_durable_launches(&self.root, &sessions);
+        if let Ok(registry) = &self.agent_registry {
+            match super::agent_dispatch::backfill_owner_pane_names(&self.root, &sessions, registry)
+            {
+                Ok(snapshot) => {
+                    if self.registry_projection != snapshot {
+                        self.registry_projection = snapshot;
+                        let _ = self.events.send(OwnerEvent::Invalidated);
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "owner Agent name backfill failed"),
+            }
+        }
+        self.shared_registry_initialization = Some(Ok(()));
+        Ok(())
+    }
+
     fn run(mut self, receiver: mpsc::Receiver<OwnerMessage>) -> Vec<oneshot::Sender<()>> {
         let mut continue_active = false;
         let mut next_project_policy_check = std::time::Instant::now();
@@ -1913,6 +1942,11 @@ impl OwnerState {
                             self.start_close(stale_id, runtime, CloseCause::ExplicitClose, reply);
                         }
                     }
+                }
+                OwnerMessage::AttachmentInputWritten { reply, receipt } => {
+                    self.input_jobs -= 1;
+                    let _ = reply
+                        .send(serde_json::to_value(receipt).map_err(|error| error.to_string()));
                 }
                 OwnerMessage::InputWritten { reply, result } => {
                     self.input_jobs -= 1;
@@ -2871,6 +2905,27 @@ impl OwnerState {
                 return;
             }
         }
+        if !self.stopping {
+            if matches!(request.command, OwnerCommand::Health) {
+                // GUI clients verify Health before sending a launch command.
+                // Retrying here makes external registry recovery reachable on
+                // the same owner rather than leaving discovery permanently degraded.
+                let _ = self.initialize_shared_registry();
+            } else if matches!(
+                request.command,
+                OwnerCommand::LaunchAgent { .. }
+                    | OwnerCommand::RestoreSavedSession { .. }
+                    | OwnerCommand::ContinueWork { .. }
+                    | OwnerCommand::AgentSwitch { .. }
+                    | OwnerCommand::DriveAgentSwitch
+                    | OwnerCommand::UpdateLayout { .. }
+            ) {
+                if let Err(error) = self.initialize_shared_registry() {
+                    let _ = reply.send(Err(error));
+                    return;
+                }
+            }
+        }
         if matches!(
             request.command,
             OwnerCommand::PrepareMobileInput { .. }
@@ -3137,6 +3192,81 @@ impl OwnerState {
             });
             return;
         }
+        if let OwnerCommand::AttachmentInput {
+            id,
+            incarnation,
+            session_id,
+            data,
+        } = request.command
+        {
+            use super::events::{
+                OwnerAttachmentInputOutcome as Outcome, OwnerAttachmentInputReason as Reason,
+                OwnerAttachmentInputReceipt,
+            };
+            let mut receipt = OwnerAttachmentInputReceipt {
+                tag: "attachment_input_receipt".into(),
+                schema_version: 1,
+                pane_id: id.clone(),
+                incarnation,
+                session_id: session_id.clone(),
+                outcome: Outcome::NotStarted,
+                reason: Some(Reason::TargetUnavailable),
+                input_observation: None,
+            };
+            let captured = self.exact(&id, incarnation).and_then(|runtime| {
+                let agent = runtime
+                    .agent
+                    .as_ref()
+                    .filter(|agent| {
+                        !session_id.is_empty()
+                            && agent.active.session_id == session_id
+                            && agent.current.load(Ordering::Acquire)
+                    })
+                    .ok_or("attachment Agent Session unavailable")?;
+                let writers = self.pty_writers.read().map_err(|error| error.to_string())?;
+                let entry = writers
+                    .get(&id)
+                    .filter(|entry| {
+                        entry.current.load(Ordering::Acquire)
+                            && Arc::ptr_eq(&entry.current, &runtime.current)
+                            && Arc::ptr_eq(&entry.handle, &runtime.pty)
+                    })
+                    .cloned()
+                    .ok_or("attachment physical writer unavailable")?;
+                Ok((entry, agent.current.clone()))
+            });
+            match captured {
+                Err(_) => {
+                    let _ = reply
+                        .send(serde_json::to_value(receipt).map_err(|error| error.to_string()));
+                }
+                Ok((entry, session_current)) => {
+                    self.begin_policy_input(&id, &data);
+                    self.input_jobs += 1;
+                    let writers = self.pty_writers.clone();
+                    let sender = self.sender.clone();
+                    spawn_owner_worker(move || {
+                        receipt.outcome = super::agent_dispatch::write_current_attachment_input(
+                            &writers,
+                            &id,
+                            &entry,
+                            &session_current,
+                            &data,
+                        );
+                        receipt.reason = match receipt.outcome {
+                            Outcome::Written => None,
+                            Outcome::NotStarted => Some(Reason::WriterUnavailable),
+                            Outcome::OutcomeUnknown => Some(Reason::WriteUncertain),
+                        };
+                        receipt.input_observation =
+                            super::events::OwnerInputObservation::capture(&entry.handle);
+                        let _ =
+                            sender.send(OwnerMessage::AttachmentInputWritten { reply, receipt });
+                    });
+                }
+            }
+            return;
+        }
         if matches!(
             request.command,
             OwnerCommand::Input { .. } | OwnerCommand::SendInput { .. }
@@ -3296,7 +3426,11 @@ impl OwnerState {
                 Ok(json!({"startup_intent":self.gui_presence.intent()}))
             }
             OwnerCommand::Health => {
-                let health = json!({"mobile_input_permit_version":super::events::MOBILE_INPUT_PERMIT_PROTOCOL_VERSION,"startup_intent":self.gui_presence.intent(),"gui_presence_count":self.gui_presence.count(),"pid":std::process::id(),"host_started_at":crate::process::host_process_start_time(std::process::id()),"host_instance_id":self.host_instance_id,"project_key":self.project_key,"panes":self.runtimes.len(),"pending_transport":self.pending_transport.len(),"draining":self.stopping,"reconciliation_required":self.retirements.values().any(Option::is_some)||self.agent_registry.is_err(),"reconciliation":self.retirements.iter().filter_map(|((id,incarnation),captured)| captured.as_ref().map(|_| json!({"id":id,"incarnation":incarnation}))).collect::<Vec<_>>()});
+                let initialization_error = self
+                    .shared_registry_initialization
+                    .as_ref()
+                    .and_then(|result| result.as_ref().err());
+                let health = json!({"mobile_input_permit_version":super::events::MOBILE_INPUT_PERMIT_PROTOCOL_VERSION,"startup_intent":self.gui_presence.intent(),"gui_presence_count":self.gui_presence.count(),"pid":std::process::id(),"host_started_at":crate::process::host_process_start_time(std::process::id()),"host_instance_id":self.host_instance_id,"project_key":self.project_key,"panes":self.runtimes.len(),"pending_transport":self.pending_transport.len(),"draining":self.stopping,"reconciliation_required":self.retirements.values().any(Option::is_some)||self.agent_registry.is_err()||initialization_error.is_some(),"agent_registry_initialization_error":initialization_error,"reconciliation":self.retirements.iter().filter_map(|((id,incarnation),captured)| captured.as_ref().map(|_| json!({"id":id,"incarnation":incarnation}))).collect::<Vec<_>>()});
                 #[cfg(any(test, feature = "test-gh-guard"))]
                 let health = {
                     let mut health = health;
@@ -3395,6 +3529,7 @@ impl OwnerState {
             | OwnerCommand::RestoreSavedSession { .. }
             | OwnerCommand::LaunchAgent { .. }
             | OwnerCommand::Input { .. }
+            | OwnerCommand::AttachmentInput { .. }
             | OwnerCommand::PrepareMobileInput { .. }
             | OwnerCommand::CommitMobileInput { .. }
             | OwnerCommand::CancelMobileInput { .. }
@@ -4373,6 +4508,7 @@ impl OwnerState {
             registry_after: None,
             launch_started: false,
             member_reservation: None,
+            pm_prior_assignment: None,
             refusal: None,
         };
         self.launch_agent_inner(
@@ -5489,6 +5625,8 @@ impl OwnerState {
                             prepared_manual_launch_claim: admitted.prepared_manual_launch_claim,
                             issue_monitor_trust_candidate: admitted.issue_monitor_trust_candidate,
                             issue_monitor_launch: admitted.issue_monitor_launch,
+                            pm_restore_prior: restore.as_ref().filter(|restore| crate::pm_registry::is_canonical_pm_worktree(&restore.source.worktree_path))
+                                .map(|restore| (restore.source.clone(), restore.pm_prior_assignment.clone())),
                         },
                         move |event| {
                             let event = match event {
@@ -8107,6 +8245,21 @@ impl OwnerState {
             );
             return;
         }
+        if let AgentFrontendRequest::Name { request_id, .. } = &request {
+            if let Err(error) = self.initialize_shared_registry() {
+                self.clients
+                    .dispatch(vec![crate::project_transport::OutboundEvent::reply(
+                        client_id,
+                        crate::BackendEvent::PaneNameResult {
+                            request_id: request_id.clone(),
+                            ok: false,
+                            agent_name: None,
+                            error: Some(error),
+                        },
+                    )]);
+                return;
+            }
+        }
         let target = match &request {
             AgentFrontendRequest::CloseWindow { id, .. }
             | AgentFrontendRequest::CloseFleetPane { id, .. }
@@ -10684,7 +10837,7 @@ fn abandon_agent_launch(
     Ok(())
 }
 
-fn retire_unspawned_launch_runtime(
+pub(super) fn retire_unspawned_launch_runtime(
     sessions_dir: &std::path::Path,
     expected: &gwt_agent::Session,
     captured_runtime: Option<&Result<Option<Vec<u8>>, String>>,
@@ -11336,6 +11489,18 @@ pub(crate) fn close_runtime(
             &runtime.pty,
         )?;
         runtime.member_cleanup = None;
+    } else if let Some(agent) = runtime
+        .agent
+        .as_ref()
+        .filter(|agent| crate::pm_registry::is_canonical_pm_worktree(&agent.snapshot.worktree_path))
+    {
+        crate::agent_names::release_reaped_pm_member(
+            &runtime.project_root,
+            &gwt_core::paths::gwt_sessions_dir(),
+            &agent.snapshot,
+            None,
+            &runtime.pty,
+        )?;
     }
     if let Some(agent) = runtime.agent.as_ref() {
         let pm_cause = match cause {
@@ -11396,6 +11561,7 @@ mod tests {
             policy_usage_accounts: Vec::new(),
             policy_capacity_resumes: HashMap::new(),
             agent_registry: super::super::agent_dispatch::load_owner_registry(root),
+            shared_registry_initialization: None,
             registry_projection: crate::persistence::empty_workspace_state(),
             pty_writers: Arc::new(std::sync::RwLock::new(HashMap::new())),
             agent_dispatch_jobs: 0,
@@ -12103,6 +12269,125 @@ mod tests {
         );
         handle.shutdown().await;
         actor.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn shared_registry_initialization_recovers_on_the_same_owner_before_admission() {
+        use futures_util::FutureExt as _;
+
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let root = home.path().join("repo");
+        std::fs::create_dir(&root).unwrap();
+        let project_key = gwt_core::paths::project_scope_hash(&root).to_string();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let mut session = gwt_agent::Session::new(&root, "main", gwt_agent::AgentId::Codex);
+        session.agent_name = Some("Retained Cedar".into());
+        session.update_status(gwt_agent::AgentStatus::Stopped);
+        session.save(&sessions).unwrap();
+        let session_path = sessions.join(format!("{}.toml", session.id));
+        let original_session = std::fs::read(&session_path).unwrap();
+        let mut registry =
+            crate::WindowRegistry::from_persisted(crate::persistence::empty_workspace_state());
+        let row = registry.add_window(crate::preset::WindowPreset::Agent);
+        registry.set_session_id(&row.id, Some(session.id.clone()));
+        let workspace_path = crate::persistence::workspace_state_path(&root);
+        crate::persistence::save_workspace_state_durable(
+            &workspace_path,
+            &registry.persistable_state(),
+        )
+        .unwrap();
+        let original_workspace = std::fs::read(&workspace_path).unwrap();
+        let registry_path = crate::agent_registry::path();
+        std::fs::create_dir_all(registry_path.parent().unwrap()).unwrap();
+        std::fs::write(&registry_path, b"{").unwrap();
+        let owner = OwnerState::start(
+            root.clone(),
+            project_key.clone(),
+            ClientHub::default(),
+            AgentCapabilityIssuer::new(
+                "http://127.0.0.1/hook".into(),
+                "ws://127.0.0.1/pane".into(),
+                "ws://127.0.0.1/pane".into(),
+                AgentCapabilityRegistry::default(),
+            ),
+            "shared-registry-preflight".into(),
+            gwt_core::daemon::DaemonStartIntent::Standalone,
+        );
+        let request = |command| OwnerRequest {
+            project_key: project_key.clone(),
+            command,
+        };
+        let verified =
+            std::panic::AssertUnwindSafe(async {
+                let health = owner.request(request(OwnerCommand::Health)).await.unwrap();
+                assert_eq!(health["reconciliation_required"], true);
+                assert!(health["agent_registry_initialization_error"]
+                    .as_str()
+                    .is_some_and(
+                        |error| error.contains("Shared Agent registry initialization failed")
+                    ));
+                assert_eq!(std::fs::read(&session_path).unwrap(), original_session);
+                assert_eq!(std::fs::read(&workspace_path).unwrap(), original_workspace);
+                let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex).build();
+                let refused = owner
+                    .request(request(OwnerCommand::LaunchAgent {
+                        id: format!("{project_key}::not-admitted"),
+                        operation_id: "registry-not-admitted".into(),
+                        tab_id: project_key.clone(),
+                        config: Box::new(config),
+                        metadata: Box::default(),
+                        cols: 80,
+                        rows: 24,
+                    }))
+                    .await;
+                assert!(refused.is_err_and(|error| {
+                    error.contains("Shared Agent registry initialization failed")
+                }));
+                let panes = owner
+                    .request(request(OwnerCommand::ListPanes))
+                    .await
+                    .unwrap();
+                assert_eq!(panes["panes"], json!([]));
+                assert_eq!(panes["pending"], json!([]));
+                assert_eq!(std::fs::read(&registry_path).unwrap(), b"{");
+
+                // External correction makes the original owner retryable; no actor
+                // or daemon replacement is needed to resume its skipped startup.
+                std::fs::remove_file(&registry_path).unwrap();
+                let ready = owner.request(request(OwnerCommand::Health)).await.unwrap();
+                assert_eq!(ready["reconciliation_required"], false);
+                assert!(ready["agent_registry_initialization_error"].is_null());
+                assert_eq!(
+                    crate::agent_registry::status(None).unwrap().phase,
+                    crate::agent_registry::RegistryPhase::Active
+                );
+                let panes = owner
+                    .request(request(OwnerCommand::ListPanes))
+                    .await
+                    .unwrap();
+                let retained = panes["canonical_rows"]["windows"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|window| window["id"] == row.id)
+                    .unwrap();
+                assert_eq!(retained["agent_name"], "Retained Cedar");
+
+                // A ready owner must not rerun startup backfill on later health reads.
+                let ready_workspace = std::fs::read(&workspace_path).unwrap();
+                session.agent_name = Some("External later name".into());
+                session.save(&sessions).unwrap();
+                let ready = owner.request(request(OwnerCommand::Health)).await.unwrap();
+                assert_eq!(ready["reconciliation_required"], false);
+                assert_eq!(std::fs::read(&workspace_path).unwrap(), ready_workspace);
+            })
+            .catch_unwind()
+            .await;
+        owner.shutdown().await;
+        if let Err(panic) = verified {
+            std::panic::resume_unwind(panic);
+        }
     }
 
     #[tokio::test]
@@ -12872,6 +13157,7 @@ mod tests {
             policy_usage_accounts: Vec::new(),
             policy_capacity_resumes: HashMap::new(),
             agent_registry: super::super::agent_dispatch::load_owner_registry(root.path()),
+            shared_registry_initialization: None,
             registry_projection: crate::persistence::empty_workspace_state(),
             pty_writers: Arc::new(std::sync::RwLock::new(HashMap::new())),
             agent_dispatch_jobs: 0,
@@ -12971,6 +13257,240 @@ mod tests {
             "shutdown must reap the captured PTY child"
         );
     }
+    #[tokio::test]
+    async fn legacy_pm_owner_reap_releases_its_original_member_after_selection_changes() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let root = home.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let worktree = crate::pm_registry::pm_worktree_path_for_repo_path(&root);
+        std::fs::create_dir_all(&worktree).unwrap();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let (mut snapshot, pane) = unbound_fixture(&worktree);
+        let pty = pane.shared_pty();
+        struct PmChildGuard(Arc<PtyHandle>);
+        impl Drop for PmChildGuard {
+            fn drop(&mut self) {
+                let _ = crate::session_finalizer::kill_and_reap(&self.0, "pane");
+            }
+        }
+        let _cleanup = PmChildGuard(pty.clone());
+        snapshot.agent_id = gwt_agent::AgentId::ClaudeCode;
+        snapshot.repo_hash = Some(gwt_core::paths::project_scope_hash(&root).to_string());
+        snapshot.project_state_root = Some(root.clone());
+        snapshot.agent_name = Some("Legacy PM".into());
+        snapshot.model = Some("old-conversation-model".into());
+        snapshot.agent_session_id = Some("legacy-pm-conversation".into());
+        snapshot.update_status(gwt_agent::AgentStatus::Running);
+        snapshot.save(&sessions).unwrap();
+        let pm_path = crate::pm_registry::pm_prefs_path_for_repo_path(&root);
+        let mut prefs = crate::pm_registry::PmPrefs {
+            registration: Some(crate::pm_registry::PmRegistration {
+                session_id: snapshot.id.clone(),
+                agent_id: "claude".into(),
+                worktree_path: worktree.to_string_lossy().into_owned(),
+                created_at: Some(snapshot.created_at.to_rfc3339()),
+                consecutive_crashes: 0,
+                next_not_before: None,
+            }),
+            ..Default::default()
+        };
+        prefs.settings.launch_profile = Some(crate::pm_registry::PmLaunchProfile {
+            agent_id: "codex".into(),
+            model: Some("next-new-model".into()),
+            reasoning: None,
+            version: None,
+        });
+        crate::pm_registry::save_pm_prefs(&pm_path, &prefs).unwrap();
+        let imported = crate::agent_names::read_project_roster(&root, &sessions).unwrap();
+        let old_id = imported.members[0].agent_member_id.clone();
+        let added = crate::agent_names::mutate_project_roster(
+            &root,
+            &sessions,
+            crate::agent_names::AgentRosterAction::Add {
+                agent_id: Some("codex".into()),
+                name: Some("Successor PM".into()),
+                pm_eligible: true,
+            },
+            Some(imported.revision),
+        )
+        .unwrap();
+        let successor_id = added.members.last().unwrap().agent_member_id.clone();
+        let selected = crate::agent_names::mutate_project_roster(
+            &root,
+            &sessions,
+            crate::agent_names::AgentRosterAction::SelectPm {
+                member_id: successor_id.clone(),
+            },
+            Some(added.revision),
+        )
+        .unwrap();
+        assert!(
+            selected
+                .members
+                .iter()
+                .find(|member| member.agent_member_id == old_id)
+                .unwrap()
+                .assignment
+                .is_some(),
+            "selection keeps the live old PM reservation"
+        );
+        let (mut state, receiver, handle) = owner_fixture(&root);
+        let current = Arc::new(AtomicBool::new(true));
+        state
+            .install_pane("pane".into(), 1, pane, current.clone())
+            .unwrap();
+        let runtime = state.runtimes.get_mut("pane").unwrap();
+        assert!(runtime.member_cleanup.is_none());
+        runtime.agent = Some(AgentRuntimeRecord {
+            feedback: None,
+            monitor_owner: None,
+            monitor_terminal_failure: None,
+            monitor_answer_inflight: false,
+            binding_repair_inflight: false,
+            monitor_source: None,
+            monitor_ack_replies: Vec::new(),
+            monitor_adopt_claim: false,
+            monitor_commit_inflight: false,
+            monitor_ready: false,
+            monitor_retry_at: None,
+            monitor_startup_at: None,
+            current,
+            active: active_fixture(&worktree, &snapshot),
+            snapshot: snapshot.clone(),
+            capability_token: None,
+            issuer: state.issuer.clone(),
+            pending_fresh: None,
+            pending_continue: None,
+            purpose_title: None,
+            readiness_deadline: None,
+        });
+        let mut events = handle.subscribe();
+        let actor_home = home.path().to_path_buf();
+        let actor = thread::spawn(move || {
+            let _home = gwt_core::test_support::ScopedGwtHome::set(actor_home);
+            run_fixture_owner(state, receiver);
+        });
+        handle
+            .request(request(OwnerCommand::Input {
+                id: "pane".into(),
+                incarnation: 1,
+                data: b"finish\n".to_vec(),
+            }))
+            .await
+            .unwrap();
+        // test-hygiene: allow-wall-clock-deadline Bounds the actual owned PTY completion; exact durable assertions determine success.
+        let terminal = tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+            loop {
+                if matches!(events.recv().await.unwrap(), OwnerEvent::Status { ref id, incarnation: 1, exit_confirmed: true, .. } if id == "pane") { break; }
+            }
+        }).await;
+        handle.request(request(OwnerCommand::Health)).await.unwrap();
+        handle.shutdown().await;
+        actor.join().unwrap();
+        assert!(terminal.is_ok());
+        assert!(pty.tree_exit_confirmed());
+        let after = crate::agent_names::read_project_roster(&root, &sessions).unwrap();
+        assert!(
+            after
+                .members
+                .iter()
+                .find(|member| member.agent_member_id == old_id)
+                .unwrap()
+                .assignment
+                .is_none(),
+            "the actual legacy owner reap must release only its original assignment"
+        );
+        assert_eq!(
+            after
+                .members
+                .iter()
+                .find(|member| member.agent_member_id == successor_id)
+                .unwrap()
+                .pm_project_key,
+            snapshot.repo_hash
+        );
+        let historical =
+            gwt_agent::Session::load(&sessions.join(format!("{}.toml", snapshot.id))).unwrap();
+        assert_eq!(historical.agent_member_id, None);
+        assert_eq!(historical.agent_name, snapshot.agent_name);
+        assert_eq!(historical.model, snapshot.model);
+        assert_eq!(historical.agent_session_id, snapshot.agent_session_id);
+        assert_eq!(
+            crate::pm_registry::load_pm_prefs(&pm_path)
+                .unwrap()
+                .settings,
+            prefs.settings
+        );
+        assert!(!crate::issue_monitor_prefs_path_for_repo_path(&root).exists());
+    }
+
+    #[test]
+    fn reaped_member_release_uses_stored_project_after_root_disappears() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let root = home.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let member = crate::agent_names::reserve_project_member(
+            &root, &sessions, "reaped", None, None, None, None,
+        )
+        .unwrap();
+        let (mut snapshot, pane) = unbound_fixture(&root);
+        snapshot.agent_member_id = Some(member.agent_member_id.clone());
+        snapshot.agent_id = gwt_agent::AgentId::Codex;
+        snapshot.repo_hash = None;
+        snapshot.save(&sessions).unwrap();
+        crate::agent_names::bind_project_member_session(
+            &root,
+            &member.agent_member_id,
+            "reaped",
+            &snapshot.id,
+        )
+        .unwrap();
+        let pty = pane.shared_pty();
+        assert!(pty.process_id().is_some_and(|pid| pid != 0));
+        crate::session_finalizer::kill_and_reap(&pty, "pane").unwrap();
+        assert!(pty.tree_exit_confirmed());
+        snapshot.update_status(gwt_agent::AgentStatus::Stopped);
+        snapshot.save(&sessions).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(crate::agent_names::release_reaped_project_member(
+            &root, &sessions, &snapshot, "wrong", &pty
+        )
+        .is_err());
+        let mut other_session = snapshot.clone();
+        other_session.id = "different-session".into();
+        assert!(crate::agent_names::release_reaped_project_member(
+            &root,
+            &sessions,
+            &other_session,
+            "reaped",
+            &pty
+        )
+        .is_err());
+        assert!(crate::agent_registry::SessionMemberSnapshot::load()
+            .unwrap()
+            .member(&member.agent_member_id)
+            .unwrap()
+            .unwrap()
+            .assignment
+            .is_some());
+        crate::agent_names::release_reaped_project_member(
+            &root, &sessions, &snapshot, "reaped", &pty,
+        )
+        .unwrap();
+        let saved = crate::agent_registry::SessionMemberSnapshot::load()
+            .unwrap()
+            .member(&member.agent_member_id)
+            .unwrap()
+            .unwrap();
+        assert!(
+            saved.assignment.is_none(),
+            "exact reaped member must be released"
+        );
+    }
+
     #[tokio::test]
     async fn natural_exit_commits_session_receipt_and_stopped_state_before_terminal_projection() {
         let root = tempfile::tempdir().unwrap();

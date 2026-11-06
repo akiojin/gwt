@@ -1534,7 +1534,9 @@ impl AppRuntime {
                     description: Some(format!(
                         "{} · {}",
                         member.agent_id.as_deref().unwrap_or("Tool unavailable"),
-                        if !member.enabled {
+                        if !member.implementation_eligible() {
+                            "Configured or reserved as PM; unavailable for implementation"
+                        } else if !member.enabled {
                             "Resting; launches wait"
                         } else if member.assignment.is_some() {
                             "Busy; launches wait"
@@ -1649,7 +1651,8 @@ impl AppRuntime {
             .members
             .into_iter()
             .find(|member| {
-                member.agent_id.is_some()
+                member.implementation_eligible()
+                    && member.agent_id.is_some()
                     && !profiles.iter().any(|profile| {
                         profile.agent_member_id.as_ref() == Some(&member.agent_member_id)
                     })
@@ -1675,21 +1678,25 @@ impl AppRuntime {
             });
         let open_other_set = match action {
             gwt::LaunchWizardAction::SetAgentMember { agent_member_id } => {
-                let Some(member) =
+                let Some(prefs) =
                     gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
                         &session.wizard.context.quick_start_root,
                     ))
                     .ok()
-                    .and_then(|prefs| prefs.agent_roster)
-                    .and_then(|roster| {
-                        roster
-                            .members
-                            .into_iter()
-                            .find(|member| member.agent_member_id == *agent_member_id)
-                    })
                 else {
                     return Some(Err("Registered Agent is unavailable; reload Agents".into()));
                 };
+                let Some(member) = prefs.agent_roster.as_ref().and_then(|roster| {
+                    roster
+                        .members
+                        .iter()
+                        .find(|member| member.agent_member_id == *agent_member_id)
+                }) else {
+                    return Some(Err("Registered Agent is unavailable; reload Agents".into()));
+                };
+                if !member.implementation_eligible() {
+                    return Some(Err("This Agent is configured or reserved as PM; choose an implementation member".into()));
+                }
                 if let Some(taken) =
                     sets.profiles
                         .iter()
@@ -1707,6 +1714,11 @@ impl AppRuntime {
                 let Some(tool) = member.agent_id.as_deref() else {
                     return Some(Err("Registered Agent tool is unavailable".into()));
                 };
+                let Some(saved) = gwt::agent_registry::member_profile(&prefs, agent_member_id)
+                    .or_else(|| new_agent_settings_profile(&[], tool))
+                else {
+                    return Some(Err("Registered Agent tool is unavailable".into()));
+                };
                 let open = match open_agent_settings_profile(&sets, &session.wizard) {
                     Ok(open) => open,
                     Err(error) => return Some(Err(error)),
@@ -1715,27 +1727,12 @@ impl AppRuntime {
                 let Some(slot) = sets.profiles.get_mut(sets.active) else {
                     return Some(Err("Agent Settings is unavailable".into()));
                 };
-                if agent_settings_provider_key(&slot.agent_id) != agent_settings_provider_key(tool)
-                {
-                    let Some(replacement) = new_agent_settings_profile(&[], tool) else {
-                        return Some(Err("Registered Agent tool is unavailable".into()));
-                    };
-                    let shared = (
-                        slot.skip_permissions,
-                        slot.runtime_target,
-                        slot.docker_lifecycle_intent,
-                        slot.windows_shell,
-                    );
-                    *slot = replacement;
-                    (
-                        slot.skip_permissions,
-                        slot.runtime_target,
-                        slot.docker_lifecycle_intent,
-                        slot.windows_shell,
-                    ) = shared;
-                }
                 slot.agent_id = tool.into();
                 slot.agent_member_id = Some(agent_member_id.clone());
+                slot.model = saved.model;
+                slot.reasoning = saved.reasoning;
+                slot.version = saved.version;
+                slot.fast_mode = saved.fast_mode;
                 true
             }
             gwt::LaunchWizardAction::SetAgent { agent_id } => {
@@ -1795,6 +1792,29 @@ impl AppRuntime {
                 else {
                     return Some(Err("Registered Agent tool is unavailable".into()));
                 };
+                let prefs = match gwt::load_issue_monitor_prefs(
+                    &gwt::issue_monitor_prefs_path_for_repo_path(
+                        &session.wizard.context.quick_start_root,
+                    ),
+                ) {
+                    Ok(prefs) => prefs,
+                    Err(_) => {
+                        return Some(Err("Registered Agent is unavailable; reload Agents".into()))
+                    }
+                };
+                let Some(saved) = gwt::agent_registry::member_profile(
+                    &prefs,
+                    &member.agent_member_id,
+                )
+                .or_else(|| {
+                    new_agent_settings_profile(&[], member.agent_id.as_deref().unwrap_or(""))
+                }) else {
+                    return Some(Err("Registered Agent tool is unavailable".into()));
+                };
+                added.model = saved.model;
+                added.reasoning = saved.reasoning;
+                added.version = saved.version;
+                added.fast_mode = saved.fast_mode;
                 added.agent_member_id = Some(member.agent_member_id);
                 profiles.push(added);
                 sets.active = profiles.len() - 1;
@@ -3528,7 +3548,11 @@ impl AppRuntime {
         }
         let mut profiles = pool.clone();
         if profiles.is_empty() {
-            if let Some(member) = roster.members.iter().find(|member| member.enabled) {
+            if let Some(member) = roster
+                .members
+                .iter()
+                .find(|member| member.enabled && member.implementation_eligible())
+            {
                 if let Some(tool) = member.agent_id.as_ref() {
                     wizard.apply(gwt::LaunchWizardAction::SetAgent {
                         agent_id: tool.clone(),
@@ -3666,8 +3690,12 @@ impl AppRuntime {
             )
             .ok()
             .and_then(|prefs| prefs.agent_roster)
-            .and_then(|roster| roster.members.into_iter().find(|member| member.enabled))
-            {
+            .and_then(|roster| {
+                roster
+                    .members
+                    .into_iter()
+                    .find(|member| member.enabled && member.implementation_eligible())
+            }) {
                 if let Some(tool) = member.agent_id {
                     wizard.apply(gwt::LaunchWizardAction::SetAgent { agent_id: tool });
                     if let Some(mut profile) = wizard.preview_launch_profile() {
@@ -3714,6 +3742,27 @@ impl AppRuntime {
             ),
             self.launch_wizard_state_outbound(context),
         ]
+    }
+
+    /// Agent/model assistance without Monitor enrollment or Docker probing.
+    pub(super) fn member_tuning_choices(
+        &self,
+        project_root: &Path,
+    ) -> Vec<gwt::launch_wizard::IssueMonitorAgentChoices> {
+        let mut wizard = self.issue_monitor_settings_wizard(
+            project_root.to_path_buf(),
+            gwt::LaunchWizardPreviousProfiles::default(),
+        );
+        for agent in gwt::build_builtin_agent_options(Vec::new()) {
+            if !wizard
+                .detected_agents
+                .iter()
+                .any(|known| known.id == agent.id)
+            {
+                wizard.detected_agents.push(agent);
+            }
+        }
+        wizard.issue_monitor_agent_choices(&[])
     }
 
     pub(super) fn issue_monitor_profile_choices(

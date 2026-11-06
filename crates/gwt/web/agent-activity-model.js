@@ -122,10 +122,20 @@ export function createAgentSwitchModel(projectKey) {
   return { model, beginAgentSwitchRequest, applyAgentSwitchSnapshot, applyAgentSwitchError, clearAgentSwitch };
 }
 
+function rosterRevision(snapshot) {
+  if (snapshot?.revision_decimal !== undefined) {
+    const value = snapshot.revision_decimal;
+    if (typeof value !== "string" || !/^\d+$/.test(value) || BigInt(value) > 18446744073709551615n) return null;
+    const exact = BigInt(value);
+    return exact <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(exact) : exact.toString();
+  }
+  return Number.isSafeInteger(snapshot?.revision) && snapshot.revision >= 0 ? snapshot.revision : null;
+}
+
 export function createAgentRosterModel(projectKey, { onRename = () => {}, scheduleFrame } = {}) {
-  let latestSnapshot = null, memberUsage = {};
+  let latestSnapshot = null, memberUsage = {}, latestRead = null;
   const model = createUiStateStore({ members: [], revision: null, capacity: null,
-    recommended_capacity: null, past_contributors: [], error: null, name_edits: {}, pending_name: null }, { scheduleFrame });
+    recommended_capacity: null, past_contributors: [], error: null, name_edits: {}, pending_name: null, pending_roster: null }, { scheduleFrame });
   function nameError(state, memberId, value) {
     const name = value.trim();
     if (!name) return "Enter a display name.";
@@ -139,10 +149,10 @@ export function createAgentRosterModel(projectKey, { onRename = () => {}, schedu
   }
   function sendNextName() {
     const state = model.read();
-    if (state.pending_name || !Number.isSafeInteger(state.revision)) return;
+    if (state.pending_name || state.revision === null) return;
     const next = Object.entries(state.name_edits).find(([, edit]) => edit.status === "queued" && !edit.composing && !edit.blocked);
     if (!next) return;
-    const [memberId, edit] = next, member = state.members.find(member => member.member_id === memberId && !member.is_pm);
+    const [memberId, edit] = next, member = state.members.find(member => member.member_id === memberId);
     const error = member ? nameError(state, memberId, edit.value) : "This member is no longer available.";
     if (error) {
       updateNameEdit(memberId, current => ({ ...current, error, status: "invalid" })); sendNextName(); return;
@@ -152,7 +162,7 @@ export function createAgentRosterModel(projectKey, { onRename = () => {}, schedu
     if (name === member.name) {
       updateNameEdit(memberId, current => ({ ...current, error: "", status: "saved" })); sendNextName(); return;
     }
-    const request = { kind: "agent_roster", action: { kind: "rename", member_id: memberId, name },
+    const request = { kind: "agent_roster", project_key: projectKey, action: { kind: "rename", member_id: memberId, name },
       expected_revision: state.revision, request_id: createLaunchOperationId("member-name") };
     model.update(current => ({ ...current, pending_name: request,
       name_edits: { ...current.name_edits, [memberId]: { ...current.name_edits[memberId], status: "saving", error: "" } } }));
@@ -162,8 +172,13 @@ export function createAgentRosterModel(projectKey, { onRename = () => {}, schedu
   }
   function editAgentMemberName(memberId, value, { composing = false } = {}) {
     const state = model.read();
-    if (typeof value !== "string" || !state.members.some(member => member.member_id === memberId && !member.is_pm)) return;
+    const member = state.members.find(member => member.member_id === memberId);
+    if (typeof value !== "string" || !member) return;
     const error = composing ? "" : nameError(state, memberId, value);
+    if (!composing && !error && value.trim() === member.name && state.pending_name?.action.member_id !== memberId) {
+      updateNameEdit(memberId, () => ({ value, composing: false, blocked: false, error: "", status: "saved" }));
+      sendNextName(); return;
+    }
     updateNameEdit(memberId, previous => ({ value, composing, blocked: previous?.blocked || false,
       error: error || (previous?.blocked ? previous.error : ""),
       status: composing ? "editing" : error ? "invalid" : previous?.blocked ? "error" : "queued" }));
@@ -184,40 +199,81 @@ export function createAgentRosterModel(projectKey, { onRename = () => {}, schedu
       name_edits: { ...current.name_edits, [memberId]: error
         ? { ...edit, blocked: true, error, status: "error" }
         : !edit.composing && edit.value.trim() === pending.action.name
-          ? { ...edit, error: "", status: "saved" }
+          ? { ...edit, blocked: false, error: "", status: "saved" }
           : { ...edit, error: validationError, status: edit.composing ? "editing" : validationError ? "invalid" : "queued" } } }));
   }
+  function beginAgentRosterRequest(request) {
+    if (request?.project_key !== projectKey || !request.request_id) return false;
+    if (request.action?.kind === "read") {
+      latestRead = { request_id: request.request_id, error: model.read().error }; return true;
+    }
+    if (!["add", "rest", "resize", "set_pm_eligibility", "select_pm"].includes(request.action?.kind)) return false;
+    latestRead = null;
+    if (latestSnapshot) latestSnapshot = { ...latestSnapshot, error: null };
+    model.update(state => ({ ...state, error: null, pending_roster: { request_id: request.request_id, action: request.action } }));
+    return true;
+  }
+
   function applyAgentRosterSnapshot(snapshot, requestId) {
+    const revision = rosterRevision(snapshot);
     if (!snapshot || snapshot.project_key !== projectKey || !Array.isArray(snapshot.members) ||
-        !Number.isSafeInteger(snapshot.revision)) return;
+        revision === null) return false;
+    if (model.read().revision !== null && BigInt(revision) < BigInt(model.read().revision)) {
+      settleName(requestId, snapshot.error || "This name changed elsewhere. Review your draft and retry.");
+      if (requestId && model.read().pending_roster?.request_id === requestId) applyAgentRosterError({
+        project_key: projectKey, request_id: requestId, message: snapshot.error || "Members changed while this request was pending. Reload the current roster and retry." });
+      if (latestRead?.request_id === requestId) latestRead = null;
+      return false;
+    }
+    const readReceipt = requestId && latestRead?.request_id === requestId;
+    const recoverRead = readReceipt && latestRead.error === model.read().error;
+    if (readReceipt) latestRead = null;
     model.update(state => {
-      if (state.revision !== null && snapshot.revision < state.revision) return state;
-      latestSnapshot = snapshot;
+      if (state.revision !== null && BigInt(revision) < BigInt(state.revision)) return state;
+      // Correlated rename errors belong to their field. Replaying an old
+      // receipt must not replace another operation's banner or revive one.
+      const ordinaryReceipt = requestId && state.pending_roster?.request_id === requestId;
+      latestSnapshot = { ...snapshot, revision, error: !requestId || ordinaryReceipt || recoverRead ? snapshot.error ?? null : state.error };
       const nameEdits = { ...state.name_edits };
       for (const member of snapshot.members) {
         const edit = nameEdits[member.agent_member_id];
         if (edit?.status === "saved" && edit.value.trim() !== member.name) nameEdits[member.agent_member_id] = { ...edit, value: member.name };
+        if (edit?.blocked && !edit.composing && edit.value.trim() === member.name && !snapshot.error) {
+          nameEdits[member.agent_member_id] = { ...edit, blocked: false, error: "", status: "saved" };
+        }
       }
-      return { ...snapshot, name_edits: nameEdits, pending_name: state.pending_name, members: snapshot.members.map(member => ({ ...member,
+      return { ...latestSnapshot, name_edits: nameEdits, pending_name: state.pending_name, pending_roster: ordinaryReceipt ? null : state.pending_roster, members: snapshot.members.map(member => ({ ...member,
         member_id: member.agent_member_id, tokens: member.tokens ?? memberUsage[member.agent_member_id] ?? null })) };
     });
     const state = model.read(), pending = state.pending_name;
     if (requestId && pending?.request_id === requestId) {
       const member = state.members.find(member => member.member_id === pending.action.member_id);
-      settleName(requestId, snapshot.error || (member?.name !== pending.action.name
-        ? "This name changed elsewhere. Review your draft and retry." : ""));
+      settleName(requestId, member?.name === pending.action.name ? ""
+        : snapshot.error || "This name changed elsewhere. Review your draft and retry.");
     }
+    return true;
   }
   function applyAgentRosterError(event) {
     if (event?.project_key === projectKey) {
-      if (event.request_id) { settleName(event.request_id, event.message || "Name could not be saved. Retry."); return; }
+      if (event.request_id) {
+        if (model.read().pending_name?.request_id === event.request_id) { settleName(event.request_id, event.message || "Name could not be saved. Retry."); return; }
+        if (model.read().pending_roster?.request_id === event.request_id) model.update(state => ({ ...state, pending_roster: null }));
+        else if (latestRead?.request_id === event.request_id) {
+          const current = latestRead.error === model.read().error; latestRead = null;
+          if (!current) return;
+        } else return;
+      }
       if (latestSnapshot) latestSnapshot = { ...latestSnapshot, error: event.message };
       model.update(state => ({ ...state, error: event.message }));
     }
   }
   function clearAgentRosterRename() {
+    latestRead = null;
     const pending = model.read().pending_name;
     if (pending) settleName(pending.request_id, "Connection lost. Review your draft and retry.");
+    const ordinary = model.read().pending_roster;
+    if (ordinary) applyAgentRosterError({ project_key: projectKey, request_id: ordinary.request_id,
+      message: "Connection lost. Reload members, review the current state and retry." });
   }
   function applyAgentRosterUsage(sessions, projectRoot) {
     memberUsage = selectWorksTelemetry({ sessions, projectRoot }).by_member;
@@ -228,7 +284,195 @@ export function createAgentRosterModel(projectKey, { onRename = () => {}, schedu
   model.subscribeFrame(state => state.pending_name ? null
     : Object.values(state.name_edits).find(edit => edit.status === "queued"), sendNextName);
   return { model, applyAgentRosterSnapshot, applyAgentRosterError, applyAgentRosterUsage,
-    editAgentMemberName, retryAgentMemberName, clearAgentRosterRename };
+    editAgentMemberName, retryAgentMemberName, clearAgentRosterRename, beginAgentRosterRequest };
+}
+
+// A target keeps its own draft and in-flight CAS. Both roles use this state;
+// their adapters select the existing canonical writer and revision token.
+export function createMemberTuningModel(projectKey, { onSave = () => {}, scheduleFrame } = {}) {
+  const model = createUiStateStore({ targets: {} }, { scheduleFrame });
+  const keyFor = (role, memberId) => `${role}:${memberId}`;
+  let pmMemberId;
+  const values = (profile, role = profile.role) => {
+    const agent_id = profile.agent_id?.trim() || "";
+    let reasoning = profile.reasoning?.trim() || null;
+    if (role === "pm" && agent_id === "grok" && /^[aA][uU][tT][oO]$/.test(reasoning || "")) reasoning = null;
+    return { agent_id, model: profile.model?.trim() || null, reasoning };
+  };
+  const equal = (left, right, role) => JSON.stringify(values(left, role)) === JSON.stringify(values(right, role));
+  function setTarget(key, next) { model.update(state => ({ targets: { ...state.targets, [key]: next } })); }
+
+  function sendNext() {
+    for (const [key, target] of Object.entries(model.read().targets)) {
+      if (target.available === false || target.status !== "queued" || target.pending || target.composing || target.blocked) continue;
+      const canonical = target.canonical, profile = values(target.draft, canonical.role);
+      if (canonical.role === "pm" && pmMemberId !== undefined && pmMemberId !== canonical.member_id) continue;
+      if (!canonical?.revision || !profile.agent_id) continue;
+      const requestId = createLaunchOperationId("member-tuning");
+      const request = canonical.role === "pm"
+        ? { kind: "set_pm_launch_profile", project_key: projectKey, member_id: canonical.member_id,
+          request_id: requestId, expected_profile_revision: canonical.revision, ...profile }
+        : { kind: "agent_roster", project_key: projectKey, request_id: requestId,
+          action: { kind: "set_tuning", member_id: canonical.member_id, model: profile.model,
+            reasoning: profile.reasoning, expected_core_revision: canonical.revision } };
+      setTarget(key, { ...target, status: "saving", error: "", field: null,
+        pending: { request_id: requestId, profile, baseRevision: canonical.revision } });
+      try { onSave(request); } catch (_error) {
+        applyTuningError({ project_key: projectKey, role: canonical.role, member_id: canonical.member_id,
+          request_id: requestId, message: "Profile could not be sent. Retry when connected." });
+      }
+    }
+  }
+
+  function applyTuningSnapshot(snapshot, requestId) {
+    if (snapshot?.project_key !== projectKey || !["implementation", "pm"].includes(snapshot.role)
+      || snapshot.role === "pm" && pmMemberId !== undefined && pmMemberId !== snapshot.member_id
+      || !snapshot.member_id || typeof snapshot.revision !== "string" || !snapshot.revision || !snapshot.agent_id) return;
+    const key = keyFor(snapshot.role, snapshot.member_id);
+    const previous = model.read().targets[key];
+    // Correlated old receipts cannot update a target after its request ended.
+    if (requestId && previous?.pending?.request_id !== requestId) return;
+    function nextSnapshot(current) {
+      if (!current) return { canonical: snapshot, available: true, draft: values(snapshot), status: "saved", error: "",
+        field: null, blocked: false, composing: false, pending: null };
+      if (requestId && current.pending && current.canonical.revision !== current.pending.baseRevision && current.canonical.revision !== snapshot.revision) {
+        return { ...current, pending: null, status: "error", blocked: true, error: "This profile changed elsewhere. Reload the current profile, review your draft and retry." };
+      }
+      const next = { ...current, available: snapshot.role === "pm" ? current.available : true, canonical: { ...current.canonical, ...snapshot } };
+      if (requestId && current.pending) {
+        next.pending = null;
+        if (!equal(snapshot, current.pending.profile, snapshot.role)) {
+          return { ...next, status: "error", blocked: true,
+            error: "This profile changed elsewhere. Review your draft and retry." };
+        }
+        if (current.blocked) return { ...next, status: "error", blocked: true, error: current.error };
+        next.status = current.composing ? "editing" : equal(current.draft, current.pending.profile, snapshot.role) ? "saved" : "queued";
+        next.blocked = false; next.error = ""; next.field = null;
+      } else if (current.status === "saved" && !equal(snapshot, current.canonical, snapshot.role)) next.draft = values(snapshot);
+      return next;
+    }
+    setTarget(key, nextSnapshot(previous));
+  }
+
+  function editTuning(role, memberId, patch, { composing = false } = {}) {
+    const key = keyFor(role, memberId), target = model.read().targets[key];
+    if (!target || target.available === false || !patch || Object.keys(patch).some(field => !["agent_id", "model", "reasoning"].includes(field)
+      || patch[field] !== null && typeof patch[field] !== "string")) return;
+    if (role === "implementation" && patch.agent_id !== undefined && patch.agent_id !== target.canonical.agent_id) return;
+    setTarget(key, { ...target, draft: { ...target.draft, ...patch }, composing,
+      status: composing ? "editing" : target.blocked ? "error" : target.pending ? "saving" : "queued" });
+    sendNext();
+  }
+
+  function applyTuningError(event) {
+    if (event?.project_key !== projectKey) return;
+    const key = keyFor(event.role, event.member_id), target = model.read().targets[key];
+    if (!event.request_id || target?.pending?.request_id !== event.request_id) return;
+    setTarget(key, { ...target, pending: null, status: "error", blocked: true,
+      error: event.message || "Profile could not be saved. Review your draft and retry.", field: event.field || null });
+  }
+
+  function retryTuning(role, memberId) {
+    const key = keyFor(role, memberId), target = model.read().targets[key];
+    if (!target?.blocked || target.available === false || target.pending || target.composing) return;
+    setTarget(key, { ...target, status: "queued", blocked: false, error: "", field: null });
+    sendNext();
+  }
+
+  function setTuningAvailable(role, memberId, available) {
+    const key = keyFor(role, memberId);
+    const target = model.read().targets[key];
+    if (target) setTarget(key, { ...target, available, ...(role === "pm" && !available
+      ? { blocked: true, status: target.pending ? target.status : "error", error: target.error || "PM profile unavailable. Reload the current profile, review your draft and retry." } : {}) });
+  }
+
+  function setPmProfileAvailable(available) {
+    if (pmMemberId) setTuningAvailable("pm", pmMemberId, available);
+  }
+
+  function applyPmTuningStatus(status) {
+    if (typeof status?.project_key === "string" && status.project_key && status.project_key !== projectKey) return;
+    if (status?.project_key !== projectKey || status.available !== true
+      || typeof status.configured_member_id !== "string" || !status.configured_member_id.trim()
+      || typeof status.profile_revision !== "string" || !status.profile_revision.trim()
+      || typeof status.configured_agent_id !== "string" || !status.configured_agent_id.trim()) {
+      for (const target of Object.values(model.read().targets)) {
+        if (target.canonical.role === "pm") setTuningAvailable("pm", target.canonical.member_id, false);
+      }
+      return;
+    }
+    setPmMember(status.configured_member_id);
+    applyTuningSnapshot({ project_key: projectKey, role: "pm", member_id: status.configured_member_id,
+      revision: status.profile_revision, agent_options: status.agent_options, agent_id: status.configured_agent_id,
+      model: status.configured_model, reasoning: status.configured_reasoning });
+    setTuningAvailable("pm", status.configured_member_id, true);
+  }
+
+  function applyRosterTuningSnapshot(roster, requestId, { accepted = null } = {}) {
+    if (roster?.project_key !== projectKey) return;
+    const pending = requestId && Object.values(model.read().targets).find(target => target.canonical.role === "implementation" && target.pending?.request_id === requestId);
+    if (accepted === false) {
+      if (pending) applyTuningError({ project_key: projectKey, role: "implementation", member_id: pending.canonical.member_id,
+        request_id: requestId, message: "This profile changed elsewhere. Reload the current profile, review your draft and retry." });
+      return;
+    }
+    if (requestId && !pending && accepted !== true) return;
+    for (const member of roster.members || []) {
+      const memberId = member.agent_member_id || member.member_id;
+      const core = member.saved_implementation_core, revision = member.saved_implementation_core_revision;
+      const acknowledgement = pending?.canonical.member_id === memberId ? requestId : undefined;
+      if (core && revision) applyTuningSnapshot({ project_key: projectKey, role: "implementation", member_id: memberId,
+        agent_id: core.agent_id, model: core.model, reasoning: core.reasoning, revision }, roster.error ? undefined : acknowledgement);
+      if (!core || !revision) {
+        setTuningAvailable("implementation", memberId, false);
+        if (acknowledgement) applyTuningError({ project_key: projectKey, role: "implementation", member_id: memberId,
+        request_id: requestId, message: roster.error || "Saved implementation settings are unavailable. Reload registered members and retry." });
+      }
+      if (acknowledgement && roster.error) applyTuningError({ project_key: projectKey, role: "implementation", member_id: memberId, request_id: requestId, message: roster.error });
+    }
+  }
+
+  function applyRosterTuningError(event) {
+    if (event?.project_key !== projectKey || !event.request_id) return;
+    const pending = Object.values(model.read().targets).find(target => target.canonical.role === "implementation" && target.pending?.request_id === event.request_id);
+    if (pending) applyTuningError({ ...event, role: "implementation", member_id: pending.canonical.member_id });
+  }
+
+  function applyPmTuningResult(event) {
+    if (event?.project_key !== projectKey || !event.member_id || !event.request_id) return;
+    const target = model.read().targets[keyFor("pm", event.member_id)];
+    if (target?.pending?.request_id !== event.request_id || pmMemberId !== undefined && event.member_id !== pmMemberId) return;
+    const snapshot = event.profile && typeof event.profile_revision === "string" && event.profile_revision
+      ? { project_key: projectKey, role: "pm", member_id: event.member_id, revision: event.profile_revision,
+        agent_id: event.profile.agent_id, model: event.profile.model, reasoning: event.profile.reasoning } : null;
+    if (event.success && snapshot) applyTuningSnapshot(snapshot, event.request_id);
+    else {
+      if (snapshot && (target.canonical.revision === target.pending.baseRevision || target.canonical.revision === snapshot.revision)) applyTuningSnapshot(snapshot);
+      applyTuningError({ ...event, role: "pm", message: event.message || "Profile result is unavailable. Reload and retry." });
+    }
+  }
+
+  function setPmMember(memberId) {
+    pmMemberId = memberId || null;
+    for (const target of Object.values(model.read().targets)) {
+      if (target.canonical.role === "pm" && target.canonical.member_id !== pmMemberId) {
+        setTuningAvailable("pm", target.canonical.member_id, false);
+        if (target.pending) applyTuningError({ project_key: projectKey, role: "pm", member_id: target.canonical.member_id,
+          request_id: target.pending.request_id, message: "The configured Project Manager changed. Reload and review this draft." });
+      }
+    }
+  }
+
+  function disconnectTuning() {
+    for (const target of Object.values(model.read().targets)) {
+      if (target.pending) applyTuningError({ project_key: projectKey, role: target.canonical.role,
+        member_id: target.canonical.member_id, request_id: target.pending.request_id,
+        message: "Connection lost. Reload the current profile, then review your draft and retry." });
+    }
+  }
+
+  model.subscribeFrame(state => Object.values(state.targets).some(target => target.status === "queued"), sendNext);
+  return { model, applyTuningSnapshot, editTuning, applyTuningError, retryTuning, disconnectTuning, setPmMember, setTuningAvailable, setPmProfileAvailable, applyPmTuningStatus, applyRosterTuningSnapshot, applyRosterTuningError, applyPmTuningResult };
 }
 
 // Inputs are session-attributed measurements, never provider account totals.

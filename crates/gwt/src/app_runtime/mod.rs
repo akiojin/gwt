@@ -785,6 +785,7 @@ pub(crate) enum RemoteRuntimeCommandKind {
     Input { reply_client: Option<ClientId> },
     Resize,
     Stop,
+    AttachmentInput(Box<attachments::AttachmentOperation>),
 }
 
 #[derive(Debug, Clone)]
@@ -796,6 +797,8 @@ pub(crate) struct RemoteRuntimeCommandCompletion {
     pub(crate) incarnation: u64,
     pub(crate) kind: RemoteRuntimeCommandKind,
     pub(crate) approval_resolution_started: bool,
+    pub(crate) attachment_outcome:
+        Option<gwt::project_runtime::events::OwnerAttachmentInputReceipt>,
     pub(crate) result: Result<Option<gwt::project_runtime::events::OwnerInputObservation>, String>,
 }
 
@@ -1053,6 +1056,7 @@ pub(crate) use wizard::{
 mod work_scans;
 mod workspace;
 mod workspace_views;
+pub(crate) use attachments::AttachmentOperation;
 use attachments::UploadedImagePasteOperation;
 #[cfg(test)]
 use attachments::{
@@ -4758,8 +4762,22 @@ impl AppRuntime {
         } = event
         {
             if !self.project_context_is_current(&context) {
-                self.cleanup_stale_project_completion(&completion);
-                return None;
+                match *completion {
+                    UserEvent::AttachmentPromptReady { operation, .. } => return Some(UserEvent::Dispatch(vec![
+                        operation.progress(AttachmentProgressPhase::Failed, Some("Attachment target unavailable. Reload the current UI and try again."))
+                    ])),
+                    UserEvent::RemoteRuntimeCommandComplete(mut boxed)
+                        if matches!(&boxed.kind, RemoteRuntimeCommandKind::AttachmentInput(_)) => {
+                            // An outer stale scope cannot certify any physical receipt adoption.
+                            boxed.attachment_outcome = None;
+                            event = UserEvent::RemoteRuntimeCommandComplete(boxed);
+                            continue;
+                        }
+                    completion => {
+                        self.cleanup_stale_project_completion(&completion);
+                        return None;
+                    }
+                }
             }
             event = *completion;
         }
@@ -11432,9 +11450,17 @@ impl AppRuntime {
                         FrontendEvent::FrontendReady => {
                             self.unopened_project_route_events(&client_id, key)
                         }
-                        event => pm_chat::rejected_request_task_events(&client_id, &event)
-                            .or_else(|| recovery_center::rejected_action_events(&client_id, &event))
-                            .unwrap_or_default(),
+                        event => {
+                            pm::rejected_member_settings_events(&client_id, key.as_str(), &event)
+                                .or_else(|| self.rejected_attachment_request(&client_id, &event))
+                                .or_else(|| {
+                                    pm_chat::rejected_request_task_events(&client_id, &event)
+                                })
+                                .or_else(|| {
+                                    recovery_center::rejected_action_events(&client_id, &event)
+                                })
+                                .unwrap_or_default()
+                        }
                     };
                 };
                 self.handle_frontend_event_for_project(&context, client_id, event)
@@ -11631,7 +11657,9 @@ impl AppRuntime {
             FrontendEvent::UpdateAutostart { enabled } => {
                 self.autostart_update_events(client_id, enabled)
             }
-            _ => Vec::new(),
+            event => self
+                .rejected_attachment_request(&client_id, &event)
+                .unwrap_or_default(),
         }
     }
 
@@ -11758,9 +11786,15 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         if !self.project_owns_frontend_request(context, &event) {
             tracing::warn!(project_key = %context.project_key, "rejected frontend request outside its project scope");
-            return pm_chat::rejected_request_task_events(&client_id, &event)
-                .or_else(|| recovery_center::rejected_action_events(&client_id, &event))
-                .unwrap_or_default();
+            return pm::rejected_member_settings_events(
+                &client_id,
+                context.project_key.as_str(),
+                &event,
+            )
+            .or_else(|| self.rejected_attachment_request(&client_id, &event))
+            .or_else(|| pm_chat::rejected_request_task_events(&client_id, &event))
+            .or_else(|| recovery_center::rejected_action_events(&client_id, &event))
+            .unwrap_or_default();
         }
         let project_scope = self.frontend_project_log_scope(Some(context), &event);
         let _project_scope = project_scope.as_ref().map(|scope| scope.enter()).unwrap_or_else(|| {
@@ -11903,8 +11937,31 @@ impl AppRuntime {
                 action,
                 expected_revision,
                 request_id,
+                project_key,
             } => {
-                self.agent_roster_events(context, &client_id, action, expected_revision, request_id)
+                if project_key
+                    .as_deref()
+                    .is_some_and(|key| key != context.project_key.as_str())
+                    || matches!(
+                        action,
+                        gwt::agent_names::AgentRosterAction::SelectPm { .. }
+                            | gwt::agent_names::AgentRosterAction::SetPmEligibility { .. }
+                            | gwt::agent_names::AgentRosterAction::SetTuning(_)
+                    ) && project_key.is_none()
+                {
+                    vec![OutboundEvent::reply(&client_id, BackendEvent::AgentRosterError {
+                        project_key: context.project_key.to_string(),
+                        message: "Load the current project's Agent roster before changing PM selection".into(), request_id,
+                    })]
+                } else {
+                    self.agent_roster_events(
+                        context,
+                        &client_id,
+                        action,
+                        expected_revision,
+                        request_id,
+                    )
+                }
             }
             FrontendEvent::AgentSchedule { action } => {
                 self.agent_schedule_events(context, &client_id, action)
@@ -11946,10 +12003,29 @@ impl AppRuntime {
                 self.set_pm_loop_interval_events(context, loop_interval_secs)
             }
             FrontendEvent::SetPmLaunchProfile {
+                project_key,
+                member_id,
+                request_id,
+                expected_profile_revision,
                 agent_id,
                 model,
                 reasoning,
-            } => self.set_pm_launch_profile_events(context, &agent_id, model, reasoning),
+            } => self.set_pm_launch_profile_events(
+                context,
+                &client_id,
+                pm::PmProfileEdit {
+                    project_key,
+                    member_id,
+                    request_id,
+                    expected_profile_revision,
+                    profile: gwt::pm_registry::PmLaunchProfile {
+                        agent_id,
+                        model,
+                        reasoning,
+                        version: None,
+                    },
+                },
+            ),
             FrontendEvent::RestartPmAgent => self.restart_pm_agent_events(context),
             FrontendEvent::OpenProjectDialog => self.open_project_dialog_events(&client_id),
             FrontendEvent::SelectCloneProjectParent => {
@@ -12093,42 +12169,29 @@ impl AppRuntime {
                     ),
                 },
             )],
-            FrontendEvent::PasteImage {
-                id,
-                data_base64,
-                mime_type,
-                filename,
-            } => self.paste_image_events(&id, &data_base64, &mime_type, filename.as_deref()),
+            event @ FrontendEvent::PasteImage { .. } => self
+                .rejected_attachment_request(&client_id, &event)
+                .expect("attachment refusal"),
             FrontendEvent::PasteImageUploaded {
                 id,
                 operation_id,
+                expected_target,
                 upload_id,
                 mime_type,
                 filename,
                 size,
-            } => {
-                if operation_id.is_some() {
-                    self.paste_image_uploaded_operation_events(
-                        client_id,
-                        id,
-                        operation_id,
-                        UploadedImagePasteOperation {
-                            upload_id,
-                            mime_type,
-                            filename,
-                            size,
-                        },
-                    )
-                } else {
-                    self.paste_image_uploaded_events(
-                        &id,
-                        &upload_id,
-                        &mime_type,
-                        filename.as_deref(),
-                        size,
-                    )
-                }
-            }
+            } => self.paste_image_uploaded_operation_events(
+                client_id,
+                id,
+                operation_id,
+                expected_target,
+                UploadedImagePasteOperation {
+                    upload_id,
+                    mime_type,
+                    filename,
+                    size,
+                },
+            ),
             FrontendEvent::AttachmentUploadFailed {
                 id,
                 operation_id,
@@ -12137,14 +12200,15 @@ impl AppRuntime {
             FrontendEvent::AttachFiles {
                 id,
                 operation_id,
+                expected_target,
                 files,
-            } => {
-                if operation_id.is_some() {
-                    self.attach_files_operation_events(client_id, id, operation_id, files)
-                } else {
-                    self.attach_files_events(&id, files)
-                }
-            }
+            } => self.attach_files_operation_events(
+                client_id,
+                id,
+                operation_id,
+                expected_target,
+                files,
+            ),
             FrontendEvent::LoadBranches { id } => self.load_branches_events(&client_id, &id),
             FrontendEvent::RequestRemoteStartWorkBranches { id } => {
                 self.request_remote_start_work_branches_events(&client_id, &id)
@@ -14956,8 +15020,17 @@ impl AppRuntime {
                 error,
                 final_screen,
             } => {
-                let Some(id) = self.window_id_for_owner_pane(context, identity, &id, incarnation)
-                else {
+                let alias = self.window_id_for_owner_pane(context, identity, &id, incarnation);
+                tracing::info!(target: "gwt.restart.diagnostic", stage = "owner_closed",
+                    gwt_project_scope = context.project_key.as_str(), project_key = %context.project_key,
+                    connection_id, owner_pid = identity.pid, owner_started_at = identity.host_started_at,
+                    owner_pane_id = %id, incarnation, alias_matched = alias.is_some(),
+                    window_id = ?alias.as_deref(), cleanup_ok = error.is_none(),
+                    final_screen_present = final_screen.is_some(),
+                    active_source_session_id = ?alias.as_ref().and_then(|alias| self.active_agent_sessions.get(alias)).map(|active| active.session_id.as_str()),
+                    pending_operation_id = ?alias.as_ref().and_then(|alias| self.pending_launch_completions.get(alias)).filter(|pending| pending.owner_pane_id == id).map(|pending| pending.operation_id.as_str()),
+                    "exact owner close observed by GUI");
+                let Some(id) = alias else {
                     return Vec::new();
                 };
                 if let Some(error) = error {
@@ -15939,7 +16012,29 @@ impl AppRuntime {
                     }) {
                         // Inventory may have installed this same owner before the HTTP launch reply.
                         // A fresh post-install snapshot repairs it without replaying older status/data.
-                        return self.request_owner_snapshot(&window_id, None);
+                        let mut events = Vec::new();
+                        if snapshot.agent_id.is_some()
+                            && snapshot.session_id.is_some()
+                            && snapshot
+                                .agent_name
+                                .as_deref()
+                                .is_some_and(|name| !name.trim().is_empty())
+                            && self.window_lookup.contains_key(&window_id)
+                            && client.identity().is_some_and(|identity| {
+                                self.refresh_pm_session_cache_for_current_owner(
+                                    &context, &window_id, identity,
+                                )
+                            })
+                        {
+                            self.invalidate_project_caches(&context.project_root);
+                            self.invalidate_workspace_projection_patch(&context.tab_id);
+                            events.push(self.workspace_state_broadcast(&context));
+                            events.extend(
+                                self.active_work_projection_broadcast_for_tab(&context.tab_id),
+                            );
+                        }
+                        events.extend(self.request_owner_snapshot(&window_id, None));
+                        return events;
                     }
                     self.record_restore_window_outcome(&window_id, Ok(()));
                     self.restore_launch_windows.remove(&window_id);
@@ -16340,6 +16435,9 @@ impl AppRuntime {
         let Some(address) = self.window_lookup.get(window_id).cloned() else {
             return Vec::new();
         };
+        let pm_cache_changed = snapshot.agent_id.is_some()
+            && self.refresh_pm_session_cache_for_current_owner(context, window_id, &identity);
+        let activity_changed = activity_changed || pm_cache_changed;
         if let Some(tab) = self.tab_mut(&address.tab_id) {
             tab.workspace
                 .set_session_id(&address.raw_id, snapshot.session_id.clone());

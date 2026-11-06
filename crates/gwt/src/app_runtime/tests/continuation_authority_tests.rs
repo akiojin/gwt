@@ -432,6 +432,9 @@ fn continue_work_without_durable_session_starts_projection_only_handoff() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
+    let codex_home = temp.path().join(".codex");
+    fs::create_dir_all(&codex_home).unwrap();
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", &codex_home);
     let fake_codex = write_fake_codex(temp.path());
     let _path = prepend_tool_parent_to_path(&fake_codex);
     let (mut runtime, repo, owner, work_id) = projection_only_continue_runtime(
@@ -462,6 +465,36 @@ fn continue_work_without_durable_session_starts_projection_only_handoff() {
             .join("historical-session.toml")
             .exists(),
         "fixture must not provide durable Session metadata"
+    );
+
+    let child_environment = gwt_agent::LaunchEnvironment::from_active_profile(
+        runtime.profile_config_path.as_deref().unwrap(),
+        gwt_agent::LaunchRuntimeTarget::Host,
+    )
+    .unwrap()
+    .with_project_root(&repo)
+    .into_parts()
+    .0;
+    let semantics = if cfg!(windows) {
+        gwt::project_runtime::launch::HostEnvKeySemantics::WindowsCaseInsensitive
+    } else {
+        gwt::project_runtime::launch::HostEnvKeySemantics::CaseSensitive
+    };
+    let codex_path = gwt::project_runtime::launch::effective_host_codex_config_path(
+        &repo,
+        &child_environment,
+        semantics,
+        dirs::home_dir().as_deref(),
+    );
+    assert!(
+        codex_path.is_ok(),
+        "fixture Codex path must resolve before checking isolation"
+    );
+    assert!(
+        codex_path
+            .as_ref()
+            .is_ok_and(|path| path.starts_with(dunce::canonicalize(temp.path()).unwrap())),
+        "fixture child Codex config must be confined to this case's private home"
     );
 
     let actual = owner_continue_launch_fixture(&runtime, "projection-only-operation", &work_id);
@@ -1433,8 +1466,41 @@ fn projection_only_continue_spawn_failure_aborts_without_committing_candidate_st
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
+    let codex_home = temp.path().join(".codex");
+    fs::create_dir_all(&codex_home).unwrap();
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", &codex_home);
     let (_runtime, repo, authority, work_id) =
         owner_continuation_seed(temp.path(), "projection-only-spawn-failure");
+    let child_environment = gwt_agent::LaunchEnvironment::from_active_profile(
+        &gwt_core::paths::gwt_config_path(),
+        gwt_agent::LaunchRuntimeTarget::Host,
+    )
+    .unwrap()
+    .with_project_root(&repo)
+    .into_parts()
+    .0;
+    let semantics = if cfg!(windows) {
+        gwt::project_runtime::launch::HostEnvKeySemantics::WindowsCaseInsensitive
+    } else {
+        gwt::project_runtime::launch::HostEnvKeySemantics::CaseSensitive
+    };
+    let codex_path = gwt::project_runtime::launch::effective_host_codex_config_path(
+        &repo,
+        &child_environment,
+        semantics,
+        dirs::home_dir().as_deref(),
+    );
+    assert!(
+        codex_path.is_ok(),
+        "fixture Codex path must resolve before checking isolation"
+    );
+    assert!(
+        codex_path
+            .as_ref()
+            .is_ok_and(|path| path.starts_with(dunce::canonicalize(temp.path()).unwrap())),
+        "fixture child Codex config must be confined to this case's private home"
+    );
+
     let work_path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo);
     let before_work = fs::read(&work_path).unwrap();
     let before_events = tracked_work_event_store_snapshot(&repo);

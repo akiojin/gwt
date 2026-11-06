@@ -5,6 +5,7 @@
  */
 import { expect, test, type Page } from "@playwright/test";
 import { APP_PROJECT_KEY, APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { startWorksManagedSource } from "./_helpers/works-managed-source";
 
 const appUrl = process.env.GWT_PLAYWRIGHT_BASE_URL
   ? new URL(new URL(APP_URL).pathname, process.env.GWT_PLAYWRIGHT_BASE_URL).href
@@ -26,8 +27,22 @@ async function expectNoHorizontalOverflow(page: Page, selector: string) {
 test.describe("Works and Agents approved baseline", () => {
   test.setTimeout(60_000);
   test.use({ deviceScaleFactor: 1, viewport: { width: 1440, height: 1000 } });
+  let managedSource: Awaited<ReturnType<typeof startWorksManagedSource>> | undefined;
+
+  test.beforeAll(async ({ browser }, info) => {
+    test.setTimeout(60_000);
+    if (process.env.GWT_PLAYWRIGHT_WORKS_SOURCE === "1") {
+      managedSource = await startWorksManagedSource(browser, info);
+    }
+  });
+
+  test.afterAll(async () => {
+    await managedSource?.stop();
+    managedSource = undefined;
+  });
 
   test.beforeEach(async ({ page }, info) => {
+    await managedSource?.audit("before");
     const errors: string[] = []; capturedErrors.set(page, errors);
     page.on("pageerror", error => errors.push(error.message));
     page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
@@ -35,19 +50,33 @@ test.describe("Works and Agents approved baseline", () => {
       localStorage.setItem("gwt:ui:theme", theme);
       localStorage.setItem("gwt:ui:agent-columns", "3");
     }, info.project.name.includes("light") ? "light" : "dark");
-    if (!process.env.GWT_PLAYWRIGHT_BASE_URL) await installEmbeddedRoutes(page);
+    if (!managedSource && !process.env.GWT_PLAYWRIGHT_BASE_URL) await installEmbeddedRoutes(page);
     await installWorksAgentsBackend(page);
-    await page.goto(appUrl);
+    await page.goto(managedSource
+      ? new URL(new URL(APP_URL).pathname, managedSource.url).href
+      : appUrl);
     await openRail(page, "works");
     await expect(main(page)).toHaveAttribute("data-surface", "works");
     await expect(workRow(page, "agent-one")).toBeVisible();
   });
 
   test.afterEach(async ({ page }, info) => {
-    await expect(page.locator(".render-degradation-banner")).toHaveCount(0);
-    await expect(page.locator("html")).toHaveAttribute("data-theme", info.project.name.includes("light") ? "light" : "dark");
-    expect(capturedErrors.get(page), "zero console/page errors, including readback and navigation").toEqual([]);
-    expect((await sent(page)).filter(message => ["close_window", "stop_agent", "stop_window", "restart_window"].includes(message.kind))).toEqual([]);
+    const failures: unknown[] = [];
+    try {
+      await expect(page.locator(".render-degradation-banner")).toHaveCount(0);
+      await expect(page.locator("html")).toHaveAttribute("data-theme", info.project.name.includes("light") ? "light" : "dark");
+      expect(capturedErrors.get(page), "zero console/page errors, including readback and navigation").toEqual([]);
+      expect((await sent(page)).filter(message => ["close_window", "stop_agent", "stop_window", "restart_window"].includes(message.kind))).toEqual([]);
+    } catch (error) {
+      failures.push(error);
+    }
+    try {
+      await managedSource?.audit("post");
+    } catch (error) {
+      failures.push(error);
+    }
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) throw new AggregateError(failures, "Works assertions and source post proof failed");
   });
 
   test("live Works never disappear while activity and catalogs converge", async ({ page }, info) => {
@@ -122,6 +151,103 @@ test.describe("Works and Agents approved baseline", () => {
     });
     await expect(works(page).locator(".work-row")).toHaveCount(0);
     await expect(works(page).locator(".works-empty")).toHaveText("No local agents are active.");
+  });
+
+  test("same-identity Works keeps real xterm scrollback and input across unavailable activity, clear and catalog gaps at 400px", async ({ page }, info) => {
+    await page.setViewportSize({ width: 400, height: 900 });
+    await workRow(page, "agent-one").getByRole("button", { name: "Open terminal" }).click();
+    await expect(full(page)).toBeVisible();
+    const root = full(page).locator('.works-terminal[data-window-id="agent-one"]');
+    const input = root.locator(".xterm-helper-textarea");
+    await root.evaluate(node => {
+      (window as any).__retainedWorks = { root: node, native: node.querySelector(".xterm"), input: node.querySelector("textarea") };
+    });
+    const metrics = () => page.evaluate(() => window.__gwtTerminalTestApi!.metrics("agent-one"));
+    const received = () => page.evaluate(() => (window as any).__worksAgentsFixture.sent
+      .filter((message: any) => message.kind === "terminal_input" && message.id === "agent-one").map((message: any) => message.data));
+    const buffer = () => page.evaluate(() => window.__gwtTerminalTestApi!.bufferText("agent-one"));
+    await page.evaluate(() => {
+      (window as any).__worksAgentsFixture.echoInputForWorks();
+      (window as any).__worksAgentsFixture.output("agent-one", Array.from({ length: 220 }, (_, index) => `retained ${String(index + 1).padStart(3, "0")}\r\n`).join(""));
+    });
+    await expect.poll(buffer).toContain("retained 220");
+    await expect.poll(metrics).toMatchObject({ hasRuntime: true, isReady: true, readOnly: false, viewportRefreshPending: false });
+    await input.focus(); await page.keyboard.type("draft-T790");
+    await expect.poll(buffer).toContain("draft-T790");
+    for (const phase of ["unknown", "clear", "catalog"] as const) {
+      // Reuse the real-buffer/real-wheel method from agent-window-scroll.spec.ts;
+      // these are xterm buffer coordinates, never synthetic DOM scroll markers.
+      await page.evaluate(() => window.__gwtTerminalTestApi!.scrollToBottom("agent-one"));
+      await expect.poll(async () => { const value = await metrics(); return value.viewportY === value.baseY; }).toBe(true);
+      const bottom = await metrics(); expect(bottom.baseY).toBeGreaterThan(0);
+      const box = await root.boundingBox(); expect(box).not.toBeNull();
+      await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+      await page.mouse.wheel(0, -900);
+      await expect.poll(async () => (await metrics()).viewportY).toBeLessThan(bottom.viewportY);
+      const before = await metrics(), text = await buffer(), inputs = await received();
+      if (phase === "catalog") await openRail(page, "agents");
+      // As in terminal-input-disconnect.spec.ts, freeze the overlay grace timer
+      // while checking real keyboard input during a disconnected transport.
+      if (phase === "clear") { await page.clock.install(); await page.clock.pauseAt(new Date(Date.now() + 1000)); }
+      await page.evaluate(phase => (window as any).__worksAgentsFixture.loseWorksProof(phase), phase);
+      if (phase === "clear") await page.clock.runFor(100);
+      await expect.poll(metrics).toMatchObject({ hasRuntime: true, readOnly: true });
+      if (phase === "catalog") await openRail(page, "works");
+      await expect(full(page)).toBeVisible();
+      await expect(full(page).locator(".works-full-meta")).toContainText("Input unavailable");
+      expect(await root.evaluate(node => {
+        const saved = (window as any).__retainedWorks;
+        return node === saved.root && node.querySelector(".xterm") === saved.native && node.querySelector("textarea") === saved.input;
+      })).toBe(true);
+      expect((await metrics()).viewportY, `${phase} preserves the actual scrolled xterm viewport`).toBe(before.viewportY);
+      expect(await buffer()).toBe(text);
+      await input.focus(); await page.keyboard.type("blocked");
+      expect(await received(), `${phase} cannot forward stale keyboard input`).toEqual(inputs);
+      if (phase === "clear") await page.clock.runFor(1000);
+      await page.evaluate(phase => (window as any).__worksAgentsFixture.restoreWorksProof(phase), phase);
+      if (phase === "clear") { await page.clock.runFor(100); await page.clock.resume(); }
+      await expect.poll(metrics).toMatchObject({ hasRuntime: true, isReady: true, readOnly: false, viewportRefreshPending: false });
+      await expect(full(page)).toBeVisible();
+      expect(await root.evaluate(node => node.querySelector(".xterm") === (window as any).__retainedWorks.native)).toBe(true);
+      expect((await metrics()).viewportY).toBe(before.viewportY);
+      expect(await buffer()).toBe(text);
+      await input.focus(); await page.keyboard.type(`fresh-${phase}`);
+      await expect.poll(async () => (await received()).join("")).toContain(`fresh-${phase}`);
+      await expect.poll(buffer).toContain(`fresh-${phase}`);
+      await page.keyboard.press("Enter");
+      await expectNoHorizontalOverflow(page, ".works-full");
+      await info.attach(`works-retained-${phase}`, { body: JSON.stringify({ before, recovered: await metrics(), inputCount: (await received()).length }), contentType: "application/json" });
+    }
+    // Enable actual xterm alternate-buffer + SGR mouse tracking with terminal
+    // output. Real wheel input must report mouse events, with no PageUp fallback.
+    await page.evaluate(() => (window as any).__worksAgentsFixture.output("agent-one", "\u001b[?1049h\u001b[?1000h\u001b[?1006h"));
+    await expect(root.locator(".xterm")).toHaveClass(/enable-mouse-events/);
+    await expect.poll(async () => (await metrics()).baseY).toBe(0);
+    const mouseStart = (await received()).length;
+    const box = await root.boundingBox();
+    await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+    await page.mouse.wheel(0, -300);
+    await expect.poll(async () => (await received()).slice(mouseStart).some((data: string) => /\u001b\[<64;\d+;\d+M/.test(data))).toBe(true);
+    expect((await received()).slice(mouseStart).some((data: string) => data.includes("\u001b[5~") || data.includes("\u001b[6~"))).toBe(false);
+    await page.evaluate(() => (window as any).__worksAgentsFixture.output("agent-one", "\u001b[?1000l\u001b[?1006l\u001b[?1049l"));
+    await expect(root.locator(".xterm")).not.toHaveClass(/enable-mouse-events/);
+    await expect.poll(buffer).toContain("draft-T790");
+    await page.screenshot({ path: info.outputPath("works-retained-real-xterm-400px.png") });
+    const previousInputs = (await received()).length;
+    await page.evaluate(() => (window as any).__worksAgentsFixture.rebindForWorks());
+    await expect(full(page)).toBeHidden();
+    await expect(workRow(page, "agent-one").locator(".work-open")).toBeEnabled();
+    await workRow(page, "agent-one").locator(".work-open").click();
+    await expect(full(page)).toBeVisible();
+    expect(await full(page).locator(".xterm").evaluate(node => node !== (window as any).__retainedWorks.native)).toBe(true);
+    await expect.poll(buffer).toContain("fresh rebound snapshot");
+    expect(await buffer()).not.toContain("draft-T790");
+    await expect.poll(metrics).toMatchObject({ readOnly: false, isReady: true });
+    await full(page).locator(".xterm-helper-textarea").focus();
+    await page.keyboard.type("new-session-input");
+    await expect.poll(async () => (await received()).slice(previousInputs).join("")).toContain("new-session-input");
+    await info.attach("works-rebound-native", { body: JSON.stringify(await metrics()), contentType: "application/json" });
+
   });
 
   test("workspace snapshots refresh Works and Agents while preserving native controls", async ({ page }, info) => {
@@ -254,6 +380,42 @@ test.describe("Works and Agents approved baseline", () => {
     });
     await expect(workRow(page, "pm-window").locator(".work-tail > .terminal-text-preview")).toHaveText("Project supervision\nReviewing current work\nWaiting for agent updates");
     await expect(workRow(page, "agent-two").locator(".work-tail > .terminal-text-preview")).toHaveText("Reading the assigned issue\nChanges saved\nWaiting for input");
+    await page.evaluate(() => {
+      const target = document.querySelector('.works-surface:not(.works-surface--preview)')!;
+      const row = target.querySelector('[data-window-id="agent-one"].work-row')!;
+      const probe = { active: true, frames: 0, empty: [] as string[], row,
+        output: row.querySelector(".terminal-text-preview"),
+        terminal: target.querySelector('.work-runtime-cache[data-window-id="agent-one"] .xterm') };
+      (window as any).__worksReactivationProbe = probe;
+      const sample = () => {
+        if (!probe.active) return;
+        if ((target as HTMLElement).getClientRects().length && !(target as HTMLElement).hidden) {
+          probe.frames++;
+          const current = target.querySelector('[data-window-id="agent-one"].work-row');
+          if (!current?.textContent?.includes("Aster")
+            || !current.querySelector(".terminal-text-preview")?.textContent?.includes("final line")) probe.empty.push("missing live output");
+        }
+        requestAnimationFrame(sample);
+      };
+      requestAnimationFrame(sample);
+    });
+    for (let turn = 0; turn < 3; turn++) {
+      await openRail(page, "agents");
+      await openRail(page, "works");
+      await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    }
+    const continuity = await page.evaluate(() => {
+      const probe = (window as any).__worksReactivationProbe; probe.active = false;
+      const target = document.querySelector('.works-surface:not(.works-surface--preview)')!;
+      return { frames: probe.frames, empty: probe.empty,
+        sameRow: target.querySelector('[data-window-id="agent-one"].work-row') === probe.row,
+        sameOutput: target.querySelector('[data-window-id="agent-one"] .terminal-text-preview') === probe.output,
+        sameTerminal: target.querySelector('.work-runtime-cache[data-window-id="agent-one"] .xterm') === probe.terminal };
+    });
+    expect(continuity.frames).toBeGreaterThan(0);
+    expect(continuity.empty).toEqual([]);
+    expect(continuity.sameRow && continuity.sameOutput && continuity.sameTerminal).toBe(true);
+    await info.attach("works-reactivation-frames", { body: JSON.stringify(continuity), contentType: "application/json" });
     await page.screenshot({ path: info.outputPath("works-approved-list.png") });
 
     await workRow(page, "agent-one").focus(); await page.keyboard.press("Enter");
@@ -399,6 +561,17 @@ test.describe("Works and Agents approved baseline", () => {
       body: JSON.stringify({ scope: "Chromium renderer metrics only; excludes native GUI CPU/RSS", updates: 20,
         observation, before, after: await cdp.send("Performance.getMetrics") }) });
     await cdp.detach();
+    await full(page).locator(".works-full-header").evaluate(target => {
+      (window as any).__gwtAttachmentUploader = async ({ file }: { file: File }) => ({
+        upload_id: "telemetry-upload", filename: file.name, mime_type: file.type, size: file.size,
+      });
+      const transfer = new DataTransfer();
+      transfer.items.add(new File(["fixture contents"], "fixture.txt", { type: "text/plain" }));
+      target.dispatchEvent(new DragEvent("dragover", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+      target.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+    });
+    await expect.poll(async () => (await sent(page)).filter(message =>
+      message.kind === "attach_files" && message.id === "agent-one")).toHaveLength(1);
     await page.evaluate(() => (window as any).__worksAgentsFixture.attachmentProgress());
     await expect(full(page).locator(".attachment-progress")).toContainText("Staging");
     await page.evaluate(() => (window as any).__worksAgentsFixture.remountInKanban());
@@ -539,14 +712,49 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(roster(page).locator(".roster-count")).toHaveText("4");
     await expect(roster(page).locator(".roster-capacity-value")).toHaveText("4");
     expect(await page.evaluate(() => (window as any).__worksAgentsFixture.members.find(member => member.agent_member_id === "m-added").agent_id)).toBe("codex");
+    // This is the fixture WebSocket roster, not a native backend Session.
+    await page.evaluate(() => {
+      const fixture = (window as any).__worksAgentsFixture;
+      const member = fixture.members.find((value: any) => value.agent_member_id === "m-added");
+      member.saved_manual_profile = { agent_id: "codex", agent_member_id: "m-added", model: "retained-model", reasoning: "high", runtime_target: "Host", skip_permissions: false };
+      member.saved_implementation_core = { agent_id: "codex", model: "retained-model", reasoning: "high", version: null, fast_mode: false };
+      member.saved_implementation_core_revision = "core-added-1";
+      member.history = [
+        { session_id: "s-added-old", issue_number: 4100, title: "Earlier retained", result: "landed", started_at: "2026-10-20T00:00:00Z", ended_at: "2026-10-20T02:00:00Z" },
+        { session_id: "s-added-new", issue_number: 4200, title: "Later retained", result: "landed", started_at: "2026-10-22T00:00:00Z", ended_at: "2026-10-22T02:00:00Z" },
+      ];
+      fixture.reorderMembers(["m-one", "m-two", "m-idle", "m-added"]);
+    });
+    const beforeRest = await page.evaluate(() => structuredClone((window as any).__worksAgentsFixture.members.find(member => member.agent_member_id === "m-added")));
+    expect(beforeRest.saved_implementation_core.model).toBe("retained-model");
+    expect(beforeRest.history).toHaveLength(2);
     await roster(page).locator('.roster-row[data-member-id="m-added"]').click();
+    await expect(roster(page).locator(".roster-saved-settings")).toContainText("Model: retained-model");
+    expect(await roster(page).locator(".roster-history li").allTextContents()).toEqual([
+      expect.stringContaining("Later retained"), expect.stringContaining("Earlier retained"),
+    ]);
     await roster(page).locator('.roster-detail [data-action="rest"]').click();
     await expect(roster(page).locator(".roster-count")).toHaveText("3");
     await expect(roster(page).locator(".roster-capacity-value")).toHaveText("3");
     const mutations = (await sent(page)).filter(message => message.kind === "agent_roster" && message.action.kind !== "read");
-    expect(mutations.map(message => [message.action, message.expected_revision])).toEqual([[{ kind: "add", agent_id: "codex", name: "Dahlia" }, 3], [{ kind: "rest", member_id: "m-added" }, 4]]);
+    expect(mutations.map(message => [message.action, message.expected_revision])).toEqual([[{ kind: "add", agent_id: "codex", name: "Dahlia", pm_eligible: false }, 3], [{ kind: "rest", member_id: "m-added" }, 5]]);
     expect(await page.evaluate(() => (window as any).__worksAgentsFixture.rejectedRevisions)).toEqual([]);
     expect(await page.evaluate(() => (window as any).__worksAgentsFixture.members.find(member => member.agent_member_id === "m-added").enabled)).toBe(false);
+    const resting = roster(page).locator('.roster-row[data-member-id="m-added"]');
+    const restingRecord = { ...beforeRest, enabled: false };
+    expect(await page.evaluate(() => (window as any).__worksAgentsFixture.members.find(member => member.agent_member_id === "m-added"))).toEqual(restingRecord);
+    await expect(roster(page).locator(".roster-saved-settings")).toContainText("Model: retained-model");
+    expect(await roster(page).locator(".roster-history li").allTextContents()).toEqual([
+      expect.stringContaining("Later retained"), expect.stringContaining("Earlier retained"),
+    ]);
+    await expect(resting).toBeVisible();
+    await expect(resting.locator(".roster-state")).toHaveText("Resting");
+    await expect(roster(page).locator(".roster-capacity-note")).toContainText("Registered 4");
+    await page.evaluate(() => (window as any).__worksAgentsFixture.census(null));
+    await expect(roster(page).locator(".roster-active")).toHaveText("Active —");
+    await expect(resting).toBeVisible();
+    await page.evaluate(() => (window as any).__worksAgentsFixture.census(["agent-one", "agent-two", "pm-window"]));
+    await expect(roster(page).locator(".roster-active")).toHaveText("Active 3");
 
     await roster(page).locator('.roster-row[data-member-id="m-one"]').click();
     await roster(page).locator(".roster-now button").evaluate(button => {
@@ -577,6 +785,24 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(works(page).locator('[data-availability="today"]')).toBeVisible();
     await expect(works(page).locator('[data-availability="fleet"]')).toBeVisible();
     await expect(works(page).locator(".works-source-note")).toBeVisible();
+    await page.reload();
+    await openRail(page, "agents");
+    await expect(resting).toBeVisible();
+    await expect(resting.locator(".roster-state")).toHaveText("Resting");
+    expect(await page.evaluate(() => (window as any).__worksAgentsFixture.members.find(member => member.agent_member_id === "m-added"))).toEqual(restingRecord);
+    await resting.click();
+    await expect(roster(page).locator(".roster-saved-settings")).toContainText("Model: retained-model");
+    expect(await roster(page).locator(".roster-history li").allTextContents()).toEqual([
+      expect.stringContaining("Later retained"), expect.stringContaining("Earlier retained"),
+    ]);
+    await expect(roster(page).locator(".roster-count")).toHaveText("3");
+    await expect(roster(page).locator(".roster-capacity-value")).toHaveText("3");
+    await expect(roster(page).locator(".roster-capacity-note")).toContainText("Registered 4");
+    expect(await roster(page).locator(".roster-row").evaluateAll(rows => rows.map(row => (row as HTMLElement).dataset.memberId)))
+      .toEqual(["m-one", "m-two", "m-idle", "m-added"]);
+    await expectNoHorizontalOverflow(page, ".agents-surface:not([hidden]):not(.agents-surface--preview)");
+    await resting.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: info.outputPath("agents-resting-reload-400.png") });
   });
 
   test("inline member names preserve drafts, IME, current work and history through conflict retry", async ({ page }, info) => {
@@ -594,12 +820,20 @@ test.describe("Works and Agents approved baseline", () => {
     await page.evaluate(() => (window as any).__worksAgentsFixture.workspaceStatus("idle"));
     await expect(name).toBeFocused();
     await expect(name).toHaveValue("Oak current");
-    await page.evaluate(() => (window as any).__worksAgentsFixture.releaseRename());
+    // A rejected CAS can read back the requested name already saved by another
+    // writer. Confirm that result and continue the newer draft without Retry.
+    await page.evaluate(() => {
+      (window as any).__worksAgentsFixture.renameElsewhere("Maple current");
+      (window as any).__worksAgentsFixture.releaseRename();
+    });
     await expect.poll(async () => (await writes()).length).toBe(2);
     await page.evaluate(() => (window as any).__worksAgentsFixture.releaseRename());
     await expect(status).toHaveText("Saved");
     await page.evaluate(() => (window as any).__worksAgentsFixture.replayRename());
     await expect(name).toHaveValue("Oak current");
+    await expect(status).toHaveText("Saved");
+    await expect(roster(page).getByRole("button", { name: "Retry name", exact: true })).toHaveCount(0);
+    await expect(roster(page).locator(":scope > .roster-error")).toBeHidden();
     await expect(roster(page).locator(".roster-detail h3")).toHaveText("Oak current");
     await name.fill("  ");
     await expect(name).toHaveAttribute("aria-invalid", "true");
@@ -725,6 +959,41 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(plan(5004).getByRole("button", { name: "Reassign issue #5004", exact: true })).toBeInViewport();
     await page.screenshot({ path: info.outputPath("agents-plans-400.png") });
   });
+  test("shared member and PM tuning retain identity, history and narrow layout", async ({ page }, info) => {
+    await openRail(page, "agents");
+    await roster(page).locator('.roster-row[data-member-id="m-idle"]').click();
+    const detail = roster(page).locator('.roster-detail');
+    await detail.locator('[data-member-tuning-field="model"]').fill("unlisted-implementation");
+    await expect(detail.locator('[data-member-tuning-status]')).toHaveText("Saved");
+    let writes = (await sent(page)).filter(message => message.kind === "agent_roster" && message.action.kind === "set_tuning");
+    expect(writes).toHaveLength(1); expect(writes[0].action.member_id).toBe("m-idle");
+    expect(writes[0].action).not.toHaveProperty("agent_id"); expect(writes[0]).not.toHaveProperty("expected_revision");
+    await detail.locator('[data-action="pm-eligible"]').check();
+    await expect(detail.locator('[data-action="select-pm"]')).toBeEnabled();
+    await detail.locator('[data-action="select-pm"]').click();
+    await expect(detail.locator('[data-action="select-pm"]')).toHaveText("Configured Project Manager");
+    await expect(roster(page).locator('.roster-row[data-member-id="m-idle"]')).toContainText("Project Manager");
+    await expect(detail.locator('[data-action="rest"]')).toBeDisabled();
+    await detail.locator('[aria-label="Display name"]').fill("Cedar PM");
+    await expect(detail.locator('.roster-name-status')).toHaveText("Saved");
+    await detail.locator('[data-member-tuning-field="model"]').fill("opusplan");
+    await expect(detail.locator('[data-member-tuning-status]')).toHaveText("Saved");
+    const pmWrites = (await sent(page)).filter(message => message.kind === "set_pm_launch_profile");
+    expect(pmWrites).toHaveLength(1); expect(pmWrites[0]).toMatchObject({ project_key: APP_PROJECT_KEY, member_id: "m-idle", model: "opusplan" });
+    expect(pmWrites[0].expected_profile_revision).toBeTruthy(); expect(pmWrites[0].request_id).toBeTruthy();
+    await page.evaluate(() => (window as any).__worksAgentsFixture.pmUnknown());
+    await expect(detail.locator('[data-member-tuning-field="model"]')).toBeDisabled();
+    await expect(detail.locator('[data-member-tuning-field="model"]')).toHaveValue("opusplan");
+    await detail.locator('[data-action="reload-tuning"]').click();
+    await expect(detail.locator('[data-member-tuning-field="model"]')).toBeEnabled();
+    await expect(detail.locator('.roster-history').filter({ hasText: "Assignment history" })).toBeVisible();
+    await page.setViewportSize({ width: 400, height: 1000 });
+    await expectNoHorizontalOverflow(page, ".agents-surface:not([hidden]):not(.agents-surface--preview)");
+    await detail.locator('[data-member-tuning-field="reasoning"]').scrollIntoViewIfNeeded();
+    await expect(detail.locator('[data-member-tuning-field="reasoning"]')).toBeInViewport();
+    await page.screenshot({ path: info.outputPath("agents-shared-pm-tuning-400.png") });
+  });
+
 });
 
 async function installWorksAgentsBackend(page: Page) {
@@ -744,7 +1013,8 @@ async function installWorksAgentsBackend(page: Page) {
       baseWindow("recorded-window", { preset: "codex", session_id: "s-recorded", agent_name: "Recorded only", status: "running" }),
     ];
     const assignment = (session_id: string, issue_number: number) => ({ reservation_id: `r-${session_id}`, session_id, issue_number, spec_number: null, delivery_id: null, host_id: "fixture-host", host_pid: 12345, host_started_at: 1 });
-    const members: any[] = [
+    const savedRoster = JSON.parse(sessionStorage.getItem("fixture:works-roster") || "null");
+    const members: any[] = savedRoster?.members ?? [
       { agent_member_id: "m-one", agent_id: "codex", name: "Aster", enabled: true, created_at: "2026-10-20T00:00:00Z", last_issue_number: 4777, last_spec_number: null, assignment: assignment("s-one", 4777), provider: "Codex", model: "Fixture model", saved_manual_profile: { agent_id: "codex", agent_member_id: "m-one", model: "saved-manual-model", reasoning: "high", runtime_target: "Host", skip_permissions: false }, issue_count: 3, landed_count: 2, active_seconds: 7200, tokens: 5000, history: [
         { session_id: "s-one", name: "Launch author", provider: "codex", model: "launch-model", issue_number: 4777, title: "Current issue", result: "Running", started_at: "2026-10-23T00:00:00Z", ended_at: null },
         { session_id: "s-earlier", name: "Recorded author", provider: "claude", model: "recorded-model", issue_number: 4000, title: "Earlier slice", result: "landed", started_at: "2026-10-20T00:00:00Z", ended_at: "2026-10-20T02:00:00Z" },
@@ -753,9 +1023,20 @@ async function installWorksAgentsBackend(page: Page) {
       { agent_member_id: "m-two", agent_id: "claude", name: "Birch", enabled: true, created_at: "2026-10-20T00:00:00Z", last_issue_number: 4001, last_spec_number: null, assignment: assignment("s-two", 4001), provider: "Claude", model: "Fixture model", issue_count: null, landed_count: null, active_seconds: null, tokens: null, history: [] },
       { agent_member_id: "m-idle", agent_id: "codex", name: "Cedar", enabled: true, created_at: "2026-10-20T00:00:00Z", last_issue_number: null, last_spec_number: null, assignment: null, provider: null, model: null, issue_count: null, landed_count: null, active_seconds: null, tokens: null, history: [] },
     ];
+    for (const member of members) {
+      member.saved_implementation_core ||= { agent_id: member.agent_id, model: member.saved_manual_profile?.model || null, reasoning: null, version: null, fast_mode: false };
+      member.saved_implementation_core_revision ||= `core-${member.agent_member_id}-1`;
+    }
+    let pmMemberId: string | null = null, pmProfileRevision = 1;
+    let pmProfile = { agent_id: "claude", model: null as string | null, reasoning: null as string | null };
+    const pmStatus = () => ({ kind: "pm_status", project_key: projectKey, configured_member_id: pmMemberId,
+      configured_member_name: members.find(member => member.agent_member_id === pmMemberId)?.name,
+      profile_revision: `pm-${pmProfileRevision}`, configured_agent_id: pmProfile.agent_id, configured_model: pmProfile.model,
+      configured_reasoning: pmProfile.reasoning, running_agent_id: "claude", running_model: "running-model", running_reasoning: "high", is_running: true, available: true, paused: false, auto_start: true, loop_interval_secs: 60,
+      agent_options: [{ id: "claude", name: "Claude Code" }, { id: "codex", name: "Codex" }] });
     // Fixture-only backing storage models backend persistence across page reload.
     let worksPreviewLines = Number(sessionStorage.getItem("fixture:works-preview-lines") || 3);
-    let revision = 3, activityRevision = 0;
+    let revision = savedRoster?.revision ?? 3, activityRevision = 0;
     let agents: any[] = [
       { window_id: "agent-two", session_id: "s-two", runtime_incarnation: 2, issue_number: 4001, is_pm: false },
       { window_id: "agent-one", session_id: "s-one", runtime_incarnation: 1, issue_number: 4777, is_pm: false },
@@ -770,9 +1051,10 @@ async function installWorksAgentsBackend(page: Page) {
       { agent_member_id: "m-two", issues: [{ issue_number: 5004, reason: "queue_order" }] },
       { agent_member_id: "m-idle", issues: [] },
     ];
-    let socket: FixtureWebSocket;
+    let socket: FixtureWebSocket, online = true, echoInput = false, resyncText: string | null = null;
+    const sockets: FixtureWebSocket[] = [];
     const workspace = () => ({ kind: "workspace_state", workspace: { app_version: "playwright", active_tab_id: "tab-works", recent_projects: [], tabs: [{ id: "tab-works", title: "Works Agents Fixture", project_root: "/fixture", project_key: projectKey, kind: "git", workspace: { windows, viewport: { x: 0, y: 0, zoom: 1 } } }] } });
-    const rosterSnapshot = () => ({ kind: "agent_roster", roster: { project_key: projectKey, revision, members, capacity: members.filter(member => member.enabled).length, recommended_capacity: 6, past_complete: true, past_contributors: [{ session_id: "s-earlier", name: "Earlier author", kind: "implementation", issue_numbers: [4000], first_posted_at: "2026-10-20T00:00:00Z", last_posted_at: "2026-10-20T02:00:00Z", post_count: 4 }], by_session: Object.fromEntries(agents.map(agent => [agent.session_id, { branch: `work/${agent.window_id}`, ahead_of_develop: 0, model: "Fixture model", provider: agent.is_pm || agent.session_id === "s-two" ? "Claude" : "Codex", last_action: "Fixture observation", elapsed_seconds: 120, warning_count: 0 }])), error: null } });
+    const rosterSnapshot = () => ({ kind: "agent_roster", roster: { project_key: projectKey, revision, revision_decimal: String(revision), members, capacity: members.filter(member => member.enabled).length, recommended_capacity: 6, past_complete: true, past_contributors: [{ session_id: "s-earlier", name: "Earlier author", kind: "implementation", issue_numbers: [4000], first_posted_at: "2026-10-20T00:00:00Z", last_posted_at: "2026-10-20T02:00:00Z", post_count: 4 }], by_session: Object.fromEntries(agents.map(agent => [agent.session_id, { branch: `work/${agent.window_id}`, ahead_of_develop: 0, model: "Fixture model", provider: agent.is_pm || agent.session_id === "s-two" ? "Claude" : "Codex", last_action: "Fixture observation", elapsed_seconds: 120, warning_count: 0 }])), error: null } });
     const applyRename = (message: any) => {
       const member = members.find(member => member.agent_member_id === message.action.member_id);
       const name = message.action.name.trim();
@@ -805,11 +1087,17 @@ async function installWorksAgentsBackend(page: Page) {
       static CONNECTING = 0; static OPEN = 1; static CLOSING = 2; static CLOSED = 3;
       readyState = FixtureWebSocket.CONNECTING;
       constructor(public readonly url: string) {
-        super(); socket = this;
-        setTimeout(() => { this.readyState = FixtureWebSocket.OPEN; this.dispatchEvent(new Event("open")); this.emit(workspace()); this.emit(rosterSnapshot()); this.emit(activity()); }, 0);
+        super(); socket = this; sockets.push(this);
+        setTimeout(() => { if (online) this.open(); }, 0);
       }
+      open() { this.readyState = FixtureWebSocket.OPEN; this.dispatchEvent(new Event("open")); this.emit(workspace()); this.emit(rosterSnapshot()); this.emit(activity()); }
       send(raw: string) {
         const message = JSON.parse(raw); sentMessages.push(message);
+        if (message.kind === "frontend_ready" && resyncText !== null) {
+          this.emit(workspace()); this.emit(activity());
+          this.emit({ kind: "terminal_snapshot", id: "agent-one", data_base64: btoa(resyncText) });
+        }
+        if (echoInput && message.kind === "terminal_input" && !message.data.startsWith("\u001b")) this.emit({ kind: "terminal_output", id: message.id, data_base64: btoa(message.data === "\r" ? "\r\n" : message.data) });
         if (message.kind === "create_window" && message.preset === "settings" && !windows.some(data => data.preset === "settings")) {
           windows.push(baseWindow("settings-window", { title: "Settings", preset: "settings", z_index: 101, surface_owner: message.surface_owner }));
           this.emit(workspace());
@@ -826,16 +1114,35 @@ async function installWorksAgentsBackend(page: Page) {
           { id: "codex", name: "Codex", installed: true }, { id: "claude", name: "Claude Code", installed: true },
         ] });
         if (message.kind === "list_custom_agents") this.emit({ kind: "custom_agent_list", agents: [] });
+        if (message.kind === "set_pm_launch_profile") {
+          const success = message.project_key === projectKey && message.member_id === pmMemberId && message.expected_profile_revision === `pm-${pmProfileRevision}`;
+          if (success) { pmProfile = { agent_id: message.agent_id, model: message.model, reasoning: message.reasoning }; pmProfileRevision++; }
+          this.emit({ kind: "pm_launch_profile_result", project_key: projectKey, member_id: message.member_id, request_id: message.request_id, success, retryable: true,
+            profile_revision: `pm-${pmProfileRevision}`, profile: pmProfile, message: success ? null : "Profile changed" }); this.emit(pmStatus());
+        }
         if (message.kind === "agent_roster") {
+          if (message.action.kind === "set_tuning") {
+            const member = members.find(member => member.agent_member_id === message.action.member_id);
+            if (!member || member.saved_implementation_core_revision !== message.action.expected_core_revision) {
+              this.emit({ kind: "agent_roster_error", project_key: projectKey, request_id: message.request_id, message: "Core changed" }); return;
+            }
+            member.saved_implementation_core = { ...member.saved_implementation_core, model: message.action.model, reasoning: message.action.reasoning };
+            revision++; member.saved_implementation_core_revision = `core-${member.agent_member_id}-${revision}`;
+            this.emit({ ...rosterSnapshot(), request_id: message.request_id }); return;
+          }
           if (message.action.kind === "rename") {
             if (deferredRename) pendingRename = message;
             else applyRename(message);
             return;
           }
           if (message.action.kind !== "read" && message.expected_revision !== revision) { rejectedRevisions.push(message); this.emit(rosterSnapshot()); return; }
-          if (message.action.kind === "add") { members.push({ agent_member_id: "m-added", agent_id: message.action.agent_id, name: message.action.name, enabled: true, created_at: "2026-10-25T00:00:00Z", last_issue_number: null, last_spec_number: null, assignment: null, provider: null, model: null, history: [], issue_count: 0, landed_count: 0, active_seconds: 0, tokens: 0 }); revision++; }
+          if (message.action.kind === "set_pm_eligibility") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member) { member.pm_eligible = message.action.eligible; revision++; } }
+          if (message.action.kind === "select_pm") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member?.pm_eligible && member.enabled && !member.assignment) { pmMemberId = member.agent_member_id; member.is_pm = true; member.pm_project_key = projectKey; revision++; this.emit(pmStatus()); } }
+          if (message.action.kind === "add") { members.push({ agent_member_id: "m-added", agent_id: message.action.agent_id, name: message.action.name, pm_eligible: message.action.pm_eligible === true, enabled: true, created_at: "2026-10-25T00:00:00Z", last_issue_number: null, last_spec_number: null, assignment: null, provider: null, model: null, history: [], issue_count: 0, landed_count: 0, active_seconds: 0, tokens: 0 }); revision++; }
           if (message.action.kind === "rest") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member) { member.enabled = false; revision++; } }
-          this.emit(rosterSnapshot());
+          if (message.action.kind !== "read") sessionStorage.setItem("fixture:works-roster", JSON.stringify({ members, revision }));
+          this.emit({ ...rosterSnapshot(), request_id: message.request_id });
+          if (message.action.kind === "read" && pmMemberId) this.emit(pmStatus());
         }
         if (message.kind === "agent_schedule") {
           if (message.action.kind === "read") this.emit(scheduleSnapshot());
@@ -849,6 +1156,30 @@ async function installWorksAgentsBackend(page: Page) {
     Object.defineProperty(window, "WebSocket", { configurable: true, value: FixtureWebSocket });
     (window as any).__worksAgentsFixture = {
       sent: sentMessages, members, rejectedRevisions, rejectedScheduleRevisions,
+      echoInputForWorks() { echoInput = true; },
+      rebindForWorks() {
+        windows.find(data => data.id === "agent-one").session_id = "rebound-session";
+        agents = [{ window_id: "agent-one", session_id: "rebound-session", runtime_incarnation: 9, issue_number: 4777, is_pm: false }];
+        resyncText = "fresh rebound snapshot\r\n";
+        socket.emit(workspace()); socket.emit(activity());
+      },
+      loseWorksProof(phase: string) {
+        if (phase === "clear") { online = false; sockets.filter(item => item.readyState === FixtureWebSocket.OPEN).forEach(item => item.close()); return; }
+        const event: any = phase === "unknown"
+          ? { kind: "local_agent_activity", activity: { ...activity().projection.local_agent_activity, agents: null } }
+          : workspace();
+        if (phase === "catalog") event.workspace.tabs[0].workspace.windows = windows.filter(data => data.id !== "agent-one");
+        window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: event }));
+      },
+      restoreWorksProof(phase: string) {
+        if (phase === "clear") {
+          online = true;
+          const connecting = sockets.filter(item => item.readyState === FixtureWebSocket.CONNECTING);
+          if (!connecting.length) throw new Error("transport has not created its reconnect socket");
+          connecting.forEach(item => item.open());
+        } else socket.emit(phase === "catalog" ? workspace() : activity());
+      },
+      pmUnknown() { socket.emit({ ...pmStatus(), profile_revision: null, configured_agent_id: null }); },
       deferRename() { deferredRename = true; },
       releaseRename() { const message = pendingRename; pendingRename = null; if (message) applyRename(message); },
       replayRename() { if (firstRenameReceipt) socket.emit(firstRenameReceipt); },
@@ -873,8 +1204,15 @@ async function installWorksAgentsBackend(page: Page) {
       },
       workspaceTitle(title: string) { windows.find(data => data.id === "agent-one").dynamic_title = title; socket.emit(workspace()); },
       workspaceStatus(status: string) { windows.find(data => data.id === "agent-one").status = status; socket.emit(workspace()); },
-      attachmentProgress() { socket.emit({ kind: "attachment_progress", id: "agent-one",
-        operation_id: "telemetry-attachment", phase: "staging", filename: "fixture.txt", bytes_done: 8, bytes_total: 16 }); },
+      attachmentProgress() {
+        const requests = sentMessages.filter(message => message.kind === "attach_files" && message.id === "agent-one");
+        if (requests.length !== 1) throw new Error("Expected one telemetry attachment request");
+        const [request] = requests;
+        if (!request.operation_id || !request.expected_target) throw new Error("Telemetry attachment request has no captured identity");
+        socket.emit({ kind: "attachment_progress", id: request.id,
+          operation_id: request.operation_id, expected_target: request.expected_target,
+          phase: "staging", file_index: 0, file_count: 1, filename: "fixture.txt", bytes_done: 8, bytes_total: 16, message: null });
+      },
       remountInKanban() {
         windows.push(baseWindow("telemetry-kanban", { preset: "agent_kanban", title: "Telemetry Kanban" }));
         windows.find(data => data.id === "agent-one").placement = {

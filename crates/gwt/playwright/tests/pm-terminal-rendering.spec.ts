@@ -477,6 +477,414 @@ test("real PTY receives one input and converges with the visible terminal grid",
   });
 });
 
+// Actual provider proof is opt-in: discovery never copies credentials or starts a provider.
+test("owned actual Codex PM retains genuine history and composer across Works reentry", async ({ page }, info) => {
+  test.skip(process.env.GWT_PLAYWRIGHT_REAL_CODEX_PM !== "1", "requires explicitly enabled isolated actual Codex PM");
+  test.setTimeout(300_000);
+  const { spawnSync } = await import("node:child_process");
+  const { createHash, randomBytes } = await import("node:crypto");
+  const { constants } = await import("node:fs");
+  const { isAbsolute } = await import("node:path");
+  const { access, chmod, copyFile, readFile, readdir, rename, rm, writeFile } = await import("node:fs/promises");
+  const { homedir } = await import("node:os");
+  const { readLatestOwnActivity, selectLatestOwnActivity, startExactRelaunchFixture, writeFixtureNodeCommand } = await import("./_helpers/exact-relaunch");
+  const nativePath = process.env.GWT_PLAYWRIGHT_REAL_CODEX_PATH;
+  expect(process.platform, "actual native proof requires Darwin").toBe("darwin");
+  expect(nativePath, "GWT_PLAYWRIGHT_REAL_CODEX_PATH must identify the installed native executable").toBeTruthy();
+  if (!nativePath || !isAbsolute(nativePath)) throw new Error("Expected an absolute native Codex path");
+  await access(nativePath, constants.X_OK);
+  const hash = createHash("sha256").update(await readFile(nativePath)).digest("hex");
+  const version = spawnSync(nativePath, ["--version"], { encoding: "utf8" });
+  if (version.error) throw version.error;
+  expect(version.status).toBe(0);
+  expect(version.stdout.trim()).toMatch(/^codex-cli\s+\S+/);
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  const theme = info.project.name.includes("light") ? "light" : "dark";
+  await page.addInitScript(value => {
+    if (location.protocol === "http:" || location.protocol === "https:") localStorage.setItem("gwt:ui:theme", value);
+  }, theme);
+  let home = "", preferences = "", id = "", session = "";
+  let fixture: Awaited<ReturnType<typeof startExactRelaunchFixture>> | undefined;
+  let captured: { pid: number; birth: string; cwd: string; session: string; deadline: number; ancestry: { pid: number; birth: string }[] } | undefined;
+  let qualified: { hostPid: number; hostBirth: number; session: string; incarnation: number; childStartedAt: number } | undefined;
+  const gateNonce = randomBytes(16).toString("hex");
+  let monitoring = false, unexpectedTool = false, monitorError: unknown;
+  let ownedGuiPid = 0, gateRequested = false;
+  let monitor: Promise<void> | undefined;
+  const received: string[] = [];
+  page.on("websocket", socket => socket.on("framereceived", ({ payload }) => {
+    try {
+      const packet = JSON.parse(String(payload));
+      if (packet.kind === "terminal_output" && packet.id === id) received.push(Buffer.from(packet.data_base64, "base64").toString("utf8"));
+    } catch { /* Ignore unrelated non-JSON frames. */ }
+  }));
+  const ps = (pid: number, columns: string) => {
+    const result = spawnSync("ps", ["-p", String(pid), "-o", columns], { encoding: "utf8" });
+    if (result.error) throw result.error;
+    const value = result.stdout.trim();
+    if (result.status === 1 && !value && !result.stderr.trim()) return "";
+    if (result.status !== 0 || !value || (columns === "lstart=" && !Number.isFinite(Date.parse(value)))) {
+      throw new Error(`Cannot inspect owned PID ${pid}: ps status ${result.status}, column ${columns}`);
+    }
+    return value;
+  };
+  const ownedNative = () => !!captured && !!qualified && captured.session === qualified.session
+    && captured.ancestry.some(item => item.pid === qualified!.hostPid && Math.floor(Date.parse(item.birth) / 1000) === qualified!.hostBirth)
+    && captured.cwd.startsWith(home + "/") && /^[0-9a-f-]{36}$/i.test(captured.session)
+    && ps(captured.pid, "lstart=") === captured.birth
+    && (ps(captured.pid, "command=") === nativePath || ps(captured.pid, "command=").startsWith(nativePath + " "));
+  const nativeRows = async (directory: string, strict = false): Promise<any[]> => {
+    const entries = strict ? await readdir(directory, { withFileTypes: true })
+      : await readdir(directory, { withFileTypes: true }).catch(() => []);
+    return (await Promise.all(entries.map(async entry => {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) return nativeRows(path, strict);
+      if (!entry.name.endsWith(".jsonl")) return [];
+      const contents = strict ? await readFile(path, "utf8") : await readFile(path, "utf8").catch(() => "");
+      if (strict && !contents.endsWith("\n")) throw new Error("Incomplete native rollout during final scan");
+      const lines = contents.split("\n");
+      if (!contents.endsWith("\n")) lines.pop();
+      return lines.filter(Boolean).map(line => JSON.parse(line));
+    }))).flat();
+  };
+  const rows = () => nativeRows(join(home, ".codex", "sessions"));
+  let primaryError: unknown;
+  const cleanupErrors: unknown[] = [];
+  try {
+    fixture = await startExactRelaunchFixture(info, {
+      async prepare(context) {
+        home = context.home;
+        // Probes are argument-shaped: the Session environment may already
+        // exist during preflight, so it cannot distinguish an interactive run.
+        await writeFixtureNodeCommand(context.bin, "codex", `#!/bin/sh
+is_probe() {
+  [ "$#" -eq 1 ] && [ "$1" = "--version" ] && return 0
+  while [ "$#" -gt 2 ]; do
+    case "$1" in
+      --config|-c|--profile|-p|--enable|--disable) [ "$#" -ge 4 ] || return 1; shift 2 ;;
+      --config=*|--profile=*|--enable=*|--disable=*) shift ;;
+      *) return 1 ;;
+    esac
+  done
+  [ "$#" -eq 2 ] && [ "$1" = "features" ] && [ "$2" = "list" ]
+}
+if is_probe "$@"; then exec '${nativePath.replace(/'/g, "'\\''")}' "$@"; fi
+case "$GWT_SESSION_ID" in ????????-????-????-????-????????????) ;; *) exit 64 ;; esac
+umask 077
+child_birth=$(ps -p $$ -o lstart= | sed 's/^ *//;s/ *$//') || exit 65
+[ -n "$child_birth" ] || exit 65
+deadline=$(( $(date +%s) + 120 )) || exit 65
+record="$HOME/native-owner.$$"
+printf '%s\n%s\n%s\n%s\n%s\n' "$$" "$GWT_SESSION_ID" "$PWD" "$child_birth" "$deadline" > "$record" || exit 65
+ancestor=$$
+while [ "$ancestor" -gt 1 ]; do
+  ancestor=$(ps -p "$ancestor" -o ppid= | tr -d ' ') || exit 65
+  case "$ancestor" in ''|*[!0-9]*) exit 65 ;; esac
+  [ "$ancestor" -gt 0 ] || exit 65
+  birth=$(ps -p "$ancestor" -o lstart= | sed 's/^ *//;s/ *$//') || exit 65
+  [ -n "$birth" ] || exit 65
+  printf '%s|%s\n' "$ancestor" "$birth" >> "$record" || exit 65
+done
+mv "$record" "$HOME/native-owner" || exit 65
+expected="$GWT_SESSION_ID|$$|$child_birth|${gateNonce}"
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  if [ -f "$HOME/native-permission" ]; then
+    permission=$(cat "$HOME/native-permission") || exit 66
+    [ "$permission" = "$expected" ] || exit 66
+    rm "$HOME/native-permission" || exit 66
+    [ "$(date +%s)" -lt "$deadline" ] || exit 67
+    exec '${nativePath.replace(/'/g, "'\\''")}' "$@"
+  fi
+  sleep 0.1
+done
+exit 67
+`);
+      },
+      async beforeStart(context) {
+        preferences = context.preferences;
+        await writeFile(join(preferences, "pm.json"), JSON.stringify({ settings: { auto_start: false, paused: true, launch_profile: { agent_id: "codex" } } }));
+      },
+    });
+    ownedGuiPid = fixture.ownedPid!;
+    expect(ownedGuiPid).toBeGreaterThan(0);
+    await page.setViewportSize({ width: 400, height: 1000 });
+    await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+    await page.locator('.op-rail__surface[data-surface="agents"]').click();
+    const surface = page.locator(".agents-surface:not(.agents-surface--preview)");
+    await surface.getByRole("textbox", { name: "Name for new member" }).fill("Owned Codex PM");
+    await surface.getByRole("combobox", { name: "Tool for new member" }).selectOption("codex");
+    await surface.getByRole("checkbox", { name: "PM eligible for new member" }).check();
+    await surface.locator('.roster-capacity [data-action="add"]').click();
+    const member = surface.locator(".roster-row").filter({ hasText: "Owned Codex PM" });
+    await expect(member).toHaveCount(1);
+    await member.click();
+    const detail = surface.locator(".roster-detail");
+    await expect(detail.locator('[data-action="select-pm"]')).toBeEnabled();
+    await detail.locator('[data-action="select-pm"]').click();
+    await expect(detail.locator('[data-action="select-pm"]')).toHaveText("Configured Project Manager");
+    expect(JSON.parse(await readFile(join(preferences, "pm.json"), "utf8")).settings.launch_profile.agent_id).toBe("codex");
+    const selectedPmSettings = JSON.parse(await readFile(join(preferences, "pm.json"), "utf8")).settings;
+    await surface.locator('[data-tab="past"]').click();
+    await page.locator("#op-pm-settings-button").click();
+    await expect(surface.locator('[data-tab="team"]')).toHaveAttribute("aria-selected", "true");
+    await expect(surface.locator('[data-role="pm-project-operations"]')).toBeVisible();
+    await expect(detail.locator('[data-action="select-pm"]')).toHaveText("Configured Project Manager");
+    await expect(detail).toContainText("Saved Project Manager profile");
+    expect(JSON.parse(await readFile(join(preferences, "pm.json"), "utf8")).settings).toEqual(selectedPmSettings);
+    expect(selectedPmSettings)
+      .toMatchObject({ auto_start: false, paused: true, launch_profile: { agent_id: "codex" } });
+    gateRequested = true;
+    await page.locator("#op-pm-entry").click();
+    await expect.poll(async () => (await readFile(join(home, "native-owner"), "utf8").catch(() => "")).split("\n").length,
+      { timeout: 60_000 }).toBeGreaterThanOrEqual(7);
+    const [pidText, ownerSession, cwd, birth, deadlineText, ...ancestors] = (await readFile(join(home, "native-owner"), "utf8")).trim().split("\n");
+    captured = { pid: Number(pidText), session: ownerSession, cwd, birth, deadline: Number(deadlineText),
+      ancestry: ancestors.map(line => { const split = line.indexOf("|"); return { pid: Number(line.slice(0, split)), birth: line.slice(split + 1) }; }) };
+    expect(captured.pid).toBeGreaterThan(0);
+    expect(captured.session).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(captured.cwd.startsWith(home + "/")).toBe(true);
+    expect(Number.isFinite(Date.parse(captured.birth))).toBe(true);
+    expect(ps(captured.pid, "lstart=")).toBe(captured.birth);
+    session = captured.session;
+    const matchesIdentity = (value: any, windowId: string, sessionId: string, incarnation?: number) =>
+      !!value?.host_id && Array.isArray(value.agents) && value.agents.some((agent: any) => agent.window_id === windowId
+        && agent.session_id === sessionId && agent.runtime_incarnation > 0
+        && (incarnation === undefined || agent.runtime_incarnation === incarnation));
+    const matching = { project_key: "probe", host_id: "host", agents: [{ window_id: "w", session_id: "s", runtime_incarnation: 1 }] };
+    for (const agents of [[], null, [{ window_id: "w", session_id: "replacement", runtime_incarnation: 2 }],
+      [{ window_id: "w", session_id: "s", runtime_incarnation: 2 }]]) {
+      expect(matchesIdentity(selectLatestOwnActivity([matching, { ...matching, agents }], "probe"), "w", "s", 1)).toBe(false);
+    }
+    expect(matchesIdentity(selectLatestOwnActivity([matching, { ...matching }], "probe"), "w", "s", 1)).toBe(true);
+    const projectKey = await page.evaluate(() => location.pathname.split("/")[2]);
+    const activity = () => readLatestOwnActivity(page, projectKey);
+    await expect.poll(async () => {
+      const latest = await activity().catch(() => null);
+      return Array.isArray(latest?.agents) && latest.agents.some((agent: any) => agent.session_id === session && agent.runtime_incarnation > 0);
+    }, { timeout: 60_000 }).toBe(true);
+    const initialActivity = await activity();
+    const censusAgent = initialActivity?.agents?.find((agent: any) => agent.session_id === session && agent.runtime_incarnation > 0);
+    expect(censusAgent).toBeTruthy();
+    id = censusAgent.window_id;
+    const incarnation = censusAgent.runtime_incarnation;
+    expect(matchesIdentity(initialActivity, id, session, incarnation)).toBe(true);
+    const host = /^(\d+):(\d+)$/.exec(initialActivity.host_id);
+    expect(host).not.toBeNull();
+    const hostPid = Number(host![1]), hostBirth = Number(host![2]);
+    expect(hostPid).toBeGreaterThan(0);
+    expect(hostBirth).toBeGreaterThan(0);
+    const ownerAncestor = captured.ancestry.find(item => item.pid === hostPid);
+    expect(ownerAncestor).toBeTruthy();
+    expect(Math.floor(Date.parse(ownerAncestor!.birth) / 1000)).toBe(hostBirth);
+    expect(ps(hostPid, "lstart=")).toBe(ownerAncestor!.birth);
+    const runtimePath = join(home, ".gwt", "sessions", "runtime", String(hostPid), `${session}.json`);
+    const runtime = async () => JSON.parse(await readFile(runtimePath, "utf8"));
+    await expect.poll(async () => (await runtime().catch(() => ({}))).child_pid, { timeout: 30_000 }).toBe(captured!.pid);
+    const initialRuntime = await runtime();
+    expect(initialRuntime.runtime_incarnation).toBe(incarnation);
+    expect(initialRuntime.host_started_at).toBe(hostBirth);
+    expect(initialRuntime.child_started_at).toBe(Math.floor(Date.parse(captured.birth) / 1000));
+    expect(matchesIdentity(await activity(), id, session, incarnation)).toBe(true);
+    expect((await activity()).host_id).toBe(initialActivity.host_id);
+    qualified = { hostPid, hostBirth, session, incarnation, childStartedAt: initialRuntime.child_started_at };
+    expect(Math.floor(Date.now() / 1000)).toBeLessThan(captured.deadline);
+    await access(join(homedir(), ".codex", "auth.json"));
+    await copyFile(join(homedir(), ".codex", "auth.json"), join(home, ".codex", "auth.json"));
+    await chmod(join(home, ".codex", "auth.json"), 0o600);
+    expect(Math.floor(Date.now() / 1000)).toBeLessThan(captured.deadline);
+    const releaseActivity = await activity();
+    expect(matchesIdentity(releaseActivity, id, session, incarnation)).toBe(true);
+    expect(releaseActivity.host_id).toBe(initialActivity.host_id);
+    expect(await runtime()).toMatchObject({ host_started_at: hostBirth, child_pid: captured.pid,
+      child_started_at: initialRuntime.child_started_at, runtime_incarnation: incarnation });
+    expect(ps(captured.pid, "lstart=")).toBe(captured.birth);
+    const permission = `${session}|${captured.pid}|${captured.birth}|${gateNonce}`;
+    const permissionTemp = join(home, "native-permission.pending");
+    await writeFile(permissionTemp, permission, { mode: 0o600, flag: "wx" });
+    await rename(permissionTemp, join(home, "native-permission"));
+    await expect.poll(() => ownedNative(), { timeout: 30_000 }).toBe(true);
+    const releasedVersion = spawnSync(nativePath, ["--version"], { encoding: "utf8" });
+    if (releasedVersion.error) throw releasedVersion.error;
+    expect(releasedVersion.status).toBe(0);
+    expect(releasedVersion.stdout.trim()).toBe(version.stdout.trim());
+    expect(createHash("sha256").update(await readFile(nativePath)).digest("hex")).toBe(hash);
+    monitoring = true;
+    monitor = (async () => {
+      while (monitoring) {
+        const events = await rows();
+        if (events.some(row => row.type === "response_item" && typeof row.payload?.type === "string" && row.payload.type.endsWith("_call"))) {
+          unexpectedTool = true;
+          if (ownedNative()) process.kill(captured!.pid, "SIGTERM");
+          return;
+        }
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    })().catch(error => { monitorError = error; });
+    await expect.poll(async () => {
+      const prefs = JSON.parse(await readFile(join(preferences, "pm.json"), "utf8"));
+      return prefs.registration?.session_id ?? "";
+    }, { timeout: 60_000 }).toBe(session);
+    await page.waitForFunction(({ sessionId, id }) => {
+      const rows = (window as any).__gwtPlaywrightMessages ?? [];
+      const state = rows.findLast((row: any) => row.payload.kind === "workspace_state")?.payload.workspace;
+      const pane = state?.tabs.flatMap((tab: any) => tab.workspace.windows).find((row: any) => row.session_id === sessionId && row.id === id);
+      return !!pane?.is_pm && pane.agent_id === "codex";
+    }, { sessionId: session, id }, { timeout: 60_000 });
+    await page.locator("#op-pm-entry").click();
+    const pm = page.locator(`.workspace-window[data-id="${id}"]`);
+    await pm.getByRole("button", { name: "Execution log", exact: true }).click();
+    const buffer = () => page.evaluate(id => (window as any).__gwtTerminalTestApi.bufferText(id), id);
+    const metrics = () => page.evaluate(id => (window as any).__gwtTerminalTestApi.metrics(id), id);
+    await expect.poll(buffer, { timeout: 60_000 }).toContain("Ask Codex");
+    const input = pm.locator(".xterm-helper-textarea");
+    await input.focus();
+    const marker = `GWT4777${randomBytes(8).toString("hex").toUpperCase()}`;
+    const preTurnActivity = await activity();
+    expect(matchesIdentity(preTurnActivity, id, session, incarnation)).toBe(true);
+    expect(preTurnActivity.host_id).toBe(initialActivity.host_id);
+    expect(await runtime()).toMatchObject({ host_started_at: hostBirth, child_pid: captured.pid,
+      child_started_at: initialRuntime.child_started_at, runtime_incarnation: incarnation });
+    expect(ownedNative()).toBe(true);
+    await page.keyboard.type(`Reply with exactly 64 lines numbered 01 through 64. Each line must contain ${marker} immediately followed by its two-digit number without spaces. Do not use tools.`);
+    const beforeOutput = received.length;
+    // Submit and leave in one browser task: no asynchronous provider response
+    // can reach the visible PM before the Works surface is selected.
+    await page.evaluate(id => {
+      const textarea = document.querySelector(`.workspace-window[data-id="${id}"] .xterm-helper-textarea:focus`) as HTMLTextAreaElement;
+      if (!textarea) throw new Error("owned PM composer is not focused");
+      textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+      const works = document.querySelector('[data-surface="works"].op-rail__surface') as HTMLElement;
+      if (!works) throw new Error("Works entry missing");
+      works.click();
+    }, id);
+    await expect(page.locator('.works-surface:not(.works-surface--preview)')).toBeVisible();
+    await expect.poll(async () => {
+      expect(unexpectedTool, "unexpected native tool call").toBe(false);
+      if (monitorError) throw monitorError;
+      const rolloutRows = await rows();
+      return rolloutRows.filter(row => row.type === "response_item" && row.payload?.type === "message" && row.payload?.role === "assistant")
+        .flatMap(row => row.payload.content ?? []).map((part: any) => part.text ?? "").join("\n");
+    }, { timeout: 180_000 }).toContain(`${marker}64`);
+    expect(received.slice(beforeOutput).join(""), "assistant-only final numbered line arrived while PM was hidden").toContain(`${marker}64`);
+    const rolloutRows = await rows();
+    const prompts = rolloutRows.filter(row => row.type === "response_item" && row.payload?.type === "message" && row.payload?.role === "user");
+    expect(prompts).toHaveLength(1);
+    expect(JSON.stringify(prompts[0].payload.content)).toContain(marker);
+    const response = rolloutRows.filter(row => row.type === "response_item" && row.payload?.type === "message" && row.payload?.role === "assistant")
+      .flatMap(row => row.payload.content ?? []).map((part: any) => part.text ?? "").join("\n");
+    for (let n = 1; n <= 64; n++) expect(response).toContain(`${marker}${String(n).padStart(2, "0")}`);
+    expect(rolloutRows.some(row => row.type === "response_item" && typeof row.payload?.type === "string" && row.payload.type.endsWith("_call"))).toBe(false);
+    await expect.poll(async () => (await rows()).some(row => row.type === "event_msg" && row.payload?.type === "task_complete"), { timeout: 60_000 }).toBe(true);
+    await page.locator("#op-pm-entry").click();
+    await expect.poll(buffer, { timeout: 60_000 }).toContain("Ask Codex");
+    await expect.poll(async () => (await metrics()).baseY).toBeGreaterThan(0);
+    const box = await pm.locator(".terminal-root").boundingBox();
+    expect(box).not.toBeNull();
+    const bottom = await metrics();
+    await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+    await page.mouse.wheel(0, -900);
+    await expect.poll(async () => (await metrics()).viewportY).toBeLessThan(bottom.viewportY);
+    const reading = await metrics(), history = await buffer();
+    await pm.locator(".terminal-root .xterm").evaluate(node => { (window as any).__ownedPmNative = node; });
+    await pm.getByRole("button", { name: "Reports", exact: true }).click();
+    await pm.getByRole("button", { name: "Execution log", exact: true }).click();
+    expect((await metrics()).viewportY).toBe(reading.viewportY);
+    expect(await buffer()).toBe(history);
+    await page.getByRole("button", { name: "Works", exact: true }).click();
+    const row = page.locator('.works-surface:not(.works-surface--preview) .work-row').filter({ hasText: "Owned Codex PM" });
+    await row.getByRole("button", { name: "Open terminal" }).click();
+    await expect(page.locator(".works-full")).toBeVisible();
+    expect((await metrics()).viewportY).toBe(reading.viewportY);
+    await page.locator('.op-rail__surface[data-surface="agents"]').click();
+    await page.getByRole("button", { name: "Works", exact: true }).click();
+    await expect(page.locator(".works-full")).toBeVisible();
+    expect((await metrics()).viewportY).toBe(reading.viewportY);
+    expect(await buffer()).toBe(history);
+    const sequence = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence ?? 0);
+    await sendLiveGwtEvent(page, { kind: "frontend_ready" });
+    await page.waitForFunction(({ after, id }) => ((window as any).__gwtPlaywrightMessages ?? []).some((row: any) =>
+      row.sequence > after && row.payload.kind === "terminal_snapshot" && row.payload.id === id), { after: sequence, id }, { timeout: 30_000 });
+    await expect(page.locator(".works-full")).toBeVisible();
+    expect((await metrics()).viewportY).toBe(reading.viewportY);
+    expect(await buffer()).toContain(`${marker}64`);
+    expect(await page.locator(`.works-terminal[data-window-id="${id}"] .xterm`).evaluate(node => node === (window as any).__ownedPmNative)).toBe(true);
+    await page.locator("#op-pm-entry").click();
+    await page.evaluate(id => (window as any).__gwtTerminalTestApi.scrollToBottom(id), id);
+    await expect.poll(buffer).toContain("Ask Codex");
+    const canary = `UNSENT${theme.toUpperCase()}4777`;
+    const beforeComposer = received.length;
+    await input.focus();
+    await page.keyboard.type(canary);
+    await expect.poll(buffer).toContain(canary);
+    expect((await buffer()).split(canary)).toHaveLength(2);
+    await expect.poll(() => received.slice(beforeComposer).join("")).toContain(canary);
+    const beforeUndo = received.length;
+    for (let i = 0; i < canary.length; i++) await page.keyboard.press("Backspace");
+    await expect.poll(() => received.length).toBeGreaterThan(beforeUndo);
+    await expect.poll(buffer).not.toContain(canary);
+    expect(unexpectedTool, "no native tool call during the owned turn").toBe(false);
+    if (monitorError) throw monitorError;
+    const finalActivity = await activity();
+    const finalRuntime = await runtime();
+    expect(finalRuntime).toMatchObject({ child_pid: initialRuntime.child_pid, child_started_at: initialRuntime.child_started_at,
+      host_started_at: initialRuntime.host_started_at, runtime_incarnation: incarnation });
+    expect(matchesIdentity(finalActivity, id, session, incarnation), "latest own-project census retains the exact PM identity").toBe(true);
+    expect(finalActivity.host_id).toBe(initialActivity.host_id);
+    expect(ps(captured.pid, "lstart=")).toBe(captured.birth);
+    expect(ps(captured.pid, "command=")).toContain(nativePath);
+    expect(createHash("sha256").update(await readFile(nativePath)).digest("hex")).toBe(hash);
+    const finalVersion = spawnSync(nativePath, ["--version"], { encoding: "utf8" });
+    if (finalVersion.error) throw finalVersion.error;
+    expect(finalVersion.status).toBe(0);
+    expect(finalVersion.stdout.trim()).toBe(version.stdout.trim());
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    await info.attach(`actual-pm-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+    await info.attach("actual-pm-identity", { body: JSON.stringify({ theme, session, id, host: initialActivity.host_id, incarnation, nativePath, hash, version: version.stdout.trim(), pid: captured.pid, birth: captured.birth, ancestry: captured.ancestry, cwd: captured.cwd, childStartedAt: initialRuntime.child_started_at, hostStartedAt: initialRuntime.host_started_at }), contentType: "application/json" });
+  } catch (error) {
+    primaryError = error;
+  } finally {
+    await page.goto("about:blank").catch(() => {});
+    try { await fixture?.stop(); } catch (error) { cleanupErrors.push(error); }
+    try {
+      // Never infer ownership from a name alone; an exact birth and executable
+      // must still match the record made before exec before sending a signal.
+      if (!captured && gateRequested) {
+        // No complete pre-exec record means no exact child can be signalled or
+        // declared exited. The wrapper deadline remains fail-closed.
+        cleanupErrors.push(new Error("Gate child identity unavailable; cleanup is unknown"));
+      }
+      if (captured && ownedNative()) {
+        process.kill(captured.pid, "SIGTERM");
+        await expect.poll(() => ps(captured!.pid, "lstart="), { timeout: 10_000 }).not.toBe(captured.birth);
+      }
+      if (captured) expect(ps(captured.pid, "lstart="), "owned native PID must exit").not.toBe(captured.birth);
+    } catch (error) {
+      cleanupErrors.push(error);
+    } finally {
+      monitoring = false;
+      try { await monitor; } catch (error) { cleanupErrors.push(error); }
+      if (monitor) {
+        try {
+          const finalRows = await nativeRows(join(home, ".codex", "sessions"), true);
+          if (!finalRows.length) throw new Error("Native rollout missing during final scan");
+          if (finalRows.some(row => row.type === "response_item" && typeof row.payload?.type === "string" && row.payload.type.endsWith("_call"))) unexpectedTool = true;
+        } catch (error) { cleanupErrors.push(error); }
+      }
+      try { if (home) await rm(join(home, ".codex", "auth.json"), { force: true }); }
+      catch (error) { cleanupErrors.push(error); }
+    }
+    // The watcher remains active through fixture.stop and native cleanup. Check its final state
+    // after joining and cleanup so a late tool call cannot become a pass.
+    if (unexpectedTool) cleanupErrors.push(new Error("Unexpected native tool call observed"));
+    if (monitorError) cleanupErrors.push(monitorError);
+    if (errors.length) cleanupErrors.push(new Error(`Console/page errors including cleanup: ${JSON.stringify(errors)}`));
+  }
+  if (primaryError || cleanupErrors.length) throw new AggregateError(
+    [...(primaryError ? [primaryError] : []), ...cleanupErrors], "Owned PM proof or cleanup failed");
+});
+
 test("ready Works terminal follows model header layout while native hidden", async ({ page, playwright }, info) => {
   test.setTimeout(60_000);
   test.skip(!liveBase, "Requires the isolated browser-check checkout server");

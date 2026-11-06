@@ -21,22 +21,6 @@ const RESTART_CONFIRM =
   "Restart the Project Manager?\n\n"
   + "The current PM session ends and a new conversation starts on the "
   + "configured agent. History is not carried over.";
-const EFFORT_OPTIONS_BY_AGENT = {
-  claude: ["", "low", "medium", "high", "xhigh", "max", "ultracode"],
-  codex: ["", "low", "medium", "high", "xhigh", "max", "ultra"],
-  grok: ["", "none", "minimal", "low", "medium", "high", "xhigh", "max"],
-};
-
-function effortLabel(value) {
-  if (value === "") return "Auto";
-  if (value === "xhigh") return "Extra high";
-  return value.charAt(0).toUpperCase() + value.slice(1);
-}
-
-function clear(node) {
-  while (node.firstChild) node.removeChild(node.firstChild);
-}
-
 function normalizedLoopInterval(value) {
   const decimal = String(value ?? "").trim();
   if (!/^\d+$/.test(decimal)) return String(DEFAULT_LOOP_INTERVAL_SECS);
@@ -73,6 +57,10 @@ function emptyStatus() {
 function normalizeStatus(status) {
   const options = Array.isArray(status?.agent_options) ? status.agent_options : [];
   return {
+    projectKey: status?.project_key,
+    memberId: status?.configured_member_id,
+    runningMemberId: status?.running_member_id,
+    profileRevision: status?.profile_revision,
     available: status?.available !== false,
     paused: Boolean(status?.paused),
     autoStart: status?.auto_start !== false,
@@ -115,7 +103,7 @@ function agentLabel(state, agentId) {
   return match ? match.name : agentId;
 }
 
-export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, executionModel, projectTitle } = {}) {
+export function createPmSettingsPanel({ document, executionModel, projectTitle, send, confirm, scheduleFrame, projectKey, projectName = () => "", onOpenMember = () => {}, onOpenAgents = () => {}, onRender = () => {}, onNavigateProject = () => {}, onReloadProfile = null } = {}) {
   if (!document) throw new TypeError("createPmSettingsPanel requires a document");
   const dispatch = typeof send === "function" ? send : () => {};
   const ask = typeof confirm === "function"
@@ -123,6 +111,7 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, 
     : (message) => Boolean(document.defaultView?.confirm?.(message));
 
   const model = createUiStateStore(emptyStatus(), { scheduleFrame });
+  const canEdit = () => { const state = model.read(); return state.available && !!projectKey && state.projectKey === projectKey; };
   const mounts = new Map();
   const boundDocuments = new Set();
   let nextErrorId = 0;
@@ -155,6 +144,7 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, 
   model.subscribe(state => state, pruneDetachedMounts);
 
   function renderView(view, state) {
+    view.heading.textContent = `Project Manager · ${projectName() || projectKey || "Unknown project"}`;
     const runningName = agentLabel(state, state.runningAgentId);
     const runningProfile = [runningName];
     if (state.runningModel) runningProfile.push(`Model: ${state.runningModel}`);
@@ -179,51 +169,32 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, 
       && state.runningAgentId !== ""
       && state.configuredAgentId !== ""
       && (
-        state.configuredAgentId !== state.runningAgentId
+        state.memberId && state.runningMemberId && state.memberId !== state.runningMemberId
+        || state.configuredAgentId !== state.runningAgentId
         || state.configuredModel !== state.runningModel
         || state.configuredReasoning !== state.runningReasoning
       )
     );
 
-    clear(view.agentSelect);
-    for (const option of state.agentOptions) {
-      const node = document.createElement("option");
-      node.value = option.id;
-      node.textContent = option.name;
-      if (option.id === state.configuredAgentId) node.selected = true;
-      view.agentSelect.appendChild(node);
+    const foreign = state.foreignProjectKey;
+    view.profileStatus.textContent = state.available && state.profileRevision && state.configuredAgentId
+      ? `Saved profile: ${[agentLabel(state, state.configuredAgentId), state.configuredModel || "Default model", state.configuredReasoning || "Default reasoning"].join(" · ")}`
+      : "Saved profile unavailable. Reload the current profile; any Agents draft is retained.";
+    view.openMember.disabled = !canEdit() || !state.memberId;
+    view.reload.disabled = !canEdit() || !onReloadProfile;
+    view.navigate.hidden = !foreign; view.navigate.disabled = !foreign; view.navigate.textContent = foreign ? `Open project ${state.foreignProjectKey}` : "";
+    view.navigate.onclick = () => onNavigateProject(state.foreignProjectKey);
+    if (state.available) {
+      view.intervalInput.value = String(state.loopIntervalSecs);
+      view.autoStartInput.checked = state.autoStart;
     }
-
-    view.modelInput.value = state.configuredModel;
-    clear(view.effortSelect);
-    const effortValues = [
-      ...(EFFORT_OPTIONS_BY_AGENT[state.configuredAgentId] || [""]),
-    ];
-    if (
-      state.configuredReasoning
-      && !effortValues.includes(state.configuredReasoning)
-    ) {
-      effortValues.push(state.configuredReasoning);
-    }
-    for (const value of effortValues) {
-      const option = document.createElement("option");
-      option.value = value;
-      option.textContent = effortLabel(value);
-      if (value === state.configuredReasoning) option.selected = true;
-      view.effortSelect.appendChild(option);
-    }
-    view.intervalInput.value = String(state.loopIntervalSecs);
-    view.autoStartInput.checked = state.autoStart;
     for (const control of [
-      view.agentSelect,
-      view.modelInput,
-      view.effortSelect,
       view.intervalInput,
       view.autoStartInput,
       view.pauseToggle,
       view.restart,
     ]) {
-      control.disabled = !state.available;
+      control.disabled = !canEdit();
     }
     // #4486 AC-7: when the PM is held back by something a Restart cannot
     // clear, say so and name the operation that can. Leaving the button live
@@ -240,21 +211,7 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, 
     view.intervalError.textContent = "";
     view.intervalInput.setAttribute("aria-invalid", "false");
     view.explanations.refresh();
-  }
-
-  function sendProfile(view) {
-    const state = model.read();
-    if (!state.available) return;
-    const agentId = view.agentSelect.value || state.configuredAgentId;
-    if (!agentId) return;
-    const configuredModel = view.modelInput.value.trim();
-    const reasoning = view.effortSelect.value.trim();
-    dispatch({
-      kind: "set_pm_launch_profile",
-      agent_id: agentId,
-      model: configuredModel === "" ? null : configuredModel,
-      reasoning: reasoning === "" ? null : reasoning,
-    });
+    onRender();
   }
 
   function setIntervalError(view, message) {
@@ -266,7 +223,7 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, 
 
   function sendLoopInterval(view) {
     const state = model.read();
-    if (!state.available) return;
+    if (!canEdit()) return;
     const decimal = view.intervalInput.value.trim();
     if (!/^\d+$/.test(decimal)) {
       setIntervalError(view, "Enter a whole number of seconds.");
@@ -293,10 +250,10 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, 
   }
 
   function build(container) {
-    clear(container);
+    container.replaceChildren();
 
     const section = el("div", "settings-section");
-    const heading = el("h3", "settings-section-heading", "Project Manager");
+    const heading = el("h3", "settings-section-heading");
     section.appendChild(heading);
     const releaseExecution = executionModel ? mountProjectExecutionStatus(section, executionModel, { projectTitle }) : null;
 
@@ -325,28 +282,12 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, 
     pendingChip.hidden = true;
     section.appendChild(pendingChip);
 
-    const agentField = el("label", "settings-field");
-    agentField.appendChild(el("span", "settings-label", "Agent"));
-    const agentSelect = el("select", "settings-select");
-    agentSelect.dataset.role = "pm-agent-select";
-    agentField.appendChild(agentSelect);
-    section.appendChild(agentField);
-
-    const modelField = el("label", "settings-field");
-    modelField.appendChild(el("span", "settings-label", "Model"));
-    const modelInput = el("input", "settings-input");
-    modelInput.type = "text";
-    modelInput.placeholder = "Agent default";
-    modelInput.dataset.role = "pm-model-input";
-    modelField.appendChild(modelInput);
-    section.appendChild(modelField);
-
-    const effortField = el("label", "settings-field");
-    effortField.appendChild(el("span", "settings-label", "Effort"));
-    const effortSelect = el("select", "settings-select");
-    effortSelect.dataset.role = "pm-effort-select";
-    effortField.appendChild(effortSelect);
-    section.appendChild(effortField);
+    const navigate = el("button", "wizard-button"); navigate.type = "button"; navigate.hidden = true; section.append(navigate);
+    const profileStatus = el("p", "settings-status"); profileStatus.dataset.role = "pm-configured-profile"; profileStatus.setAttribute("role", "status"); section.append(profileStatus);
+    const openMember = el("button", "wizard-button", "Edit member in Agents"); openMember.type = "button"; openMember.dataset.role = "pm-open-member";
+    openMember.addEventListener("click", () => { if (canEdit() && model.read().memberId) onOpenMember(model.read().memberId); }); section.append(openMember);
+    const reload = el("button", "wizard-button", "Reload profile"); reload.type = "button"; reload.dataset.role = "pm-reload-profile";
+    reload.addEventListener("click", () => { if (canEdit()) onReloadProfile?.(); }); section.append(reload);
     section.appendChild(el("p", "settings-help", PROFILE_HELP));
 
     const intervalField = el("label", "settings-field");
@@ -395,9 +336,6 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, 
       [runningLine, "The agent, model and effort of the current Project Manager session. Saved profile changes apply after restart.", "pm-running-as"],
       [pauseToggle, "Pause autonomous coordination while keeping the Project Manager available. Issue Monitor stays unchanged.", "pm-pause-toggle"],
       [pendingChip, PROFILE_HELP, "pm-pending-chip"],
-      [agentSelect, PROFILE_HELP, "pm-agent-select"],
-      [modelInput, PROFILE_HELP, "pm-model-input"],
-      [effortSelect, PROFILE_HELP, "pm-effort-select"],
       [intervalInput, LOOP_INTERVAL_HELP, "pm-loop-interval"],
       [autoStartInput, AUTO_START_HELP, "pm-auto-start"],
       [restart, RESTART_CONFIRM, "pm-restart"],
@@ -405,15 +343,13 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, 
     const explanations = bindControlExplanations({ document, root: container, id: `pm-control-explanation-${intervalError.id}` });
 
     const view = {
+      heading, navigate, profileStatus, openMember, reload,
       releaseExecution,
-      agentSelect,
       autoStartInput,
       autonomyStatus,
-      effortSelect,
       explanations,
       intervalError,
       intervalInput,
-      modelInput,
       pendingChip,
       pauseToggle,
       restart,
@@ -421,12 +357,9 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, 
       startBlockLine,
     };
 
-    agentSelect.addEventListener("change", () => sendProfile(view));
-    modelInput.addEventListener("change", () => sendProfile(view));
-    effortSelect.addEventListener("change", () => sendProfile(view));
     intervalInput.addEventListener("change", () => sendLoopInterval(view));
     autoStartInput.addEventListener("change", () => {
-      if (!model.read().available) return;
+      if (!canEdit()) return;
       dispatch({
         kind: "set_pm_auto_start",
         enabled: Boolean(autoStartInput.checked),
@@ -434,12 +367,12 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, 
     });
     pauseToggle.addEventListener("click", () => {
       const state = model.read();
-      if (!state.available) return;
+      if (!canEdit()) return;
       dispatch({ kind: "set_pm_paused", paused: !state.paused });
     });
     restart.addEventListener("click", () => {
       const state = model.read();
-      if (!state.available) return;
+      if (!canEdit()) return;
       // Guard the action as well as the control: a stale render or a
       // programmatic click must not spend a restart on a block it cannot clear.
       if (state.startBlock && !state.startBlock.restartClearsIt) return;
@@ -450,20 +383,27 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, 
     return view;
   }
 
-  function openSettings(entryDocument) {
-    const CustomEventCtor = entryDocument.defaultView?.CustomEvent || CustomEvent;
-    entryDocument.dispatchEvent(
-      new CustomEventCtor("settings:open", {
-        detail: { target: "project-manager", surface_owner: "pm" },
-      }),
-    );
+  function openSettings() {
+    onOpenAgents(model.read().memberId);
   }
 
   function applyPmSettingsReceiveEvent(status) {
-    model.update(() => normalizeStatus(status));
+    const interval = status?.loop_interval_secs_decimal ?? status?.loop_interval_secs;
+    const decimal = String(interval ?? "").trim();
+    let validInterval = false;
+    try { validInterval = /^\d+$/.test(decimal) && BigInt(decimal) >= BigInt(MIN_LOOP_INTERVAL_SECS) && BigInt(decimal) <= MAX_U64; } catch {}
+    const own = !!projectKey && status?.project_key === projectKey && status.available === true
+      && typeof status.paused === "boolean" && typeof status.auto_start === "boolean" && validInterval;
+    model.update(previous => {
+      if (!own) return { ...previous, available: false,
+        foreignProjectKey: status?.project_key && status.project_key !== projectKey ? status.project_key : null };
+      const next = normalizeStatus(status);
+      return { ...next, foreignProjectKey: null };
+    });
   }
 
   return {
+    openAgents: openSettings,
     mount(container) {
       if (!container) {
         throw new TypeError("pmSettingsPanel.mount requires a container");
@@ -472,7 +412,8 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, 
       releaseMount(container);
       const view = build(container);
       mounts.set(container, view);
-      view.unsubscribe = model.subscribeFrame(state => state, state => renderView(view, state));
+      const subscriptions = [model.subscribeFrame(state => state, state => renderView(view, state))];
+      view.unsubscribe = () => subscriptions.forEach(unsubscribe => unsubscribe());
       return this;
     },
     unmount(container) {

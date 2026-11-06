@@ -6,10 +6,10 @@ const labelFor = state => state.charAt(0).toUpperCase() + state.slice(1);
 
 // Live activity owns membership; a separately arriving catalog only enriches
 // the row and authorizes access to its exact session's local terminal.
-function currentWorks(catalog, activity, roster) {
+function currentWorks(catalog, activity, roster, projectKey) {
   const app = catalog.appState, members = roster.members || [];
-  const windows = (app.tabs || []).filter(tab => !activity.snapshot?.project_key
-    || tab.project_key === activity.snapshot.project_key).flatMap(tab => tab.workspace?.windows || []);
+  const windows = (app.tabs || []).filter(tab => !(projectKey ?? activity.snapshot?.project_key)
+    || tab.project_key === (projectKey ?? activity.snapshot.project_key)).flatMap(tab => tab.workspace?.windows || []);
   const order = work => {
     if (work.member) return members.indexOf(work.member);
     const index = windows.findIndex(data => data.id === work.data.id);
@@ -20,7 +20,7 @@ function currentWorks(catalog, activity, roster) {
       && data.session_id === assignment.session_id && data.preset !== "shell");
     const data = matched || { id: assignment.window_id };
     const member = assignment.is_pm ? null : members.find(member => member.assignment?.session_id === assignment.session_id);
-    return { data, assignment, member, ready: !!matched,
+    return { data, assignment, member, projectKey: projectKey ?? activity.snapshot?.project_key, hostId: activity.snapshot?.host_id, ready: !!matched,
       state: matched ? stateFor(catalog.runtimeStates[data.id] ?? data.status) : "unknown" };
   }).sort((a, b) => Number(!!b.assignment.is_pm) - Number(!!a.assignment.is_pm) || order(a) - order(b));
 }
@@ -58,8 +58,8 @@ function drawSpark(document, svg, input, maximum) {
   sparkStates.set(svg, { values, maximum: max });
 }
 
-export function createWorksSurface({ document, windowCatalogModel, activityModel, rosterModel, windowDisplayTitle, systemSettingsModel,
-  mountTerminal, mountPreview, onLayout = () => {}, onFocus = () => {}, onSelectMember = () => {}, getTelemetry = () => null }) {
+export function createWorksSurface({ projectKey, document, windowCatalogModel, activityModel, rosterModel, windowDisplayTitle, systemSettingsModel,
+  mountTerminal, mountPreview, onRevokeTerminal = () => {}, onReleaseTerminal = () => {}, onLayout = () => {}, onFocus = () => {}, onSelectMember = () => {}, getTelemetry = () => null }) {
   const element = document.createElement("section");
   element.className = "works-surface"; element.setAttribute("aria-label", "Works");
   element.innerHTML = `<div class="works-overview"><header class="works-heading"><h2>Works</h2><div class="works-counts">
@@ -73,7 +73,7 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
       <button type="button" data-action="previous" aria-label="Previous work">↑</button><button type="button" data-action="next" aria-label="Next work">↓</button></header><div class="works-terminal-host"></div></section>`;
   const overview = element.querySelector(".works-overview"), list = element.querySelector(".works-list"), full = element.querySelector(".works-full");
   const entries = new Map();
-  let selected = null, previewElement = null, previewCleanups = [], disposed = false;
+  let selected = null, previewElement = null, previewEntries = [], disposed = false;
   let renderedCatalog, renderedActivity, renderedRoster;
   const previewLines = () => systemSettingsModel?.read().worksPreviewLines ?? 3;
   const isPresented = () => element.isConnected && !element.hidden;
@@ -103,10 +103,11 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
       host.append(badge);
     } else if (!work.assignment.is_pm) badge?.remove();
   }
+  const targetFor = work => ({ ...work.assignment, projectKey: work.projectKey, hostId: work.hostId });
   function park(entry, rehost = false) {
     const moved = entry.terminal.parentElement !== entry.cache;
     if (moved) entry.cache.append(entry.terminal);
-    if (exactWork(entry.work.assignment) && isPresented() && (moved || rehost)) mountTerminal(entry.work.data.id, entry.terminal, { readOnly: true });
+    if (exactWork(targetFor(entry.work)) && isPresented() && (moved || rehost)) mountTerminal(entry.work.data.id, entry.terminal, { readOnly: true, identity: targetFor(entry.work) });
   }
   function back(restore = true) {
     const previous = selected; selected = null; full.hidden = true; overview.hidden = false;
@@ -114,33 +115,35 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
     if (restore) entries.get(previous?.window_id)?.row.focus({ preventScroll: true });
     syncPreview(); onLayout();
   }
-  function exactWork(target) {
+  function exactWork(target, catalog = windowCatalogModel.read().catalog) {
     const requested = typeof target === "string" ? { window_id: target } : target;
     if (!requested?.window_id) return null;
-    return currentWorks(windowCatalogModel.read().catalog, activityModel.read(), rosterModel.read()).find(work =>
-      work.ready && work.assignment.window_id === requested.window_id &&
+    return currentWorks(catalog, activityModel.read(), rosterModel.read(), projectKey).find(work =>
+      work.ready && (!projectKey || activityModel.read().snapshot?.project_key === projectKey) &&
+      (requested.hostId === undefined || requested.hostId === work.hostId) &&
+      work.assignment.window_id === requested.window_id &&
       (!requested.session_id || requested.session_id === work.assignment.session_id) &&
       (requested.runtime_incarnation === undefined || requested.runtime_incarnation === work.assignment.runtime_incarnation));
   }
   function showFull(work, rehost = true) {
-    selected = work.assignment; overview.hidden = true; full.hidden = false;
+    selected = { ...work.assignment, hostId: work.hostId, root: entries.get(work.data.id).terminal }; overview.hidden = true; full.hidden = false;
     const entry = entries.get(work.data.id);
     for (const other of entries.values()) if (other !== entry) park(other);
     const host = full.querySelector(".works-terminal-host");
     if (entry.terminal.parentElement !== host) host.append(entry.terminal);
     setName(full.querySelector(".works-full-name"), work);
     const t = telemetryFor(work);
-    const available = work.data.session_id && ["running", "waiting", "idle"].includes(work.state);
+    const available = work.ready && work.data.session_id && ["running", "waiting", "idle"].includes(work.state);
     full.querySelector(".works-full-meta").textContent = `${work.assignment.is_pm ? "PM" : work.assignment.issue_number ? `#${work.assignment.issue_number}` : "—"} · ${purposeFor(work)} · ${labelFor(work.state)} · ${seconds(t.elapsed_seconds)} · ${providerFor(work)} / ${work.member?.model || t.model || "—"} · ${available ? "Interactive" : "Input unavailable"}`;
     full.querySelector(".works-full-usage").textContent = `${number(t.input_tokens)} input / ${number(t.cache_tokens)} cache / ${number(t.output_tokens)} output · Context ${finite(t.context_remaining_percent) ? `${t.context_remaining_percent}%` : "—"}`;
     // Attachment progress may remain after another surface moves the native xterm.
-    if ((rehost || !entry.terminal.querySelector(".xterm")) && isPresented()) mountTerminal(work.data.id, entry.terminal, { readOnly: false });
+    if ((rehost || !entry.terminal.querySelector(".xterm")) && work.ready && isPresented()) { mountTerminal(work.data.id, entry.terminal, { readOnly: false, identity: targetFor(work) }); entry.revoked = false; }
   }
   function openWork(target) {
     if (disposed) return false;
     render(false);
     const work = exactWork(target);
-    if (!work) { back(false); return false; }
+    if (!work) return false;
     showFull(work); syncPreview(); onLayout(); onFocus(work.data.id); return true;
   }
   function createEntry(work) {
@@ -156,12 +159,12 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
     terminal.dataset.windowId = work.data.id;
     terminal.addEventListener("focusin", () => onFocus(work.data.id));
     terminal.addEventListener("pointerdown", () => onFocus(work.data.id));
-    row.addEventListener("click", event => { if (!event.target.closest("button, a, .work-tail")) openWork(entries.get(work.data.id).work.assignment); });
+    row.addEventListener("click", event => { if (!event.target.closest("button, a, .work-tail")) openWork(targetFor(entries.get(work.data.id).work)); });
     row.addEventListener("keydown", event => {
       if (event.target !== row || !["Enter", " "].includes(event.key)) return;
-      event.preventDefault(); openWork(entries.get(work.data.id).work.assignment);
+      event.preventDefault(); openWork(targetFor(entries.get(work.data.id).work));
     });
-    row.querySelector(".work-open").addEventListener("click", () => openWork(entries.get(work.data.id).work.assignment));
+    row.querySelector(".work-open").addEventListener("click", () => openWork(targetFor(entries.get(work.data.id).work)));
     list.append(row);
     return { row, terminal, cache, work, cleanup: null, previewMounted: false };
   }
@@ -187,36 +190,116 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
   function syncPreview() {
     if (!previewElement) return;
     previewElement.style.setProperty("--works-preview-lines", String(previewLines()));
-    for (const cleanup of previewCleanups) cleanup?.(); previewCleanups = [];
-    previewElement.replaceChildren();
-    const note = document.createElement("p"); note.className = "surface-readonly-note"; note.textContent = "Read-only preview · Select this pane to interact"; previewElement.append(note);
+    const previous = previewEntries; previewEntries = [];
+    const contents = document.createDocumentFragment();
+    const retainOutput = (work, container, options) => {
+      const key = JSON.stringify([work.projectKey ?? "", work.hostId ?? "", work.assignment.window_id,
+        work.assignment.session_id, work.assignment.runtime_incarnation, selected ? "full" : "list", options?.tailLines ?? null]);
+      // An unavailable terminal returns a no-op mount; retry it when its
+      // actual output container becomes available, even for the same identity.
+      const entry = previous.find(entry => entry.key === key && entry.container.firstElementChild)
+        || (exactWork(targetFor(work)) ? { key, container, cleanup: mountPreview(work.assignment.window_id, container, options) } : { key, container });
+      previewEntries.push(entry);
+      return entry.container;
+    };
+    const note = document.createElement("p"); note.className = "surface-readonly-note"; note.textContent = "Read-only preview · Select this pane to interact"; contents.append(note);
     if (selected) {
-      if (!exactWork(selected)) return;
-      const heading = full.querySelector(".works-full-header").cloneNode(true);
-      for (const button of heading.querySelectorAll("button")) { button.disabled = true; button.tabIndex = -1; }
-      const output = document.createElement("div"); output.className = "works-preview-output";
-      previewElement.append(heading, output);
-      previewCleanups.push(mountPreview(selected.window_id, output));
+      const work = displayedWork(selected);
+      if (work) {
+        const heading = full.querySelector(".works-full-header").cloneNode(true);
+        for (const button of heading.querySelectorAll("button")) { button.disabled = true; button.tabIndex = -1; }
+        const output = document.createElement("div"); output.className = "works-preview-output";
+        contents.append(heading, retainOutput(work, output));
+      }
     } else {
       const clone = overview.cloneNode(true);
       for (const cache of clone.querySelectorAll(".work-runtime-cache")) cache.remove();
       for (const button of clone.querySelectorAll("button")) { button.disabled = true; button.tabIndex = -1; }
       for (const row of clone.querySelectorAll(".work-row")) {
         row.tabIndex = -1; const tail = row.querySelector(".work-tail"); tail.replaceChildren();
-        if (!exactWork(entries.get(row.dataset.windowId)?.work.assignment)) continue;
-        previewCleanups.push(mountPreview(row.dataset.windowId, tail, { tailLines: previewLines() }));
+        const previousWork = entries.get(row.dataset.windowId)?.work;
+        const work = previousWork && displayedWork(targetFor(previousWork));
+        if (!work) continue;
+        tail.replaceWith(retainOutput(work, tail, { tailLines: previewLines() }));
       }
-      previewElement.append(clone);
+      contents.append(clone);
     }
+    previewElement.replaceChildren(contents);
+    for (const entry of previous) if (!previewEntries.includes(entry)) entry.cleanup?.();
     previewElement.dataset.catalogVersion = element.dataset.catalogVersion;
   }
   function setPreviewHost(host) {
     if (previewElement?.parentElement === host) return;
-    for (const cleanup of previewCleanups) cleanup?.(); previewCleanups = [];
+    for (const entry of previewEntries) entry.cleanup?.(); previewEntries = [];
     previewElement?.remove(); previewElement = null;
     if (!host || disposed) return;
     previewElement = document.createElement("section"); previewElement.className = "works-surface works-surface--preview";
     previewElement.setAttribute("aria-label", "Works read-only preview"); host.append(previewElement); syncPreview();
+  }
+  function sameIdentity(left, right) {
+    return left.assignment.window_id === right.assignment.window_id
+      && left.assignment.session_id === right.assignment.session_id
+      && left.assignment.runtime_incarnation === right.assignment.runtime_incarnation
+      && left.hostId === right.hostId && left.projectKey === right.projectKey
+      && left.catalogConflict === right.catalogConflict;
+  }
+  function displayWorks(catalog, activity, roster) {
+    const live = currentWorks(catalog, activity, roster, projectKey);
+    const snapshot = activity.snapshot;
+    const tabs = catalog.appState.tabs || [];
+    const foreign = (projectKey && snapshot && snapshot.project_key !== projectKey)
+      || (projectKey && tabs.length && !tabs.some(tab => tab.project_key === projectKey));
+    const unknown = activity.count === null;
+    const result = [...live];
+    for (const entry of entries.values()) {
+      const previous = entry.work;
+      const current = live.find(work => work.assignment.window_id === previous.assignment.window_id);
+      const windows = tabs.filter(tab => !projectKey || tab.project_key === projectKey).flatMap(tab => tab.workspace?.windows || []);
+      const conflict = windows.some(data => data.id === previous.data.id
+        && (data.session_id !== previous.assignment.session_id || data.preset === "shell"));
+      if (foreign || conflict) {
+        if (current) result[result.indexOf(current)] = { ...current, catalogConflict: foreign ? "foreign-project" : JSON.stringify(windows.filter(data => data.id === previous.data.id).map(data => [data.session_id, data.preset])) };
+        continue;
+      }
+      if (snapshot?.host_id && snapshot.host_id !== previous.hostId) continue;
+      if (current && !sameIdentity(current, previous)) continue;
+      if ((!current && unknown) || (current && !current.ready)) {
+        const retained = { ...previous, ready: false, state: "unknown" };
+        if (current) result[result.indexOf(current)] = retained; else result.push(retained);
+      }
+    }
+    return result;
+  }
+  function displayedWork(target) {
+    if (!target) return null;
+    return displayWorks(windowCatalogModel.read().catalog, activityModel.read(), rosterModel.read()).find(work =>
+      work.assignment.window_id === target.window_id && work.assignment.session_id === target.session_id
+      && work.assignment.runtime_incarnation === target.runtime_incarnation
+      && (target.hostId === undefined || target.hostId === work.hostId));
+  }
+  function incomingCatalog(state) {
+    return { ...windowCatalogModel.read().catalog, appState: state };
+  }
+  function retainedEntry(entry, catalog) {
+    return displayWorks(catalog, activityModel.read(), rosterModel.read()).some(work => sameIdentity(work, entry.work));
+  }
+  function releaseEntry(entry, cause) {
+    onReleaseTerminal(entry.work.data.id, entry.terminal, targetFor(entry.work), cause);
+  }
+  function prepareWorkspaceReconciliation(state) {
+    if (disposed) return;
+    const catalog = incomingCatalog(state);
+    for (const entry of entries.values()) {
+      const authorized = exactWork(targetFor(entry.work), catalog);
+      if (!authorized) {
+        entry.revoked = true;
+        onRevokeTerminal(entry.work.data.id, entry.terminal, targetFor(entry.work));
+      }
+      if (!retainedEntry(entry, catalog)) releaseEntry(entry, "identity-ended");
+    }
+  }
+  function reconcileNativeAuthority() {
+    prepareWorkspaceReconciliation(windowCatalogModel.read().catalog.appState);
   }
   function render(rehost) {
     if (disposed) return;
@@ -226,9 +309,10 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
     const linesChanged = element.style.getPropertyValue("--works-preview-lines") !== String(lines);
     element.style.setProperty("--works-preview-lines", String(lines));
     const catalog = windowCatalogModel.read().catalog, activity = activityModel.read(), roster = rosterModel.read();
-    const works = currentWorks(catalog, activity, roster), ids = new Set(works.map(work => work.data.id));
+    const works = displayWorks(catalog, activity, roster), ids = new Set(works.map(work => work.data.id));
     let changed = false;
-    for (const [id, entry] of entries) if (!ids.has(id) || !works.some(work => work.data.id === id && work.assignment.session_id === entry.work.assignment.session_id && work.assignment.runtime_incarnation === entry.work.assignment.runtime_incarnation)) {
+    for (const [id, entry] of entries) if (!ids.has(id) || !works.some(work => work.data.id === id && sameIdentity(work, entry.work))) {
+      releaseEntry(entry, "identity-ended");
       entry.cleanup?.(); entry.row.remove(); entry.cache.remove(); entry.terminal.remove(); entries.delete(id); changed = true;
     }
     const telemetry = getTelemetry() || {}, today = telemetry.today || {};
@@ -257,8 +341,14 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
     element.querySelector(".works-empty").textContent = activity.count === null ? "Local agent activity is unavailable." : "No local agents are active.";
     element.querySelector(".works-empty").hidden = works.length > 0;
     element.dataset.catalogVersion = String(catalog.version);
-    if (selected) { const work = exactWork(selected); if (work) showFull(work, rehost); else back(false); }
-    for (const entry of entries.values()) if (!entry.work.ready || linesChanged) {
+    if (selected) {
+      const entry = entries.get(selected.window_id);
+      const work = entry && entry.terminal === selected.root && entry.work.assignment.session_id === selected.session_id
+        && entry.work.assignment.runtime_incarnation === selected.runtime_incarnation
+        && entry.work.hostId === selected.hostId ? entry.work : null;
+      if (work) showFull(work, rehost || entry.revoked); else back(false);
+    }
+    for (const entry of entries.values()) if (linesChanged) {
       entry.cleanup?.(); entry.cleanup = null; entry.previewMounted = false;
     }
     if (isPresented()) for (const entry of entries.values()) {
@@ -275,20 +365,26 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
   }
   element.querySelector('[data-action="back"]').addEventListener("click", () => back());
   for (const [action, delta] of [["previous", -1], ["next", 1]]) element.querySelector(`[data-action="${action}"]`).addEventListener("click", () => {
-    const works = currentWorks(windowCatalogModel.read().catalog, activityModel.read(), rosterModel.read()).filter(work => work.ready);
+    if (!exactWork(selected)) return;
+    const works = currentWorks(windowCatalogModel.read().catalog, activityModel.read(), rosterModel.read(), projectKey).filter(work => work.ready);
     const index = works.findIndex(work => work.assignment.window_id === selected?.window_id && work.assignment.session_id === selected?.session_id && work.assignment.runtime_incarnation === selected?.runtime_incarnation);
-    if (index < 0 || !works.length) { back(false); return; }
+    if (index < 0 || !works.length) return;
     openWork(works[(index + delta + works.length) % works.length].assignment);
   });
   render(false);
   const unsubscribers = [
+    windowCatalogModel.subscribe(state => state.catalog, reconcileNativeAuthority),
+    activityModel.subscribe(state => state, reconcileNativeAuthority),
     windowCatalogModel.subscribeFrame(state => state.catalog, value => { if (value !== renderedCatalog) render(false); }),
     activityModel.subscribeFrame(state => state, value => { if (value !== renderedActivity) render(false); }),
     rosterModel.subscribeFrame(state => state, value => { if (value !== renderedRoster) render(false); }),
     systemSettingsModel?.subscribeFrame(state => state.worksPreviewLines, () => render(false)),
   ];
-  return { element, sync: (rehost = true) => render(rehost), openWork, reveal: openWork, showList: () => back(false), setPreviewHost,
+  return { element, prepareWorkspaceReconciliation,
+    nativeIdentity: (id, root) => { const entry = entries.get(id); return entry?.terminal === root ? targetFor(entry.work) : null; },
+    retainsNativeRoot: (id, root, state) => { const entry = entries.get(id); return !!entry && entry.terminal === root && retainedEntry(entry, incomingCatalog(state)); },
+    sync: (rehost = true) => render(rehost), openWork, reveal: openWork, showList: () => back(false), setPreviewHost,
     contains: id => !!exactWork(id), isVisible: id => !element.hidden && !!exactWork(id),
-    dispose() { if (disposed) return; for (const unsubscribe of unsubscribers) unsubscribe?.(); setPreviewHost(null); for (const entry of entries.values()) entry.cleanup?.(); entries.clear(); disposed = true; },
+    dispose() { if (disposed) return; for (const unsubscribe of unsubscribers) unsubscribe?.(); setPreviewHost(null); for (const entry of entries.values()) { releaseEntry(entry, "unload"); entry.cleanup?.(); } entries.clear(); disposed = true; },
   };
 }

@@ -49,6 +49,19 @@ fn pm_restore_owner_fixture(
     (executor, owner)
 }
 
+fn pm_registration_for_saved_session(
+    session: &gwt_agent::Session,
+) -> gwt::pm_registry::PmRegistration {
+    gwt::pm_registry::PmRegistration {
+        session_id: session.id.clone(),
+        agent_id: session.agent_id.command().into(),
+        worktree_path: session.worktree_path.to_string_lossy().into_owned(),
+        created_at: Some(session.created_at.to_rfc3339()),
+        consecutive_crashes: 0,
+        next_not_before: None,
+    }
+}
+
 fn drain_pm_owner_restore(
     runtime: &mut AppRuntime,
     recorded: &Arc<Mutex<Vec<UserEvent>>>,
@@ -395,6 +408,7 @@ fn restore_still_resumes_the_stores_own_pm_worktree() {
         gwt_agent::AgentId::Custom("fixture".into()),
     );
     session.id = "session-own-pm".to_string();
+    session.agent_name = Some("Fixture resident PM".into());
     session.agent_session_id = Some("native-own-pm".to_string());
     session.restore_window_on_startup = true;
     session.update_status(gwt_agent::AgentStatus::Stopped);
@@ -410,7 +424,7 @@ fn restore_still_resumes_the_stores_own_pm_worktree() {
     );
     gwt::pm_registry::try_register_pm(
         &gwt::pm_registry::pm_prefs_path_for_repo_path(&repo),
-        pm_registration_fixture("session-own-pm", &own_pm_worktree),
+        pm_registration_for_saved_session(&session),
         |_| false,
     )
     .expect("register the store's own PM");
@@ -508,14 +522,20 @@ fn restore_brings_back_only_the_registered_pm_of_the_stores_pm_worktree() {
             gwt_agent::AgentId::Custom("fixture".into()),
         );
         session.id = session_id.to_string();
+        if session_id == registered {
+            session.agent_name = Some("Fixture resident PM".into());
+        }
         session.agent_session_id = Some(format!("native-{session_id}"));
         session.restore_window_on_startup = true;
         session.update_status(gwt_agent::AgentStatus::Stopped);
         session.save(&runtime.sessions_dir).expect("save session");
     }
+    let registered_session =
+        gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{registered}.toml")))
+            .expect("saved registered target");
     gwt::pm_registry::try_register_pm(
         &gwt::pm_registry::pm_prefs_path_for_repo_path(&repo),
-        pm_registration_fixture(registered, &own_pm_worktree),
+        pm_registration_for_saved_session(&registered_session),
         |_| false,
     )
     .expect("register one PM");
@@ -2911,9 +2931,6 @@ fn restored_autonomous_session_uses_manual_route_only_for_user_requested_restart
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
-    let _home = ScopedEnvVar::set("HOME", temp.path());
-    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let _gwt_home = ScopedGwtHome::set(temp.path());
     for (origin, expected_route) in [
         (
             super::super::startup::RestoreOrigin::Automatic,
@@ -2925,6 +2942,9 @@ fn restored_autonomous_session_uses_manual_route_only_for_user_requested_restart
         ),
     ] {
         let case_root = temp.path().join(format!("{origin:?}"));
+        let _home = ScopedEnvVar::set("HOME", &case_root);
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", &case_root);
+        let _gwt_home = ScopedGwtHome::set(&case_root);
         let repo = case_root.join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         init_repo_with_initial_commit(&repo);
@@ -3094,6 +3114,7 @@ fn generic_pm_session_resume_refreshes_before_spawning_the_process() {
         "",
         gwt_agent::AgentId::Custom("fixture".into()),
     );
+    session.agent_name = Some("Fixture resident PM".into());
     session.agent_session_id = Some("pm-conversation-resume".to_string());
     session.project_state_root = Some(repo.clone());
     session.restore_window_on_startup = true;
@@ -3104,7 +3125,7 @@ fn generic_pm_session_resume_refreshes_before_spawning_the_process() {
     // PM worktree.
     gwt::pm_registry::try_register_pm(
         &gwt::pm_registry::pm_prefs_path_for_repo_path(&repo),
-        pm_registration_fixture(&session.id, &pm_worktree),
+        pm_registration_for_saved_session(&session),
         |_| false,
     )
     .expect("register the resuming PM");

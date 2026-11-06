@@ -296,6 +296,7 @@ test.describe("Browser file drop attachments", () => {
         kind: "attachment_progress",
         id: "agent-1",
         operation_id: operationId,
+        expected_target: window.__fileDropSent.find(message => message.operation_id === operationId)?.expected_target,
         phase: "staging",
         file_index: 0,
         file_count: 1,
@@ -316,6 +317,7 @@ test.describe("Browser file drop attachments", () => {
         kind: "attachment_progress",
         id: "agent-1",
         operation_id: operationId,
+        expected_target: window.__fileDropSent.find(message => message.operation_id === operationId)?.expected_target,
         phase: "attached",
         file_index: 0,
         file_count: 1,
@@ -345,8 +347,10 @@ test.describe("Browser file drop attachments", () => {
 
     await emitAttachmentProgress(page, { operationId: "", phase: "failed", message: "ignored" });
     await expect(agentProgress).toHaveCount(0);
+    await dropTextFileOn(page, ".works-full-header", { name: "notes.txt", type: "text/plain", content: "1234567890123456" });
+    const operation = await waitForAttachFiles(page);
     await emitAttachmentProgress(page, {
-      operationId: "op-attach",
+      operationId: operation.operation_id,
       phase: "staging",
       filename: "/workspace/notes.txt",
       bytesDone: 8,
@@ -360,7 +364,7 @@ test.describe("Browser file drop attachments", () => {
     const progressbar = agentProgress.locator('[role="progressbar"]');
     await expect(progressbar).toHaveAttribute("aria-valuenow", "50");
     await emitAttachmentProgress(page, {
-      operationId: "op-attach", phase: "injecting", filename: "notes.txt", bytesDone: 12, bytesTotal: 16,
+      operationId: operation.operation_id, phase: "injecting", filename: "notes.txt", bytesDone: 12, bytesTotal: 16,
     });
     await expect(agentProgress).toContainText("Injecting");
     await expect(progressbar).toHaveAttribute("aria-valuenow", "75");
@@ -369,7 +373,7 @@ test.describe("Browser file drop attachments", () => {
     await page.screenshot({ path: testInfo.outputPath("attachment-progress.png") });
 
     await emitAttachmentProgress(page, {
-      operationId: "op-attach",
+      operationId: operation.operation_id,
       phase: "attached",
       filename: "notes.txt",
       bytesDone: 16,
@@ -400,8 +404,10 @@ test.describe("Browser file drop attachments", () => {
       ".works-terminal[data-window-id='agent-1'] .attachment-progress",
     );
 
+    await dropTextFileOn(page, ".works-full-header", { name: "notes.txt", type: "text/plain", content: "1234567890123456" });
+    const operation = await waitForAttachFiles(page);
     await emitAttachmentProgress(page, {
-      operationId: "op-fail",
+      operationId: operation.operation_id,
       phase: "failed",
       filename: "notes.txt",
       bytesDone: 4,
@@ -421,8 +427,11 @@ test.describe("Browser file drop attachments", () => {
 
     // The next attachment operation reuses the same surface and replaces the
     // error in place.
+    await dropTextFileOn(page, ".works-full-header", { name: "report.pdf", type: "application/pdf", content: "next operation" });
+    await expect.poll(() => attachFilesMessages(page).then(messages => messages.length)).toBe(2);
+    const next = (await attachFilesMessages(page))[1];
     await emitAttachmentProgress(page, {
-      operationId: "op-next",
+      operationId: next.operation_id,
       phase: "staging",
       filename: "report.pdf",
       bytesDone: 8,
@@ -435,6 +444,80 @@ test.describe("Browser file drop attachments", () => {
     expect(await agentProgress.evaluate((node, original) => node === original, surfaceNode)).toBe(true);
     await expect(page.locator(".workspace-window[data-id='shell-1'] .attachment-progress")).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath("attachment-replacement.png") });
+  });
+
+  test("unknown receipts stay visible at 400px and late progress cannot revive or resend them", async ({ page }) => {
+    if (!fileDropBase) await installEmbeddedRoutes(page);
+    await installFileDropBackend(page);
+    await page.goto(fileDropAppUrl);
+    await openAgentWork(page);
+    await page.setViewportSize({ width: 400, height: 800 });
+    await dropTextFileOn(page, ".works-full-header", { name: "notes.txt", type: "text/plain", content: "one body" });
+    const operation = await waitForAttachFiles(page);
+    const progress = page.locator(".works-terminal[data-window-id='agent-1'] .attachment-progress");
+    await emitAttachmentProgress(page, { operationId: "unknown-operation", phase: "attached" });
+    await expect(progress).toContainText("Queued");
+    await emitAttachmentProgress(page, { operationId: operation.operation_id, phase: "attached", omitTarget: true });
+    await expect(progress).toContainText("Outcome unknown");
+    await emitAttachmentProgress(page, { operationId: operation.operation_id, phase: "queued" });
+    await page.keyboard.press("Tab");
+    await expect(progress).toContainText("Outcome unknown");
+    await expect(progress).toBeVisible();
+    const bounds = (await progress.boundingBox())!;
+    expect(bounds.x).toBeGreaterThanOrEqual(0);
+    expect(bounds.x + bounds.width).toBeLessThanOrEqual(400);
+    expect(await attachFilesMessages(page)).toHaveLength(1);
+  });
+
+  test("target replacement retires its attachment with an honest notice and no replacement injection", async ({ page }) => {
+    if (!fileDropBase) await installEmbeddedRoutes(page);
+    await installFileDropBackend(page);
+    await page.goto(fileDropAppUrl);
+    await openAgentWork(page);
+    await dropTextFileOn(page, ".works-full-header", { name: "notes.txt", type: "text/plain", content: "original body" });
+    const operation = await waitForAttachFiles(page);
+    await page.evaluate(() => window.__emitFileDropBackendEvent?.({ kind: "local_agent_activity", activity: {
+      project_key: location.pathname.split("/").filter(Boolean).at(-1), host_id: "file-drop-fixture", observed_at: new Date().toISOString(),
+      agents: [{ window_id: "agent-1", session_id: "session-agent-1", runtime_incarnation: 2, is_pm: false, issue_number: null }],
+    } }));
+    await expect(page.locator(".toast-alerts")).toContainText("Outcome unknown");
+    await emitAttachmentProgress(page, { operationId: operation.operation_id, phase: "attached" });
+    await expect(page.locator(".toast-alerts")).toContainText("Outcome unknown");
+    expect(await attachFilesMessages(page)).toHaveLength(1);
+    await expect(page.locator(".workspace-window[data-id='shell-1'] .attachment-progress")).toHaveCount(0);
+  });
+
+  test("clipboard image intent stays bound across its read and refuses a changed incarnation", async ({ page }) => {
+    if (!fileDropBase) await installEmbeddedRoutes(page);
+    await installFileDropBackend(page);
+    await page.goto(fileDropAppUrl);
+    await openAgentWork(page);
+    await page.evaluate(() => Object.defineProperty(navigator, "clipboard", { configurable: true, value: {
+      read: () => new Promise(resolve => {
+        window.__releaseAttachmentClipboardRead = () => resolve([{ types: ["image/png"],
+          getType: async () => new Blob(["png"], { type: "image/png" }) }]);
+      }),
+      readText: async () => "",
+    } }));
+    const root = page.locator(".works-terminal[data-window-id='agent-1']");
+    await root.click({ button: "right" });
+    await page.getByRole("menuitem", { name: "Paste", exact: true }).click();
+    await page.evaluate(() => window.__releaseAttachmentClipboardRead());
+    const original = await waitForPasteImageUploaded(page);
+    expect(original.expected_target).toMatchObject({ session_id: "session-agent-1", runtime_incarnation: 1 });
+    await expect.poll(() => page.evaluate(() => window.__attachmentUploads.length)).toBe(1);
+
+    await root.click({ button: "right" });
+    await page.getByRole("menuitem", { name: "Paste", exact: true }).click();
+    await page.evaluate(() => window.__emitFileDropBackendEvent?.({ kind: "local_agent_activity", activity: {
+      project_key: location.pathname.split("/").filter(Boolean).at(-1), host_id: "file-drop-fixture", observed_at: new Date().toISOString(),
+      agents: [{ window_id: "agent-1", session_id: "session-agent-1", runtime_incarnation: 2, is_pm: false, issue_number: null }],
+    } }));
+    await expect(page.locator(".toast-alerts")).toContainText("Outcome unknown");
+    await page.evaluate(() => window.__releaseAttachmentClipboardRead());
+    await expect(page.locator(".toast-alerts")).toContainText("File not sent");
+    expect(await pasteImageUploadedMessages(page)).toHaveLength(1);
+    expect(await page.evaluate(() => window.__attachmentUploads.length)).toBe(1);
   });
 
   test("pasting an image on an Agent terminal uploads and shows progress", async ({ page }) => {
@@ -564,6 +647,8 @@ async function emitAttachmentProgress(
     bytesTotal?: number;
     message?: string | null;
     windowId?: string;
+    omitTarget?: boolean;
+    target?: { project_key: string; session_id: string; host_id: string; runtime_incarnation: number };
   },
 ) {
   await page.evaluate((event) => {
@@ -571,6 +656,7 @@ async function emitAttachmentProgress(
       kind: "attachment_progress",
       id: event.windowId ?? "agent-1",
       operation_id: event.operationId,
+      expected_target: event.omitTarget ? undefined : event.target ?? window.__fileDropSent.find(message => message.operation_id === event.operationId)?.expected_target,
       phase: event.phase,
       file_index: 0,
       file_count: 1,

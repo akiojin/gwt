@@ -588,7 +588,7 @@ fn completed_restore_reaches_exact_close(bookkeeping_warning: bool) {
     assert_eq!(
         observations[0].eligibility,
         TerminalCloseEligibility::Eligible(reason),
-        "terminal settlement trace: {settlement_trace:?}"
+        "terminal delivery settlement trace: {settlement_trace:?}"
     );
     assert_eq!(
         runtime.restore_work_terminality(&session, &repo, Some(&window_id)),

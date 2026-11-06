@@ -189,6 +189,12 @@ impl AppRuntime {
         kind: &super::RemoteRuntimeCommandKind,
         error: String,
     ) -> Vec<OutboundEvent> {
+        if let super::RemoteRuntimeCommandKind::AttachmentInput(operation) = kind {
+            return vec![operation.progress(
+                super::AttachmentProgressPhase::Failed,
+                Some("Attachment was not sent. Reload the current UI and try again."),
+            )];
+        }
         if let super::RemoteRuntimeCommandKind::Input {
             reply_client: Some(client_id),
         } = kind
@@ -223,10 +229,26 @@ impl AppRuntime {
             .get(id)
             .and_then(|address| self.project_context(&address.tab_id))
         else {
-            return Vec::new();
+            return if matches!(&kind, super::RemoteRuntimeCommandKind::AttachmentInput(_)) {
+                self.remote_command_refusal(
+                    id,
+                    &kind,
+                    "The project execution is unavailable.".into(),
+                )
+            } else {
+                Vec::new()
+            };
         };
         let Some(state) = self.project_state(&context) else {
-            return Vec::new();
+            return if matches!(&kind, super::RemoteRuntimeCommandKind::AttachmentInput(_)) {
+                self.remote_command_refusal(
+                    id,
+                    &kind,
+                    "The project execution is unavailable.".into(),
+                )
+            } else {
+                Vec::new()
+            };
         };
         if state.project_owner_identity.as_ref() != Some(&runtime.owner_identity)
             || runtime.owner_pane_id.is_empty()
@@ -258,16 +280,31 @@ impl AppRuntime {
             self.begin_runtime_approval_resolution(&id);
         }
         if let Err(error) = self.blocking_tasks.try_spawn(move || {
-            let result = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|error| error.to_string())
+            let mut attachment_outcome = None;
+            let attachment = matches!(&kind, super::RemoteRuntimeCommandKind::AttachmentInput(_));
+            let command_runtime = tokio::runtime::Builder::new_current_thread().enable_all().build();
+            if command_runtime.is_err() {
+                if let super::RemoteRuntimeCommandKind::AttachmentInput(operation) = &kind {
+                    // This worker settled before even calling the private owner.
+                    proxy.send(UserEvent::Dispatch(vec![operation.progress(super::AttachmentProgressPhase::Failed,
+                        Some("Attachment input could not start. Reload the current UI."))]));
+                    return;
+                }
+            }
+            let result = command_runtime.map_err(|error| error.to_string())
                 .and_then(|runtime| {
                     runtime.block_on(async {
                         tokio::time::timeout(Duration::from_secs(120), client.command(command))
                             .await
                             .map_err(|_| "project command timed out".to_string())?
                             .and_then(|value| {
+                                if attachment {
+                                    let receipt: gwt::project_runtime::events::OwnerAttachmentInputReceipt =
+                                        serde_json::from_value(value).map_err(|error| error.to_string())?;
+                                    let observation = receipt.input_observation;
+                                    attachment_outcome = Some(receipt);
+                                    return Ok(observation);
+                                }
                                 value
                                     .get("input_observation")
                                     .filter(|value| !value.is_null())
@@ -288,6 +325,7 @@ impl AppRuntime {
                     incarnation,
                     kind,
                     approval_resolution_started,
+                    attachment_outcome,
                     result,
                 },
             )));
@@ -312,8 +350,55 @@ impl AppRuntime {
             incarnation,
             kind,
             approval_resolution_started,
+            attachment_outcome,
             result,
         } = completion;
+        if let super::RemoteRuntimeCommandKind::AttachmentInput(operation) = &kind {
+            use gwt::project_runtime::events::OwnerAttachmentInputOutcome as Outcome;
+            let current = self.attachment_operation_is_current(operation)
+                && context == operation.context
+                && connection_id == operation.connection_id
+                && identity == operation.identity
+                && id == operation.id
+                && incarnation == operation.expected_target.runtime_incarnation;
+            let receipt = attachment_outcome.filter(|receipt| receipt.tag == "attachment_input_receipt"
+                && receipt.schema_version == 1 && receipt.pane_id == operation.owner_pane_id
+                && receipt.incarnation == operation.expected_target.runtime_incarnation
+                && receipt.session_id == operation.expected_target.session_id
+                && match receipt.outcome {
+                    Outcome::Written => receipt.reason.is_none(),
+                    Outcome::NotStarted => matches!(receipt.reason, Some(gwt::project_runtime::events::OwnerAttachmentInputReason::TargetUnavailable | gwt::project_runtime::events::OwnerAttachmentInputReason::WriterUnavailable)),
+                    Outcome::OutcomeUnknown => receipt.reason == Some(gwt::project_runtime::events::OwnerAttachmentInputReason::WriteUncertain),
+                });
+            let (phase, message) = match (current, result.is_ok(), receipt.as_ref().map(|r| r.outcome)) {
+                (true, true, Some(Outcome::Written)) => (super::AttachmentProgressPhase::Attached, None),
+                (true, true, Some(Outcome::NotStarted)) => (super::AttachmentProgressPhase::Failed,
+                    Some("Attachment was not sent. The original target or physical writer is unavailable.")),
+                _ => (super::AttachmentProgressPhase::OutcomeUnknown,
+                    Some("Attachment outcome unknown. Some bytes may have reached the original target. Do not resend automatically.")),
+            };
+            // A physical observation may update only this same producer. It is
+            // never the proof used to choose the public attachment outcome.
+            if current && result.is_ok() {
+                if let Some(observation) = receipt.and_then(|receipt| receipt.input_observation) {
+                    let runtime = self.runtimes.get_mut(&id).expect("fenced attachment input");
+                    if runtime
+                        .input_observation
+                        .is_none_or(|old| old.revision <= observation.revision)
+                    {
+                        runtime.has_unsent_user_input.store(
+                            observation.has_unsent_user_input,
+                            std::sync::atomic::Ordering::Release,
+                        );
+                        runtime.observe_input(Some(observation));
+                    }
+                    if !observation.has_unsent_user_input {
+                        self.flush_pending_pm_wake(&id);
+                    }
+                }
+            }
+            return vec![operation.progress(phase, message)];
+        }
         if !self.project_owner_event_is_current(&context, connection_id, &identity)
             || !self.remote_runtime_is_current(&context, &identity, &id, incarnation)
         {
@@ -585,13 +670,18 @@ impl AppRuntime {
                 )]));
             }
             settle_window_lifecycle_generation(&generations, &window_id, closing_window_generation);
-            let pm_status = pm_outcome.as_ref().map(|outcome| {
-                gwt::project_runtime::pm_delivery::pm_status_from_launch_prefs(
-                    &gwt_core::paths::gwt_sessions_dir(),
-                    &outcome.prefs,
-                    None,
-                )
-            });
+            let pm_status =
+                pm_outcome
+                    .as_ref()
+                    .zip(close_project_root.as_ref())
+                    .map(|(outcome, root)| {
+                        gwt::project_runtime::pm_delivery::pm_status_from_launch_prefs(
+                            &gwt_core::paths::gwt_sessions_dir(),
+                            root,
+                            &outcome.prefs,
+                            None,
+                        )
+                    });
             let pm_deregistered = pm_outcome
                 .as_ref()
                 .is_some_and(|outcome| outcome.deregistered);

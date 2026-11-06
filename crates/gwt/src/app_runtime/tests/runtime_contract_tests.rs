@@ -918,13 +918,59 @@ fn resumed_agent_window_accepts_terminal_input_and_attachment_staging() {
             .any(|event| matches!(&event.event, BackendEvent::PaneSendResult { ok: true, .. })),
         "pane.write into the actual resumed agent must succeed: {pane_send_events:?}"
     );
-    let attachment_events =
-        runtime.paste_image_events(&window_id, "AQ==", "image/png", Some("pasted.png"));
+    let uploaded_path = temp.path().join("resumed-image-upload");
+    fs::write(&uploaded_path, [1_u8]).unwrap();
+    runtime
+        .attachment_uploads
+        .insert(
+            "resumed-image-upload".into(),
+            UploadedAttachment {
+                path: uploaded_path,
+                filename: "pasted.png".into(),
+                mime_type: Some("image/png".into()),
+                size: 1,
+            },
+        )
+        .unwrap();
+    let event = super::work_projection_tests::qualified_attachment_event(
+        &runtime,
+        &window_id,
+        serde_json::json!({
+            "kind":"paste_image_uploaded", "id":window_id, "operation_id":"resumed-attachment",
+            "upload_id":"resumed-image-upload", "mime_type":"image/png", "filename":"pasted.png", "size":1
+        }),
+    );
+    let attachment_before = probe.pty.ordinary_input_revision().unwrap();
+    let attachment_events = runtime.handle_frontend_event("client-1".into(), event);
     assert!(
-        attachment_events.is_empty(),
+        attachment_events.iter().any(|event| matches!(
+            event.event,
+            BackendEvent::AttachmentProgress {
+                phase: AttachmentProgressPhase::Queued,
+                ..
+            }
+        )),
         "restored attachment staging must not be denied: {attachment_events:?}"
     );
-    assert!(drain_browser_owner_input(&mut runtime).is_empty());
+    let completed = super::work_projection_tests::drain_attachment_work(&mut runtime);
+    assert!(
+        completed.iter().any(|event| matches!(
+            event.event,
+            BackendEvent::AttachmentProgress {
+                phase: AttachmentProgressPhase::Attached,
+                ..
+            }
+        )),
+        "the resumed owner must acknowledge its physical attachment write: {completed:?}"
+    );
+    assert_eq!(
+        probe.pty.ordinary_input_revision().unwrap(),
+        attachment_before + 1
+    );
+    assert!(
+        probe.pty.has_unsent_user_input(),
+        "attachment never appends CR"
+    );
     assert!(
         worktree.join(".gwt/drop-files").exists(),
         "attachment bytes are staged in the actual resumed worktree"
@@ -1120,6 +1166,7 @@ fn terminal_agent_error_invalidates_input_even_when_pane_is_kept_for_diagnostics
         ],
     );
     seed_owner_fixture_roster(&repo, 1);
+    configure_owner_fixture_tools(&repo, &["pane-contract-fixture"]);
     let owner = owner_fixture_block_on(ProjectOwnerHarness::start(&repo)).unwrap();
     let mut config = super::pane_control_tests::control_launch_config(&repo, 42);
     config.pending_initial_prompt =
