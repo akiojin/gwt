@@ -333,15 +333,33 @@ test("Custom Agent replies commit immutable snapshots shared by all mounts and r
   assert.equal(draft.value, "unsaved-draft");
   assert.equal(sent.filter(message => message.kind === "list_custom_agents").length, reads + 2);
   assert.equal(sent.filter(message => message.kind === "update_custom_agent").length, 0);
-  body.querySelector('[aria-label="Cancel environment editing"]').click();
-  body.querySelector('[aria-label="Edit agent environment"]').click();
-  body.querySelector('[aria-label="Environment value"]').value = "saved-value";
+  const refreshed = { ...surface.customAgentsModel.read().catalog.agents[0],
+    display_name: "Refreshed CLI", command: "new-fixture", default_args: ["--fresh"] };
+  surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_list", agents: [refreshed] });
+  assert.equal(surface.customAgentsModel.read().catalog.agents[0].command, "new-fixture");
+  flush();
+  assert.equal(body.querySelector('[aria-label="Environment value"]') === draft, true,
+    "catalog replies retain the live environment editor until the user settles it");
+  assert.equal(draft.isConnected, true);
+  assert.equal(draft.value, "unsaved-draft");
+  surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_error", code: "unavailable", message: "Refresh unavailable" });
+  flush();
+  assert.equal(body.querySelector('[aria-label="Environment value"]') === draft, true);
+  assert.equal(draft.value, "unsaved-draft");
+  assert.match(body.querySelector('[data-role="settings-scroll"]').textContent, /Refresh unavailable/,
+    "an open editor must not hide current status feedback");
+  assert.equal(body.querySelector('[data-role="custom-agent-status"] .mock-label').style.color,
+    "var(--color-state-blocked)", "status feedback uses the shared Operator state token");
+  draft.value = "saved-value";
   body.querySelector('[aria-label="Save environment changes"]').click();
   assert.equal(body.querySelector('[aria-label="Save environment changes"]') === null, true,
     "saving closes the editor synchronously before a second click can resend it");
   const saves = sent.filter(message => message.kind === "update_custom_agent");
   assert.equal(saves.length, 1);
   assert.equal(saves[0].agent.env.TOKEN, "saved-value");
+  assert.equal(saves[0].agent.display_name, "Refreshed CLI");
+  assert.equal(saves[0].agent.command, "new-fixture");
+  assert.deepEqual(saves[0].agent.default_args, ["--fresh"]);
   body.querySelector('[aria-label="Edit agent environment"]').click();
   const nextDraft = body.querySelector('[aria-label="Environment value"]');
   nextDraft.value = "fresh-unsaved-draft";
@@ -349,6 +367,8 @@ test("Custom Agent replies commit immutable snapshots shared by all mounts and r
   assert.equal(nextDraft.isConnected, true, "an already rendered save snapshot cannot replace a reopened editor");
   assert.equal(nextDraft.value, "fresh-unsaved-draft");
   body.querySelector('[aria-label="Cancel environment editing"]').click();
+  assert.match(body.querySelector('[data-role="settings-scroll"]').textContent, /Refreshed CLI/,
+    "cancel renders the latest saved catalog");
   surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_saved", agent: { ...agent, display_name: "Updated CLI", env: {} } });
   assert.equal(loaded.catalog.agents[0].display_name, "Fixture CLI", "past snapshot stays immutable");
   assert.equal(surface.customAgentsModel.read().catalog.agents.length, 1, "save replaces the existing agent");
@@ -362,7 +382,14 @@ test("Custom Agent replies commit immutable snapshots shared by all mounts and r
   }
   const detachedText = second.textContent;
   second.remove();
+  body.querySelector('[aria-label="Edit agent environment"]').click();
+  const savesBeforeRemoval = sent.filter(message => message.kind === "update_custom_agent").length;
   surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_deleted", agent_id: "fixture-cli" });
+  body.querySelector('[aria-label="Save environment changes"]').click();
+  assert.equal(sent.filter(message => message.kind === "update_custom_agent").length, savesBeforeRemoval,
+    "a save racing the removal reply cannot recreate a missing agent");
+  assert.equal(body.querySelector('[aria-label="Save environment changes"]'), null);
+  assert.match(body.querySelector('[data-role="settings-scroll"]').textContent, /no longer available/);
   assert.equal(second.textContent, detachedText, "detached mount is no longer rendered");
   assert.ok(body.querySelector('[data-settings-candidates] option[value="member-custom"]'),
     "removing a CLI catalog entry does not replace or remove its registered member");

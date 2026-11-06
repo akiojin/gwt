@@ -1025,6 +1025,8 @@ project に紐づくブラウザ protocol の `load_pm_request_task` は、1 件
 `request` 内の `operation_id`・`expected_revision`・`reason`・`task_id` で Task を
 未完了＋再評価待ちへ戻します。応答は `pm_request_task` で要求の `request_id` を返し、
 変更者はサーバーがブラウザ接続から確定します。PM 停止中も保存済みの Task を扱えます。
+`cancel_pm_request_task` は同じ `request` 項目で依頼を取り消し、完了とは別の取消状態と
+ユーザーの監査記録を保存します。対象と祖先の過去の完了根拠は無効になります。
 応答を失ったら、現在の Task と元の receipt を読み直してください。新しい接続は別の
 actor になるため、旧 operation の再実行は競合になります。現在の Task と receipt 内の
 過去状態は、それぞれの revision を保持します。欠測・読取不能は診断と回復用の参照を

@@ -1126,10 +1126,12 @@ Issues or change delivery gates.
 
 The project-scoped browser protocol supports `load_pm_request_task` for one
 saved `task_id` and an optional `receipt_operation_id`, and
-`reopen_pm_request_task` with `operation_id`, `expected_revision`, `reason`
+`reopen_pm_request_task` or `cancel_pm_request_task` with `operation_id`, `expected_revision`, `reason`
 and `task_id` inside `request`. Replies use `pm_request_task` and the caller's
 `request_id`. Reopening records the server-assigned browser user actor and
 returns the task to pending reassessment, including when the PM is stopped.
+Cancellation records the same user audit and marks the task cancelled rather
+than completed, invalidating its and its ancestors' previous completion evidence.
 After a connection loss, read the current task and original receipt: a new
 connection has a new actor, so replaying the old operation there is a conflict.
 The current task and the receipt's historical task state retain their own

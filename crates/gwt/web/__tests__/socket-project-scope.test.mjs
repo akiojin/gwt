@@ -57,7 +57,11 @@ function fixture({ routeProjectKey = null } = {}) {
     resyncKnowledge: (ids) => context.resyncCalls.push(["knowledge", ...ids]),
     resyncProfile: (ids) => context.resyncCalls.push(["profile", ...ids]),
     resyncProjectIndexSearch: (ids) => context.resyncCalls.push(["index", ...ids]),
-    resyncSettings: () => context.resyncCalls.push(["settings"]),
+    resyncSettings: () => {
+      context.resyncCalls.push(["settings"]);
+      context.send({ kind: "get_system_settings" });
+      context.resyncHookDoctor();
+    },
     hookDoctorResyncs: 0, resyncHookDoctor: () => { context.hookDoctorResyncs++; },
     applyPmWindowReceiveEvent: createPmWindowModel().applyPmWindowReceiveEvent,
     appState: { tabs: [], active_tab_id: null }, hubCatalog: null,
@@ -314,10 +318,12 @@ test("route-bound Project tab reconnects to the same Project only", t => {
     { kind: "load_profile", id: "profile" },
   ], "ordinary reconnect recovers interrupted reads without replaying the pending post");
   assert.deepEqual(context.resyncCalls, [
+    ["settings"],
     ["board-logs", "board", "logs", "profile", "index"], ["profile", "board", "logs", "profile", "index"], ["index", "board", "logs", "profile", "index"],
+    ["settings"],
     ["board-logs", "board", "logs", "profile", "index"], ["profile", "board", "logs", "profile", "index"], ["index", "board", "logs", "profile", "index"],
   ],
-    "normal reconnect must not broadly resync every Settings surface");
+    "ordinary reconnect must recover Settings reads as well as window snapshots");
   assert.equal(draft.draft.name, "Unsent Profile draft");
   assert.equal(draft.saveInFlight, true);
   assert.equal(draft.saveTimer, 17);
@@ -356,7 +362,7 @@ test("receive recovery requests pane and open surface snapshots only on the owni
   assert.deepEqual(sockets[1].sent, [{ kind: "frontend_ready" }, { kind: "get_system_settings" }]);
   sockets.at(-1).open();
   assert.equal(sockets[1].readyState, 3, "the input handoff ends when recovery opens");
-  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }]);
+  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }, { kind: "get_system_settings" }]);
   assert.deepEqual(context.resyncCalls, [
     ["board-logs", "pane-a"], ["branches", "pane-a"], ["knowledge", "pane-a"],
     ["profile", "pane-a"],
@@ -379,7 +385,7 @@ test("a terminal receive failure replaces the owning connection and fences its o
   assert.equal(sockets.length, 3, "the native backlog cannot follow the failed terminal packet");
   sockets[2].open();
   assert.equal(sockets[1].readyState, 3);
-  assert.deepEqual(sockets[2].sent, [{ kind: "frontend_ready" }]);
+  assert.deepEqual(sockets[2].sent, [{ kind: "frontend_ready" }, { kind: "get_system_settings" }]);
   const count = context.received.length;
   old.receive({ kind: "terminal_output", data_base64: "stale" });
   old.onResync("receive-error");
@@ -484,7 +490,7 @@ test("foreground recovery replaces the native backlog without replaying mutation
   replacement.open();
   assert.equal(oldSocket.readyState, 3, "release the old transport after the replacement opens");
   assert.equal(context.droppedInputs, 0);
-  assert.deepEqual(replacement.sent, [{ kind: "frontend_ready" }], "one full sync and no mutation replay");
+  assert.deepEqual(replacement.sent, [{ kind: "frontend_ready" }, { kind: "get_system_settings" }], "one full sync and no mutation replay");
   assert.deepEqual(context.resyncCalls, [
     ["board-logs", "pane-a"], ["branches", "pane-a"], ["knowledge", "pane-a"],
     ["profile", "pane-a"], ["index", "pane-a"], ["settings"],
