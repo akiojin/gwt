@@ -11325,6 +11325,7 @@ impl AppRuntime {
             | FrontendEvent::LoadPmReports { id, .. }
             | FrontendEvent::LoadPmRequestTask { id, .. }
             | FrontendEvent::ReopenPmRequestTask { id, .. }
+            | FrontendEvent::CancelPmRequestTask { id, .. }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
             | FrontendEvent::AttachmentUploadFailed { id, .. }
@@ -11703,6 +11704,7 @@ impl AppRuntime {
             | FrontendEvent::LoadPmReports { id, .. }
             | FrontendEvent::LoadPmRequestTask { id, .. }
             | FrontendEvent::ReopenPmRequestTask { id, .. }
+            | FrontendEvent::CancelPmRequestTask { id, .. }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
             | FrontendEvent::AttachmentUploadFailed { id, .. }
@@ -12072,6 +12074,17 @@ impl AppRuntime {
                 &id,
                 request_id,
                 pm_chat::PmRequestTaskOperation::Reopen(request),
+            ),
+            FrontendEvent::CancelPmRequestTask {
+                id,
+                request_id,
+                request,
+            } => self.pm_request_task_events(
+                context,
+                client_id,
+                &id,
+                request_id,
+                pm_chat::PmRequestTaskOperation::Cancel(request),
             ),
             FrontendEvent::PaneName { .. } => Vec::new(),
             FrontendEvent::PaneSendInput { session_id, text } => {
