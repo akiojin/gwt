@@ -121,7 +121,8 @@ test.describe("Agent window scrollback lifecycle", () => {
           .toBeGreaterThanOrEqual(1000);
         const container = id === "shell-1" ? agentTile(page, id).locator(".terminal-root") : agentTile(page, id);
         await expect(container, `${provider} ${phase} explains how to select text`).toHaveAttribute("title", /Shift\+drag.*Option\+drag/);
-        await expectWheelMovesScrollback(page, id, true, 1000);
+        // The 1,000-line wheel AC covers agent panes; Shell keeps native notch speed.
+        await expectWheelMovesScrollback(page, id, true, id === "shell-1" ? 1 : 1000);
         await expectDragCopiesRenderedRows(page, info, `${id}-${phase}`, id, Boolean(tracking));
       };
       await check("initial");

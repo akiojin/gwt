@@ -1799,9 +1799,21 @@ fn drain_owner_snapshot_completions(runtime: &mut AppRuntime) -> Vec<OutboundEve
     };
     let completions = Arc::clone(completions);
     drain_queued_blocking_tasks(&tasks);
-    let completed = std::mem::take(&mut *completions.lock().unwrap());
     let mut events = Vec::new();
-    for event in completed {
+    loop {
+        let event = {
+            let mut completions = completions.lock().unwrap();
+            completions
+                .iter()
+                .position(|event| {
+                    matches!(
+                        recorded_project_payload(event),
+                        UserEvent::ProjectOwnerSnapshot(_)
+                    )
+                })
+                .map(|index| completions.remove(index))
+        };
+        let Some(event) = event else { break };
         if let Some(UserEvent::ProjectOwnerSnapshot(completion)) =
             runtime.accept_project_completion(event)
         {
