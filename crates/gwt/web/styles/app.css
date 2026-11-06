@@ -88,6 +88,70 @@ body {
   display: none;
 }
 
+.update-check {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: min(28vw, 24rem);
+  gap: var(--space-1);
+  font-size: var(--type-xs);
+}
+
+.update-check > button {
+  flex: 0 0 auto;
+}
+
+.update-check-status {
+  min-width: 0;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.update-check-detail {
+  order: 0;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  box-shadow: var(--shadow-2);
+  font-size: var(--type-sm);
+  overflow-wrap: anywhere;
+  pointer-events: auto;
+}
+
+.update-check-detail p {
+  margin: 0 0 var(--space-2);
+}
+
+.update-check-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.update-check-failure {
+  color: var(--color-state-needs-input);
+  overflow-wrap: anywhere;
+}
+
+.update-check-detail a {
+  color: var(--color-link);
+}
+
+.update-check-detail[hidden],
+.update-check-detail [hidden] {
+  display: none;
+}
+
 /* SPEC-2013 Phase 8 — Open Folder / Clone actions that replace the retired
    Open Project split button, divided from the switchable OPEN / RECENT rows. */
 /* SPEC-2013 — agent state cue on project tabs. */
@@ -6479,6 +6543,9 @@ body.route-body {
 .issue-card-updated { color: var(--color-text-muted); font-family: var(--font-mono); font-size: var(--type-xs); }
 .issue-backlog-more { width: 100%; }
 .issue-queue-column[data-queue-column="queued"] > .knowledge-empty { padding: var(--space-3); border: 1px dashed var(--color-border-strong); }
+.issue-queue-column[data-drop-state="accept"] { border-color: var(--color-state-active); background: color-mix(in oklab, var(--color-state-active) 8%, var(--color-surface-elevated)); }
+.issue-queue-column[data-drop-state="reject"] { border-color: var(--color-state-blocked); background: color-mix(in oklab, var(--color-state-blocked) 8%, var(--color-surface-elevated)); }
+.issue-queue-column-notice { margin-block: var(--space-2); padding: var(--space-2); border: 1px solid var(--color-state-blocked); border-left-width: 3px; color: var(--color-text); font-size: var(--type-xs); }
 .issue-bridge-root .issue-list-shell { grid-template-columns: minmax(0, 1fr) minmax(320px, 34%); }
 .issue-bridge-root[data-preview-hidden="true"] .issue-list-shell { grid-template-columns: minmax(0, 1fr); }
 .issue-bridge-root .knowledge-list-pane { grid-area: 1 / 1; }

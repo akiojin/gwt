@@ -262,10 +262,12 @@ test("Works distinguishes measured zero from unavailable tokens and thirty-minut
 test("Works retains native input and fixed names when runtime state and purpose change", async () => {
   const f = await fixture(); f.surface.openWork("one"); const input = f.runtimes.get("one");
   const nativeRoot = input.parentElement, removedRoots = [];
+  const layouts = f.layouts.length;
   const observer = new f.window.MutationObserver(records => { for (const record of records) removedRoots.push(...record.removedNodes); });
   observer.observe(nativeRoot.parentElement, { childList: true });
   f.windowCatalogModel.update(() => ({ catalog: { ...catalog(windows.map(w => w.id === "one" ? { ...w, dynamic_title: "New purpose" } : w), 2), runtimeStates: { one: "error" } } }));
   f.flush(); await Promise.resolve();
+  assert.equal(f.layouts.length, layouts + 1, "selected header changes request layout after model rendering");
   assert.equal(removedRoots.includes(nativeRoot), false, "metadata rendering must not detach a focused native root");
   observer.disconnect();
   assert.equal(f.surface.element.querySelector(".works-full-name").textContent, "One");

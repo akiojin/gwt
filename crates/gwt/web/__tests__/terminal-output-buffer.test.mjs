@@ -69,17 +69,182 @@ function cursorScheduler() {
   };
 }
 
-function hiddenTasks(t) {
+test("RAW retention stops an oversized pane before decoding, including blocked output", () => {
+  const scheduler = manualScheduler(), writes = [], failures = [];
+  const batcher = createTerminalOutputBatcher({
+    schedule: scheduler.schedule,
+    maxPendingBytesPerWindow: 6,
+    projectForWindow: () => "cold-project",
+    canWrite: () => false,
+    write: (id, text) => writes.push([id, text]),
+    onError: (error, id, project) => failures.push([id, project]),
+  });
+  assert.equal(batcher.enqueue("cold", "abcdef"), true);
+  assert.equal(batcher.enqueue("cold", "g"), false);
+  assert.equal(batcher.enqueue("cold", "discarded suffix"), false);
+  scheduler.runAll();
+  assert.deepEqual(writes, []);
+  assert.deepEqual(failures, [["cold", "cold-project"]]);
+  assert.equal(batcher.pendingCount(), 0);
+});
+
+test("RAW project capacity includes issued writes until their own callback completes", () => {
+  const scheduler = manualScheduler(), callbacks = [], writes = [], failures = [];
+  const batcher = createTerminalOutputBatcher({
+    schedule: scheduler.schedule,
+    maxPendingBytesPerWindow: 6,
+    maxPendingBytesPerProject: 8,
+    projectForWindow: id => id === "other" ? "other-project" : "project",
+    write: (id, text, done) => { writes.push([id, text]); callbacks.push(done); },
+    onError: (error, id) => failures.push(id),
+  });
+  batcher.enqueue("one", "12345");
+  scheduler.runAll(); // Moving bytes to xterm is not releasing capacity.
+  assert.equal(batcher.enqueue("two", "6789"), false);
+  assert.equal(batcher.enqueue("other", "ABCDE"), true);
+  assert.deepEqual(failures, ["two"]);
+  callbacks[0]();
+  callbacks[0](); // A duplicate/late completion cannot release another write.
+  batcher.clear("two");
+  assert.equal(batcher.enqueue("two", "6789"), true);
+  scheduler.runAll();
+  assert.deepEqual(writes, [["one", "12345"], ["other", "ABCDE"], ["two", "6789"]]);
+  batcher.clear("one");
+  batcher.enqueue("one", "1234");
+  scheduler.runAll();
+  callbacks[0]();
+  assert.equal(batcher.enqueue("two", "X"), false, "old callbacks must not free newer bytes");
+  batcher.clear("two");
+  batcher.enqueue("two", "6789");
+  scheduler.runAll();
+  callbacks[2](); // This write was still in flight when clear invalidated it.
+  assert.equal(batcher.enqueue("one", "X"), false, "disposed write callbacks cannot free a new account");
+});
+
+test("catalog pruning reclaims unmounted output without touching retained panes", () => {
+  const scheduler = manualScheduler();
+  const batcher = createTerminalOutputBatcher({
+    schedule: scheduler.schedule,
+    maxPendingBytesPerWindow: 6,
+    maxPendingBytesPerProject: 8,
+    canWrite: () => false,
+    write() { assert.fail("unmounted output must not be written"); },
+  });
+  batcher.enqueue("orphan", "12345");
+  batcher.enqueue("kept", "ab");
+  assert.deepEqual(batcher.prune(new Set(["kept"])), ["orphan"]);
+  assert.equal(batcher.enqueue("kept", "cdef"), true);
+  assert.equal(batcher.pendingCount("kept"), 2);
+  assert.equal(batcher.pendingCount("orphan"), 0);
+  assert.deepEqual(batcher.prune(new Set(["kept"])), []);
+});
+
+test("a recovery snapshot retains its bounded suffix until success and drops a failed suffix", () => {
+  const scheduler = manualScheduler(), writes = [];
+  const batcher = createTerminalOutputBatcher({
+    schedule: scheduler.schedule,
+    maxPendingBytesPerWindow: 6,
+    write: (id, text, done) => { writes.push(text); done(); },
+  });
+  batcher.invalidate("pane", new Error("torn stream"));
+  batcher.beginSnapshot("pane");
+  assert.equal(batcher.enqueue("pane", "new"), true);
+  scheduler.runAll();
+  assert.deepEqual(writes, []);
+  batcher.beginSnapshot("pane"); // A newer snapshot supersedes the suffix.
+  batcher.enqueue("pane", "latest");
+  batcher.finishSnapshot("pane");
+  scheduler.runAll();
+  assert.deepEqual(writes, ["latest"]);
+  batcher.beginSnapshot("pane");
+  batcher.enqueue("pane", "broken");
+  batcher.invalidate("pane", new Error("snapshot decode failed"));
+  assert.equal(batcher.enqueue("pane", "suffix"), false);
+  batcher.beginSnapshot("pane");
+  batcher.enqueue("pane", "ok");
+  batcher.finishSnapshot("pane");
+  scheduler.runAll();
+  assert.deepEqual(writes, ["latest", "ok"]);
+  batcher.beginSnapshot("pane");
+  batcher.enqueue("pane", "held");
+  assert.equal(batcher.enqueue("pane", "overflow"), false);
+  batcher.finishSnapshot("pane"); // Old completion follows suffix overflow.
+  assert.equal(batcher.enqueue("pane", "gap"), false);
+});
+
+for (const stage of ["merge", "write"]) {
+  test(`${stage} failure stops the torn stream until snapshot clear`, (t) => {
+    t.mock.method(console, "warn", () => {});
+    const scheduler = manualScheduler();
+    const writes = [], failures = [];
+    const fault = new Error(`one-shot ${stage} failure`);
+    let project = "source-project";
+    let armed = true;
+    const failOnce = (at, windowId) => {
+      if (armed && stage === at && windowId === "pm") {
+        armed = false;
+        throw fault;
+      }
+    };
+    const batcher = createTerminalOutputBatcher({
+      schedule: scheduler.schedule,
+      maxCharsPerFlush: 3,
+      projectForWindow: () => project,
+      mergeChunks: (chunks, id) => { failOnce("merge", id); return chunks.join(""); },
+      write: (id, text) => { failOnce("write", id); writes.push([id, text]); },
+      onError: (error, id, origin) => {
+        failures.push([error, id, batcher.enqueue(id, "REENTRANT"), origin]);
+        throw new Error("recovery callback failed");
+      },
+    });
+    batcher.enqueue("pm", "BAD");
+    batcher.enqueue("pm", "TORN SUFFIX");
+    batcher.enqueue("peer", "OK");
+    scheduler.runAll();
+    assert.deepEqual(writes, [["peer", "OK"]]);
+    assert.deepEqual(failures, [[fault, "pm", false, "source-project"]]);
+    assert.equal(batcher.pendingCount(), 0);
+    assert.equal(batcher.enqueue("pm", "INTERVENING"), false);
+    assert.equal(batcher.schedulePending("pm"), false);
+    assert.equal(batcher.flushNow("pm"), false);
+    batcher.clear("pm", { preserveFailure: true }); // Receipt is not success.
+    assert.equal(batcher.enqueue("pm", "AFTER FAILED SNAPSHOT"), false);
+    const snapshotFault = new Error("replacement snapshot failed");
+    batcher.invalidate("pm", snapshotFault);
+    assert.deepEqual(failures.at(-1), [snapshotFault, "pm", false, "source-project"]);
+    batcher.clear("pm"); // Successful replacement releases the stop.
+    assert.equal(batcher.enqueue("pm", "RECOVERED"), true);
+    scheduler.runAll();
+    assert.deepEqual(writes, [["peer", "OK"], ["pm", "RECOVERED"]]);
+    assert.equal(failures.length, 2);
+    batcher.clear("pm");
+    batcher.enqueue("pm", "BAD");
+    project = "other-project";
+    armed = true;
+    scheduler.runAll();
+    assert.equal(failures.at(-1)[3], "source-project", "a delayed fault retains its allocation's project after dequeue");
+  });
+}
+
+function hiddenTasks(t, hidden = true) {
   const tasks = manualScheduler();
+  const listeners = new Set(), stalled = [];
+  const visibility = { hidden,
+    addEventListener: (type, listener) => { assert.equal(type, "visibilitychange"); listeners.add(listener); },
+    removeEventListener: (type, listener) => { assert.equal(type, "visibilitychange"); listeners.delete(listener); },
+  };
   let closed = 0;
   for (const [key, value] of Object.entries({
-    document: { hidden: true },
+    document: visibility,
     MessageChannel: class {
       port1 = { onmessage: null, close: () => { closed += 1; } };
       port2 = { close: () => { closed += 1; },
         postMessage: () => tasks.schedule(() => this.port1.onmessage?.()) };
     },
-    requestAnimationFrame: () => assert.fail("hidden work must not wait for an animation frame"),
+    requestAnimationFrame: callback => {
+      assert.equal(visibility.hidden, false, "hidden work must not wait for an animation frame");
+      stalled.push(callback); return stalled.length;
+    },
     cancelAnimationFrame: () => {},
   })) {
     const descriptor = Object.getOwnPropertyDescriptor(globalThis, key);
@@ -90,10 +255,27 @@ function hiddenTasks(t) {
     });
   }
   // Native background timers may be clamped; do not advance them in this test.
-  t.mock.method(globalThis, "setTimeout", () => 1);
+  t.mock.method(globalThis, "setTimeout", callback => { stalled.push(callback); return stalled.length; });
   t.mock.method(globalThis, "clearTimeout", () => {});
-  return { tasks, closed: () => closed };
+  return { tasks, stalled, closed: () => closed, listeners,
+    hide() { visibility.hidden = true; for (const listener of [...listeners]) listener(); },
+  };
 }
+
+test("output queued while visible drains once after the document becomes hidden", (t) => {
+  const { tasks, stalled, closed, listeners, hide } = hiddenTasks(t, false);
+  const writes = [];
+  const batcher = createTerminalOutputBatcher({ write: (id, text) => writes.push([id, text]) });
+  batcher.enqueue("agent", "a");
+  batcher.enqueue("agent", "b");
+  hide();
+  assert.equal(tasks.pendingCount(), 1, "pending output must escape suspended frames and timers");
+  tasks.runAll();
+  for (const callback of stalled) callback();
+  assert.deepEqual(writes, [["agent", "ab"]]);
+  assert.equal(closed(), 2);
+  assert.equal(listeners.size, 0);
+});
 
 test("hidden output batches advance by tasks while preserving order and window budgets", (t) => {
   const { tasks, closed } = hiddenTasks(t);
@@ -114,13 +296,13 @@ test("hidden output batches advance by tasks while preserving order and window b
 });
 
 test("vendored xterm coalesces hidden redraws and cancels disposed work without frames", (t) => {
-  const { tasks } = hiddenTasks(t);
+  const { tasks, stalled, listeners, hide } = hiddenTasks(t);
   const source = readFileSync(new URL("../vendor/xterm/xterm.mjs", import.meta.url), "utf8");
   const start = source.indexOf("Ws=class{") + 3;
   const end = source.indexOf(",zs={}", start);
   assert.ok(start > 3 && end > start, "pinned xterm RenderDebouncer is present");
   const Debouncer = new Function("gwtScheduleTerminalTask", `return (${source.slice(start, end)});`)(
-    callback => terminalOutput.scheduleTerminalTask(callback));
+    (...args) => terminalOutput.scheduleTerminalTask(...args));
   const draws = [], callbacks = [];
   const debouncer = new Debouncer((first, last) => draws.push([first, last]), { window: globalThis });
   debouncer.refresh(0, 1, 4);
@@ -136,10 +318,78 @@ test("vendored xterm coalesces hidden redraws and cancels disposed work without 
   debouncer.dispose();
   tasks.runAll();
   assert.deepEqual(draws, [[0, 3]], "disposed terminal must not redraw");
+
+  globalThis.document.hidden = false;
+  const pending = new Debouncer((first, last) => draws.push([first, last]), { window: globalThis });
+  pending.refresh(1, 2, 4);
+  hide();
+  assert.equal(tasks.pendingCount(), 1, "a visible redraw must survive a hidden transition");
+  tasks.runAll();
+  for (const callback of stalled) callback();
+  assert.deepEqual(draws, [[0, 3], [1, 2]]);
+  assert.equal(listeners.size, 0);
+  globalThis.document.hidden = false;
+  pending.refresh(0, 1, 4);
+  pending.dispose();
+  hide();
+  tasks.runAll();
+  for (const callback of stalled) callback();
+  assert.equal(listeners.size, 0, "disposed redraws release the pending visibility listener");
+  assert.deepEqual(draws, [[0, 3], [1, 2]]);
+});
+
+test("vendored xterm refreshes a laid-out hidden terminal after stale nonintersection", () => {
+  const source = readFileSync(new URL("../vendor/xterm/xterm.mjs", import.meta.url), "utf8");
+  const start = source.indexOf("sr=class extends Ie{") + 3;
+  const end = source.indexOf(";sr=B(", start);
+  assert.ok(start > 3 && end > start, "pinned xterm RenderService is present");
+  const RenderService = new Function("Ie", `return (${source.slice(start, end)});`)(class {});
+  const events = [];
+  const host = { clientWidth: 800, clientHeight: 400 };
+  const service = {
+    _isPaused: true, _needsFullRefresh: true, _rowCount: 4,
+    // The self-sized xterm root alone cannot prove its host has layout.
+    _screenElement: { isConnected: true, parentElement: { clientWidth: 800, clientHeight: 400, parentElement: host } },
+    _charSizeService: { hasValidSize: true },
+    _coreBrowserService: { window: { document: { hidden: true } } },
+    _coreService: { decPrivateModes: { synchronizedOutput: false } },
+    _pausedResizeTask: { flush: () => events.push("resize") },
+    _syncOutputHandler: { flush() {}, bufferRows: (first, last) => events.push(["buffer", first, last]) },
+    _renderDebouncer: { refresh: (first, last, rows) => events.push(["render", first, last, rows]) },
+    refreshRows: RenderService.prototype.refreshRows,
+  };
+  service.refreshRows(1, 1, true);
+  assert.deepEqual(events, ["resize", ["render", 0, 3, 4]], "recover the full viewport through the existing debouncer");
+  assert.equal(service._isPaused, true, "native intersection state stays unchanged");
+  assert.equal(service._needsFullRefresh, false);
+  assert.equal(service._isNextRenderRedrawOnly, false);
+
+  events.length = 0;
+  service._coreService.decPrivateModes.synchronizedOutput = true;
+  RenderService.prototype._fullRefresh.call(service);
+  assert.deepEqual(events, [["buffer", 0, 3]], "resize can draw, so synchronized output must defer it too");
+  service._coreService.decPrivateModes.synchronizedOutput = false;
+  RenderService.prototype._fullRefresh.call(service);
+  assert.deepEqual(events, [["buffer", 0, 3], "resize", ["render", 0, 3, 4]]);
+
+  events.length = 0;
+  host.clientHeight = 0;
+  RenderService.prototype._fullRefresh.call(service);
+  host.clientHeight = 400;
+  service._coreBrowserService.window.document.hidden = false;
+  RenderService.prototype._fullRefresh.call(service);
+  service._coreBrowserService.window.document.hidden = true;
+  service._charSizeService.hasValidSize = false;
+  RenderService.prototype._fullRefresh.call(service);
+  service._charSizeService.hasValidSize = true;
+  service._screenElement.isConnected = false;
+  RenderService.prototype._fullRefresh.call(service);
+  assert.deepEqual(events, [], "zero-size, visible offscreen, invalid-size and detached terminals remain paused");
+  assert.equal(service._needsFullRefresh, true);
 });
 
 test("vendored xterm parser starts and yields hidden tasks at its existing budget", (t) => {
-  const { tasks } = hiddenTasks(t);
+  const { tasks, stalled, listeners, hide } = hiddenTasks(t);
   const source = readFileSync(new URL("../vendor/xterm/xterm.mjs", import.meta.url), "utf8");
   const start = source.indexOf("In=class extends Ie{") + 3;
   const end = source.indexOf(",Nn=class", start);
@@ -163,6 +413,15 @@ test("vendored xterm parser starts and yields hidden tasks at its existing budge
   assert.deepEqual(parsed, ["a", "b"]);
   assert.deepEqual(done, ["a", "b"]);
   assert.equal(tasks.pendingCount(), 0);
+  globalThis.document.hidden = false;
+  parser.write("c", () => done.push("c"));
+  hide();
+  assert.equal(tasks.pendingCount(), 1, "a visible parser task must survive a hidden transition");
+  tasks.runAll();
+  for (const callback of stalled) callback();
+  assert.deepEqual(parsed, ["a", "b", "c"]);
+  assert.deepEqual(done, ["a", "b", "c"]);
+  assert.equal(listeners.size, 0);
 });
 
 test("default output scheduler drains without animation frames and ignores the losing callback", (t) => {

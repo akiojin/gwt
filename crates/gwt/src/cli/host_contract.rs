@@ -1131,8 +1131,8 @@ mod tests {
         HOST_PROCESS.store(false, std::sync::atomic::Ordering::SeqCst);
 
         let home = tempfile::tempdir().expect("home");
-        let _home = ScopedEnvVar::set("HOME", home.path());
-        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        // Foreign workers must not follow this fixture into its byte snapshot.
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
         let session_id = "host-contract-snapshot-session";
         let _session_env = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
 

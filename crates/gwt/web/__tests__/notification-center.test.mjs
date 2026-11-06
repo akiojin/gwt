@@ -320,6 +320,18 @@ test("resolveError marks the row resolved and read; a later recurrence re-flags 
   assert.equal(center.unreadCount(), 1, "the recurrence is unread again");
 });
 
+test("Issue #6729: a grouped diagnostic activates the latest window after retry and recovery", () => {
+  const { document, center } = setup();
+  const activated = [];
+  const notice = { key: "attention-project-issue-6729", level: "error", title: "Agent error" };
+  const row = center.recordSurfaceNotice({ ...notice, onActivate: () => activated.push("old") });
+  center.resolveError(notice.key);
+  center.recordSurfaceNotice({ ...notice, onActivate: () => activated.push("new") });
+  click(document, row);
+  assert.deepEqual(activated, ["new"]);
+  assert.equal(center.count(), 1);
+});
+
 test("a dismissed error row does not resurrect on recurrence", () => {
   const { document, center } = setup();
   const row = center.recordError({ key: "k", title: "t", message: "m" });

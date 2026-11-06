@@ -84,6 +84,9 @@ impl ServerState {
             self.agent_capabilities.clone(),
             self.host_instance_id.clone(),
             Arc::new(move |event| match event {
+                TransportEvent::BrowserDisconnected { client_id } => state
+                    .proxy
+                    .send(UserEvent::BrowserDisconnected { client_id }),
                 TransportEvent::MobileInput(request) => {
                     state.proxy.send(UserEvent::MobileInput(request))
                 }

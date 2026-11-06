@@ -169,14 +169,18 @@ test("desktop intents have no duplicate in-app history or toast fan-out", () => 
   assert.doesNotMatch(block, /notificationCenter\.record|alertsToasts\.push|showAgentCompletionToast/);
 });
 
-test("attention keeps error=sticky / done=8s / needs_input=14s and per-window dedup, and records history", () => {
+test("attention keeps lifetimes and uses the controller key for Issue error grouping and recovery", () => {
   const body = functionBody(appSource, "showAttentionToast");
   assert.match(
     body,
     /flavor === "error" \? 0 : flavor === "done" \? 8_000 : 14_000/,
     "attention lifetimes preserved",
   );
-  assert.match(body, /id:\s*`attention-\$\{notice\.windowId\}`/, "per-window alerts dedup preserved");
+  assert.match(body, /id:\s*notice\.id/, "controller owns Issue/window identity");
+  assert.match(body, /notificationCenter\.recordSurfaceNotice\(\{ key: notice\.id/);
+  assert.match(appSource, /applyStatus\(state\.id, state\.status, state\.detail, state\.kind, state\.retryable\)/);
+  assert.match(appSource, /projectKey: windowContext\?\.tab\.project_key/);
+  assert.match(appSource, /notificationCenter\.resolveError\(id\)/);
   assert.match(body, /alertsToasts\.push\(/);
   const calls = recordCalls(body);
   assert.equal(calls.length, 1);

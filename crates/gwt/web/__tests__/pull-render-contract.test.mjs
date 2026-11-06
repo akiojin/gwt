@@ -940,6 +940,65 @@ test("Profile receivers resolve only shared model updates", () => {
     .some(finding => finding.kind === 'dom-write'));
 });
 
+test("Profile reconnect preserves newer edits while a sent rename is unconfirmed", async t => {
+  const source = readFileSync(new URL('../profile-window-surface.js', import.meta.url), 'utf8')
+    .replace('"/ui-state-store.js"', JSON.stringify(new URL('../ui-state-store.js', import.meta.url).href));
+  const { createProfileWindowSurface } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+  const { document, window } = parseHTML('<html><body><div class="pane"><div class="window-body"></div></div></body></html>');
+  const previousDocument = globalThis.document;
+  globalThis.document = document;
+  t.after(() => { globalThis.document = previousDocument; });
+  const pane = document.querySelector('.pane'), sends = [];
+  const surface = createProfileWindowSurface({
+    send: event => sends.push(event), windowMap: new Map([['profile', pane]]),
+    createNode(tag, className, text = '') {
+      const node = document.createElement(tag);
+      node.className = className; node.textContent = text; return node;
+    },
+    focusWindowLocally() {}, sendWindowFocus() {},
+  });
+  t.after(() => surface.disposeProfileWindow('profile'));
+  const snapshot = name => ({ active_profile: name, selected_profile: name, os_env: [],
+    profiles: [{ name, description: 'saved', env_vars: [], disabled_env: [] }] });
+  surface.mountProfileWindow({ id: 'profile' }, pane.firstChild);
+  surface.applyProfileReceiveEvent({ kind: 'profile_snapshot', id: 'profile', snapshot: snapshot('review') });
+  const name = pane.querySelector('.profile-field input');
+  name.value = 'renamed'; name.dispatchEvent(new window.Event('input'));
+  surface.flushProfileSave('profile');
+  assert.equal(sends.at(-1).name, 'renamed');
+  // The backend commits this rename, but its reply is lost. Undoing the name
+  // locally does not restore the server identity used by the next save.
+  name.value = 'review'; name.dispatchEvent(new window.Event('input'));
+  const description = pane.querySelector('.profile-textarea');
+  description.value = 'newer unsaved draft'; description.dispatchEvent(new window.Event('input'));
+  surface.flushProfileSave('profile');
+  assert.equal(sends.at(-1).current_name, 'review');
+  surface.applyProfileReceiveEvent({ kind: 'profile_error', id: 'profile', message: 'profile not found: review' });
+  const currentInput = pane.querySelector('.profile-textarea');
+  const before = sends.length;
+
+  surface.resyncProfile(['profile']);
+
+  assert.equal(sends.length, before, 'a recovery read cannot resolve an unconfirmed rename');
+  assert.equal(pane.querySelector('.profile-textarea'), currentInput);
+  assert.equal(currentInput.value, 'newer unsaved draft');
+  assert.equal(pane.querySelector('.profile-status').textContent, 'profile not found: review');
+  // A confirmed rename releases the local uncertainty; ordinary reads resume.
+  surface.applyProfileReceiveEvent({ kind: 'profile_snapshot', id: 'profile', snapshot: snapshot('renamed') });
+  surface.resyncProfile(['profile']);
+  assert.deepEqual(sends.at(-1), { kind: 'load_profile', id: 'profile' });
+  assert.equal(sends.length, before + 1);
+  const nextName = pane.querySelector('.profile-field input');
+  nextName.value = 'next-rename'; nextName.dispatchEvent(new window.Event('input'));
+  surface.flushProfileSave('profile');
+  const pending = sends.length;
+  surface.resyncProfile(['profile']);
+  assert.equal(sends.length, pending);
+  pane.querySelector('[data-action="refresh-profile"]').click();
+  assert.equal(sends.length, pending + 1, 'explicit refresh releases the lost rename loading owner');
+  assert.deepEqual(sends.at(-1), { kind: 'load_profile', id: 'profile' });
+});
+
 test("Profile disposal cancels pending saves and remounts without closed-window data", async t => {
   const source = readFileSync(new URL('../profile-window-surface.js', import.meta.url), 'utf8')
     .replace('"/ui-state-store.js"', JSON.stringify(new URL('../ui-state-store.js', import.meta.url).href));

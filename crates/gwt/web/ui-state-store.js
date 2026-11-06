@@ -2,13 +2,15 @@
 // Stream notifications stay synchronous; views can opt into frame batching.
 const owned = new WeakSet();
 
-function defaultScheduleFrame(callback) {
+export function defaultScheduleFrame(callback) {
   let finished = false;
   let frame = null;
   let timer = null;
   let task = null;
+  const visibility = typeof document !== 'undefined' ? document : null;
   const cancel = () => {
     finished = true;
+    visibility?.removeEventListener?.('visibilitychange', scheduleHidden);
     clearTimeout(timer);
     if (frame !== null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(frame);
     if (task) {
@@ -23,13 +25,17 @@ function defaultScheduleFrame(callback) {
     cancel();
     callback();
   };
-  // Hidden documents suspend frames and clamp timers. Keep a yielding task
-  // boundary without waiting for either; focus is never a render trigger.
-  if (typeof document !== 'undefined' && document.hidden && typeof MessageChannel === 'function') {
+  // A pending visible frame can become hidden before it runs. Keep a yielding
+  // task boundary without waiting for suspended frames or clamped timers.
+  const scheduleHidden = () => {
+    if (finished || task || !visibility?.hidden || typeof MessageChannel !== 'function') return;
     task = new MessageChannel();
     task.port1.onmessage = run;
     task.port2.postMessage(null);
-  } else {
+  };
+  scheduleHidden();
+  if (!task) {
+    visibility?.addEventListener?.('visibilitychange', scheduleHidden);
     timer = setTimeout(run, 100);
     if (typeof requestAnimationFrame === 'function') frame = requestAnimationFrame(run);
   }

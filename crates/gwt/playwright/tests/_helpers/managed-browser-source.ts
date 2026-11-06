@@ -3,12 +3,30 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { readFile, realpath, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { expect, type Browser, type BrowserContext, type TestInfo } from "@playwright/test";
+import { expect, type Browser, type BrowserContext, type TestInfo, type test } from "@playwright/test";
 import { startIssueQueueLaunchFixture } from "./issue-queue-launch";
 import { writeFixtureNodeCommand } from "./exact-relaunch";
-import { gotoLiveGwt } from "./live-gwt";
+import { gotoLiveGwt, sendLiveGwtEvent } from "./live-gwt";
 
 const sha = (bytes: Buffer | string) => createHash("sha256").update(bytes).digest("hex");
+
+/** Audit the ordinary fixture Source around a complete live suite. The verifier
+ * may run under a daemon, so its process ancestry cannot supply pane authority. */
+export function useManagedBrowserSource(suite: typeof test) {
+  let source: Awaited<ReturnType<typeof startManagedBrowserSource>> | undefined;
+  suite.beforeAll(async ({ browser }, info) => {
+    if (!process.env.GWT_PLAYWRIGHT_BASE_URL) return;
+    suite.setTimeout(240_000);
+    source = await startManagedBrowserSource(browser, info);
+  });
+  suite.afterAll(async () => {
+    suite.setTimeout(240_000);
+    const failures: unknown[] = [];
+    try { await source?.postAudit(); } catch (error) { failures.push(error); }
+    try { await source?.stop(); } catch (error) { failures.push(error); }
+    if (failures.length) throw new AggregateError(failures, "managed source post/cleanup failed:\n" + failures.map(String).join("\n").slice(0, 16384));
+  });
+}
 
 export async function startManagedBrowserSource(browser: Browser, info: TestInfo) {
   const checkout = resolve(process.env.GWT_PLAYWRIGHT_CHECKOUT_ROOT ?? process.cwd());
@@ -121,16 +139,47 @@ export async function startManagedBrowserSource(browser: Browser, info: TestInfo
     page.on("pageerror", error => errors.push(error.message));
     page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
     await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+    // This source needs an ordinary managed provider, not a Monitor delivery.
+    // Launch through the same manual wizard as the exact-relaunch live tests.
+    async function wizard(message: unknown, requireOpen = false) {
+      const after = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
+      await sendLiveGwtEvent(page, message);
+      return page.waitForFunction(({ after, requireOpen }) => {
+        const frame = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) =>
+          entry.sequence > after && entry.payload.kind === "launch_wizard_state"
+          && (!requireOpen || entry.payload.wizard)
+          && (!entry.payload.wizard || (!entry.payload.wizard.is_hydrating
+            && !entry.payload.wizard.runtime_resolution_pending
+            && !entry.payload.wizard.launch_materialization_pending)));
+        return frame ? { wizard: frame.payload.wizard } : null;
+      }, { after, requireOpen }, { timeout: 30_000 }).then(handle => handle.jsonValue());
+    }
+    const action = (value: unknown) => wizard({ kind: "launch_wizard_action", action: value,
+      bounds: { x: 80, y: 80, width: 700, height: 440 } });
+    await wizard({ kind: "open_active_work_launch_wizard", branch_name: fixture.branch,
+      linked_issue_number: fixture.issueNumber }, true);
+    await action({ kind: "set_launch_path", path: "manual_setup" });
+    await action({ kind: "set_branch_mode", create_new: true });
+    await action({ kind: "set_branch_name", value: `issue-${fixture.issueNumber}` });
+    let state = await action({ kind: "set_agent", agent_id: "codex" });
+    for (let step = 0; step < 12 && state.wizard; step++) {
+      expect(state.wizard.error).toBeFalsy();
+      if (state.wizard.selected_runtime_target !== "host"
+        && state.wizard.runtime_target_options?.some((option: any) => option.value === "host")) {
+        state = await action({ kind: "set_runtime_target", target: "Host" });
+      } else {
+        expect(state.wizard.primary_action_enabled, state.wizard.primary_action_disabled_reason).toBe(true);
+        state = await action({ kind: "submit" });
+      }
+    }
+    expect(state.wizard).toBeNull();
     const hub = await connect(new URL("/ws", fixture.url).toString().replace(/^http/, "ws"));
     await expect.poll(() => hub.messages.findLast(message => message.kind === "hub_state")?.hub.projects[0]?.project_key).toBeTruthy();
     const key = hub.messages.findLast(message => message.kind === "hub_state").hub.projects[0].project_key;
     const control = await connect(new URL(`/ws?repo_hash=${key}`, fixture.url).toString().replace(/^http/, "ws"));
-    control.send({ kind: "issue_monitor_queue_push", issue_numbers: [fixture.issueNumber] });
     await expect.poll(async () => (await fixture!.launches()).length, { timeout: 90_000 }).toBe(1);
     const source = (await fixture.launches())[0];
     expect(source.gwt_session_id).toBeTruthy();
-    await expect.poll(async () => JSON.parse((await fixture!.monitorPreferencesBytes()).toString())
-      .launch_confirmations?.[String(fixture!.issueNumber)]?.window_id, { timeout: 90_000 }).toBeTruthy();
     const windows = () => (control.messages.findLast(message => message.kind === "workspace_state")?.workspace.tabs ?? [])
       .flatMap((tab: any) => tab.workspace.windows);
     await expect.poll(() => windows().find((window: any) => window.session_id === source.gwt_session_id)?.id).toBeTruthy();

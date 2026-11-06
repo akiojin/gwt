@@ -18,6 +18,7 @@
 
 use std::{
     collections::{BTreeMap, HashSet},
+    io::Read,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -74,6 +75,25 @@ pub struct HttpResponse {
     pub body: String,
 }
 
+/// Bounded raw bytes for diagnostic assets and artifact downloads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinaryHttpResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+const DIAGNOSTIC_BODY_LIMIT: usize = 1024 * 1024;
+
+/// Direct acknowledgment of the fixed diagnostic workflow dispatch.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiagnosticDispatchAck {
+    pub workflow_run_id: u64,
+    pub run_url: String,
+    pub html_url: String,
+}
+
 /// Transport errors surfaced by [`HttpTransport::execute`].
 #[derive(Debug, thiserror::Error)]
 pub enum HttpError {
@@ -90,6 +110,16 @@ pub enum HttpError {
 /// Abstract HTTP executor used by [`HttpIssueClient`].
 pub trait HttpTransport: Send + Sync {
     fn execute(&self, request: HttpRequest) -> Result<HttpResponse, HttpError>;
+
+    fn execute_binary(
+        &self,
+        _request: HttpRequest,
+        _max_bytes: usize,
+    ) -> Result<BinaryHttpResponse, HttpError> {
+        Err(HttpError::PreSubmitTransport(
+            "binary diagnostic transport is unavailable".into(),
+        ))
+    }
 
     fn execute_with_deadline(
         &self,
@@ -114,7 +144,12 @@ pub struct FakeTransport {
 struct FakeState {
     recorded: Vec<HttpRequest>,
     recorded_deadlines: Vec<Instant>,
-    canned: std::collections::VecDeque<HttpResponse>,
+    canned: std::collections::VecDeque<FakeResponse>,
+}
+
+enum FakeResponse {
+    Text(HttpResponse),
+    Binary(BinaryHttpResponse),
 }
 
 impl FakeTransport {
@@ -134,7 +169,15 @@ impl FakeTransport {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .canned
-            .push_back(response);
+            .push_back(FakeResponse::Text(response));
+    }
+
+    pub fn enqueue_binary(&self, response: BinaryHttpResponse) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .canned
+            .push_back(FakeResponse::Binary(response));
     }
 
     /// Snapshot of every recorded request so far.
@@ -171,7 +214,38 @@ impl HttpTransport for FakeTransport {
         state
             .canned
             .pop_front()
+            .and_then(|response| match response {
+                FakeResponse::Text(response) => Some(response),
+                FakeResponse::Binary(_) => None,
+            })
             .ok_or_else(|| HttpError::Transport("no canned response available".into()))
+    }
+
+    fn execute_binary(
+        &self,
+        request: HttpRequest,
+        max_bytes: usize,
+    ) -> Result<BinaryHttpResponse, HttpError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.recorded.push(request);
+        let response = match state.canned.pop_front() {
+            Some(FakeResponse::Binary(response)) => response,
+            Some(FakeResponse::Text(response)) => BinaryHttpResponse {
+                status: response.status,
+                headers: response.headers,
+                body: response.body.into_bytes(),
+            },
+            None => return Err(HttpError::Transport("no canned response available".into())),
+        };
+        if response.body.len() > max_bytes.min(DIAGNOSTIC_BODY_LIMIT) {
+            return Err(HttpError::Transport(
+                "diagnostic response exceeds byte limit".into(),
+            ));
+        }
+        Ok(response)
     }
 
     fn execute_with_deadline(
@@ -191,6 +265,10 @@ impl HttpTransport for FakeTransport {
         state
             .canned
             .pop_front()
+            .and_then(|response| match response {
+                FakeResponse::Text(response) => Some(response),
+                FakeResponse::Binary(_) => None,
+            })
             .ok_or_else(|| HttpError::Transport("no canned response available".into()))
     }
 }
@@ -253,6 +331,68 @@ impl HttpTransport for ReqwestTransport {
             .map(|deadline| ambient_remaining(deadline, "github http request"))
             .transpose()?;
         execute_reqwest(self.standard_client.as_ref(), request, timeout)
+    }
+
+    fn execute_binary(
+        &self,
+        request: HttpRequest,
+        max_bytes: usize,
+    ) -> Result<BinaryHttpResponse, HttpError> {
+        let timeout = ambient_deadline("github diagnostic request")?
+            .map(|deadline| ambient_remaining(deadline, "github diagnostic request"))
+            .transpose()?
+            .unwrap_or(Duration::from_secs(30))
+            .min(Duration::from_secs(30));
+        let mut builder = self
+            .standard_client
+            .request(reqwest::Method::GET, &request.url)
+            .timeout(timeout);
+        if request.method != HttpMethod::Get || request.body.is_some() {
+            return Err(HttpError::PreSubmitTransport(
+                "diagnostic binary requests must be reads".into(),
+            ));
+        }
+        for (name, value) in request.headers {
+            builder = builder.header(name, value);
+        }
+        let response = builder
+            .send()
+            .map_err(|_| HttpError::Transport("diagnostic request failed".into()))?;
+        let max_bytes = max_bytes.min(DIAGNOSTIC_BODY_LIMIT);
+        if response
+            .content_length()
+            .is_some_and(|length| length > max_bytes as u64)
+        {
+            return Err(HttpError::Transport(
+                "diagnostic response exceeds byte limit".into(),
+            ));
+        }
+        let status = response.status().as_u16();
+        let headers = response
+            .headers()
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.as_str().to_string(),
+                    String::from_utf8_lossy(value.as_bytes()).into_owned(),
+                )
+            })
+            .collect();
+        let mut body = Vec::new();
+        response
+            .take(max_bytes as u64 + 1)
+            .read_to_end(&mut body)
+            .map_err(|_| HttpError::Transport("diagnostic response read failed".into()))?;
+        if body.len() > max_bytes {
+            return Err(HttpError::Transport(
+                "diagnostic response exceeds byte limit".into(),
+            ));
+        }
+        Ok(BinaryHttpResponse {
+            status,
+            headers,
+            body,
+        })
     }
 
     fn execute_with_deadline(
@@ -814,6 +954,334 @@ impl<T: HttpTransport> HttpIssueClient<T> {
         )
         .map(|_| ())
         .map_err(sanitize_workflow_error)
+    }
+
+    /// Dispatch the fixed diagnostic workflow once and bind its returned run.
+    pub fn dispatch_diagnostic_workflow(
+        &self,
+        git_ref: &str,
+        inputs: &serde_json::Map<String, Value>,
+    ) -> Result<DiagnosticDispatchAck, ApiError> {
+        if git_ref.trim().is_empty() {
+            return Err(ApiError::Unexpected(
+                "GitHub diagnostic workflow ref is required".into(),
+            ));
+        }
+        self.admit(&REST_BUDGET_ARGS)?;
+        self.settle(
+            &REST_BUDGET_ARGS,
+            (|| {
+                let mut headers = self.auth_headers();
+                for (name, value) in &mut headers {
+                    if name == "X-GitHub-Api-Version" {
+                        *value = "2026-03-10".into();
+                    }
+                }
+                headers.push(("Content-Type".into(), "application/json".into()));
+                let response = self
+                    .transport
+                    .execute(HttpRequest {
+                        method: HttpMethod::Post,
+                        url: format!(
+                            "{}/repos/{}/{}/actions/workflows/windows-diagnostic.yml/dispatches",
+                            self.rest_base, self.owner, self.repo
+                        ),
+                        headers,
+                        body: Some(json!({ "ref": git_ref, "inputs": inputs }).to_string()),
+                    })
+                    .map_err(|_| {
+                        ApiError::Network("GitHub diagnostic workflow request failed".into())
+                    })?;
+                check_status(&response).map_err(sanitize_workflow_error)?;
+                let invalid = || {
+                    ApiError::Unexpected(
+                        "GitHub diagnostic workflow acknowledgment is invalid".into(),
+                    )
+                };
+                if response.status != 200 {
+                    return Err(invalid());
+                }
+                let ack: DiagnosticDispatchAck =
+                    serde_json::from_str(&response.body).map_err(|_| invalid())?;
+                let run_path = format!(
+                    "{}/{}/actions/runs/{}",
+                    self.owner, self.repo, ack.workflow_run_id
+                );
+                if ack.workflow_run_id == 0
+                    || ack.run_url != format!("https://api.github.com/repos/{run_path}")
+                    || ack.html_url != format!("https://github.com/{run_path}")
+                {
+                    return Err(invalid());
+                }
+                Ok(ack)
+            })(),
+        )
+    }
+
+    /// Observe the fixed workflow and assets at one exact default-branch head.
+    pub fn diagnostic_workflow_context(&self) -> Result<Value, ApiError> {
+        let prefix = format!("/repos/{}/{}", self.owner, self.repo);
+        let repository = self.diagnostic_json_get(&prefix)?;
+        let identity = format!("{}/{}", self.owner, self.repo);
+        let branch = repository["default_branch"]
+            .as_str()
+            .filter(|branch| {
+                !branch.is_empty() && branch.len() <= 255 && !branch.chars().any(char::is_control)
+            })
+            .ok_or_else(diagnostic_invalid)?;
+        if repository["full_name"].as_str() != Some(identity.as_str()) {
+            return Err(diagnostic_invalid());
+        }
+        let head = self.diagnostic_json_get(&format!(
+            "{prefix}/git/ref/heads/{}",
+            encode_path_segment(branch)
+        ))?;
+        let commit = head["object"]["sha"]
+            .as_str()
+            .filter(|sha| valid_diagnostic_commit(sha))
+            .ok_or_else(diagnostic_invalid)?;
+        if head["object"]["type"] != "commit" {
+            return Err(diagnostic_invalid());
+        }
+        let workflow = self.diagnostic_json_get(&format!(
+            "{prefix}/actions/workflows/windows-diagnostic.yml"
+        ))?;
+        let workflow_id = workflow["id"]
+            .as_u64()
+            .filter(|id| *id > 0)
+            .ok_or_else(diagnostic_invalid)?;
+        if workflow["path"] != ".github/workflows/windows-diagnostic.yml" {
+            return Err(diagnostic_invalid());
+        }
+        let published = match workflow["state"].as_str() {
+            Some("active") => true,
+            Some("disabled_manually" | "disabled_inactivity" | "disabled_fork" | "deleted") => {
+                false
+            }
+            _ => return Err(diagnostic_invalid()),
+        };
+        let mut context = self.fixed_asset_hashes(commit)?;
+        context.extend(
+            json!({"repository":identity,"default_branch":branch,"workflow_commit":commit,
+            "workflow_id":workflow_id,"published":published})
+            .as_object()
+            .unwrap()
+            .clone(),
+        );
+        Ok(Value::Object(context))
+    }
+
+    /// Return private provider evidence for one exact diagnostic run.
+    pub fn diagnostic_run_snapshot(&self, run_id: u64) -> Result<Value, ApiError> {
+        let (run, artifacts) = self.diagnostic_run_artifacts(run_id)?;
+        let commit = run["head_sha"].as_str().ok_or_else(diagnostic_invalid)?;
+        let mut snapshot = self.fixed_asset_hashes(commit)?;
+        snapshot.insert("artifacts".into(), Value::Array(artifacts));
+        snapshot.insert("run".into(), run);
+        Ok(Value::Object(snapshot))
+    }
+
+    fn diagnostic_run_artifacts(&self, run_id: u64) -> Result<(Value, Vec<Value>), ApiError> {
+        if run_id == 0 {
+            return Err(diagnostic_invalid());
+        }
+        let prefix = format!("/repos/{}/{}/actions/runs/{run_id}", self.owner, self.repo);
+        let run = self.diagnostic_json_get(&prefix)?;
+        if run["id"].as_u64() != Some(run_id)
+            || run["repository"]["full_name"] != format!("{}/{}", self.owner, self.repo)
+            || !run["path"].as_str().is_some_and(|path| {
+                path.split('@').next() == Some(".github/workflows/windows-diagnostic.yml")
+            })
+            || run["event"] != "workflow_dispatch"
+            || !run["head_sha"]
+                .as_str()
+                .is_some_and(valid_diagnostic_commit)
+        {
+            return Err(diagnostic_invalid());
+        }
+        let workflow = self.diagnostic_json_get(&format!(
+            "/repos/{}/{}/actions/workflows/windows-diagnostic.yml",
+            self.owner, self.repo
+        ))?;
+        let workflow_id = workflow["id"]
+            .as_u64()
+            .filter(|id| *id > 0)
+            .ok_or_else(diagnostic_invalid)?;
+        if workflow["path"] != ".github/workflows/windows-diagnostic.yml"
+            || run["workflow_id"].as_u64() != Some(workflow_id)
+        {
+            return Err(diagnostic_invalid());
+        }
+        let page = self.diagnostic_json_get(&format!("{prefix}/artifacts?per_page=100"))?;
+        let artifacts = page["artifacts"]
+            .as_array()
+            .ok_or_else(diagnostic_invalid)?;
+        if artifacts.len() > 100 || page["total_count"].as_u64() != Some(artifacts.len() as u64) {
+            return Err(diagnostic_invalid());
+        }
+        let mut ids = HashSet::new();
+        for artifact in artifacts {
+            let id = artifact["id"]
+                .as_u64()
+                .filter(|id| *id > 0)
+                .ok_or_else(diagnostic_invalid)?;
+            if !ids.insert(id) || artifact["workflow_run"]["id"].as_u64() != Some(run_id) {
+                return Err(diagnostic_invalid());
+            }
+        }
+        Ok((run, artifacts.clone()))
+    }
+
+    fn fixed_asset_hashes(&self, commit: &str) -> Result<serde_json::Map<String, Value>, ApiError> {
+        if !valid_diagnostic_commit(commit) {
+            return Err(diagnostic_invalid());
+        }
+        let mut hashes = serde_json::Map::new();
+        for (key, path) in [
+            (
+                "profile_sha256",
+                ".github/diagnostics/windows/4777-restore-f351-v1/profile.json",
+            ),
+            (
+                "patch_sha256",
+                ".github/diagnostics/windows/4777-restore-f351-v1/diagnostic.patch",
+            ),
+            (
+                "workflow_sha256",
+                ".github/workflows/windows-diagnostic.yml",
+            ),
+            (
+                "harness_sha256",
+                ".github/diagnostics/windows/4777-restore-f351-v1/run.ps1",
+            ),
+        ] {
+            let response = self.diagnostic_get(
+                &format!(
+                    "/repos/{}/{}/contents/{path}?ref={commit}",
+                    self.owner, self.repo
+                ),
+                "application/vnd.github.raw+json",
+            )?;
+            if response.status != 200 {
+                return Err(diagnostic_invalid());
+            }
+            hashes.insert(
+                key.into(),
+                Value::String(hex::encode(Sha256::digest(&response.body))),
+            );
+        }
+        Ok(hashes)
+    }
+
+    /// Fetch a fresh repository/run-bound artifact through one signed redirect.
+    pub fn diagnostic_artifact(&self, run_id: u64, artifact_id: u64) -> Result<Vec<u8>, ApiError> {
+        if artifact_id == 0 {
+            return Err(diagnostic_invalid());
+        }
+        let (_, artifacts) = self.diagnostic_run_artifacts(run_id)?;
+        let artifact = artifacts
+            .iter()
+            .find(|artifact| artifact["id"].as_u64() == Some(artifact_id))
+            .ok_or_else(diagnostic_invalid)?;
+        if artifact["expired"] != false
+            || artifact["size_in_bytes"]
+                .as_u64()
+                .is_none_or(|size| size > DIAGNOSTIC_BODY_LIMIT as u64)
+        {
+            return Err(diagnostic_invalid());
+        }
+        let redirect = self.diagnostic_get(
+            &format!(
+                "/repos/{}/{}/actions/artifacts/{artifact_id}/zip",
+                self.owner, self.repo
+            ),
+            "application/vnd.github+json",
+        )?;
+        if redirect.status != 302 {
+            return Err(diagnostic_invalid());
+        }
+        let locations = redirect
+            .headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("location"))
+            .collect::<Vec<_>>();
+        if locations.len() != 1 {
+            return Err(diagnostic_invalid());
+        }
+        let signed = reqwest::Url::parse(&locations[0].1).map_err(|_| diagnostic_invalid())?;
+        if !diagnostic_artifact_host(&signed) {
+            return Err(diagnostic_invalid());
+        }
+        let response = self.diagnostic_http_get(
+            signed.to_string(),
+            vec![
+                ("Accept".into(), "application/zip".into()),
+                ("User-Agent".into(), "gwt-github/0.1".into()),
+            ],
+        )?;
+        if response.status != 200 {
+            return Err(diagnostic_invalid());
+        }
+        Ok(response.body)
+    }
+
+    fn diagnostic_json_get(&self, path: &str) -> Result<Value, ApiError> {
+        let response = self.diagnostic_get(path, "application/vnd.github+json")?;
+        if response.status != 200
+            || response.headers.iter().any(|(name, value)| {
+                name.eq_ignore_ascii_case("link") && value.contains("rel=\"next\"")
+            })
+        {
+            return Err(diagnostic_invalid());
+        }
+        serde_json::from_slice(&response.body).map_err(|_| diagnostic_invalid())
+    }
+
+    fn diagnostic_get(&self, path: &str, accept: &str) -> Result<BinaryHttpResponse, ApiError> {
+        let mut headers = self.auth_headers();
+        for (name, value) in &mut headers {
+            if name == "Accept" {
+                *value = accept.into();
+            }
+        }
+        self.diagnostic_http_get(format!("{}{path}", self.rest_base), headers)
+    }
+
+    fn diagnostic_http_get(
+        &self,
+        url: String,
+        headers: Vec<(String, String)>,
+    ) -> Result<BinaryHttpResponse, ApiError> {
+        self.admit(&REST_BUDGET_ARGS)?;
+        self.settle(
+            &REST_BUDGET_ARGS,
+            (|| {
+                let response = self
+                    .transport
+                    .execute_binary(
+                        HttpRequest {
+                            method: HttpMethod::Get,
+                            url,
+                            headers,
+                            body: None,
+                        },
+                        DIAGNOSTIC_BODY_LIMIT,
+                    )
+                    .map_err(|_| ApiError::Network("GitHub diagnostic read failed".into()))?;
+                if response.body.len() > DIAGNOSTIC_BODY_LIMIT {
+                    return Err(diagnostic_invalid());
+                }
+                if response.status != 302 {
+                    check_status(&HttpResponse {
+                        status: response.status,
+                        headers: response.headers.clone(),
+                        body: String::from_utf8_lossy(&response.body).into_owned(),
+                    })
+                    .map_err(sanitize_workflow_error)?;
+                }
+                Ok(response)
+            })(),
+        )
     }
 
     fn workflow_get(&self, url: String, accept: &str) -> Result<String, ApiError> {
@@ -1828,6 +2296,35 @@ fn sanitize_workflow_error(error: ApiError) -> ApiError {
         ApiError::Network(_) => ApiError::Network("GitHub workflow request failed".into()),
         _ => ApiError::Unexpected("GitHub workflow request was rejected".into()),
     }
+}
+
+fn diagnostic_invalid() -> ApiError {
+    ApiError::Unexpected("GitHub diagnostic evidence is invalid or incomplete".into())
+}
+
+fn valid_diagnostic_commit(commit: &str) -> bool {
+    commit.len() == 40
+        && commit
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn diagnostic_artifact_host(url: &reqwest::Url) -> bool {
+    let host = url.host_str().unwrap_or_default();
+    let storage = host
+        .strip_prefix("productionresultssa")
+        .and_then(|host| host.strip_suffix(".blob.core.windows.net"))
+        .is_some_and(|account| {
+            !account.is_empty()
+                && account.len() <= 5
+                && account.bytes().all(|byte| byte.is_ascii_digit())
+        });
+    url.scheme() == "https"
+        && url.port_or_known_default() == Some(443)
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.fragment().is_none()
+        && (host == "results-receiver.actions.githubusercontent.com" || storage)
 }
 
 fn check_status(resp: &HttpResponse) -> Result<(), ApiError> {

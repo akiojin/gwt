@@ -5375,6 +5375,14 @@ pub struct IssueMonitorState {
     /// SPEC #3200 T-016/T-022: per-issue autonomous lifecycle records keyed by
     /// issue number (attempt counter, phase, in-flight launch id, snapshot).
     autonomous_records: BTreeMap<u64, AutonomousIssueRecord>,
+    /// A local launch ended before its first typed control was observed. The
+    /// next protected commit must reload and recompute rather than assign that
+    /// end to a subject learned only from a later disk snapshot.
+    #[serde(default, skip)]
+    unbound_wait_lifecycle_ends: BTreeSet<u64>,
+    /// Trusted runtime routing supplied by the daemon, never by persisted prefs.
+    #[serde(default, skip)]
+    wait_project_root: Option<std::path::PathBuf>,
     failed_issues: BTreeMap<u64, String>,
     #[serde(default)]
     failed_launch_started_at: BTreeMap<u64, String>,
@@ -5907,6 +5915,10 @@ pub struct AutonomousIssueRecord {
     /// detection skips this record. Cleared when the launch ends.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait: Option<AutonomousWaitDeclaration>,
+    /// The original canonical execution/runtime that owns these controls.
+    /// Retained after a clear or launch end; absent legacy controls stay legacy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_control: Option<IssueMonitorWaitControl>,
     /// Issue #3944 AC-1: why the row is parked, when `phase` is `NeedsHuman`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub needs_human_kind: Option<NeedsHumanKind>,
@@ -6045,6 +6057,53 @@ pub struct AutonomousWaitInvalidation {
     pub at: String,
 }
 
+/// Non-secret identity captured from canonical authority when a new control is
+/// admitted. Runtime census counts and matching panes cannot construct it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorWaitSubject {
+    pub execution_identity: gwt_agent::SessionExecutionIdentity,
+    /// Canonical lifecycle head at intake. The durable Session identity may
+    /// retain an earlier valid prefix when the same Session is reopened.
+    pub lifecycle_identity: gwt_agent::ExecutionBindingIdentity,
+    pub host_pid: u32,
+    pub host_started_at: u64,
+    pub runtime_incarnation: u64,
+    pub child_pid: u32,
+    pub child_started_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorWaitControl {
+    pub subject: IssueMonitorWaitSubject,
+    /// Monotonic for this exact subject, including when census membership
+    /// outlives the launch. A different successor gets a new control.
+    #[serde(default)]
+    pub ended: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IssueMonitorWaitRebaseError {
+    UnprotectedSubject(u64),
+    AmbiguousLocalEnd(u64),
+}
+
+impl std::fmt::Display for IssueMonitorWaitRebaseError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnprotectedSubject(number) => {
+                write!(
+                    formatter,
+                    "wait subject for issue #{number} was not protected"
+                )
+            }
+            Self::AmbiguousLocalEnd(number) => write!(
+                formatter,
+                "local launch end for issue #{number} requires a fresh scan"
+            ),
+        }
+    }
+}
+
 /// Issue #3844 AC-3: how long one continuous wait declaration suspends stuck
 /// detection. Sized for a serialized verification queue of a few predecessors
 /// at 30–40 minutes each; past it the ordinary `stuck_timeout_secs` rule
@@ -6087,6 +6146,8 @@ pub struct IssueMonitorWaitSummary {
     /// a stale field. Defaults for a status written by an older daemon.
     #[serde(default)]
     pub in_force: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_control: Option<IssueMonitorWaitControl>,
     /// Issue #4286 AC-2: the PM's invalidation, when one was recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invalidated: Option<AutonomousWaitInvalidation>,
@@ -6110,6 +6171,27 @@ pub fn record_heartbeat_on_record(record: &mut AutonomousIssueRecord, now: &str)
     record.last_heartbeat = Some(now.to_string());
     // Issue #3944 AC-2: progress answers the steering request.
     record.steering = None;
+}
+
+/// Bind a newly admitted declaration before applying it. Existing identity-less
+/// waits are deliberately not upgraded by resolving their current holder.
+pub(crate) fn apply_wait_subject_on_record(
+    record: &mut AutonomousIssueRecord,
+    subject: &IssueMonitorWaitSubject,
+) -> bool {
+    if let Some(control) = &record.wait_control {
+        if &control.subject == subject {
+            return !control.ended;
+        }
+    } else if record.wait.is_some() {
+        return false;
+    }
+    record.wait = None;
+    record.wait_control = Some(IssueMonitorWaitControl {
+        subject: subject.clone(),
+        ended: false,
+    });
+    true
 }
 
 /// Issue #4608 AC-3: a heartbeat that stopped within this many seconds of the
@@ -6199,10 +6281,14 @@ pub fn wait_declaration_in_force(wait: &AutonomousWaitDeclaration, now: &str) ->
 
 /// Whether `record`'s wait declaration still suspends stuck detection at `now`.
 fn autonomous_wait_in_force(record: &AutonomousIssueRecord, now: &str) -> bool {
-    record
-        .wait
+    !record
+        .wait_control
         .as_ref()
-        .is_some_and(|wait| wait_declaration_in_force(wait, now))
+        .is_some_and(|control| control.ended)
+        && record
+            .wait
+            .as_ref()
+            .is_some_and(|wait| wait_declaration_in_force(wait, now))
 }
 
 /// Issue #3944 AC-2: seconds since the record's latest liveness anchor — the
@@ -6363,6 +6449,17 @@ pub enum AutonomousFailureOutcome {
 }
 
 impl AutonomousIssueRecord {
+    fn is_wait_control_tombstone_only(&self) -> bool {
+        self.wait_control.as_ref().is_some_and(|control| {
+            control.ended
+                && self
+                    == &Self {
+                        wait_control: Some(control.clone()),
+                        ..Self::new(self.issue_number)
+                    }
+        })
+    }
+
     fn mark_cancelled_claim_phase(&mut self, authority_epoch: u64) {
         if self.phase == AutonomousPhase::Implementing && self.reviewed_sha.is_none() {
             self.cancelled_claim_phase = Some(CancelledClaimPhase {
@@ -6413,6 +6510,7 @@ impl AutonomousIssueRecord {
             reviewed_sha: None,
             review_passed: None,
             wait: None,
+            wait_control: None,
             needs_human_kind: None,
             steering: None,
             review_dispatch_hold: None,
@@ -8107,6 +8205,19 @@ impl IssueMonitorState {
         self.source_repository = source.source_repository;
     }
 
+    pub(crate) fn inherit_pending_idle_release(&mut self, source: &Self) {
+        self.pending_idle_release
+            .clone_from(&source.pending_idle_release);
+    }
+
+    pub(crate) fn set_wait_project_root(&mut self, project_root: &Path) {
+        self.wait_project_root = Some(project_root.to_path_buf());
+    }
+
+    pub(crate) fn wait_project_root(&self) -> Option<&Path> {
+        self.wait_project_root.as_deref()
+    }
+
     pub fn set_source_repository(&mut self, repository: Option<(&str, &str)>) {
         self.source_repository = match repository {
             Some((owner, repo))
@@ -8201,6 +8312,8 @@ impl IssueMonitorState {
             last_control_receipt: None,
             autonomous_tuning: AutonomousTuning::default(),
             autonomous_records: BTreeMap::new(),
+            unbound_wait_lifecycle_ends: BTreeSet::new(),
+            wait_project_root: None,
             failed_issues: BTreeMap::new(),
             failed_launch_started_at: BTreeMap::new(),
             failed_windows: BTreeMap::new(),
@@ -9458,10 +9571,22 @@ impl IssueMonitorState {
         self.autonomous_record_mut(issue_number).acceptance_snapshot = Some(snapshot);
     }
 
-    /// SPEC #3200 T-016/T-022: drop an issue's autonomous record (resets the
-    /// attempt counter) once the work merges or is otherwise resolved.
+    /// SPEC #3200 T-016/T-022: reset attempt state once work merges or resolves.
+    /// Keep an ended typed control so an old writer cannot restore its wait.
     pub fn clear_autonomous_record(&mut self, issue_number: u64) {
-        self.autonomous_records.remove(&issue_number);
+        let Some(record) = self.autonomous_records.remove(&issue_number) else {
+            return;
+        };
+        if let Some(mut control) = record.wait_control {
+            control.ended = true;
+            self.autonomous_records.insert(
+                issue_number,
+                AutonomousIssueRecord {
+                    wait_control: Some(control),
+                    ..AutonomousIssueRecord::new(issue_number)
+                },
+            );
+        }
     }
 
     /// Gate remediation retains a verified live implementation window and its
@@ -9771,6 +9896,18 @@ impl IssueMonitorState {
     /// launched agent for `issue_number`. Resets the stuck-detection window.
     pub fn record_autonomous_heartbeat(&mut self, issue_number: u64, now: &str) {
         record_heartbeat_on_record(self.autonomous_record_mut(issue_number), now);
+    }
+
+    pub(crate) fn apply_autonomous_wait_subject(
+        &mut self,
+        issue_number: u64,
+        subject: &IssueMonitorWaitSubject,
+    ) -> bool {
+        let bound = apply_wait_subject_on_record(self.autonomous_record_mut(issue_number), subject);
+        if bound {
+            self.unbound_wait_lifecycle_ends.remove(&issue_number);
+        }
+        bound
     }
 
     /// Issue #3844 AC-1: record that the launched agent for `issue_number` is
@@ -12562,7 +12699,7 @@ impl IssueMonitorState {
     pub fn rebase_gui_observer_prefs(&mut self, disk: &IssueMonitorPrefs) {
         self.restore_persisted_scan_diagnostics(disk);
         self.missing_window_observations = disk.missing_window_observations.clone();
-        self.rebase_cross_process_prefs(disk, AutonomousRecordRebasePolicy::DiskAuthoritative);
+        self.rebase_cross_process_prefs(disk, AutonomousRecordRebasePolicy::DiskAuthoritative, &[]);
     }
 
     /// Rebase the daemon driver on the latest committed prefs. A scan result
@@ -12572,7 +12709,179 @@ impl IssueMonitorState {
         self.rebase_cross_process_prefs(
             disk,
             AutonomousRecordRebasePolicy::LocalSameKeyAuthoritative,
+            &[],
         );
+    }
+
+    /// Rebase while the caller holds canonical owner and Session leases for
+    /// every classified subject. This model performs no authority or OS reads.
+    /// Errors leave the complete local state unchanged.
+    pub(crate) fn rebase_daemon_driver_prefs_with_wait_subjects(
+        &mut self,
+        disk: &IssueMonitorPrefs,
+        live: &[IssueMonitorWaitSubject],
+        retired: &[IssueMonitorWaitSubject],
+    ) -> Result<(), IssueMonitorWaitRebaseError> {
+        // A first accepted subject may be classified before it has a durable
+        // control. It still cannot assign an earlier untyped local end to the
+        // currently live generation.
+        for number in &self.unbound_wait_lifecycle_ends {
+            if live
+                .iter()
+                .any(|subject| subject.execution_identity.execution_binding.owner_number == *number)
+            {
+                return Err(IssueMonitorWaitRebaseError::AmbiguousLocalEnd(*number));
+            }
+        }
+        for record in self
+            .autonomous_records
+            .values()
+            .chain(&disk.autonomous_records)
+        {
+            if let Some(control) = &record.wait_control {
+                let binding = &control.subject.execution_identity.execution_binding;
+                if binding.owner_number != record.issue_number
+                    || control.subject.execution_identity.linked_issue_number
+                        != Some(record.issue_number)
+                    || control.subject.lifecycle_identity.generation_id
+                        != binding.identity.generation_id
+                    || control.subject.lifecycle_identity.binding_id != binding.identity.binding_id
+                    || (!live.contains(&control.subject) && !retired.contains(&control.subject))
+                {
+                    return Err(IssueMonitorWaitRebaseError::UnprotectedSubject(
+                        record.issue_number,
+                    ));
+                }
+            }
+        }
+        let mut controls = BTreeMap::new();
+        for incoming in &disk.autonomous_records {
+            let Some(control) = &incoming.wait_control else {
+                continue;
+            };
+            let local = self.autonomous_records.get(&incoming.issue_number);
+            // A retired predecessor's disk snapshot cannot clear a current
+            // successor already held by this writer.
+            if retired.contains(&control.subject)
+                && local
+                    .and_then(|record| record.wait_control.as_ref())
+                    .is_some_and(|local| {
+                        local.subject != control.subject && live.contains(&local.subject)
+                    })
+            {
+                controls.insert(
+                    incoming.issue_number,
+                    local.expect("protected live successor exists").clone(),
+                );
+                continue;
+            }
+            let mut incoming = incoming.clone();
+            let same_subject_ended = local
+                .and_then(|record| record.wait_control.as_ref())
+                .is_some_and(|local| local.subject == control.subject && local.ended);
+            if retired.contains(&control.subject) || same_subject_ended {
+                incoming.wait = None;
+                incoming.wait_control.as_mut().expect("typed control").ended = true;
+            }
+            controls.insert(incoming.issue_number, incoming);
+        }
+        for local in self.autonomous_records.values() {
+            let Some(control) = &local.wait_control else {
+                continue;
+            };
+            if retired.contains(&control.subject) && !controls.contains_key(&local.issue_number) {
+                let mut tombstone = local.clone();
+                tombstone.wait = None;
+                tombstone
+                    .wait_control
+                    .as_mut()
+                    .expect("typed control")
+                    .ended = true;
+                controls.insert(local.issue_number, tombstone);
+            }
+        }
+        for record in controls.values() {
+            if self
+                .unbound_wait_lifecycle_ends
+                .contains(&record.issue_number)
+                && record
+                    .wait_control
+                    .as_ref()
+                    .is_some_and(|control| !control.ended)
+            {
+                return Err(IssueMonitorWaitRebaseError::AmbiguousLocalEnd(
+                    record.issue_number,
+                ));
+            }
+        }
+        // Reconciliation itself can discover an untyped lifecycle end (for
+        // example while applying a release). Keep its no-write result atomic.
+        let mut rebased = self.clone();
+        let controls = controls.into_values().collect::<Vec<_>>();
+        rebased.rebase_cross_process_prefs(
+            disk,
+            AutonomousRecordRebasePolicy::LocalSameKeyAuthoritative,
+            &controls,
+        );
+        for record in &controls {
+            if rebased
+                .unbound_wait_lifecycle_ends
+                .contains(&record.issue_number)
+                && record
+                    .wait_control
+                    .as_ref()
+                    .is_some_and(|control| !control.ended)
+                && rebased
+                    .autonomous_records
+                    .get(&record.issue_number)
+                    .is_some_and(|current| {
+                        current
+                            .wait_control
+                            .as_ref()
+                            .is_none_or(|control| !control.ended)
+                    })
+            {
+                return Err(IssueMonitorWaitRebaseError::AmbiguousLocalEnd(
+                    record.issue_number,
+                ));
+            }
+        }
+        *self = rebased;
+        Ok(())
+    }
+
+    /// Restore a historical receipt from its committed snapshot without
+    /// dropping an exact launch end already observed by this writer.
+    pub(crate) fn restore_wait_receipt_projection(
+        &mut self,
+        disk: &IssueMonitorPrefs,
+        live: &[IssueMonitorWaitSubject],
+        retired: &[IssueMonitorWaitSubject],
+    ) -> Result<(), IssueMonitorWaitRebaseError> {
+        let mut restored = Self::with_prefs(self.config.clone(), disk.clone());
+        restored.inherit_source_repository(self);
+        restored
+            .wait_project_root
+            .clone_from(&self.wait_project_root);
+        for (number, local) in &self.autonomous_records {
+            let Some(ended) = local.wait_control.as_ref().filter(|control| control.ended) else {
+                continue;
+            };
+            let Some(record) = restored.autonomous_records.get_mut(number) else {
+                continue;
+            };
+            if record
+                .wait_control
+                .as_ref()
+                .is_some_and(|control| control.subject == ended.subject)
+            {
+                record.wait = None;
+                record.wait_control = Some(ended.clone());
+            }
+        }
+        restored.rebase_daemon_driver_prefs_with_wait_subjects(disk, live, retired)?;
+        *self = restored;
+        Ok(())
     }
 
     /// Rebase before applying an exact window-close control under the prefs
@@ -12650,6 +12959,7 @@ impl IssueMonitorState {
         &mut self,
         disk: &IssueMonitorPrefs,
         autonomous_policy: AutonomousRecordRebasePolicy,
+        typed_wait_controls: &[AutonomousIssueRecord],
     ) {
         // Wait controls commit under the prefs lock, independently of a scan's
         // phase changes. Capture their launch identity before additive merges
@@ -12663,6 +12973,9 @@ impl IssueMonitorState {
                         let Some(local) = self.autonomous_records.get(&number) else {
                             return false;
                         };
+                        if incoming.wait_control.is_some() || local.wait_control.is_some() {
+                            return false;
+                        }
                         let Some(confirmation) = self.launch_confirmations.get(&number) else {
                             return false;
                         };
@@ -12900,16 +13213,33 @@ impl IssueMonitorState {
                 }
             }
         }
-        for incoming in committed_wait_controls {
+        for incoming in committed_wait_controls
+            .into_iter()
+            .chain(typed_wait_controls)
+        {
             let Some(local) = self.autonomous_records.get_mut(&incoming.issue_number) else {
                 continue;
             };
-            if local.attempts != incoming.attempts
+            if matches!(
+                local.phase,
+                AutonomousPhase::Merged | AutonomousPhase::NeedsHuman
+            ) {
+                continue;
+            }
+            if let Some(control) = &incoming.wait_control {
+                // A local end for this exact subject remains authoritative
+                // even when the native census still counts its child.
+                if local
+                    .wait_control
+                    .as_ref()
+                    .is_some_and(|local| local.subject == control.subject && local.ended)
+                {
+                    local.wait = None;
+                    continue;
+                }
+                local.wait_control = Some(control.clone());
+            } else if local.attempts != incoming.attempts
                 || local.active_launch_id != incoming.active_launch_id
-                || matches!(
-                    local.phase,
-                    AutonomousPhase::Merged | AutonomousPhase::NeedsHuman
-                )
             {
                 continue;
             }
@@ -14900,7 +15230,8 @@ impl IssueMonitorState {
             resume_condition: wait.resume_condition.clone(),
             since: wait.since.clone(),
             expires_at: autonomous_wait_expires_at(&wait.since),
-            in_force: wait_declaration_in_force(wait, now),
+            in_force: autonomous_wait_in_force(record, now),
+            wait_control: record.wait_control.clone(),
             invalidated: wait.invalidated.clone(),
             silent_secs,
             silent_beyond_stuck_timeout: silent_secs.is_some_and(|elapsed| elapsed >= timeout),
@@ -16446,7 +16777,14 @@ impl IssueMonitorState {
             );
         }
         // Idempotency: a candidate already in flight is left alone.
-        if self.active_launches.contains(&number) {
+        if self.active_launches.contains(&number)
+            || (self.autonomous_record(number).is_some_and(|record| {
+                record
+                    .wait_control
+                    .as_ref()
+                    .is_some_and(|control| !control.ended)
+            }) && self.has_monitor_pane_for_issue(number))
+        {
             return EligibilityDecision::Eligible;
         }
         // SPEC #3200 T-043/FR-029: honor the transient-retry backoff — a candidate
@@ -16483,6 +16821,9 @@ impl IssueMonitorState {
                 record.retry_hold_provider = None;
                 // Issue #3844: a wait belongs to one launch; never inherit it.
                 record.wait = None;
+                if let Some(control) = &mut record.wait_control {
+                    control.ended = true;
+                }
                 // SPEC #3200 T-045/FR-025: seed the liveness baseline at launch so
                 // stuck detection actually fires for an agent that hangs without
                 // producing a PR within stuck_timeout_secs. Real progress (a
@@ -20830,7 +21171,10 @@ impl IssueMonitorState {
             .chain(live_launch_owners.iter().filter(|(window, issue)| {
                 self.verified_window_owner(window, **issue, observed_at)
                     && self.inbox_item(**issue).map_or_else(
-                        || self.autonomous_record(**issue).is_some(),
+                        || {
+                            self.autonomous_record(**issue)
+                                .is_some_and(|record| !record.is_wait_control_tombstone_only())
+                        },
                         |item| {
                             item.state == MonitorInboxState::Queued
                                 || self.is_unbound_live_park(**issue, window)
@@ -20874,7 +21218,11 @@ impl IssueMonitorState {
             }
             self.clear_recovered_issue_failure(issue_number);
             self.readopt_live_launch(issue_number, &window_id);
-            if let Some(record) = self.autonomous_records.get_mut(&issue_number) {
+            if let Some(record) = self
+                .autonomous_records
+                .get_mut(&issue_number)
+                .filter(|record| !record.is_wait_control_tombstone_only())
+            {
                 if matches!(
                     record.phase,
                     AutonomousPhase::Idle | AutonomousPhase::NeedsHuman
@@ -21052,10 +21400,20 @@ impl IssueMonitorState {
         self.queued_launch_session_strategies.remove(&issue_number);
         self.pending_review_dispatches
             .retain(|pending| pending.issue_number != issue_number);
-        // Issue #3844: the wait declaration is scoped to the launch that made
-        // it; every path that ends the launch funnels through here.
+        // Issue #3844: ending active tracking also ends its launch-scoped wait.
+        self.end_autonomous_wait(issue_number);
+    }
+
+    fn end_autonomous_wait(&mut self, issue_number: u64) {
         if let Some(record) = self.autonomous_records.get_mut(&issue_number) {
             record.wait = None;
+            if let Some(control) = &mut record.wait_control {
+                control.ended = true;
+            } else {
+                self.unbound_wait_lifecycle_ends.insert(issue_number);
+            }
+        } else {
+            self.unbound_wait_lifecycle_ends.insert(issue_number);
         }
     }
 
@@ -21194,7 +21552,10 @@ impl IssueMonitorState {
         }
         // FR-034: notify the operator when an issue that went through the
         // autonomous loop completes (checked BEFORE the record is cleared).
-        if self.autonomous_records.contains_key(&issue_number) {
+        if self
+            .autonomous_record(issue_number)
+            .is_some_and(|record| !record.is_wait_control_tombstone_only())
+        {
             self.push_autonomous_notice(
                 "done",
                 issue_number,
@@ -25538,6 +25899,7 @@ impl IssueMonitorState {
         }
         self.active_launches
             .retain(|active| *active != issue_number);
+        self.end_autonomous_wait(issue_number);
         // Issue #4150: this row really did fail, so the duplicate-attempt note
         // beside it has nothing left to qualify.
         self.duplicate_launch_refusals.remove(&issue_number);
@@ -29131,6 +29493,7 @@ mod tests {
             reviewed_sha: None,
             review_passed: None,
             wait: None,
+            wait_control: None,
             needs_human_kind: None,
             steering: None,
             review_dispatch_hold: None,
@@ -29257,6 +29620,7 @@ mod tests {
             reviewed_sha: None,
             review_passed: None,
             wait: None,
+            wait_control: None,
             needs_human_kind: None,
             steering: None,
             review_dispatch_hold: None,
@@ -29329,6 +29693,7 @@ mod tests {
                 reviewed_sha: None,
                 review_passed: None,
                 wait: None,
+                wait_control: None,
                 needs_human_kind: None,
                 steering: None,
                 review_dispatch_hold: None,
@@ -29401,6 +29766,7 @@ mod tests {
             reviewed_sha: None,
             review_passed: None,
             wait: None,
+            wait_control: None,
             needs_human_kind: None,
             steering: None,
             review_dispatch_hold: None,
@@ -29462,6 +29828,7 @@ mod tests {
             reviewed_sha: None,
             review_passed: None,
             wait: None,
+            wait_control: None,
             needs_human_kind: None,
             steering: None,
             review_dispatch_hold: None,
@@ -39146,21 +39513,92 @@ mod tests {
             IssueMonitorReadiness::ReadyWithOpenTasks,
             "2026-08-15T00:00:00Z",
         );
-        let mut monitor = test_monitor(IssueMonitorConfig::default());
-        scan_queued_candidates(&mut monitor, &[candidate], "2026-08-15T00:00:01Z");
-        monitor.complete_active_launch(42, "tab-1::agent-1");
-        monitor.record_attempt(42);
-        monitor.set_autonomous_phase(42, AutonomousPhase::Delivering);
+        for typed in [false, true] {
+            let mut monitor = test_monitor(IssueMonitorConfig::default());
+            scan_queued_candidates(
+                &mut monitor,
+                std::slice::from_ref(&candidate),
+                "2026-08-15T00:00:01Z",
+            );
+            monitor.complete_active_launch_at(42, "tab-1::agent-1", "2026-08-15T00:00:01Z");
+            monitor.record_attempt(42);
+            monitor.set_autonomous_phase(42, AutonomousPhase::Delivering);
+            let subject = wait_subject("partial-delivery");
+            if typed {
+                monitor.apply_autonomous_wait_subject(42, &subject);
+                monitor.declare_autonomous_wait(42, "CI", "CI passes", "2026-08-15T00:00:01Z");
+            }
+            let stale = monitor.prefs();
+            monitor.record_merged(42);
 
-        monitor.record_merged(42);
+            assert_eq!(
+                monitor.inbox_item(42).map(|item| item.state),
+                Some(MonitorInboxState::Queued)
+            );
+            assert_eq!(monitor.active_count(), 0);
+            assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+            assert!(monitor.autonomous_in_flight_issues().is_empty());
+            if !typed {
+                assert!(monitor.autonomous_record(42).is_none());
+                continue;
+            }
+            let tombstone = AutonomousIssueRecord {
+                wait_control: Some(IssueMonitorWaitControl {
+                    subject: subject.clone(),
+                    ended: true,
+                }),
+                ..AutonomousIssueRecord::new(42)
+            };
+            assert_eq!(monitor.autonomous_record(42), Some(&tombstone));
+            let mut restored = test_monitor_with_prefs(monitor.config.clone(), monitor.prefs());
+            restored
+                .rebase_daemon_driver_prefs_with_wait_subjects(
+                    &stale,
+                    std::slice::from_ref(&subject),
+                    &[],
+                )
+                .unwrap();
+            assert_eq!(restored.autonomous_record(42), Some(&tombstone));
 
-        assert_eq!(
-            monitor.inbox_item(42).map(|item| item.state),
-            Some(MonitorInboxState::Queued)
-        );
-        assert!(monitor.autonomous_record(42).is_none());
-        assert_eq!(monitor.active_count(), 0);
-        assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+            // An identity tombstone alone is not work to readopt. A legacy Idle
+            // record retains its existing recovery behavior.
+            restored.inbox.clear();
+            let observed_at = "2026-08-15T00:00:02Z";
+            restored.record_window_snapshot(pane_snapshot(
+                observed_at,
+                vec![live_pane_observation(
+                    "tab-1::agent-1",
+                    42,
+                    WindowState::Running,
+                )],
+            ));
+            let owners = BTreeMap::from([("tab-1::agent-1".to_string(), 42)]);
+            let mut bound = restored.clone();
+            let mut legacy_bound = restored.clone();
+            legacy_bound.autonomous_records.remove(&42);
+            assert_eq!(
+                bound.readopt_live_launch_bindings(&owners, observed_at),
+                vec![42]
+            );
+            assert_eq!(
+                legacy_bound.readopt_live_launch_bindings(&owners, observed_at),
+                vec![42]
+            );
+            assert!(legacy_bound.autonomous_record(42).is_none());
+            assert_eq!(bound.autonomous_record(42), Some(&tombstone));
+            restored.launch_bindings.clear();
+            let mut legacy = restored.clone();
+            legacy
+                .autonomous_records
+                .insert(42, AutonomousIssueRecord::new(42));
+            assert_eq!(
+                legacy.readopt_live_launch_bindings(&owners, observed_at),
+                vec![42]
+            );
+            assert!(restored
+                .readopt_live_launch_bindings(&owners, observed_at)
+                .is_empty());
+        }
     }
 
     #[test]
@@ -45844,6 +46282,334 @@ mod tests {
         assert!(old.autonomous_wait(42).is_none());
     }
 
+    fn wait_subject(generation: &str) -> IssueMonitorWaitSubject {
+        IssueMonitorWaitSubject {
+            execution_identity: gwt_agent::SessionExecutionIdentity {
+                session_id: format!("session-{generation}"),
+                worktree_path: std::path::PathBuf::from("/test/worktree"),
+                project_state_root: None,
+                repo_hash: Some("test-repo".to_string()),
+                branch: "work/42".to_string(),
+                agent_id: gwt_agent::AgentId::Codex,
+                linked_issue_number: Some(42),
+                execution_binding: gwt_agent::SessionExecutionBinding {
+                    schema_version: 1,
+                    session_id: format!("session-{generation}"),
+                    repo_hash: "test-repo".to_string(),
+                    owner_kind: "issue".to_string(),
+                    owner_number: 42,
+                    identity: gwt_agent::ExecutionBindingIdentity {
+                        generation_id: generation.to_string(),
+                        binding_id: format!("binding-{generation}"),
+                        ledger_head_hash: "ledger-head".to_string(),
+                    },
+                    capability_generation: 1,
+                },
+            },
+            lifecycle_identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: generation.to_string(),
+                binding_id: format!("binding-{generation}"),
+                ledger_head_hash: "ledger-head".to_string(),
+            },
+            host_pid: 1,
+            host_started_at: 2,
+            runtime_incarnation: 3,
+            child_pid: 4,
+            child_started_at: 5,
+        }
+    }
+
+    fn runtime_only_wait_monitor() -> IssueMonitorState {
+        let mut monitor = stuck_monitor(42, "2026-06-29T00:00:00Z");
+        monitor.active_launches.clear();
+        monitor.launched_windows.clear();
+        monitor.launch_confirmations.clear();
+        monitor.record_monitor_runtime_counts(
+            1,
+            2,
+            BTreeMap::from([(42, 1)]),
+            "2026-06-29T00:00:00Z".to_string(),
+        );
+        monitor
+    }
+
+    #[test]
+    fn typed_runtime_wait_rebase_preserves_controls_without_replacing_scan_progress() {
+        let subject = wait_subject("first");
+        let mut stale = runtime_only_wait_monitor();
+        let mut committed = stale.clone();
+        assert!(committed.apply_autonomous_wait_subject(42, &subject));
+        committed.declare_autonomous_wait(42, "CI", "CI passes", "2026-06-29T00:10:00Z");
+        let disk = committed.prefs();
+        stale.set_autonomous_phase(42, AutonomousPhase::Reviewing);
+        stale.record_autonomous_heartbeat(42, "2026-06-29T00:20:00Z");
+        stale.rebase_daemon_driver_prefs(&disk);
+        assert!(
+            stale.autonomous_wait(42).is_none(),
+            "unprotected equality is insufficient"
+        );
+        stale
+            .rebase_daemon_driver_prefs_with_wait_subjects(
+                &disk,
+                std::slice::from_ref(&subject),
+                &[],
+            )
+            .unwrap();
+        let record = stale.autonomous_record(42).unwrap();
+        assert_eq!(record.wait, committed.autonomous_record(42).unwrap().wait);
+        assert_eq!(record.phase, AutonomousPhase::Reviewing);
+        assert_eq!(
+            record.last_heartbeat.as_deref(),
+            Some("2026-06-29T00:20:00Z")
+        );
+
+        let long_wait = stale.wait_summary(record, "2026-06-29T03:00:00Z").unwrap();
+        assert!(long_wait.in_force);
+        assert_eq!(long_wait.wait_control, record.wait_control);
+        let mut ended_with_wait = record.clone();
+        ended_with_wait.wait_control.as_mut().unwrap().ended = true;
+        assert!(
+            !stale
+                .wait_summary(&ended_with_wait, "2026-06-29T03:00:00Z")
+                .unwrap()
+                .in_force
+        );
+        assert!(
+            !stale
+                .wait_summary(record, "2026-06-29T03:10:00Z")
+                .unwrap()
+                .in_force
+        );
+
+        committed.invalidate_autonomous_wait(42, "PM", "CI finished", "2026-06-29T00:25:00Z");
+        stale
+            .rebase_daemon_driver_prefs_with_wait_subjects(
+                &committed.prefs(),
+                std::slice::from_ref(&subject),
+                &[],
+            )
+            .unwrap();
+        assert!(
+            !stale
+                .wait_summary(stale.autonomous_record(42).unwrap(), "2026-06-29T00:26:00Z")
+                .unwrap()
+                .in_force
+        );
+        committed.clear_autonomous_wait(42, "2026-06-29T00:30:00Z");
+        stale
+            .rebase_daemon_driver_prefs_with_wait_subjects(
+                &committed.prefs(),
+                std::slice::from_ref(&subject),
+                &[],
+            )
+            .unwrap();
+        assert!(stale.autonomous_wait(42).is_none());
+        assert_eq!(
+            stale
+                .autonomous_record(42)
+                .unwrap()
+                .wait_control
+                .as_ref()
+                .unwrap()
+                .subject,
+            subject
+        );
+    }
+
+    #[test]
+    fn typed_wait_end_is_exact_and_retirement_does_not_clear_a_successor() {
+        let first = wait_subject("first");
+        let mut successor = first.clone();
+        successor.lifecycle_identity.ledger_head_hash = "reopened-head".to_string();
+        let mut committed = runtime_only_wait_monitor();
+        committed.apply_autonomous_wait_subject(42, &first);
+        committed.declare_autonomous_wait(42, "CI", "CI passes", "2026-06-29T00:10:00Z");
+        let predecessor_prefs = committed.prefs();
+        let mut ended = committed.clone();
+        ended.clear_active_tracking(42);
+        assert!(
+            ended.has_observed_monitor_runtime(42),
+            "census membership remains"
+        );
+        ended
+            .rebase_daemon_driver_prefs_with_wait_subjects(
+                &committed.prefs(),
+                std::slice::from_ref(&first),
+                &[],
+            )
+            .unwrap();
+        assert!(ended.autonomous_wait(42).is_none());
+        assert!(
+            ended
+                .autonomous_record(42)
+                .unwrap()
+                .wait_control
+                .as_ref()
+                .unwrap()
+                .ended
+        );
+        let mut receipt_recovery = ended.clone();
+        receipt_recovery.set_autonomous_phase(42, AutonomousPhase::Reviewing);
+        receipt_recovery.set_wait_project_root(Path::new("/trusted/project"));
+        let before = receipt_recovery.clone();
+        assert_eq!(
+            receipt_recovery.restore_wait_receipt_projection(&committed.prefs(), &[], &[]),
+            Err(IssueMonitorWaitRebaseError::UnprotectedSubject(42))
+        );
+        assert_eq!(receipt_recovery, before);
+        receipt_recovery
+            .restore_wait_receipt_projection(&committed.prefs(), std::slice::from_ref(&first), &[])
+            .unwrap();
+        assert!(receipt_recovery.autonomous_wait(42).is_none());
+        assert!(
+            receipt_recovery
+                .autonomous_record(42)
+                .unwrap()
+                .wait_control
+                .as_ref()
+                .unwrap()
+                .ended
+        );
+        assert_eq!(
+            receipt_recovery.autonomous_record(42).unwrap().phase,
+            committed.autonomous_record(42).unwrap().phase
+        );
+        assert_eq!(
+            receipt_recovery.wait_project_root(),
+            Some(Path::new("/trusted/project"))
+        );
+        let mut retired = committed.clone();
+        retired
+            .rebase_daemon_driver_prefs_with_wait_subjects(
+                &committed.prefs(),
+                &[],
+                std::slice::from_ref(&first),
+            )
+            .unwrap();
+        assert!(retired.autonomous_wait(42).is_none());
+        assert!(
+            retired
+                .autonomous_record(42)
+                .unwrap()
+                .wait_control
+                .as_ref()
+                .unwrap()
+                .ended
+        );
+
+        committed = ended.clone();
+        assert!(committed.apply_autonomous_wait_subject(42, &successor));
+        committed.declare_autonomous_wait(42, "review", "review finishes", "2026-06-29T00:30:00Z");
+        ended
+            .rebase_daemon_driver_prefs_with_wait_subjects(
+                &committed.prefs(),
+                std::slice::from_ref(&successor),
+                std::slice::from_ref(&first),
+            )
+            .unwrap();
+        assert_eq!(
+            ended
+                .autonomous_record(42)
+                .unwrap()
+                .wait_control
+                .as_ref()
+                .unwrap()
+                .subject,
+            successor
+        );
+        assert_eq!(
+            ended.autonomous_wait(42).unwrap().since,
+            "2026-06-29T00:30:00Z"
+        );
+        let successor_prefs = ended.prefs();
+        ended
+            .rebase_daemon_driver_prefs_with_wait_subjects(
+                &retired.prefs(),
+                std::slice::from_ref(&successor),
+                std::slice::from_ref(&first),
+            )
+            .unwrap();
+        assert_eq!(
+            ended.autonomous_wait(42),
+            successor_prefs.autonomous_records[0].wait.as_ref()
+        );
+        let mut cancelled_predecessor = predecessor_prefs;
+        let cancellation = CancelledClaimPhase {
+            authority_epoch: 1,
+            reconciled: false,
+        };
+        cancelled_predecessor.autonomous_records[0].cancelled_claim_phase = Some(cancellation);
+        ended
+            .rebase_daemon_driver_prefs_with_wait_subjects(
+                &cancelled_predecessor,
+                std::slice::from_ref(&successor),
+                std::slice::from_ref(&first),
+            )
+            .unwrap();
+        let record = ended.autonomous_record(42).unwrap();
+        assert_eq!(record.wait, successor_prefs.autonomous_records[0].wait);
+        assert_eq!(record.wait_control.as_ref().unwrap().subject, successor);
+        assert_eq!(record.cancelled_claim_phase, Some(cancellation));
+    }
+
+    #[test]
+    fn typed_wait_rebase_unknown_or_unbound_local_end_leaves_state_unchanged() {
+        let subject = wait_subject("first");
+        let mut stale = runtime_only_wait_monitor();
+        let mut committed = stale.clone();
+        committed.apply_autonomous_wait_subject(42, &subject);
+        committed.declare_autonomous_wait(42, "CI", "CI passes", "2026-06-29T00:10:00Z");
+        let before = stale.clone();
+        assert_eq!(
+            stale.rebase_daemon_driver_prefs_with_wait_subjects(&committed.prefs(), &[], &[]),
+            Err(IssueMonitorWaitRebaseError::UnprotectedSubject(42))
+        );
+        assert_eq!(stale, before);
+        let mut foreign = subject.clone();
+        foreign.execution_identity.execution_binding.owner_number = 43;
+        foreign.execution_identity.linked_issue_number = Some(43);
+        let mut foreign_prefs = committed.prefs();
+        foreign_prefs.autonomous_records[0]
+            .wait_control
+            .as_mut()
+            .unwrap()
+            .subject = foreign.clone();
+        assert_eq!(
+            stale.rebase_daemon_driver_prefs_with_wait_subjects(
+                &foreign_prefs,
+                std::slice::from_ref(&foreign),
+                &[],
+            ),
+            Err(IssueMonitorWaitRebaseError::UnprotectedSubject(42))
+        );
+        assert_eq!(stale, before);
+        stale.clear_active_tracking(42);
+        let before = stale.clone();
+        assert_eq!(
+            stale.rebase_daemon_driver_prefs_with_wait_subjects(
+                &committed.prefs(),
+                std::slice::from_ref(&subject),
+                &[]
+            ),
+            Err(IssueMonitorWaitRebaseError::AmbiguousLocalEnd(42))
+        );
+        assert_eq!(stale, before);
+        assert_eq!(
+            stale.rebase_daemon_driver_prefs_with_wait_subjects(
+                &before.prefs(),
+                std::slice::from_ref(&subject),
+                &[],
+            ),
+            Err(IssueMonitorWaitRebaseError::AmbiguousLocalEnd(42))
+        );
+        assert_eq!(stale, before);
+
+        let mut legacy = runtime_only_wait_monitor();
+        legacy.declare_autonomous_wait(42, "legacy", "legacy condition", "2026-06-29T00:10:00Z");
+        assert!(!legacy.apply_autonomous_wait_subject(42, &subject));
+        assert!(legacy.autonomous_record(42).unwrap().wait_control.is_none());
+    }
+
     #[test]
     fn wait_declaration_suspends_stuck_detection_and_preserves_attempts() {
         // Issue #3844 AC-1/AC-4: a launched agent that declares it is waiting
@@ -46858,13 +47624,43 @@ mod tests {
         // issue (and persisted) so an explicit Launch Now can close the stale
         // window before relaunching; a successful relaunch clears it.
         let mut monitor = launched_monitor(42, "tab-1::agent-42");
+        let subject = wait_subject("terminal-failure");
+        monitor.apply_autonomous_wait_subject(42, &subject);
+        monitor.declare_autonomous_wait(42, "CI", "CI passes", "2026-06-30T00:00:00Z");
+        let before_failure = monitor.prefs();
         assert_eq!(
             monitor.record_agent_window_failed("tab-1::agent-42", "boom"),
             Some(42)
         );
+        assert!(monitor.autonomous_wait(42).is_none());
+        let control = monitor
+            .autonomous_record(42)
+            .unwrap()
+            .wait_control
+            .as_ref()
+            .unwrap();
+        assert!(control.ended);
+        assert_eq!(control.subject, subject);
 
         // Persisted across a prefs round-trip (daemon/GUI restart).
         let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        restored
+            .rebase_daemon_driver_prefs_with_wait_subjects(
+                &before_failure,
+                std::slice::from_ref(&subject),
+                &[],
+            )
+            .unwrap();
+        assert!(restored.autonomous_wait(42).is_none());
+        assert!(
+            restored
+                .autonomous_record(42)
+                .unwrap()
+                .wait_control
+                .as_ref()
+                .unwrap()
+                .ended
+        );
         assert_eq!(
             restored.take_failed_window(42).as_deref(),
             Some("tab-1::agent-42"),
@@ -47725,6 +48521,23 @@ mod tests {
             record.acceptance_snapshot.is_some(),
             "snapshot captured at launch"
         );
+
+        let mut runtime = runtime_only_wait_monitor();
+        runtime.set_autonomous_mode(true);
+        let subject = wait_subject("runtime-only-candidate");
+        runtime.apply_autonomous_wait_subject(42, &subject);
+        runtime.declare_autonomous_wait(42, "CI", "CI passes", "2026-06-29T00:10:00Z");
+        runtime.autonomous_record_mut(42).retry_not_before = Some("2026-06-29T00:00:00Z".into());
+        let before = runtime.autonomous_record(42).unwrap().clone();
+        assert_eq!(
+            runtime.prepare_autonomous_candidate(
+                &auto_issue(42, "## Acceptance Criteria\n- [ ] AC-1: x\n"),
+                &bp,
+                "2026-06-29T00:30:00Z",
+            ),
+            EligibilityDecision::Eligible
+        );
+        assert_eq!(runtime.autonomous_record(42), Some(&before));
     }
 
     #[test]

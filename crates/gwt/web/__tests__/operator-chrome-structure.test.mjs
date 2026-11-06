@@ -4677,8 +4677,8 @@ test("Hidden window output is gated while PM and Agents retain their VT buffers"
   assert.ok(batcherConfig, "app.js must configure the terminal output batcher");
   assert.match(
     batcherConfig[1],
-    /canWrite:\s*\(windowId\)\s*=>\s*pmChatViews\.has\(windowId\)\s*\|\|\s*\(worksHost\s*&&\s*worksSurface\?\.contains\(windowId\)\)\s*\|\|\s*canRefreshTerminalViewport\(windowId\)/,
-    "PM and Agents must keep their VT buffers current while other hidden windows retain output gating",
+    /canWrite:\s*\(windowId\)\s*=>\s*\{\s*const runtime = terminalMap\.get\(windowId\);\s*return runtime\?\.isReady === true\s*&& runtime\.snapshotWriteCoordinator\?\.shouldDeferOutput\(\) !== true\s*&& \(pmChatViews\.has\(windowId\)\s*\|\|\s*\(worksHost\s*&&\s*worksSurface\?\.contains\(windowId\)\)\s*\|\|\s*canRefreshTerminalViewport\(windowId\)\)/,
+    "ready PM and Agents must consume output while missing/unfit/barrier and other hidden windows retain output gating",
   );
 
   const renderWorkspaceBody = extractFunctionBody(appSource, "renderWorkspace");

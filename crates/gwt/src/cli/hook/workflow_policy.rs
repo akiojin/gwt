@@ -884,6 +884,7 @@ pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
             | "issue.monitor.status"
             | "update.settings.status"
             | "actions.release_policy.status"
+            | "actions.diagnostic.policy.status"
             | "issue.monitor.profiles"
             | "issue.monitor.tiers"
             | "pr.current"
@@ -915,7 +916,9 @@ pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
             | "perf.violations"
             | "pm.capabilities"
             | "pm.plan.status"
+            | "pm.request_tasks.read"
             | "pm.status"
+            | "project.execution.status"
             | "pm.report.list"
             | "search"
     )
@@ -2329,7 +2332,13 @@ mod tests {
 
     #[test]
     fn pm_plan_operations_preserve_identity_and_mutation_boundaries() {
-        for (operation, admitted) in [("pm.plan.status", true), ("pm.plan.apply", false)] {
+        for (operation, admitted) in [
+            ("pm.plan.status", true),
+            ("pm.plan.apply", false),
+            ("pm.request_tasks.read", true),
+            ("pm.request_tasks.apply", false),
+            ("pm.request_tasks.capture", false),
+        ] {
             let event = HookEvent {
                 tool_name: Some("Bash".to_string()),
                 tool_input: Some(serde_json::json!({

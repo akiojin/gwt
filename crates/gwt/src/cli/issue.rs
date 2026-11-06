@@ -154,6 +154,27 @@ pub(super) fn run<E: CliEnv>(
             guard_pm_owner_check(env.repo_path(), owner_check.as_ref())?;
             guard_autonomous_acceptance_block(&labels, &body)?;
             let snapshot = env.client().create_issue(&title, &body, &labels)?;
+            let lineage_error = if super::pm::caller_is_registered_pm(env.repo_path()) {
+                owner_check
+                    .as_ref()
+                    .and_then(|check| check.owner_spec)
+                    .zip(super::pm::ambient_session_id())
+                    .and_then(|(parent, issuer)| {
+                        crate::project_execution_policy::record_derived_owner(
+                            env.repo_path(),
+                            snapshot.number.0,
+                            parent.get(),
+                            &issuer,
+                            &format!(
+                                "issue.create:{}:{}",
+                                snapshot.number.0, snapshot.updated_at.0
+                            ),
+                        )
+                        .err()
+                    })
+            } else {
+                None
+            };
             super::intake_outcome::auto_record_issue_operation(
                 env.repo_path(),
                 "issue.create",
@@ -162,6 +183,10 @@ pub(super) fn run<E: CliEnv>(
             );
             let renewal = Cache::new(env.cache_root()).write_snapshot_with_receipt(&snapshot)?;
             let code = finish_issue_create(&snapshot, renewal, out);
+            if let Some(error) = lineage_error {
+                out.push_str(&format!("warning: Issue #{} was created, but its continued-parent receipt could not be saved: {error}. Do not create this Issue again. Render this Project or capture a new normal human instruction for this existing child Issue to continue it. project.execution.status is diagnostic only; it does not repair the receipt.\n", snapshot.number.0));
+                return Ok(1);
+            }
             finish_urgent_issue_mutation(env, &snapshot, code, out)
         }
         IssueCommand::CacheRepair { number } => {
@@ -5214,30 +5239,119 @@ fn record_monitor_wait_in_prefs(
     now: &str,
 ) -> Result<(), String> {
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project_root);
-    crate::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
-        let position = prefs
-            .autonomous_records
-            .iter()
-            .position(|record| record.issue_number == number);
-        let index = match position {
-            Some(index) => index,
-            None => {
-                prefs
-                    .autonomous_records
-                    .push(crate::AutonomousIssueRecord::new(number));
-                prefs.autonomous_records.len() - 1
+    mutate_monitor_wait_with_subject(
+        project_root,
+        &prefs_path,
+        number,
+        !clear,
+        |prefs, subject| {
+            let position = prefs
+                .autonomous_records
+                .iter()
+                .position(|record| record.issue_number == number);
+            let index = match position {
+                Some(index) => index,
+                None => {
+                    prefs
+                        .autonomous_records
+                        .push(crate::AutonomousIssueRecord::new(number));
+                    prefs.autonomous_records.len() - 1
+                }
+            };
+            let record = &mut prefs.autonomous_records[index];
+            if clear {
+                crate::clear_wait_on_record(record, now);
+            } else {
+                if let Some(subject) = subject {
+                    if !crate::issue_monitor::apply_wait_subject_on_record(record, subject) {
+                        return Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            "wait provenance changed before fallback declaration",
+                        ));
+                    }
+                }
+                crate::declare_wait_on_record(record, reason, resume_condition, now);
             }
-        };
-        let record = &mut prefs.autonomous_records[index];
-        if clear {
-            crate::clear_wait_on_record(record, now);
-        } else {
-            crate::declare_wait_on_record(record, reason, resume_condition, now);
-        }
-        Ok(())
-    })
+            Ok(())
+        },
+    )
     .map(|_| ())
     .map_err(|error| error.to_string())
+}
+
+/// The fallback changes only the target record from the latest locked prefs.
+/// Preserve its original subject on clear/invalidation; a fresh declaration
+/// captures native authority before taking prefs, then checks it again leased.
+fn mutate_monitor_wait_with_subject<T>(
+    project_root: &std::path::Path,
+    prefs_path: &std::path::Path,
+    number: u64,
+    declare: bool,
+    mutation: impl FnOnce(
+        &mut crate::IssueMonitorPrefs,
+        Option<&crate::issue_monitor::IssueMonitorWaitSubject>,
+    ) -> io::Result<T>,
+) -> io::Result<(crate::IssueMonitorPrefs, T)> {
+    let snapshot = crate::load_issue_monitor_prefs(prefs_path)?;
+    let record = snapshot
+        .autonomous_records
+        .iter()
+        .find(|record| record.issue_number == number);
+    let original = record
+        .and_then(|record| record.wait_control.as_ref())
+        .map(|control| control.subject.clone());
+    let original_wait = (
+        record.and_then(|record| record.wait_control.as_ref()),
+        record.and_then(|record| record.wait.as_ref()),
+    );
+    let legacy_wait =
+        record.is_some_and(|record| record.wait.is_some() && record.wait_control.is_none());
+    let subject = if declare && !legacy_wait {
+        let current = super::execution_state::capture_current_wait_subject(project_root, number)?;
+        if original.is_some() && current.is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "typed wait has no current native subject",
+            ));
+        }
+        current
+    } else {
+        original.clone()
+    };
+    let subjects = subject.iter().cloned().collect::<Vec<_>>();
+    super::execution_state::with_wait_subject_leases(project_root, &subjects, |live, _retired| {
+        if declare
+            && subject
+                .as_ref()
+                .is_some_and(|subject| !live.contains(subject))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "wait subject changed before fallback",
+            ));
+        }
+        crate::try_mutate_issue_monitor_prefs_without_authority_fence(prefs_path, |prefs| {
+            let record = prefs
+                .autonomous_records
+                .iter()
+                .find(|record| record.issue_number == number);
+            let control = record.and_then(|record| record.wait_control.as_ref());
+            let wait = record.and_then(|record| record.wait.as_ref());
+            if (control, wait) != original_wait
+                || (declare
+                    && control.is_some_and(|control| {
+                        control.ended && Some(&control.subject) == subject.as_ref()
+                    }))
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "wait state changed before fallback commit",
+                ));
+            }
+            gwt_core::operation_deadline::ensure_remaining("wait fallback commit")?;
+            mutation(prefs, subject.as_ref())
+        })
+    })
 }
 
 /// Issue #3844 AC-1/AC-2: tell the Issue Monitor that the current launch is
@@ -5411,16 +5525,22 @@ fn record_monitor_wait_invalidation_in_prefs(
     now: &str,
 ) -> Result<(), String> {
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project_root);
-    crate::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
-        if let Some(record) = prefs
-            .autonomous_records
-            .iter_mut()
-            .find(|record| record.issue_number == number)
-        {
-            crate::invalidate_wait_on_record(record, by, reason, now);
-        }
-        Ok(())
-    })
+    mutate_monitor_wait_with_subject(
+        project_root,
+        &prefs_path,
+        number,
+        false,
+        |prefs, _subject| {
+            if let Some(record) = prefs
+                .autonomous_records
+                .iter_mut()
+                .find(|record| record.issue_number == number)
+            {
+                crate::invalidate_wait_on_record(record, by, reason, now);
+            }
+            Ok(())
+        },
+    )
     .map(|_| ())
     .map_err(|error| error.to_string())
 }
@@ -7053,18 +7173,6 @@ fn linked_prs_bulk_query_with_cursors(
     query
 }
 
-/// Linked PRs for every issue in `numbers` through the bulk query
-/// (SPEC #4093 FR-005), including every timeline page. First pages cost
-/// `ceil(N / LINKED_PR_BULK_CHUNK)` GraphQL calls instead of one per issue.
-/// An issue GitHub does not return (deleted, no access) is absent from the map.
-pub(crate) fn fetch_linked_prs_bulk_via_gh(
-    owner: &str,
-    repo: &str,
-    numbers: &[u64],
-) -> io::Result<std::collections::BTreeMap<u64, Vec<LinkedPrSummary>>> {
-    fetch_linked_prs_bulk_via_gh_observing(owner, repo, numbers, |_, _| {})
-}
-
 /// Publish only completed Issues, so a later page failure does not erase their
 /// evidence. The return value retains the strict all-pages error contract.
 pub(crate) fn fetch_linked_prs_bulk_via_gh_observing(
@@ -7105,7 +7213,7 @@ pub(crate) fn fetch_linked_prs_bulk_via_gh_observing(
     )
 }
 
-/// Injectable core of [`fetch_linked_prs_bulk_via_gh`]: `run` executes one
+/// Injectable core of [`fetch_linked_prs_bulk_via_gh_observing`]: `run` executes one
 /// bulk query and answers its JSON body.
 #[cfg(test)]
 pub(crate) fn fetch_linked_prs_bulk_via_gh_with<F>(
@@ -7133,12 +7241,11 @@ fn fetch_linked_prs_bulk_via_gh_with_observer(
                 chunk.to_vec(),
                 std::collections::BTreeMap::new(),
                 std::collections::BTreeSet::new(),
-                std::collections::BTreeMap::<u64, Vec<serde_json::Value>>::new(),
+                std::collections::BTreeMap::<u64, LinkedPrAccumulator>::new(),
             )
         })
         .collect();
-    while let Some((pending, mut cursors, mut seen_cursors, mut nodes_by_issue)) =
-        chunks.pop_front()
+    while let Some((pending, mut cursors, mut seen_cursors, mut prs_by_issue)) = chunks.pop_front()
     {
         gwt_core::operation_deadline::ensure_remaining("linked PR timeline page")?;
         let query = if cursors.is_empty() {
@@ -7180,10 +7287,10 @@ fn fetch_linked_prs_bulk_via_gh_with_observer(
                 .get("nodes")
                 .and_then(serde_json::Value::as_array)
                 .ok_or_else(invalid)?;
-            nodes_by_issue
+            prs_by_issue
                 .entry(*number)
                 .or_default()
-                .extend(nodes.iter().cloned());
+                .extend(nodes, *number);
             match timeline.get("pageInfo") {
                 Some(info)
                     if info.get("hasNextPage").and_then(serde_json::Value::as_bool)
@@ -7206,15 +7313,12 @@ fn fetch_linked_prs_bulk_via_gh_with_observer(
                         == Some(false) => {}
                 _ => return Err(invalid()),
             }
-            let complete = serde_json::json!({"timelineItems": {
-                "nodes": nodes_by_issue.remove(number).unwrap_or_default()
-            }});
-            let prs = parse_linked_pr_timeline(&complete, *number);
+            let prs = prs_by_issue.remove(number).unwrap_or_default().prs;
             observe(*number, &prs);
             linked.insert(*number, prs);
         }
         if !next.is_empty() {
-            chunks.push_back((next, cursors, seen_cursors, nodes_by_issue));
+            chunks.push_back((next, cursors, seen_cursors, prs_by_issue));
         }
     }
     Ok(linked)
@@ -7243,81 +7347,93 @@ pub(crate) fn parse_linked_pr_timeline(
     issue: &serde_json::Value,
     issue_number: u64,
 ) -> Vec<LinkedPrSummary> {
-    let nodes = issue
+    let mut linked = LinkedPrAccumulator::default();
+    if let Some(nodes) = issue
         .get("timelineItems")
         .and_then(|v| v.get("nodes"))
         .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    let mut index: std::collections::BTreeMap<u64, usize> = std::collections::BTreeMap::new();
-    let mut out: Vec<LinkedPrSummary> = Vec::new();
-    for node in nodes {
-        let typename = node
-            .get("__typename")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        let (pr, mut will_close_target) = match typename {
-            "CrossReferencedEvent" => (
-                node.get("source"),
-                node.get("willCloseTarget")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false),
-            ),
-            "ConnectedEvent" => (node.get("subject"), true),
-            _ => (None, false),
-        };
-        let Some(pr) = pr else { continue };
-        // gwt merges fixes into develop (not the default branch), so GitHub
-        // reports willCloseTarget=false for every real fix PR (measured on
-        // #3222/#3213). The closing INTENT therefore also comes from closing
-        // keywords in the PR body targeting THIS issue (`Closes #N` — the gwt
-        // PR-body contract).
-        if !will_close_target {
-            if let Some(body) = pr.get("body").and_then(|v| v.as_str()) {
-                will_close_target = body_closes_issue(body, issue_number);
-            }
-        }
-        if pr.get("__typename").and_then(|v| v.as_str()) != Some("PullRequest") {
-            continue;
-        }
-        let Some(pr_number) = pr.get("number").and_then(serde_json::Value::as_u64) else {
-            continue;
-        };
-        let merged_at = pr
-            .get("mergedAt")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
-        if let Some(existing) = index.get(&pr_number) {
-            out[*existing].will_close_target |= will_close_target;
-            if out[*existing].merged_at.is_none() {
-                out[*existing].merged_at = merged_at;
-            }
-            continue;
-        }
-        index.insert(pr_number, out.len());
-        out.push(LinkedPrSummary {
-            number: pr_number,
-            will_close_target,
-            merged_at,
-            title: pr
-                .get("title")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            state: pr
-                .get("state")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            url: pr
-                .get("url")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-        });
+    {
+        linked.extend(nodes, issue_number);
     }
-    out
+    linked.prs
+}
+
+/// Retain summaries, not raw timeline nodes and PR bodies, between pages.
+/// The single-page parser uses the same first-occurrence/OR merge contract.
+#[derive(Default)]
+struct LinkedPrAccumulator {
+    index: std::collections::BTreeMap<u64, usize>,
+    prs: Vec<LinkedPrSummary>,
+}
+
+impl LinkedPrAccumulator {
+    fn extend(&mut self, nodes: &[serde_json::Value], issue_number: u64) {
+        for node in nodes {
+            let typename = node
+                .get("__typename")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let (pr, mut will_close_target) = match typename {
+                "CrossReferencedEvent" => (
+                    node.get("source"),
+                    node.get("willCloseTarget")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
+                ),
+                "ConnectedEvent" => (node.get("subject"), true),
+                _ => (None, false),
+            };
+            let Some(pr) = pr else { continue };
+            // gwt merges fixes into develop (not the default branch), so GitHub
+            // reports willCloseTarget=false for every real fix PR (measured on
+            // #3222/#3213). The closing INTENT therefore also comes from closing
+            // keywords in the PR body targeting THIS issue (`Closes #N` — the gwt
+            // PR-body contract).
+            if !will_close_target {
+                if let Some(body) = pr.get("body").and_then(|v| v.as_str()) {
+                    will_close_target = body_closes_issue(body, issue_number);
+                }
+            }
+            if pr.get("__typename").and_then(|v| v.as_str()) != Some("PullRequest") {
+                continue;
+            }
+            let Some(pr_number) = pr.get("number").and_then(serde_json::Value::as_u64) else {
+                continue;
+            };
+            let merged_at = pr
+                .get("mergedAt")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            if let Some(existing) = self.index.get(&pr_number) {
+                self.prs[*existing].will_close_target |= will_close_target;
+                if self.prs[*existing].merged_at.is_none() {
+                    self.prs[*existing].merged_at = merged_at;
+                }
+                continue;
+            }
+            self.index.insert(pr_number, self.prs.len());
+            self.prs.push(LinkedPrSummary {
+                number: pr_number,
+                will_close_target,
+                merged_at,
+                title: pr
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                state: pr
+                    .get("state")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                url: pr
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            });
+        }
+    }
 }
 
 /// GitHub closing keywords (close/closes/closed, fix/fixes/fixed,
@@ -16432,6 +16548,179 @@ command = "my-agent-cli"
     /// without a publish transport produces) the declaration is still recorded
     /// in the durable prefs and `issue.monitor.status` shows the row waiting.
     #[test]
+    fn typed_monitor_wait_fallback_retains_intake_subject_and_clear_tombstone() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = tempfile::tempdir().unwrap();
+        let (session, monitor, now) =
+            crate::issue_monitor_worker::tests::issue_3809_bound_activity_fixture(repo.path());
+        let path = crate::issue_monitor_prefs_path_for_repo_path(repo.path());
+        crate::save_issue_monitor_prefs(&path, &monitor.prefs()).unwrap();
+        record_monitor_wait_in_prefs(repo.path(), 3809, "CI", "checks finish", false, &now)
+            .unwrap();
+        let prefs = crate::load_issue_monitor_prefs(&path).unwrap();
+        let record = prefs
+            .autonomous_records
+            .iter()
+            .find(|record| record.issue_number == 3809)
+            .unwrap();
+        let subject = record.wait_control.as_ref().unwrap().subject.clone();
+        assert_eq!(subject.execution_identity.session_id, session.id);
+        record_monitor_wait_invalidation_in_prefs(repo.path(), 3809, "pm", "finished", &now)
+            .unwrap();
+        let invalidated = crate::load_issue_monitor_prefs(&path).unwrap();
+        let record = invalidated
+            .autonomous_records
+            .iter()
+            .find(|record| record.issue_number == 3809)
+            .unwrap();
+        assert_eq!(&record.wait_control.as_ref().unwrap().subject, &subject);
+        assert!(record.wait.as_ref().unwrap().invalidated.is_some());
+        let since = record.wait.as_ref().unwrap().since.clone();
+        let heartbeat_at = (chrono::DateTime::parse_from_rfc3339(&now).unwrap()
+            + chrono::Duration::seconds(1))
+        .to_rfc3339();
+        let declaration_at = (chrono::DateTime::parse_from_rfc3339(&now).unwrap()
+            + chrono::Duration::seconds(2))
+        .to_rfc3339();
+        let heartbeat_path = path.clone();
+        crate::cli::trusted_store::set_write_lease_acquired_hook(move || {
+            crate::try_mutate_issue_monitor_prefs_without_authority_fence(
+                &heartbeat_path,
+                |prefs| {
+                    let record = prefs
+                        .autonomous_records
+                        .iter_mut()
+                        .find(|record| record.issue_number == 3809)
+                        .unwrap();
+                    crate::issue_monitor::record_heartbeat_on_record(record, &heartbeat_at);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        });
+        record_monitor_wait_in_prefs(
+            repo.path(),
+            3809,
+            "fresh wait",
+            "new checks finish",
+            false,
+            &declaration_at,
+        )
+        .expect("a fresh re-declaration permits an unrelated heartbeat after its snapshot");
+        let redeclared = crate::load_issue_monitor_prefs(&path).unwrap();
+        let wait = redeclared
+            .autonomous_records
+            .iter()
+            .find(|record| record.issue_number == 3809)
+            .unwrap()
+            .wait
+            .as_ref()
+            .unwrap();
+        assert!(wait.invalidated.is_none());
+        assert_eq!(wait.since, since);
+        record_monitor_wait_in_prefs(repo.path(), 3809, "", "", true, &now).unwrap();
+        let cleared = crate::load_issue_monitor_prefs(&path).unwrap();
+        let record = cleared
+            .autonomous_records
+            .iter()
+            .find(|record| record.issue_number == 3809)
+            .unwrap();
+        assert!(record.wait.is_none());
+        assert_eq!(&record.wait_control.as_ref().unwrap().subject, &subject);
+        let before = std::fs::read(&path).unwrap();
+        let runtime_path =
+            gwt_agent::runtime_state_path(&gwt_core::paths::gwt_sessions_dir(), &session.id);
+        std::fs::remove_file(runtime_path).unwrap();
+        assert!(record_monitor_wait_in_prefs(
+            repo.path(),
+            3809,
+            "CI",
+            "checks finish",
+            false,
+            &now
+        )
+        .is_err());
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "unknown canonical runtime cannot downgrade a typed wait to legacy"
+        );
+    }
+
+    #[test]
+    fn issue_5876_wait_fallback_rejects_same_subject_changes_after_snapshot() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let repo = tempfile::tempdir().unwrap();
+        let (_, monitor, now) =
+            crate::issue_monitor_worker::tests::issue_3809_bound_activity_fixture(repo.path());
+        let path = crate::issue_monitor_prefs_path_for_repo_path(repo.path());
+        crate::save_issue_monitor_prefs(&path, &monitor.prefs()).unwrap();
+        for clear in [false, true] {
+            record_monitor_wait_in_prefs(repo.path(), 3809, "CI", "checks finish", false, &now)
+                .unwrap();
+            let committed = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let committed_in_hook = std::rc::Rc::clone(&committed);
+            let changed_path = path.clone();
+            let changed_at = now.clone();
+            // This owner lease is acquired after the fallback's prefs snapshot.
+            // Commit the intervening control before it observes the same native subject.
+            crate::cli::trusted_store::set_write_lease_acquired_hook(move || {
+                crate::try_mutate_issue_monitor_prefs_without_authority_fence(
+                    &changed_path,
+                    |prefs| {
+                        let record = prefs
+                            .autonomous_records
+                            .iter_mut()
+                            .find(|record| record.issue_number == 3809)
+                            .unwrap();
+                        let control = record.wait_control.clone();
+                        if clear {
+                            crate::clear_wait_on_record(record, &changed_at);
+                        } else {
+                            crate::invalidate_wait_on_record(record, "pm", "finished", &changed_at);
+                        }
+                        assert_eq!(record.wait_control, control, "the subject did not change");
+                        Ok(())
+                    },
+                )
+                .unwrap();
+                *committed_in_hook.borrow_mut() = std::fs::read(&changed_path).unwrap();
+            });
+            assert!(
+                record_monitor_wait_in_prefs(
+                    repo.path(),
+                    3809,
+                    "stale declaration",
+                    "old checks finish",
+                    false,
+                    &now,
+                )
+                .is_err(),
+                "a same-subject {} after the snapshot must refuse the stale declaration",
+                if clear { "clear" } else { "PM invalidation" }
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), *committed.borrow());
+            record_monitor_wait_in_prefs(
+                repo.path(),
+                3809,
+                "fresh wait",
+                "new checks",
+                false,
+                &now,
+            )
+            .expect("a fresh snapshot can re-declare after either control");
+        }
+    }
+
+    #[test]
     fn monitor_wait_records_the_declaration_durably_without_a_publish_transport() {
         use gwt_core::test_support::ScopedEnvVar;
 
@@ -17979,8 +18268,13 @@ command = "my-agent-cli"
             queries.push(query.to_string());
             assert!(query.contains("pageInfo { hasNextPage endCursor }"));
             let repository = if queries.len() == 1 {
+                let mut first = event(7, false);
+                first["source"]["title"] = serde_json::json!("first title");
+                first["source"]["url"] = serde_json::json!("first URL");
+                let mut empty_merge = event(8, true);
+                empty_merge["source"]["mergedAt"] = serde_json::json!("");
                 serde_json::json!({
-                    "i42": {"timelineItems": {"nodes": [event(7, false)],
+                    "i42": {"timelineItems": {"nodes": [first, empty_merge],
                         "pageInfo": {"hasNextPage": true, "endCursor": cursor}}},
                     "i43": {"timelineItems": {"nodes": [],
                         "pageInfo": {"hasNextPage": false, "endCursor": null}}}
@@ -17993,8 +18287,16 @@ command = "my-agent-cli"
                     "after: {}",
                     serde_json::to_string(cursor).unwrap()
                 )));
+                let mut later = event(7, false);
+                later["source"]["body"] = serde_json::json!("Fixes #42");
+                later["source"]["title"] = serde_json::json!("later title");
+                later["source"]["url"] = serde_json::json!("later URL");
+                later["source"]["state"] = serde_json::json!("MERGED");
+                later["source"]["mergedAt"] = serde_json::json!("2026-11-04T00:00:00Z");
+                let mut later_merge = event(8, true);
+                later_merge["source"]["mergedAt"] = serde_json::json!("2026-11-04T00:00:00Z");
                 serde_json::json!({"i42": {"timelineItems": {
-                    "nodes": [event(7, true), event(8, true)],
+                    "nodes": [later, later_merge],
                     "pageInfo": {"hasNextPage": false, "endCursor": null}
                 }}})
             };
@@ -18007,6 +18309,14 @@ command = "my-agent-cli"
             vec![7, 8]
         );
         assert!(linked[&42].iter().all(|pr| pr.will_close_target));
+        assert_eq!(linked[&42][0].title, "first title");
+        assert_eq!(linked[&42][0].url, "first URL");
+        assert_eq!(linked[&42][0].state, "OPEN");
+        assert_eq!(
+            linked[&42][0].merged_at.as_deref(),
+            Some("2026-11-04T00:00:00Z")
+        );
+        assert_eq!(linked[&42][1].merged_at.as_deref(), Some(""));
         assert!(linked[&43].is_empty());
 
         for cursor in [serde_json::Value::Null, serde_json::json!("unchanged")] {
@@ -18629,6 +18939,20 @@ command = "my-agent-cli"
         .unwrap();
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "registration-pm");
         let mut env = crate::cli::TestEnv::new(repo);
+        let continued_repo = env.repo_path().to_path_buf();
+        gwt_core::project_execution_policy::choose(
+            &continued_repo,
+            &gwt_core::project_execution_policy::ChoiceRequest {
+                operation_id: uuid::Uuid::new_v4().to_string(),
+                expected_revision: 0,
+                generation: 1,
+                choice: gwt_core::project_execution_policy::Choice::Continue,
+                consent_source_id: "explicit-test-choice".into(),
+                actor: "human".into(),
+                authorized_work_lineage: vec!["issue:3431".into()],
+            },
+        )
+        .unwrap();
         let error = run(
             &mut env,
             IssueCommand::CreateBody {
@@ -18670,6 +18994,29 @@ command = "my-agent-cli"
                 .filter(|call| call.starts_with("create_issue:"))
                 .count(),
             2
+        );
+        let created: Vec<u64> = env
+            .client
+            .call_log()
+            .iter()
+            .filter_map(|call| call.strip_prefix("create_issue:#")?.parse().ok())
+            .collect();
+        assert_eq!(created.len(), 2);
+        assert!(
+            crate::project_execution_policy::admission(
+                &continued_repo,
+                &[format!("issue:{}", created[0])]
+            )
+            .is_err(),
+            "an unrelated Issue is not a continued child"
+        );
+        assert!(
+            crate::project_execution_policy::admission(
+                &continued_repo,
+                &[format!("issue:{}", created[1])]
+            )
+            .is_ok(),
+            "typed PM child of the admitted parent remains runnable"
         );
     }
 

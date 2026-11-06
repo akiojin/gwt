@@ -106,7 +106,7 @@ test.describe("Agent window scrollback lifecycle", () => {
       await prepareClipboard(page);
       const errors = await openAgentsFixture(page, info.project.name);
       await setActiveAgentTab(page, id);
-      await emitTerminalText(page, id, numberedLines(provider, 240) + tracking);
+      await emitTerminalText(page, id, numberedLines(provider, 1200) + tracking);
       if (tracking) {
         const inputs = await terminalInputs(page, id);
         await agentTile(page, id).locator(".xterm-screen").click();
@@ -116,15 +116,23 @@ test.describe("Agent window scrollback lifecycle", () => {
 
       const check = async (phase: string) => {
         await waitForScrollableTerminal(page, id);
+        const metrics = await terminalScrollMetrics(page, id);
+        expect(metrics.bufferLength - metrics.rows, `${provider} ${phase} retains 1,000 history rows`)
+          .toBeGreaterThanOrEqual(1000);
         const container = id === "shell-1" ? agentTile(page, id).locator(".terminal-root") : agentTile(page, id);
         await expect(container, `${provider} ${phase} explains how to select text`).toHaveAttribute("title", /Shift\+drag.*Option\+drag/);
-        await expectWheelMovesScrollback(page, id, true);
+        // The 1,000-line wheel AC covers agent panes; Shell keeps native notch speed.
+        await expectWheelMovesScrollback(page, id, true, id === "shell-1" ? 1 : 1000);
         await expectDragCopiesRenderedRows(page, info, `${id}-${phase}`, id, Boolean(tracking));
       };
       await check("initial");
       await setActiveAgentTab(page, id === "agent-1" ? "agent-2" : "agent-1");
       await setActiveAgentTab(page, id);
       await check("tab-switch");
+
+      await page.setViewportSize({ width: 1280, height: 820 });
+      await check("resize");
+      await page.setViewportSize({ width: 1440, height: 900 });
 
       await page.getByRole("button", { name: "Split view", exact: true }).click();
       const right = page.getByRole("region", { name: "Right pane", exact: true });
@@ -143,9 +151,9 @@ test.describe("Agent window scrollback lifecycle", () => {
         await setActiveAgentTab(page, id);
       }
       await check("remount");
-      await emitTerminalSnapshot(page, id, numberedLines(`${provider} replay`, 240) + tracking);
+      await emitTerminalSnapshot(page, id, numberedLines(`${provider} replay`, 1200) + tracking);
       await expect.poll(() => page.evaluate(windowId => window.__gwtTerminalTestApi!.bufferText(windowId), id))
-        .toContain(`${provider} replay 240`);
+        .toContain(`${provider} replay 1200`);
       await check("snapshot");
 
       // The fixture backend persists the latest raw screen and replays it on a
@@ -153,12 +161,98 @@ test.describe("Agent window scrollback lifecycle", () => {
       await page.reload();
       await setActiveAgentTab(page, id);
       await expect.poll(() => page.evaluate(windowId => window.__gwtTerminalTestApi!.bufferText(windowId), id))
-        .toContain(`${provider} replay 240`);
+        .toContain(`${provider} replay 1200`);
       await check("reload");
       expect(errors, "zero console/page errors across host changes and reload").toEqual([]);
     });
   }
 });
+
+// SPEC #6476 T-005 (FR-002, AC-2 automated part): on a phone the terminal is
+// scrolled with a finger, not a wheel. A fullscreen agent has no scrollback for
+// xterm's native touch scrolling to move, so a vertical swipe must reach the
+// application exactly as the wheel does — PageUp/PageDown for agents that do
+// not track the mouse, wheel mouse reports for agents that do — while retained
+// history keeps xterm's own touch scrolling with no application input.
+test.describe("Agent window touch scroll on a phone viewport", () => {
+  test.use({
+    deviceScaleFactor: 1,
+    hasTouch: true,
+    viewport: { width: 390, height: 844 },
+  });
+
+  test("swipe sends PageUp/PageDown to a fullscreen agent that does not track the mouse", async ({ page }, info) => {
+    const errors = await openAgentsFixture(page, info.project.name);
+    await setActiveAgentTab(page, "agent-2");
+    await emitTerminalText(page, "agent-2", "\x1b[?1049h\x1b[Hfullscreen claude\r\n");
+    await expect.poll(() => terminalScrollMetrics(page, "agent-2")).toMatchObject({ hidden: false, baseY: 0 });
+
+    await page.evaluate(() => (document.activeElement as HTMLElement)?.blur());
+    const before = (await terminalInputs(page, "agent-2")).length;
+    await swipeTerminal(page, "agent-2", "down");
+    await expect.poll(async () => (await terminalInputs(page, "agent-2")).slice(before))
+      .toContain("\x1b[5~");
+    const afterUp = (await terminalInputs(page, "agent-2")).length;
+    await swipeTerminal(page, "agent-2", "up");
+    await expect.poll(async () => (await terminalInputs(page, "agent-2")).slice(afterUp))
+      .toContain("\x1b[6~");
+    await expect(page.locator(".xterm-helper-textarea:focus"),
+      "a swipe must not focus terminal input and summon the software keyboard").toHaveCount(0);
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+
+  test("swipe reaches a mouse-tracking fullscreen agent as wheel reports, never PageUp", async ({ page }, info) => {
+    const errors = await openAgentsFixture(page, info.project.name);
+    await emitTerminalText(page, "agent-1", "\x1b[?1049h\x1b[?1003h\x1b[?1006h\x1b[Hfullscreen codex\r\n");
+    await expect.poll(() => terminalScrollMetrics(page, "agent-1")).toMatchObject({ hidden: false, baseY: 0 });
+
+    const before = (await terminalInputs(page, "agent-1")).length;
+    await swipeTerminal(page, "agent-1", "down");
+    await expect.poll(async () => (await terminalInputs(page, "agent-1")).slice(before).join(""))
+      .toMatch(/\x1b\[<64;\d+;\d+M/);
+    expect((await terminalInputs(page, "agent-1")).slice(before), "mouse-tracking agents must not get PageUp")
+      .not.toContain("\x1b[5~");
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+
+  test("swipe over retained history scrolls the viewport without application input", async ({ page }, info) => {
+    const errors = await openAgentsFixture(page, info.project.name);
+    await setActiveAgentTab(page, "agent-2");
+    await emitTerminalText(page, "agent-2", numberedLines("touch-history", 240));
+    await waitForScrollableTerminal(page, "agent-2");
+    await scrollTerminalToBottom(page, "agent-2");
+    const before = await terminalScrollMetrics(page, "agent-2");
+    const inputsBefore = await terminalInputs(page, "agent-2");
+
+    await swipeTerminal(page, "agent-2", "down");
+    await expect.poll(async () => (await terminalScrollMetrics(page, "agent-2")).viewportY)
+      .toBeLessThan(before.viewportY);
+    expect(await terminalInputs(page, "agent-2"), "history swipe must not send PageUp or mouse reports")
+      .toEqual(inputsBefore);
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+});
+
+// A real (trusted) single-finger swipe through Chromium's input pipeline.
+// "down" moves the finger toward the bottom of the screen, which reveals
+// earlier output, like a wheel scrolled up.
+async function swipeTerminal(page: Page, windowId: string, direction: "up" | "down"): Promise<void> {
+  const box = await agentTile(page, windowId).locator(".xterm-screen").boundingBox();
+  expect(box).not.toBeNull();
+  const x = Math.round(box!.x + box!.width / 2);
+  const top = Math.round(box!.y + box!.height * 0.25);
+  const bottom = Math.round(box!.y + box!.height * 0.75);
+  const [from, to] = direction === "down" ? [top, bottom] : [bottom, top];
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y: from }] });
+  const steps = 10;
+  for (let step = 1; step <= steps; step += 1) {
+    const y = Math.round(from + ((to - from) * step) / steps);
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y }] });
+  }
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await cdp.detach();
+}
 
 async function prepareClipboard(page: Page): Promise<void> {
   if (liveBase) await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
@@ -279,7 +373,7 @@ async function expectPendingRefresh(
     .toBe(expected);
 }
 
-async function expectWheelMovesScrollback(page: Page, windowId: string, noApplicationInput = false): Promise<void> {
+async function expectWheelMovesScrollback(page: Page, windowId: string, noApplicationInput = false, minimumLines = 1): Promise<void> {
   await expect
     .poll(async () => {
       // A host move can finish fitting after the first reset. Establish the
@@ -297,14 +391,14 @@ async function expectWheelMovesScrollback(page: Page, windowId: string, noApplic
   expect(box).not.toBeNull();
   await page.mouse.move(Math.round(box!.x + box!.width / 2), Math.round(box!.y + box!.height / 2));
   const inputsBefore = noApplicationInput ? await terminalInputs(page, windowId) : [];
-  await page.mouse.wheel(0, -900);
+  await page.mouse.wheel(0, -Math.max(900, minimumLines * 32));
 
   await expect
     .poll(async () => {
       const after = await terminalScrollMetrics(page, windowId);
       return after.viewportY;
     })
-    .toBeLessThan(before.viewportY);
+    .toBeLessThanOrEqual(before.viewportY - minimumLines);
   if (noApplicationInput) {
     expect(await terminalInputs(page, windowId), "history wheel must not send mouse reports or PageUp/PageDown").toEqual(inputsBefore);
   }

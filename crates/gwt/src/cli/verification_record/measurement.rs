@@ -58,6 +58,66 @@ impl Evidence {
     }
 }
 
+fn environment_capture_requested(env: &[(String, String)], canonical_headed: bool) -> bool {
+    canonical_headed
+        || env.iter().any(|(key, _)| key == "GWT_VERIFY_TARGET_PIDS")
+        || env
+            .iter()
+            .rev()
+            .find(|(key, _)| key == "GWT_VERIFY_PERFORMANCE")
+            .is_some_and(|(_, value)| value == "1")
+}
+
+#[cfg(any(windows, test))]
+fn request_requires_measurement(input: &str) -> bool {
+    let Ok(request) = serde_json::from_str::<serde_json::Value>(input) else {
+        return false;
+    };
+    if request["operation"].as_str() != Some("verify.run") {
+        return false;
+    }
+    let Some(commands) = request["params"]["commands"].as_array() else {
+        return false;
+    };
+    commands
+        .iter()
+        .filter_map(|command| command.as_str())
+        .any(|command| {
+            let headed = request["params"]["headed_e2e_commands"]
+                .as_array()
+                .is_some_and(|selected| {
+                    selected.iter().any(|value| value.as_str() == Some(command))
+                });
+            super::split_command_line(command)
+                .ok()
+                .and_then(|args| super::take_env_assignments(args).ok())
+                .is_some_and(|(env, _)| environment_capture_requested(&env, headed))
+        })
+}
+
+/// Identify the existing ancestry rejection before selecting a runner. This
+/// does not certify an unknown GUI's Job or change the measurement guard.
+#[cfg(windows)]
+pub fn windows_recovery_reason(input: &str) -> Result<Option<String>, String> {
+    if !request_requires_measurement(input) {
+        return Ok(None);
+    }
+    let mut system = System::new()
+        .map_err(|error| format!("measurement process observation unavailable: {error}"))?;
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().without_tasks(),
+    );
+    let pid = std::process::id();
+    let caps = gwt_core::process_tree::job_cpu::observe(pid)?;
+    match validate_gwt_ancestors(&system, pid, &caps) {
+        Ok(()) => Ok(None),
+        Err(reason) if reason.contains("unregistered ancestor gwt PID") => Ok(Some(reason)),
+        Err(reason) => Err(reason),
+    }
+}
+
 pub(super) struct Capture {
     evidence: Evidence,
     stop: Option<mpsc::Sender<()>>,
@@ -72,14 +132,7 @@ impl Capture {
             .iter()
             .rev()
             .find(|(key, _)| key == "GWT_VERIFY_TARGET_PIDS");
-        if !canonical_headed
-            && nominated.is_none()
-            && !env
-                .iter()
-                .rev()
-                .find(|(key, _)| key == "GWT_VERIFY_PERFORMANCE")
-                .is_some_and(|(_, value)| value == "1")
-        {
+        if !environment_capture_requested(&env, canonical_headed) {
             return None;
         }
         let mut evidence = Evidence {
@@ -305,7 +358,7 @@ fn sample(
             }
         };
         #[cfg(windows)]
-        let (caps, unregistered_current) = {
+        let (caps, unregistered_target) = {
             let mut caps = caps;
             let unknown = if pid == std::process::id() {
                 match gwt_core::process_tree::job_cpu::observe_current() {
@@ -322,6 +375,15 @@ fn sample(
                         unknown
                     }
                     Err(error) => {
+                        unknown.get_or_insert(error);
+                        false
+                    }
+                }
+            } else if target.required_uncapped {
+                match required_target_has_unregistered_job(pid, &caps) {
+                    Ok(unregistered) => unregistered,
+                    Err(error) => {
+                        target.job_cap_error.get_or_insert(error.clone());
                         unknown.get_or_insert(error);
                         false
                     }
@@ -353,8 +415,10 @@ fn sample(
             target.job_caps = caps;
         }
         #[cfg(windows)]
-        if unregistered_current {
-            unknown.get_or_insert_with(|| "runner Job ancestry is unregistered; restart gwt with the updated runtime or start from an uncapped environment, then rerun the registered matrix".into());
+        if unregistered_target {
+            unknown.get_or_insert_with(|| format!(
+                "PID {pid} has unregistered Job ancestry; use a measurement target whose uncapped Jobs can be observed, then rerun the registered matrix"
+            ));
         }
         if seeds.contains(&pid) {
             if let Err(reason) = validate_gwt_ancestors(&system, pid, &target.job_caps) {
@@ -381,6 +445,15 @@ fn descends_from(system: &System, pid: u32, seeds: &[u32]) -> bool {
         next = system.process(pid).and_then(|process| process.parent());
     }
     false
+}
+
+#[cfg(windows)]
+fn required_target_has_unregistered_job(pid: u32, caps: &[JobCap]) -> Result<bool, String> {
+    if caps.is_empty() {
+        gwt_core::process_tree::job_cpu::is_in_job(pid)
+    } else {
+        Ok(false)
+    }
 }
 
 fn validate_gwt_ancestors(system: &System, pid: u32, caps: &[JobCap]) -> Result<(), String> {
@@ -437,6 +510,105 @@ fn validate_gwt_ancestors_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_only_routes_requests_that_use_the_measurement_boundary() {
+        let request = |command: &str| {
+            serde_json::json!({"operation":"verify.run", "params":{"commands":[command]}})
+                .to_string()
+        };
+        assert!(request_requires_measurement(&request(
+            "GWT_VERIFY_PERFORMANCE=1 git --version"
+        )));
+        assert!(request_requires_measurement(&request(
+            "GWT_VERIFY_TARGET_PIDS=123 git --version"
+        )));
+        assert!(!request_requires_measurement(&request(
+            "echo GWT_VERIFY_PERFORMANCE=1"
+        )));
+        assert!(!request_requires_measurement(&request(
+            "GWT_VERIFY_PERFORMANCE=1 GWT_VERIFY_PERFORMANCE=0 git --version"
+        )));
+        assert!(!request_requires_measurement(
+            r#"{"operation":"verify.plan","params":{"commands":["GWT_VERIFY_PERFORMANCE=1 git --version"]}}"#
+        ));
+        assert!(request_requires_measurement(
+            r#"{"operation":"verify.run","params":{"commands":["playwright test"],"headed_e2e_commands":["playwright test"]}}"#
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "native fixture stays suspended until its private Job is assigned"
+    )]
+    fn required_nominated_target_rejects_an_unregistered_native_job() {
+        use gwt_core::{process_tree::WindowsJobObject, test_support::ScopedGwtHome};
+        use std::process::Stdio;
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let mut command = gwt_core::process::hidden_command("cmd.exe");
+        command
+            .args(["/C", "pause"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        WindowsJobObject::configure_suspended(&mut command);
+        let mut job = WindowsJobObject::new().unwrap();
+        let mut child = command.spawn().unwrap();
+        if let Err(error) = job.assign_and_resume(child.id()) {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("assign nominated fixture Job: {error}");
+        }
+        let registered = WindowsJobObject::attach_running(child.id()).unwrap();
+        let caps = gwt_core::process_tree::job_cpu::observe(child.id()).unwrap();
+        assert_eq!(caps.len(), 1);
+        assert!(caps[0].hard_cap_percent.is_none());
+        assert!(gwt_core::process_tree::job_cpu::is_in_job(child.id()).unwrap());
+        assert_eq!(
+            required_target_has_unregistered_job(child.id(), &caps),
+            Ok(false)
+        );
+        for entry in
+            std::fs::read_dir(gwt_core::paths::gwt_runtime_dir().join("windows-pane-jobs")).unwrap()
+        {
+            std::fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+        assert!(gwt_core::process_tree::job_cpu::observe(child.id())
+            .unwrap()
+            .is_empty());
+        let mut evidence = Evidence {
+            status: "ready".into(),
+            reason: None,
+            admission_wait_ms: 0,
+            cap_relief_wait_ms: 0,
+            raw_exit_code: None,
+            targets: Vec::new(),
+        };
+        let reason = sample(&mut evidence, &[child.id()], Duration::ZERO, true).unwrap_err();
+        let target = evidence
+            .targets
+            .iter()
+            .find(|target| target.pid == child.id())
+            .unwrap();
+        assert!(target.required_uncapped);
+        assert!(target.job_caps.is_empty());
+        assert!(reason.contains(&format!("PID {}", child.id())), "{reason}");
+        assert!(reason.contains("unregistered Job ancestry"), "{reason}");
+        assert!(reason.contains("rerun the registered matrix"), "{reason}");
+        drop(registered);
+        drop(job);
+        child.wait().unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn nominated_target_fails_closed_on_native_query_error() {
+        let reason = required_target_has_unregistered_job(0, &[]).unwrap_err();
+        assert!(reason.starts_with("query required target 0:"), "{reason}");
+    }
 
     #[test]
     fn ancestry_ignores_recycled_parent_before_gwt_registration() {

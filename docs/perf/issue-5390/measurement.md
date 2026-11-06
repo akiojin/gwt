@@ -622,3 +622,122 @@ This is test coverage for the delivered FIFO reader, with no product change,
 new helper, timer or environment mutation. The original timeout cause (LF6),
 raw-node residency measurement (LF7), parent AC-1/2/3 and installed/real-fleet
 performance remain unproven. No CPU, RSS or elapsed-time improvement is claimed.
+
+### Queued linked-PR payload residency (LF7, 2026-11-04)
+
+FIFO initial-page fairness can leave several incomplete chunks queued at once.
+The shipped reader retained each page's raw timeline nodes, including PR bodies,
+until that Issue completed. The single-page parser also cloned those nodes before
+parsing. The correction moves the existing event parser into one incremental
+accumulator shared by the single-page and bulk paths. Each incomplete Issue now
+retains summaries and their number-to-position index in its original chunk.
+
+The finite native probe in [measure-linked-pr-residency.py](measure-linked-pr-residency.py)
+extracts the actual query functions, bulk reader and parser from the preserved
+baseline and current source. Only the queue sampling call is inserted; closed
+deadline/budget/clock stubs and a finite fake transport replace unrelated runtime
+services. [linked-pr-residency.json](linked-pr-residency.json) records source,
+extraction, probe, fixture and cached dependency hashes plus every queue sample.
+It does not exercise the installed Host, real GitHub transport or deadline/budget
+integration.
+
+The identical fixture has 50 Issues in two chunks, 100 initial events per Issue,
+ten unique PRs per Issue and a 4,096-byte body per initial event. Every Issue has
+one continuation page. After the first two queries, both chunks are incomplete:
+
+| Queued payload at the peak | Baseline | Shared accumulator |
+| --- | ---: | ---: |
+| Raw timeline nodes | 5,000 | 0 |
+| Raw PR body bytes | 20,480,000 | 0 |
+| Raw JSON string-value bytes | 20,863,200 | 0 |
+| Summaries / number-index entries | 0 / 0 | 500 / 500 |
+| Summary string bytes | 0 | 22,820 |
+
+The zero-queued-raw-body acceptance failed on the baseline with
+`actual=20480000` and passed on the correction. Both runs completed four queries;
+query hashes, 50-Issue observer order/content and all 500 returned summaries
+matched exactly. Each Issue was published only after its continuation completed.
+The original positive and failed-continuation controls remain in the regular
+test suite. Before this change, the related linked-PR/closing selection passed
+all 15 tests. The existing pagination fixture now also checks first metadata,
+body-derived closing intent, later merge time and retention of the first
+`Some("")` merge value across pages.
+The same 15-test selection passed after the correction; no additional test
+matrix or fixture helper was added.
+
+To reproduce, preserve the pre-change `crates/gwt/src/cli/issue.rs` from
+`dee5fbd0cc662cfdb76cbc2dcddfb4f8f495caa0`, then run the script with
+`--baseline <preserved-file> --current crates/gwt/src/cli/issue.rs
+--deps-dir target/debug/deps --output <report.json>`. It uses native `rustc` and
+an existing `serde_json` rlib; it downloads nothing and prints the retained probe
+directory. Use a separate output report during verification.
+
+The counters measure UTF-8 string lengths and entry counts in queued payloads.
+They exclude the active stdout/parsed response, fixture storage, JSON keys,
+cursor state, numeric storage, capacities and allocator overhead. They are not
+RSS, total allocation or elapsed-time measurements. Summaries still grow with
+unique PRs. Parsing bodies now occurs per page, including pages whose later
+continuation might fail; this can move CPU work earlier. No timeout, retry,
+query, scheduler, public API or completion authority changed. LF6's original
+coverage timeout and parent AC-1/2/3, installed and real-fleet performance remain
+unproven. Final-head canonical verification and CI are separate delivery evidence.
+
+### Coverage timeout: finite concurrent replay (LF6, 2026-11-04)
+
+The original [coverage shard 3 failure](https://github.com/akiojin/gwt/actions/runs/41736787341/job/126267934629)
+passed 2,073 tests and timed out the last-settings runtime-target case at
+120.011 seconds. Its log predates the nine fixed phase markers and contains
+neither a stopping phase nor a stack. All other cases finished before that
+timeout; the fixture's successful Git setup does not identify the later wait.
+
+Read-only inspection identified initial Monitor scan idle, launch preparation
+completion, Close and owner shutdown as possible waits. Close has a 120-second
+request timeout; the surrounding waits can also outlive the test deadline.
+No particular wait or deadlock was demonstrated.
+
+[Replay evidence](coverage-timeout-replay.json) records two bounded experiments
+using the preserved instrumented Linux artifact, unchanged, with a fresh private
+`gwt-%8m.profraw` pool for each experiment. Each invocation selected exactly one
+fully qualified test; all exit codes and result counts were checked.
+
+| Experiment | Cases | Observed process duration | Result |
+| --- | ---: | --- | --- |
+| Same last-settings case, four concurrent processes, two waves | 8 | 2.315–2.414 s | 8 passed |
+| The 16 same-module cases extracted from the original shard, one concurrent wave | 16 | 0.566–2.528 s | 16 passed |
+
+No process reached the 20-second slow-capture threshold, so no stopping stack
+was collected. The artifact has debug line information and predates LF5; its
+exact producing source SHA was not independently reconstructed. These are
+artifact replay results, not current-source verification. Neither experiment
+recreates the original debug-zero build or the complete 2,074-test mixed shard.
+Hashes, case inventory and raw report digests are retained in the linked JSON;
+raw logs remain in the local investigation directory.
+
+LF6 remains unresolved. The next useful evidence is the last delivered phase
+marker and an owned stopping stack on recurrence. Passing replays do not justify
+a timeout extension or a speculative product change. This slice changes only
+the investigation record; parent AC-1/2/3, installed-runtime and real-fleet
+CPU/RSS acceptance remain unproven.
+
+### Delivered child acceptance reconciliation (2026-11-06)
+
+A fresh read found both children CLOSED with all three child AC checked, while
+the parent tasks still listed their delivered work as incomplete. Independent
+read-only review and four ancestry checks against fetched `origin/develop`
+(`957e4c7fc3e94399ca0b131f3986a9572da3809e`) confirmed the following delivery:
+
+| Child | Parent tasks reconciled | Merged PR | Producing source | Merge commit |
+| --- | --- | --- | --- | --- |
+| [Issue #5500](https://github.com/akiojin/gwt/issues/5500) | T-5500-1 through T-5500-5 | [PR #5548](https://github.com/akiojin/gwt/pull/5548) | `2d1cc738c247` | `c065348e45cd` |
+| [Issue #5597](https://github.com/akiojin/gwt/issues/5597) | T-5597-1 through T-5597-3 | [PR #5635](https://github.com/akiojin/gwt/pull/5635) | `0beb14986077` | `2c59f8e86803` |
+
+The [capacity measurement](../issue-5500/measurement.md) retains the single
+sampler-thread comparison and its workload limits. The
+[periodic notification evidence](../issue-5597/README.md) distinguishes the
+deployed baseline from the isolated headed after run; it is not a matched-fleet
+comparison. Their PRs retain the original canonical and dark/light evidence.
+This reconciliation adds no current-runtime measurement or implementation.
+
+Only those eight parent task checkboxes change. Parent AC-1/2/3, LF6's original
+timeout cause, installed-runtime, Mac, real-fleet and whole-GUI CPU/RSS
+acceptance remain unproven. Active child investigations retain their owners.

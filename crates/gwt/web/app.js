@@ -1,3 +1,4 @@
+import { createProjectExecutionPolicyModel, createProjectViewReadiness } from "/project-execution-policy-model.js";
 import { createCloseProjectController } from "/close-project-confirm-modal.js";
 import { createUiStateStore } from "/ui-state-store.js";
 import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleModel, createAgentSwitchModel, selectWorksTelemetry } from "/agent-activity-model.js";
@@ -111,7 +112,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         attachContainerResizeReflow,
         attachHostResizeReflow,
         classifyProjectWindowVisibility,
-        clearTerminalOutputBeforeSnapshot,
         createTerminalFitScheduler,
         createTerminalSnapshotWriteCoordinator,
         createTerminalViewportRefreshScheduler,
@@ -238,7 +238,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       const appVersionLabel = document.getElementById("app-version");
 
       const decoderMap = new Map();
-      const pendingOutputMap = new Map();
       const pendingSnapshotMap = new Map();
       const detailMap = new Map();
       const windowRuntimeStateMap = new Map();
@@ -249,6 +248,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       let terminalFitScheduler = null;
       let terminalViewportRefreshScheduler = null;
       const terminalOutputBatcher = createTerminalOutputBatcher({
+        // The queue retains encoded strings; limits count their decoded RAW
+        // bytes, including writes awaiting xterm's completion callback.
+        measureBytes: (chunk) => chunk.length / 4 * 3
+          - (chunk.endsWith("==") ? 2 : chunk.endsWith("=") ? 1 : 0),
+        projectForWindow: (id) => projectWindowContextById(id)?.tab.project_key ?? socketProjectKey,
         mergeChunks: (chunks, windowId) => {
           const decoder = decoderMap.get(windowId);
           if (!decoder) {
@@ -261,15 +265,30 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         write: (windowId, text, onWritten) => {
           const runtime = terminalMap.get(windowId);
           if (!runtime) {
+            onWritten();
             return;
           }
+          runtime.hasOutput = true;
           runtime.terminal.write(text, onWritten);
+        },
+        onError: (error, windowId, projectKey) => {
+          if (!socketProjectKey || projectKey !== socketProjectKey
+            || socket?.readyState !== WebSocket.OPEN) return;
+          // The batch runs after receive() returns, so recover here rather than
+          // letting the dispatcher continue an already torn terminal stream.
+          connectSocket(true);
+          renderDegradationBanner.report({ source: "terminal:output", error });
         },
         // Reports hides the PM renderer, but its VT buffer must keep consuming
         // output at the current grid. Replaying it only after reveal can apply
         // old-width wraps and relative erases to an already resized terminal.
         // Hidden Agents likewise feed the buffer used by Issue previews.
-        canWrite: (windowId) => pmChatViews.has(windowId) || (worksHost && worksSurface?.contains(windowId)) || canRefreshTerminalViewport(windowId),
+        canWrite: (windowId) => {
+          const runtime = terminalMap.get(windowId);
+          return runtime?.isReady === true
+            && runtime.snapshotWriteCoordinator?.shouldDeferOutput() !== true
+            && (pmChatViews.has(windowId) || (worksHost && worksSurface?.contains(windowId)) || canRefreshTerminalViewport(windowId));
+        },
         onFlush: (windowId) => {
           const runtime = terminalMap.get(windowId);
           if (runtime?.snapshotWriteCoordinator?.shouldDeferOutput() === true) {
@@ -423,6 +442,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // route, never from in-page selection, so reconnects rebind the same
       // Project and workspace actions never change the URL.
       const routeProjectKey = parseFrontendRoute(window.location.pathname).projectKey;
+      const projectExecutionPolicy = createProjectExecutionPolicyModel(routeProjectKey);
+      const projectViewReadiness = createProjectViewReadiness({ document, projectKey: routeProjectKey, send });
       const { model: agentActivityModel, applyAgentActivitySnapshot, clearAgentActivity } = createAgentActivityModel(routeProjectKey);
       const { model: rosterModel, applyAgentRosterSnapshot, applyAgentRosterError, applyAgentRosterUsage,
         editAgentMemberName, retryAgentMemberName, clearAgentRosterRename } = createAgentRosterModel(routeProjectKey, {
@@ -902,7 +923,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         }
         // These explicit writes belong to this live connection.
         // Never replay an unacknowledged write after reconnect.
-        if ((message.kind === "agent_switch" && message.action.kind !== "read") ||
+        if (["confirm_close_project", "cancel_close_project", "preview_close_project", "project_view_ready"].includes(message.kind) ||
+            (message.kind === "agent_switch" && message.action.kind !== "read") ||
             (message.kind === "agent_roster" && message.action.kind === "rename") ||
             (message.kind === "get_hook_doctor" && message.repair === true)) {
           if (!socket || socket.readyState !== WebSocket.OPEN || socketProjectKey !== activeProjectKey()) return "unavailable";
@@ -1118,6 +1140,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       updateRestartImpactModel.subscribe(impact => impact, impact => {
         if (impact) updateCtaController.handleUpdateRestartImpact(impact);
       });
+      const updateCheckResultModel = createUiStateStore(null);
+      updateCheckResultModel.subscribe(event => event, event => {
+        if (event) updateCtaController.handleUpdateCheckResult(event);
+      });
 
       // SPEC-2359 W-17 (FR-399): explicit full-screen overlay while the
       // WebSocket bridge is down — a tiny status-strip label alone reads as
@@ -1283,8 +1309,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           onResync: (reason) => {
             if (ownGeneration !== socketReceiveDispatcherGeneration) return;
             // A native receive backlog precedes snapshots on the old socket.
-            // Replace the project transport on foreground recovery to discard it.
-            if ((reason === "visible" || reason === "overflow") && socketProjectKey) connectSocket(true);
+            // Replace the transport so a torn stream cannot precede recovery.
+            if ((reason === "visible" || reason === "overflow" || reason === "receive-error") && socketProjectKey) connectSocket(true);
             else requestSocketSnapshots();
           },
           // Issue #3365 — a receive() failure keeps the event stream alive but
@@ -1297,10 +1323,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           },
         });
         projectPageMetadata.resetConnection();
+        projectViewReadiness.connectionLost();
         // A restarted backend has its own restore gate, even when this page survives.
         startupAutoResumeReadySent = false;
         setConnectionState(true);
         send({ kind: "frontend_ready" });
+        closeProjectController.reconnect();
         if (socketProjectKey) projectPageMetadata.reportAttention();
         recoveryCenterController?.reconnect();
         for (let index = 0; index < pendingMessages.length;) {
@@ -1317,8 +1345,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         // operations it still shows as running.
         if (recoverSnapshots === true) resyncSocketSurfaces();
         else if (socketProjectKey) {
-          send({ kind: "get_system_settings" });
-          resyncHookDoctor();
+          resyncSettings();
+          // frontend_ready omits these snapshots; release reads lost with the old client.
+          const ids = (activeWorkspace()?.windows || []).map(entry => entry.id);
+          resyncBoardLogs(ids);
+          resyncProfile(ids);
+          resyncProjectIndexSearch(ids);
         }
         syncRunningBranchCleanups();
         requestVisiblePmReports(true);
@@ -1396,6 +1428,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
 
       function handleSocketClose(recoverSnapshots = false) {
         closeProjectController.connectionLost();
+        projectViewReadiness.connectionLost();
+        projectExecutionPolicy.connectionLost();
         socketReceiveDispatcherGeneration += 1;
         socketReceiveDispatcher?.dispose?.();
         socketReceiveDispatcher = null;
@@ -1779,6 +1813,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       function receiveHubState(hub) {
+        const execution = hub.projects?.find(project => project.project_key === routeProjectKey)?.execution;
+        if (execution) projectExecutionPolicy.applyStatus(execution);
         hubCatalog = hub;
         renderAppState({ ...appState, app_version: hub.app_version });
       }
@@ -1809,7 +1845,16 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
               renderedRuntimeStatusKeys.delete(windowId);
             }
             // Rebind before rendering can emit requests for the new project.
-            connectSocket();
+            // A streamed prefix may precede an old catalog in the dispatcher.
+            // Reclaim unmounted orphans, then recover uncertain bytes through
+            // hydration rather than continuing across a silently dropped gap.
+            const discardedRaw = terminalOutputBatcher.prune(new Set([...currentWindowIds, ...windowMap.keys()]));
+            for (const id of discardedRaw) {
+              pendingSnapshotMap.delete(id);
+              renderedTerminalPackets.delete(id);
+              removePmWindowState(id);
+            }
+            connectSocket(discardedRaw.length > 0 && socket?.readyState === WebSocket.OPEN && socketProjectKey === activeProjectKey());
             if (incomingRuntimeStatus) {
               const wasReconciling = reconcilingWindowCatalog;
               reconcilingWindowCatalog = true;
@@ -1946,7 +1991,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       const closeProjectController = createCloseProjectController({
-        document, send,
+        document, send, projectKey: routeProjectKey,
         onClosed: (projectKey) => {
           if (projectKey !== routeProjectKey) return;
           routeProjectMissing = true;
@@ -2003,7 +2048,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // SPEC-2008 Phase 26.A regression fix (Issue #2832): completeInitialFitHandshake
       // must verify the container has a real layout box before flipping
       // `isReady` true, otherwise fit resolves against a 0-sized parent
-      // and the deferredWrites flush into xterm's default 80×24 grid.
+      // and queued output reaches xterm's default 80×24 grid.
       // Bound retries even when only the 100ms readiness fallback advances.
       // A later reveal can retry a window whose layout was unavailable.
       const HANDSHAKE_RETRY_LIMIT = 60;
@@ -2364,7 +2409,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           // (completeInitialFitHandshake bails when canRefreshTerminalViewport
           // is false). The hidden → visible transition is the first chance
           // to drain the pending buffers; complete the handshake here so
-          // subsequent writeOutput calls stop hitting deferredWrites.
+          // the bounded output queue can start draining.
           if (activeRuntime.isReady === false) {
             completeInitialFitHandshake(windowId);
           }
@@ -2608,7 +2653,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         return item;
       }
 
-      function applyStatus(windowId, status, detail) {
+      function applyStatus(windowId, status, detail, source = "snapshot", retryable = false) {
         return traceMeasure(
           UI_TRACE_EVENT.applyStatus,
           { window_id: windowId, status },
@@ -2635,6 +2680,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             if (detail) {
               detailMap.set(windowId, detail);
             } else if (
+              (source === "terminal_status" && runtimeState === "error") ||
               runtimeState === "running" ||
               runtimeState === "starting" ||
               runtimeState === "idle" ||
@@ -2651,6 +2697,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
                 runtimeState,
                 windowData,
                 statusDetail: effectiveDetail,
+                projectKey: windowContext?.tab.project_key || windowContext?.tab.id,
+                source,
+                retryable,
               });
             }
             const nextRuntimeStatusKey = windowRuntimeStatusRenderKey(
@@ -2991,11 +3040,13 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           window,
           isApplicationScrollFallbackEnabled: () =>
             isAgentWindowPreset(workspaceWindowById(windowId)?.preset),
-          sendTerminalInput: (data) => {
+          sendTerminalInput: (data, { focus = true } = {}) => {
             if (readOnly || terminalMap.get(windowId)?.isReady !== true) {
               return;
             }
-            terminal.focus();
+            if (focus) {
+              terminal.focus();
+            }
             send({ kind: "terminal_input", id: windowId, data });
           },
         });
@@ -3151,15 +3202,14 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           // `isReady` flips to `true` AFTER the first
           // runTerminalActivationSequence has resolved real dimensions,
           // i.e. after xterm has reached its real cols/rows. Until then,
-          // all writeOutput / replaceTerminalSnapshot calls are captured
-          // in deferredWrites / pendingSnapshotMap so the bytes are not
+          // live output stays in the bounded batcher and snapshots in
+          // pendingSnapshotMap so the bytes are not
           // written against xterm's default 80x24 grid. Without this,
           // the early Claude Code TUI bytes (which were generated for
           // the backend's spawn cols/rows) land at the wrong grid size
           // and stay layout-locked until the next manual resize,
           // producing the post-launch corruption symptom.
           isReady: false,
-          deferredWrites: [],
           snapshotWriteCoordinator: null,
           hasOutput: false,
           // Issue #2937: bounds the focus-path reflow retry in
@@ -3193,17 +3243,20 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           installLiveDecoder: (decoder) => decoderMap.set(windowId, decoder),
           onSnapshotFailureSettled: () => {
             decoderMap.set(windowId, new TextDecoder());
-            flushDeferredTerminalWrites(windowId, runtime);
           },
           onLatestSnapshotWritten: () => {
             try {
+              terminalOutputBatcher.finishSnapshot(windowId);
               forceTerminalViewportRefresh(windowId, { shouldPersistGeometry: true });
             } finally {
-              flushDeferredTerminalWrites(windowId, runtime);
+              terminalOutputBatcher.schedulePending(windowId);
             }
           },
           onError: (error, stage) => {
             console.warn(`terminal snapshot ${stage} failed for ${windowId}`, error);
+            if (["take", "decode", "reset", "barrier-write", "snapshot-write"].includes(stage)) {
+              terminalOutputBatcher.invalidate(windowId, error);
+            }
           },
         });
         // SPEC-2008 Phase 26.A / FR-057: schedule the initial fit
@@ -3216,21 +3269,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         scheduleInitialFitHandshake(windowId);
 
         return runtime;
-      }
-
-      function flushDeferredTerminalWrites(windowId, runtime) {
-        if (
-          terminalMap.get(windowId) !== runtime ||
-          runtime.snapshotWriteCoordinator?.shouldDeferOutput() === true ||
-          runtime.deferredWrites.length === 0
-        ) {
-          return;
-        }
-        const flush = runtime.deferredWrites;
-        runtime.deferredWrites = [];
-        for (const chunk of flush) {
-          writeOutput(windowId, chunk);
-        }
       }
 
       // SPEC-2008 Phase 26.A / FR-057: run the initial fit + replay
@@ -3261,7 +3299,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         // state `fitAddon.fit()` resolves cell-grid dimensions against a
         // 0-sized container and silently leaves the terminal at the xterm
         // default 80×24 grid. The previous code then flipped
-        // `isReady = true` and flushed `deferredWrites` into that broken
+        // `isReady = true` and flushed pending output into that broken
         // grid, producing the post-launch corruption that resize/move
         // recovered from. Re-schedule via rAF until the container has a
         // non-zero box, with an attempt ceiling so a perma-hidden window
@@ -3292,18 +3330,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           runtime.snapshotWriteCoordinator.start();
         }
 
-        const pending = pendingOutputMap.get(windowId);
-        if (pending?.length) {
-          for (const chunk of pending) {
-            writeOutput(windowId, chunk);
-          }
-          pendingOutputMap.delete(windowId);
-        }
-
-        // Flush any terminal_output WebSocket bytes that arrived
-        // between createTerminalRuntime returning and this handshake
-        // firing.
-        flushDeferredTerminalWrites(windowId, runtime);
+        terminalOutputBatcher.schedulePending(windowId);
       }
 
       function writeOutput(windowId, base64) {
@@ -3312,27 +3339,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           { window_id: windowId, bytes_base64: base64 ? base64.length : 0 },
           () => {
             const runtime = terminalMap.get(windowId);
-            if (!runtime) {
-              const queue = pendingOutputMap.get(windowId) || [];
-              queue.push(base64);
-              pendingOutputMap.set(windowId, queue);
-              return;
-            }
-            if (base64) {
+            if (base64 && runtime) {
               runtime.hasOutput = true;
             }
-            // SPEC-2008 Phase 26.A / FR-057: if the terminal has not yet
-            // completed its initial fit, hold the chunk in the runtime's
-            // deferred queue. The createTerminalRuntime rAF flushes this
-            // queue after the activation sequence so writes land at the
-            // real cols/rows instead of xterm's default 80×24 grid.
-            if (
-              runtime.isReady === false ||
-              runtime.snapshotWriteCoordinator?.shouldDeferOutput() === true
-            ) {
-              runtime.deferredWrites.push(base64);
-              return;
-            }
+            // One bounded queue covers absent/unfit/hidden runtimes and
+            // snapshot barriers. canWrite keeps bytes behind the real grid.
             terminalOutputBatcher.enqueue(windowId, base64);
             if (!canRefreshTerminalViewport(windowId)) {
               markTerminalViewportRefreshPending(windowId);
@@ -3343,12 +3354,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
 
       function replaceTerminalSnapshot(windowId, base64) {
         const runtime = terminalMap.get(windowId);
-        clearTerminalOutputBeforeSnapshot({
-          windowId,
-          runtime,
-          pendingOutputMap,
-          clearBatchedOutput: (id) => terminalOutputBatcher.clear(id),
-        });
+        terminalOutputBatcher.beginSnapshot(windowId);
         pendingSnapshotMap.set(windowId, base64);
         if (base64 && runtime) {
           runtime.hasOutput = true;
@@ -3759,7 +3765,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         const level = flavor === "error" ? "error" : flavor === "done" ? "done" : "warn";
         const timeoutMs = flavor === "error" ? 0 : flavor === "done" ? 8_000 : 14_000;
         const alert = {
-          id: `attention-${notice.windowId}`,
+          id: notice.id,
           level,
           title: notice.title || "Agent attention",
           message: notice.body || "",
@@ -3769,7 +3775,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         };
         // FR-011: recorded regardless of the toast; the history row keeps the
         // jump-to (Sc 7) and survives the window's toast being dismissed.
-        notificationCenter.record({ kind: "attention", ...alert });
+        if (flavor === "error") {
+          notificationCenter.recordSurfaceNotice({ key: notice.id, ...alert });
+        } else {
+          notificationCenter.record({ kind: "attention", ...alert });
+        }
         alertsToasts.push(alert);
       }
 
@@ -3947,6 +3957,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         document,
         send,
         confirm: (message) => window.confirm(message),
+        executionModel: projectExecutionPolicy.model, projectTitle: () => activeProjectTab()?.title || routeProjectKey,
       });
       pmSettingsPanel.bindEntryPoints({ document });
 
@@ -4647,7 +4658,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
                       return next;
                     });
                     renderedIssueWindowHeaderKeys.delete(windowId);
-                    pendingOutputMap.delete(windowId);
                     pendingSnapshotMap.delete(windowId);
                     terminalOutputBatcher.clear(windowId);
                     disposeProfileWindow(windowId);
@@ -4774,7 +4784,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       const terminalStatusModel = createUiStateStore(null);
       terminalStatusModel.subscribe(state => state, state => {
         if (!state) return;
-        applyStatus(state.id, state.status, state.detail);
+        applyStatus(state.id, state.status, state.detail, state.kind, state.retryable);
         if (state.kind === "terminal_status") {
           startupMetrics.onTerminalStatus(state.id, state.status, terminalMap.get(state.id));
         }
@@ -4834,6 +4844,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // SPEC-2356 Anshin Addendum (FR-040): the always-on, in-app counterpart.
       const agentAttentionToaster = createAgentAttentionToaster({
         showToast: showAttentionToast,
+        dismissToast: (id) => {
+          alertsToasts.dismiss(id);
+          notificationCenter.resolveError(id);
+        },
       });
 
       const workspaceWindowManager = Object.freeze({
@@ -4978,6 +4992,13 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         updatePmLauncher(activeWorkspace());
       });
 
+      const projectViewChallengeModel = createUiStateStore(null);
+      projectViewChallengeModel.subscribe(value => value, challenge => {
+        if (challenge?.project_key !== routeProjectKey) return;
+        projectExecutionPolicy.bindGeneration(challenge.generation);
+        projectViewReadiness.challenge(challenge);
+      });
+
       const workspaceStateModel = createUiStateStore(null);
       workspaceStateModel.subscribe(state => state, snapshot => {
         if (!snapshot) return;
@@ -4987,6 +5008,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         // Keep launcher, pending navigation and startup ACKs in render order.
         updatePmLauncher(activeWorkspace());
         resolvePendingWindowFrames();
+        projectViewReadiness.rendered();
         sendStartupAutoResumeReady();
         startupMetrics.onWorkspaceRendered();
       });
@@ -4998,6 +5020,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           return;
         }
         switch (event.kind) {
+          case "project_view_challenge":
+            projectViewChallengeModel.update(() => event);
+            break;
+          case "project_execution_status":
+            projectExecutionPolicy.applyStatus(event.status);
+            break;
           case "hub_state": {
             hubCatalogModel.update(() => event.hub);
             break;
@@ -5131,6 +5159,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           case "terminal_status":
             terminalStatusModel.update(() => ({
               kind: event.kind, id: event.id, status: event.status, detail: event.detail,
+              retryable: event.retryable,
             }));
             break;
           case "attachment_progress":
@@ -5282,9 +5311,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             }));
             break;
           case "update_state":
-            if (event.state === "available") {
+            if (event.state === "available" || event.state === "up_to_date") {
               applyUpdateState(event);
             }
+            break;
+          case "update_check_result":
+            updateCheckResultModel.update(() => event);
             break;
           case "update_progress":
             applyUpdateProgress({
@@ -5573,7 +5605,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
               if (worksSurface.isVisible(id)) scheduleInitialFitHandshake(id);
             }
           }
-          requestAnimationFrame(() => {
+          scheduleTerminalInitialFit(() => {
             if (!worksHost) return;
             for (const id of terminalMap.keys()) {
               if (worksSurface.isVisible(id)) {
@@ -5646,7 +5678,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         openSurface("works");
         return worksSurface.openWork(live);
       }
-      agentsSurface = createAgentsSurface({ document, rosterModel, scheduleModel, switchModel, activityModel: agentActivityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
+      agentsSurface = createAgentsSurface({ document, executionModel: projectExecutionPolicy.model,
+        projectTitle: () => activeProjectTab()?.title || routeProjectKey, rosterModel, scheduleModel, switchModel, activityModel: agentActivityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
         onRenameMember: editAgentMemberName,
         onRetryName: retryAgentMemberName,
         onAddMember: (agentId, name) => {
@@ -5829,6 +5862,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           if (socketReceiveDispatcher) socketReceiveDispatcher.resume();
           else if (socketProjectKey) connectSocket(true);
         }
+        projectViewReadiness.visible();
         requestVisiblePmReports(true);
         rearmVisibleTerminalViewportRefreshes();
         resumeKnowledgeEventRefresh();

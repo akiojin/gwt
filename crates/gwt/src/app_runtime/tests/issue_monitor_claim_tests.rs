@@ -5919,6 +5919,16 @@ fn assert_expired_launch_ack_cleanup(
         launch_payload::OwnerLaunchMetadata,
         test_support::OwnerLaunchStage,
     };
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // This verifies ownership across ACKs, not the daemon's wall-clock latency.
+    let _control_budget = ScopedEnvVar::set(
+        "GWT_TEST_BUDGET_DURABLE_ISSUE_MONITOR_CONTROL_MS",
+        gwt_core::deadline_budget::HANG_GUARD
+            .as_millis()
+            .to_string(),
+    );
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
     let (root, owner, delivery_id) =
@@ -6051,6 +6061,10 @@ fn assert_expired_launch_ack_cleanup(
             .await
             .unwrap()
     });
+    assert!(
+        captured.session.is_some(),
+        "the paused launch must have materialized its Session before changing Monitor state"
+    );
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&root);
     let expired = if disabled_monitor {
         gwt::daemon_publisher::publish_durable_issue_monitor_control(
@@ -7501,6 +7515,14 @@ fn durable_issue_monitor_delivery_preserves_live_materializer_and_replays_after_
             assert!(waiting_since.elapsed() < gwt_core::deadline_budget::HANG_GUARD);
             thread::sleep(Duration::from_millis(100));
         }
+        assert_eq!(
+            gwt::project_execution_policy::observation(&repo)
+                .unwrap()
+                .unwrap()
+                .host_pid,
+            std::process::id(),
+            "the physical materializer preserves its controller's actual Project view"
+        );
         let client = owner_fixture_block_on(ProjectRuntimeClient::from_current_project(
             &repo,
             &gwt_core::paths::gwt_home(),

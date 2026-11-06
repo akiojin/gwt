@@ -16,7 +16,7 @@ const members = [
   { member_id: "m2", name: "Two", enabled: true, provider: null, model: null, created_at: null, issue_count: null, landed_count: null, active_seconds: null, tokens: null, history: [] },
 ];
 const current = { window_id: "one", session_id: "s1", runtime_incarnation: 4, issue_number: 4777, is_pm: false };
-async function fixture({ onOpenWork = () => {}, onContinueSavedWork = () => {}, isContinuePending, schedule, switching } = {}) {
+async function fixture({ onOpenWork = () => {}, onContinueSavedWork = () => {}, isContinuePending, schedule, switching, executionModel } = {}) {
   const { document, window } = parseHTML("<main></main>");
   // linkedom does not track focus; keep that browser state local to this fixture.
   let activeElement = null;
@@ -34,7 +34,7 @@ async function fixture({ onOpenWork = () => {}, onContinueSavedWork = () => {}, 
   const supportedAgentsModel = createUiStateStore({ agents: [{ id: "codex", name: "Codex" }, { id: "claude", name: "Claude Code" }] }, options);
   const customAgentsModel = createUiStateStore({ catalog: { loaded: true, agents: [{ id: "custom-cli", display_name: "Custom CLI" }] } }, options);
   const opened = [], rested = [], added = [], reassigned = [], refreshed = [], switched = [], saved = [], continued = [];
-  const surface = createAgentsSurface({ document, rosterModel, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel, scheduleModel, switchModel, onRenameMember: rosterController.editAgentMemberName, onRetryName: rosterController.retryAgentMemberName, isContinuePending, onContinueSavedWork: workId => { continued.push(workId); onContinueSavedWork(workId); }, onSwitch: action => { switched.push(action); switchModel.update(state => ({ ...state, pending: action })); }, onOpenSavedWork: intent => saved.push(intent), onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: (tool, name) => { added.push({ tool, name }); rosterModel.update(state => ({ ...state, error: null })); }, onRestMember: id => rested.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
+  const surface = createAgentsSurface({ document, executionModel, projectTitle: "Alpha", rosterModel, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel, scheduleModel, switchModel, onRenameMember: rosterController.editAgentMemberName, onRetryName: rosterController.retryAgentMemberName, isContinuePending, onContinueSavedWork: workId => { continued.push(workId); onContinueSavedWork(workId); }, onSwitch: action => { switched.push(action); switchModel.update(state => ({ ...state, pending: action })); }, onOpenSavedWork: intent => saved.push(intent), onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: (tool, name) => { added.push({ tool, name }); rosterModel.update(state => ({ ...state, error: null })); }, onRestMember: id => rested.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
   for (const node of surface.element.querySelectorAll("select, input")) node.focus = () => { activeElement = node; };
   document.querySelector("main").append(surface.element);
   const flush = () => { for (const fn of [...frames]) { frames.delete(fn); fn(); } };
@@ -622,4 +622,16 @@ test("Agents registers an explicit name with its selected catalog tool and prese
   f.rosterModel.update(state => ({ ...state, revision: state.revision + 1, error: null,
     members: [...state.members, { member_id: "retry", name: "Cedar", enabled: true }] })); f.flush();
   assert.equal(name.value, "", "retry success clears the submitted draft after unrelated activity redraw");
+});
+
+
+test("Agents labels its project execution and opens the existing shared PM editor", async () => {
+  const { createProjectExecutionPolicyModel } = await import('../project-execution-policy-model.js');
+  const policy = createProjectExecutionPolicyModel('alpha');
+  const f = await fixture({ executionModel: policy.model });
+  assert.match(f.surface.element.querySelector('[data-project-execution-status]')?.textContent || '', /Alpha.*Unknown/);
+  let request = null; f.document.addEventListener('settings:open', event => { request = event.detail; });
+  [...f.surface.element.querySelectorAll('button')].find(button => button.textContent === 'Project Manager settings').click();
+  assert.deepEqual(request, { target: 'project-manager', surface_owner: 'pm' });
+  assert.deepEqual(f.added, []); f.surface.dispose();
 });

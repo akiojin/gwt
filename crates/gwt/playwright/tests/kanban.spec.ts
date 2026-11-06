@@ -8,6 +8,7 @@
 import { expect, test } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { withNativeHiddenPage } from "./_helpers/native-chromium";
 
 test("Issue #3165: Open Monitor is pointer and keyboard navigation only", async ({ page }, info) => {
   const errors: string[] = [];
@@ -427,7 +428,7 @@ test.describe("Issue Bridge load recovery", () => {
     await page.screenshot({ path: info.outputPath("knowledge-phase-completion.png") });
   });
 
-  test("Issue #5395: projection snapshots update Related Work and hidden event bursts reload once on reveal", async ({ page }, testInfo) => {
+  test("Issue #5395: projection snapshots update Related Work and hidden event bursts reload once on reveal", async ({ page, playwright }, testInfo) => {
     test.setTimeout(60_000);
     const errors: string[] = [];
     page.on("pageerror", error => errors.push(error.message));
@@ -437,7 +438,7 @@ test.describe("Issue Bridge load recovery", () => {
     if (!liveBase) await installEmbeddedRoutes(page);
     await installIssueBridgeBackend(page, { includeRelatedWork: true, theme });
     // With browser-check, every asset is served by the fresh checkout process.
-    await page.goto(liveBase ? new URL("p/0123456789abcdef", liveBase).href : APP_URL);
+    await page.goto(liveBase ? new URL("/p/0123456789abcdef", liveBase).href : APP_URL);
     await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(5);
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
     const loads = () => page.evaluate(() => window.__knowledgeLoadMessages
@@ -462,6 +463,124 @@ test.describe("Issue Bridge load recovery", () => {
     {
       await page.locator('.op-rail__surface[data-surface="settings"]').click();
       await expect(page.locator(".surface-knowledge")).toBeHidden();
+      const observe = async ({ work, nativeHidden }) => {
+        const surface = document.querySelector(".surface-knowledge");
+        const active = document.activeElement;
+        const documentHiddenBefore = document.hidden;
+        const documentFocusedBefore = document.hasFocus();
+        const title = nativeHidden ? "Native hidden snapshot" : "Hidden snapshot";
+        const raf = window.requestAnimationFrame;
+        let focusEvents = 0;
+        let windowFocusEvents = 0;
+        let visibilityChanges = 0;
+        const onFocus = () => { focusEvents++; };
+        const onWindowFocus = () => { windowFocusEvents++; };
+        const onVisibility = () => { visibilityChanges++; };
+        document.addEventListener("focusin", onFocus);
+        window.addEventListener("focus", onWindowFocus);
+        document.addEventListener("visibilitychange", onVisibility);
+        window.requestAnimationFrame = () => 0;
+        const started = performance.now();
+        const socket = window.__issueBridgeFixtureSocket;
+        let receivedAt: number | null = null;
+        let onMessage: ((event: MessageEvent) => void) | undefined;
+        try {
+          return await new Promise<any>(resolve => {
+            const current = () => ({
+              title: surface.querySelector(".knowledge-related-work-title")?.textContent,
+              status: surface.querySelector(".knowledge-related-status")?.textContent,
+            });
+            const finish = () => {
+              clearTimeout(timer);
+              observer.disconnect();
+              const renderedAt = performance.now();
+              const emitToDomMs = renderedAt - started;
+              resolve({ ...current(), elapsedMs: emitToDomMs, emitToDomMs,
+                emittedAt: started, receivedAt, renderedAt,
+                receiptToDomMs: receivedAt === null ? null : renderedAt - receivedAt, focusEvents,
+                windowFocusEvents, visibilityChanges,
+                retainedFocus: document.activeElement === active, targetUnfocused: !surface.contains(active),
+                documentHiddenBefore, documentFocusedBefore,
+                documentHiddenAfter: document.hidden, documentFocused: document.hasFocus(),
+                hidden: surface.getClientRects().length === 0 });
+            };
+            const check = () => { if (current().title === title && current().status === "idle") finish(); };
+            const observer = new MutationObserver(check);
+            let timer = setTimeout(finish, 5000);
+            onMessage = event => {
+              const payload = JSON.parse(event.data);
+              if (receivedAt !== null || payload.kind !== "active_work_projection"
+                || !payload.projection?.active_works?.some(item => item.id === work.id && item.title === title)) return;
+              // The fixture creates this event inside its asynchronous emit
+              // callback. Its timestamp includes all app handlers, but not the
+              // fixture's pre-receipt timer wait in a background tab.
+              receivedAt = event.timeStamp;
+              clearTimeout(timer);
+              timer = setTimeout(finish, 1000);
+              check();
+            };
+            socket.addEventListener("message", onMessage);
+            observer.observe(surface, { childList: true, subtree: true, characterData: true });
+            socket.emit({ kind: "active_work_projection",
+              projection: { active_works: [{ ...work, title, status_category: "idle" }] } });
+            check();
+          });
+        } finally {
+          window.requestAnimationFrame = raf;
+          document.removeEventListener("focusin", onFocus);
+          window.removeEventListener("focus", onWindowFocus);
+          document.removeEventListener("visibilitychange", onVisibility);
+          if (onMessage) socket.removeEventListener("message", onMessage);
+        }
+      };
+      // Native attention is measured with browser-check's live asset server.
+      // Self-contained runs retain the original CSS-hidden coverage.
+      for (const nativeHidden of testInfo.project.use.headless === false && liveBase ? [false, true] : [false]) {
+        const local = nativeHidden
+          ? await withNativeHiddenPage(playwright.chromium, testInfo, async nativePage => {
+            await installIssueBridgeBackend(nativePage, { includeRelatedWork: true, theme });
+            await nativePage.goto(new URL("/p/0123456789abcdef", liveBase).href);
+            await expect.poll(() => nativePage.evaluate(() => document.documentElement.dataset.theme)).toBe(theme);
+            await expect.poll(() => nativePage.evaluate(() =>
+              document.querySelectorAll(".surface-knowledge .knowledge-row").length)).toBe(5);
+            const beforeNativeAssociation = await nativePage.evaluate(() => window.__knowledgeLoadMessages
+              .filter(message => message.kind === "load_knowledge_bridge").length);
+            await nativePage.evaluate(work => window.__issueBridgeFixtureSocket.emit({
+              kind: "active_work_projection", projection: { active_works: [work] },
+            }), work);
+            await expect.poll(() => nativePage.evaluate(() => window.__knowledgeLoadMessages
+              .filter(message => message.kind === "load_knowledge_bridge").length)).toBe(beforeNativeAssociation + 1);
+            await nativePage.evaluate(() => document.querySelector(".knowledge-row[data-issue-number='3096']").click());
+            await expect.poll(() => nativePage.evaluate(() =>
+              document.querySelector(".knowledge-related-work-title")?.getClientRects().length > 0)).toBe(true);
+            await nativePage.evaluate(() => document.querySelector('.op-rail__surface[data-surface="settings"]').click());
+            await expect.poll(() => nativePage.evaluate(() =>
+              document.querySelector(".surface-knowledge").getClientRects().length)).toBe(0);
+          }, observe, { work, nativeHidden })
+          : await page.evaluate(observe, { work, nativeHidden });
+        await testInfo.attach(nativeHidden ? "native-hidden-related-work.json" : "inactive-related-work.json", {
+          body: JSON.stringify(local, null, 2), contentType: "application/json",
+        });
+        expect(local.title).toBe(nativeHidden ? "Native hidden snapshot" : "Hidden snapshot");
+        expect(local.status).toBe("idle");
+        expect(Number.isFinite(local.receivedAt)).toBe(true);
+        expect(local.receivedAt).toBeGreaterThanOrEqual(local.emittedAt);
+        expect(local.receiptToDomMs).toBeGreaterThanOrEqual(0);
+        expect(local.receiptToDomMs).toBeLessThanOrEqual(1000);
+        if (!nativeHidden) expect(local.elapsedMs).toBeLessThanOrEqual(1000);
+        expect(local.hidden).toBe(true);
+        expect(local.targetUnfocused).toBe(true);
+        expect(local.focusEvents).toBe(0);
+        expect(local.retainedFocus).toBe(true);
+        if (nativeHidden) {
+          expect(local.documentHiddenBefore).toBe(true);
+          expect(local.documentFocusedBefore).toBe(false);
+          expect(local.documentHiddenAfter).toBe(true);
+          expect(local.documentFocused).toBe(false);
+          expect(local.windowFocusEvents).toBe(0);
+          expect(local.visibilityChanges).toBe(0);
+        }
+      }
       const beforeHidden = await loads();
       await page.evaluate(() => {
         for (let agent = 0; agent < 8; agent++) {

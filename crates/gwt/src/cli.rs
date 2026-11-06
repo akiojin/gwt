@@ -51,6 +51,7 @@ mod plan;
 mod pm;
 pub mod pm_authorization;
 mod pr;
+mod project_execution_policy;
 mod provider_reset;
 pub(crate) mod register;
 mod release;

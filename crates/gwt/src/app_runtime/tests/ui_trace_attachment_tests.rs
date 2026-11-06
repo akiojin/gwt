@@ -1306,6 +1306,7 @@ fn app_runtime_agent_failed_ack_runs_ui_finalize_without_a_local_write() {
                 reviewed_sha: None,
                 review_passed: None,
                 wait: None,
+                wait_control: None,
                 needs_human_kind: None,
                 steering: None,
                 review_dispatch_hold: None,

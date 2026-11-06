@@ -338,6 +338,10 @@ function usageProviderLabel(provider) {
 
 function usageSummaryPercent(account) {
   const percentages = (account.windows || [])
+    .filter(
+      (window) => account.provider !== "claude_code" ||
+        window.kind === "five_hour" || window.kind === "weekly",
+    )
     .map((window) => window.used_percent)
     .filter(
       (percent) =>

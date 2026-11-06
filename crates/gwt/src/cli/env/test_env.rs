@@ -33,6 +33,13 @@ pub struct TargetIssueCreateCall {
 }
 
 pub struct TestEnv {
+    pub diagnostic_repository: Option<(String, String)>,
+    pub diagnostic_context: Option<serde_json::Value>,
+    pub diagnostic_runs: HashMap<u64, serde_json::Value>,
+    pub diagnostic_artifacts: HashMap<u64, Vec<u8>>,
+    pub diagnostic_dispatches: Vec<serde_json::Map<String, serde_json::Value>>,
+    pub diagnostic_dispatch_results:
+        std::collections::VecDeque<io::Result<gwt_github::client::http::DiagnosticDispatchAck>>,
     pub release_policy_context_hook:
         Option<Box<dyn FnMut() -> io::Result<crate::cli::ReleasePolicyContext> + Send>>,
     pub release_policy_contexts:
@@ -109,6 +116,12 @@ impl TestEnv {
     pub fn new(cache_root: PathBuf) -> Self {
         let repo_path = cache_root.clone();
         TestEnv {
+            diagnostic_repository: None,
+            diagnostic_context: None,
+            diagnostic_runs: Default::default(),
+            diagnostic_artifacts: Default::default(),
+            diagnostic_dispatches: Default::default(),
+            diagnostic_dispatch_results: Default::default(),
             release_policy_context_hook: None,
             release_policy_contexts: Default::default(),
             client: FakeIssueClient::new(),
@@ -647,7 +660,37 @@ impl CliEnv for TestEnv {
     }
 
     fn github_repository(&self) -> io::Result<(String, String)> {
+        if let Some(repository) = &self.diagnostic_repository {
+            return Ok(repository.clone());
+        }
         Ok(("owner".into(), "repo".into()))
+    }
+    fn diagnostic_workflow_context(&mut self) -> io::Result<serde_json::Value> {
+        self.diagnostic_context
+            .clone()
+            .ok_or_else(super::super::actions::diagnostic::unavailable)
+    }
+    fn diagnostic_run_snapshot(&mut self, run_id: u64) -> io::Result<serde_json::Value> {
+        self.diagnostic_runs
+            .get(&run_id)
+            .cloned()
+            .ok_or_else(super::super::actions::diagnostic::unavailable)
+    }
+    fn diagnostic_artifact(&mut self, _run_id: u64, artifact_id: u64) -> io::Result<Vec<u8>> {
+        self.diagnostic_artifacts
+            .get(&artifact_id)
+            .cloned()
+            .ok_or_else(super::super::actions::diagnostic::unavailable)
+    }
+    fn dispatch_diagnostic_workflow(
+        &mut self,
+        _git_ref: &str,
+        inputs: &serde_json::Map<String, serde_json::Value>,
+    ) -> io::Result<gwt_github::client::http::DiagnosticDispatchAck> {
+        self.diagnostic_dispatches.push(inputs.clone());
+        self.diagnostic_dispatch_results
+            .pop_front()
+            .unwrap_or_else(|| Err(super::super::actions::diagnostic::unavailable()))
     }
     fn release_policy_context(&mut self) -> io::Result<crate::cli::ReleasePolicyContext> {
         if let Some(hook) = &mut self.release_policy_context_hook {
