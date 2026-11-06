@@ -15,6 +15,8 @@
 //! front door's endpoint-slot handling entirely rather than by giving it a
 //! second liveness definition.
 
+pub mod windows_recovery;
+
 fn resolve_username(whoami_value: Option<&str>, env_value: Option<&str>) -> String {
     whoami_value
         .map(str::trim)
@@ -195,6 +197,32 @@ pub fn is_descendant_of(pid: u32, ancestor: u32) -> Result<bool, sysinfo::Error>
         current = parent;
     }
     Ok(false)
+}
+
+/// Runtime callers include the exact process, ordinary descendants, and a
+/// Windows recovery worker positively linked by its original caller's Job.
+pub fn is_runtime_descendant_of(pid: u32, ancestor: u32) -> bool {
+    checked_runtime_descendant_of(pid, ancestor, windows_recovery::capture_source())
+        .unwrap_or(false)
+}
+
+/// Keep uncertainty distinct from unrelated ancestry so revocation callers can
+/// deny on an unavailable proof, using the same captured source as admission.
+pub fn checked_runtime_descendant_of(
+    pid: u32,
+    ancestor: u32,
+    source: Option<&std::ffi::OsStr>,
+) -> std::io::Result<bool> {
+    if pid == 0 || ancestor == 0 {
+        return Ok(false);
+    }
+    if pid == ancestor || is_descendant_of(pid, ancestor).map_err(std::io::Error::other)? {
+        return Ok(true);
+    }
+    match source {
+        Some(source) => windows_recovery::checked_recovered_descendant_of(pid, ancestor, source),
+        None => Ok(false),
+    }
 }
 
 /// Return the start identity of one host process incarnation.
