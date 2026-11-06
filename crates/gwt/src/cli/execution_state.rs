@@ -17691,11 +17691,15 @@ fn run_impl<E: CliEnv>(
             if let Ok(session) = gwt_agent::Session::load(
                 &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
             ) {
-                crate::session_launch::record_named_issue_activity(
+                if let Err(error) = crate::session_launch::record_named_issue_activity(
                     env.client(),
                     &session,
                     crate::session_launch::NamedIssueActivity::Completed,
-                )?;
+                ) {
+                    out.push_str(&format!(
+                        "execution: warning — named Issue completion history could not be recorded: {error}\n"
+                    ));
+                }
             }
         }
     }
@@ -34792,6 +34796,15 @@ exit 1
                     },
                     ExecutionControlStatus::Active,
                 );
+                gwt_agent::update_session(
+                    &gwt_core::paths::gwt_sessions_dir(),
+                    "sess-op",
+                    |session| {
+                        session.agent_name = Some("completion-fixture".into());
+                        Ok(())
+                    },
+                )
+                .unwrap();
                 // This test exercises completion, not the managed start preflight.
                 // Starting without a Host/Work is correctly rejected; seed the fixture.
                 save_build_state(dir.path(), "sess-op", Some(3248), true);
@@ -34806,8 +34819,27 @@ exit 1
                 );
                 save_covering_evidence(dir.path(), "sess-op", false);
 
-                let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
+                let mut env = TestEnv::new(dir.path().to_path_buf());
+                let issue = gwt_github::IssueNumber(3248);
+                env.client.seed(gwt_github::IssueSnapshot {
+                    number: issue,
+                    author_login: Some("akiojin".into()),
+                    title: "completion fixture".into(),
+                    body: String::new(),
+                    labels: vec![],
+                    state: gwt_github::IssueState::Open,
+                    updated_at: gwt_github::UpdatedAt::new("2026-11-06T00:00:00Z"),
+                    comments: vec![],
+                });
+                env.client.fail_create_comment_after(0);
+                let (code, out) =
+                    run_collect(&mut env, CliCommand::Execution(ExecutionCommand::Complete))
+                        .expect("completed execution must survive named history write failure");
                 assert_eq!(code, 0, "{out}");
+                assert!(
+                    out.contains("warning") && out.contains("injected create_comment failure"),
+                    "{out}"
+                );
                 assert_eq!(
                     load(dir.path()).unwrap().unwrap().status,
                     ExecutionControlStatus::Completed
@@ -34822,6 +34854,31 @@ exit 1
                 let completed_bytes = record_contents(dir.path()).unwrap();
                 let build_path = gwt_core::skill_state::state_path(dir.path(), "build-spec");
                 let build_bytes = fs::read(&build_path).unwrap();
+                env.client.fail_next_fetch(gwt_github::ApiError::Unexpected(
+                    "named history fetch unavailable".into(),
+                ));
+                let (code, out) =
+                    run_collect(&mut env, CliCommand::Execution(ExecutionCommand::Complete))
+                        .expect("completed replay must survive named history read failure");
+                assert_eq!(code, 0, "{out}");
+                assert!(
+                    out.contains("warning") && out.contains("named history fetch unavailable"),
+                    "{out}"
+                );
+                assert_eq!(record_contents(dir.path()).unwrap(), completed_bytes);
+                assert_eq!(fs::read(&build_path).unwrap(), build_bytes);
+                assert!(env.client.comments(issue).is_empty());
+                env.client.fail_create_comment_after(1);
+                for _ in 0..2 {
+                    let (code, out) =
+                        run_collect(&mut env, CliCommand::Execution(ExecutionCommand::Complete))
+                            .unwrap();
+                    assert_eq!(code, 0, "{out}");
+                    assert!(!out.contains("warning"), "{out}");
+                    assert_eq!(record_contents(dir.path()).unwrap(), completed_bytes);
+                    assert_eq!(fs::read(&build_path).unwrap(), build_bytes);
+                }
+                assert_eq!(env.client.comments(issue).len(), 1);
                 let mut env = TestEnv::new(dir.path().to_path_buf());
                 let (code, out) = run_collect(
                     &mut env,
