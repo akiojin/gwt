@@ -1022,6 +1022,9 @@ fn pm_worktree_gwt_pm_guidance_is_regenerated_when_absent_or_tampered() {
     assert!(
         original_contract.contains("`expected_inventory_sha256`")
             && original_contract.contains("`candidate_chunk`")
+            && original_contract.contains("`pm.request_tasks.capture`")
+            && original_contract.contains("`native_turns`")
+            && original_contract.contains("Never infer native identity from candidate text")
             && original_contract.contains("Candidates are not authenticated sources"),
         "materialized guidance must preserve candidate discovery, recovery and authority boundaries"
     );

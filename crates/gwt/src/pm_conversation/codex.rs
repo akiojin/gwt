@@ -22,6 +22,13 @@ pub(super) fn message(value: &Value) -> Result<Option<PmConversationMessage>, &'
     if value["type"] != "response_item" || payload["type"] != "message" {
         return Ok(None);
     }
+    if [value, payload].iter().any(|record| {
+        record["origin"]["kind"]
+            .as_str()
+            .is_some_and(|kind| kind != "human")
+    }) {
+        return Ok(None);
+    }
     let (role, block_type) = match payload["role"].as_str() {
         Some("user") => (PmConversationRole::User, "input_text"),
         Some("assistant") => (PmConversationRole::Assistant, "output_text"),
