@@ -1,8 +1,9 @@
 # Issue #6743: Windows idle CPU
 
-本資料は調査途中の証跡。R5 の直接 shipping Dark 600 秒は GUI / daemon の
-CPU 閾値を満たした。pushed source に対する最新 canonical / uncapped 検証でも環境拒否（Issue #6735）が
-未解消であり、全 AC 完了、Ready PR、develop 配送はまだ完了していない。
+本資料は各測定時点の証跡。R5 の直接 shipping Dark 600 秒は GUI / daemon の
+CPU 閾値を満たした。下記の環境拒否は当時の結果として保持する。
+Issue #6735 の回復機能は PR #6762 で配送され、現在の作業ブランチにも取り込み済み。
+全 AC の完了は、最終 HEAD の fresh canonical 検証と develop 配送の確認で判定する。
 
 分類は gwt runtime の性能機能。開始時の fetch 後、HEAD と
 origin/develop は `bcf777ed432df9fd96dc5dd9c13d01ec859d7ea2` で一致し、
@@ -396,3 +397,20 @@ embedded driver source HEAD と対象 HEAD の完全一致が必要なため、�
 Issue #6743 と親 #5390 は OPEN、AC は unchecked、PR/CI/merge は未実施。
 coverage は未測定（PR 未作成）。outer shell 除外後の gwt-core+gwt 90% と他 domain 80% の
 必須 CI gate を未達と判定したものではない。
+
+## 2026-11-06 の配送再開
+
+サチが fetch 後の `origin/develop` と比較した時点で、HEAD
+`dbbff3c1054d48a2c28fe63df7a08d52b2a232bb` の固有 6 commit は未配信だった。
+既存の runtime 修正を追加実装せず維持し、同 checkout の正規 worker 回復と
+元 caller の `hook.doctor` broker を使って検証・配送する。
+前回の canonical 記録 `vrr-78632491ca37496bbfd19462f58a81ab` は Debug の
+headed dark/light 各 1 PASS と関連テストを含む 17 commands PASS の後、
+Release build 中の記録で止まっており、全 matrix PASS としては扱わない。
+
+独立した読み取り専用差分レビューでは blocking 指摘はなかった。
+fresh な最終結果、PR、必須 CI の scoped coverage、merge と base 包含の証明は
+Issue #6743 と配送 PR に記録する。branch 上の source や旧測定値だけを根拠に
+AC を完了したり Issue を閉じたりしない。
+
+User Verification Result: n/a (autonomous)
