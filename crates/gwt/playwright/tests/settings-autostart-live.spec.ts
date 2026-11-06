@@ -18,6 +18,76 @@ test.describe("Autostart Settings (isolated live backend)", () => {
     });
   });
 
+  test("ordinary reconnect recovers Settings reads while preserving unsaved inputs", async ({ page }, info) => {
+    await withLiveGwtBackendLock(BASE, info, async () => {
+      const errors: string[] = [];
+      const requests: string[] = [];
+      let lostReply = false;
+      let recovered: { enabled: boolean } | undefined;
+      page.on("pageerror", error => errors.push(error.message));
+      page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+      const theme = info.project.name.endsWith("light") ? "light" : "dark";
+      await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+      await page.routeWebSocket(/\/ws(?:\?|$)/, socket => {
+        const server = socket.connectToServer();
+        socket.onMessage(message => {
+          const request = typeof message === "string" ? JSON.parse(message) : null;
+          if (request?.kind) requests.push(request.kind);
+          server.send(message);
+        });
+        server.onMessage(message => {
+          const reply = typeof message === "string" ? JSON.parse(message) : null;
+          if (reply?.kind === "autostart_status") {
+            if (!lostReply) { lostReply = true; return; }
+            recovered = reply;
+          }
+          // Show the provider draft controls without saving remote configuration.
+          if (reply?.kind === "system_settings") socket.send(JSON.stringify({ ...reply, board_provider: "slack" }));
+          else socket.send(message);
+        });
+      });
+      await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+      await openLiveGwtProject(page, PROJECT);
+      await page.bringToFront();
+      await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "system" } })));
+      const settings = page.locator('.workspace-window[data-preset="settings"]');
+      const status = settings.locator('[data-role="autostart-settings-status"]');
+      const toggle = settings.locator('input[id$="-settings-system-autostart"]');
+      const client = settings.getByLabel("Client ID", { exact: true });
+      const port = settings.getByLabel("OAuth callback port", { exact: true });
+      await expect.poll(() => lostReply).toBe(true);
+      await expect(status).toHaveText("Checking login launch status…");
+      await expect(toggle).toBeDisabled();
+      await client.fill("unsaved-client-draft");
+      await port.fill("9876");
+      // End the native input interaction; its guard deliberately defers display updates.
+      await port.blur();
+      await client.evaluate(input => { (window as any).__settingsReconnectClient = input; });
+      await port.evaluate(input => { (window as any).__settingsReconnectPort = input; });
+      await page.evaluate(() => {
+        const socket = (window as any).__gwtPlaywrightSockets.findLast((socket: WebSocket) =>
+          socket.readyState === WebSocket.OPEN && new URL(socket.url).searchParams.has("repo_hash"));
+        if (!socket) throw new Error("missing owning project socket");
+        socket.close();
+      });
+      await expect.poll(() => requests.filter(kind => kind === "get_autostart_status").length).toBe(2);
+      await expect.poll(() => recovered).toBeDefined();
+      await expect(toggle).toBeEnabled();
+      expect(await toggle.isChecked()).toBe(recovered!.enabled);
+      await expect(status).toHaveText("");
+      await expect(client).toHaveValue("unsaved-client-draft");
+      await expect(port).toHaveValue("9876");
+      expect(await client.evaluate(input => input.isConnected && input === (window as any).__settingsReconnectClient)).toBe(true);
+      expect(await port.evaluate(input => input.isConnected && input === (window as any).__settingsReconnectPort)).toBe(true);
+      expect(requests.filter(kind => ["update_system_settings", "update_autostart", "set_auto_apply_updates",
+        "update_board_provider_config", "update_board_oauth_port", "update_custom_agent", "delete_custom_agent"].includes(kind))).toEqual([]);
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await info.attach(`settings-reconnect-${theme}`, { body: await settings.screenshot(), contentType: "image/png" });
+      await info.attach("Settings reconnect requests", { body: JSON.stringify(requests), contentType: "application/json" });
+      expect(errors).toEqual([]);
+    });
+  });
+
   test("Update status batches bursts while toggles preserve immediate rollback", async ({ page }, info) => {
     await withLiveGwtBackendLock(BASE, info, async () => {
       const errors: string[] = [];
