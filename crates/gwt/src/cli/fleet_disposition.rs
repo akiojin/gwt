@@ -531,6 +531,8 @@ mod tests {
 
     #[cfg(unix)]
     fn selected_orphan(worktree: &Path) -> (OwnedChild, Value, FleetTarget) {
+        use std::os::unix::process::CommandExt;
+
         std::fs::create_dir_all(worktree).unwrap();
         crate::cli::trusted_store::init_git_repo_with_origin(worktree);
         let mut session =
@@ -554,6 +556,8 @@ mod tests {
         let mut child = OwnedChild(
             resolved_command(ProcessPlanRequest::new(&executable))
                 .unwrap()
+                // Multicall coreutils selects the cat applet by argv[0].
+                .arg0("cat")
                 .current_dir(worktree)
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
