@@ -11312,6 +11312,8 @@ impl AppRuntime {
             | FrontendEvent::TerminalInput { id, .. }
             | FrontendEvent::LoadPmConversation { id }
             | FrontendEvent::LoadPmReports { id, .. }
+            | FrontendEvent::LoadPmRequestTask { id, .. }
+            | FrontendEvent::ReopenPmRequestTask { id, .. }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
             | FrontendEvent::AttachmentUploadFailed { id, .. }
@@ -11419,7 +11421,8 @@ impl AppRuntime {
                         FrontendEvent::FrontendReady => {
                             self.unopened_project_route_events(&client_id, key)
                         }
-                        event => recovery_center::rejected_action_events(&client_id, &event)
+                        event => pm_chat::rejected_request_task_events(&client_id, &event)
+                            .or_else(|| recovery_center::rejected_action_events(&client_id, &event))
                             .unwrap_or_default(),
                     };
                 };
@@ -11687,6 +11690,8 @@ impl AppRuntime {
             | FrontendEvent::TerminalInput { id, .. }
             | FrontendEvent::LoadPmConversation { id }
             | FrontendEvent::LoadPmReports { id, .. }
+            | FrontendEvent::LoadPmRequestTask { id, .. }
+            | FrontendEvent::ReopenPmRequestTask { id, .. }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
             | FrontendEvent::AttachmentUploadFailed { id, .. }
@@ -11742,7 +11747,9 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         if !self.project_owns_frontend_request(context, &event) {
             tracing::warn!(project_key = %context.project_key, "rejected frontend request outside its project scope");
-            return recovery_center::rejected_action_events(&client_id, &event).unwrap_or_default();
+            return pm_chat::rejected_request_task_events(&client_id, &event)
+                .or_else(|| recovery_center::rejected_action_events(&client_id, &event))
+                .unwrap_or_default();
         }
         let project_scope = self.frontend_project_log_scope(Some(context), &event);
         let _project_scope = project_scope.as_ref().map(|scope| scope.enter()).unwrap_or_else(|| {
@@ -12029,6 +12036,32 @@ impl AppRuntime {
                 request_id,
                 version,
             } => self.load_pm_reports_events(context, client_id, &id, request_id, version),
+            FrontendEvent::LoadPmRequestTask {
+                id,
+                request_id,
+                task_id,
+                receipt_operation_id,
+            } => self.pm_request_task_events(
+                context,
+                client_id,
+                &id,
+                request_id,
+                pm_chat::PmRequestTaskOperation::Read {
+                    task_id,
+                    receipt_operation_id,
+                },
+            ),
+            FrontendEvent::ReopenPmRequestTask {
+                id,
+                request_id,
+                request,
+            } => self.pm_request_task_events(
+                context,
+                client_id,
+                &id,
+                request_id,
+                pm_chat::PmRequestTaskOperation::Reopen(request),
+            ),
             FrontendEvent::PaneName { .. } => Vec::new(),
             FrontendEvent::PaneSendInput { session_id, text } => {
                 self.pane_send_input_events(client_id, &session_id, &text)

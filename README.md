@@ -1111,9 +1111,24 @@ tracking changes with fresh conditions, review generation and revision checks.
 Uninitialized, unreadable or partially read tracking retains a degraded state;
 it does not establish that no requests remain. Temporary recovery and an empty
 Monitor queue do not complete the original request. This guidance covers saved
-tracking and selected native intake; automatic intake, legacy import, user
-mutation and the Tasks UI remain separate work. Tracking itself does not launch
+tracking and selected native intake; automatic intake, legacy import, other user
+mutations and the Tasks UI remain separate work. Tracking itself does not launch
 Issues or change delivery gates.
+
+The project-scoped browser protocol supports `load_pm_request_task` for one
+saved `task_id` and an optional `receipt_operation_id`, and
+`reopen_pm_request_task` with `operation_id`, `expected_revision`, `reason`
+and `task_id` inside `request`. Replies use `pm_request_task` and the caller's
+`request_id`. Reopening records the server-assigned browser user actor and
+returns the task to pending reassessment, including when the PM is stopped.
+After a connection loss, read the current task and original receipt: a new
+connection has a new actor, so replaying the old operation there is a conflict.
+The current task and the receipt's historical task state retain their own
+revisions. Missing or unreadable data returns a diagnostic and recovery read.
+Reading a receipt observes its recorded outcome; it does not acknowledge a new
+durable write.
+This transport adapter is available; the Tasks screen and checkbox controls
+are still pending.
 
 For selected native intake, the registered PM reads
 `selector:{kind:"native_turns"}` through `pm.request_tasks.read`. The result gives

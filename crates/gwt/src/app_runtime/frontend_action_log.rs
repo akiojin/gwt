@@ -677,6 +677,9 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::PaneSendInput { session_id, .. } => {
             FrontendUserActionLog::new("pane_send_input", "terminal").target(session_id)
         }
+        FrontendEvent::ReopenPmRequestTask { id, .. } => {
+            FrontendUserActionLog::new("reopen_pm_request_task", "pm").window(id)
+        }
         FrontendEvent::PmPaneSendInput { window_id, .. } => {
             FrontendUserActionLog::new("pm_pane_send_input", "terminal").target(window_id)
         }
@@ -797,6 +800,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         | FrontendEvent::TerminalInput { .. }
         | FrontendEvent::LoadPmConversation { .. }
         | FrontendEvent::LoadPmReports { .. }
+        | FrontendEvent::LoadPmRequestTask { .. }
         | FrontendEvent::GetIssueMonitorProfiles
         | FrontendEvent::PasteImage { .. }
         | FrontendEvent::PasteImageUploaded { .. }
