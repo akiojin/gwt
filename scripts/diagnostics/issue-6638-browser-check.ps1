@@ -102,7 +102,7 @@ try {
         if (!$savedEnvironment.ContainsKey($key)) { $savedEnvironment[$key] = [Environment]::GetEnvironmentVariable($key) }
         [Environment]::SetEnvironmentVariable($key, $testVariables[$key])
     }
-    & node "$deps/node_modules/@playwright/test/cli.js" test --config crates/gwt/playwright/playwright.config.ts --workers=1 provider-usage.spec.ts @PlaywrightArguments
+    & node "$deps/node_modules/@playwright/test/cli.js" test --config crates/gwt/playwright/playwright.config.ts --workers=1 provider-usage.spec.ts --grep 'Issue #6638' @PlaywrightArguments
     if ($LASTEXITCODE -ne 0) { throw "Playwright failed with exit $LASTEXITCODE" }
 } finally {
     foreach ($key in $savedEnvironment.Keys) { [Environment]::SetEnvironmentVariable($key, $savedEnvironment[$key]) }
