@@ -1139,6 +1139,7 @@ impl OwnerState {
                     })).collect())
                 },
             ).map_err(|error| tracing::error!(target: "gwt.monitor.runtime", %error, "failed to start owner Monitor runtime reconciliation")).ok();
+            state.start_initial_gui_attach_grace();
             let shutdown_replies = state.run(receiver);
             drop(_monitor_reconciler);
             #[cfg(windows)]
@@ -1150,10 +1151,12 @@ impl OwnerState {
         });
         handle
     }
-    fn run(mut self, receiver: mpsc::Receiver<OwnerMessage>) -> Vec<oneshot::Sender<()>> {
+    fn start_initial_gui_attach_grace(&mut self) {
         // Startup recovery and name migration may outlast the attach budget.
         // Begin the unchanged GUI grace only when attachment can be served.
         self.gui_presence = GuiPresence::new(self.gui_presence.intent(), std::time::Instant::now());
+    }
+    fn run(mut self, receiver: mpsc::Receiver<OwnerMessage>) -> Vec<oneshot::Sender<()>> {
         let mut continue_active = false;
         let mut next_project_policy_check = std::time::Instant::now();
         loop {
@@ -12623,7 +12626,10 @@ mod tests {
             // test-hygiene: allow-wall-clock-deadline Injects an expired startup timestamp; no wall-clock wait or elapsed-time verdict.
             std::time::Instant::now() - std::time::Duration::from_secs(60),
         );
-        let actor = thread::spawn(move || run_fixture_owner(state, receiver));
+        let actor = thread::spawn(move || {
+            state.start_initial_gui_attach_grace();
+            run_fixture_owner(state, receiver);
+        });
         let attached = handle.attach_gui().await;
         handle.shutdown().await;
         actor.join().unwrap();
