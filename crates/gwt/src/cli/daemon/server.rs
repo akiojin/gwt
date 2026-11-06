@@ -462,6 +462,8 @@ impl OwnerDaemonFixture {
             effect_override: None,
             #[cfg(test)]
             capacity_override: None,
+            #[cfg(test)]
+            control_retry_observer: None,
             #[cfg(all(test, unix))]
             scan_concurrency_probe: None,
             #[cfg(all(test, unix))]
@@ -898,6 +900,8 @@ type IssueMonitorStateObserver = dyn Fn(&crate::IssueMonitorState) + Send + Sync
 
 #[derive(Clone, Default)]
 struct IssueMonitorWorkerTestHooks {
+    #[cfg(test)]
+    control_retry_observer: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
     #[cfg(any(test, feature = "test-gh-guard"))]
     state_observer: Option<Arc<IssueMonitorStateObserver>>,
     #[cfg(any(test, feature = "test-gh-guard"))]
@@ -1509,6 +1513,8 @@ fn spawn_issue_monitor_worker_with_lease(
                     }
                 }
                 _ = wait_for_issue_monitor_deadline(authority_retry_deadline) => {
+                    #[cfg(test)]
+                    let revision_before_retry = revision;
                     let Some(accepted) = pending_authority_controls
                         .as_ref()
                         .and_then(PendingIssueMonitorAuthorityControls::front_accepted)
@@ -1528,15 +1534,16 @@ fn spawn_issue_monitor_worker_with_lease(
                         );
                         break;
                     };
-                    revision = next_revision;
                     let review_deferred = matches!(&accepted.control, IssueMonitorControl::ReviewDispatchDeferred(_));
                     let immediate_admission = matches!(&accepted.control, IssueMonitorControl::ScanNow);
                     let authority_epoch_before_retry = monitor.effect_authority_epoch();
-                    match try_apply_accepted_issue_monitor_control_with_disk_migration(
+                    let retry_baseline = monitor.clone();
+                    let retry_result = try_apply_accepted_issue_monitor_control_with_disk_migration(
                         &prefs_path,
                         &mut monitor,
                         accepted,
-                    ) {
+                    );
+                    match retry_result {
                         IssueMonitorControlCommit::Committed {
                             should_scan,
                             authority_changed,
@@ -1630,6 +1637,18 @@ fn spawn_issue_monitor_worker_with_lease(
                             );
                             control_open = false;
                         }
+                    }
+                    // A revoked, unchanged write is not a new scan input. A
+                    // failed attempt can still adopt a renamed snapshot or a
+                    // recovery projection, so retain the fence for real changes.
+                    if retry_result != IssueMonitorControlCommit::RetryableFailure
+                        || !monitor.scan_inputs_unchanged_after_failed_control(retry_baseline)
+                    {
+                        revision = next_revision;
+                    }
+                    #[cfg(test)]
+                    if let Some(observe) = &test_hooks.control_retry_observer {
+                        observe(revision_before_retry, revision);
                     }
                     if review_deferred {
                         publish_issue_monitor_read_only_payloads(&hub, &monitor, &project_store);
@@ -9847,6 +9866,156 @@ fn issue_4783_scan_commit_does_not_restore_a_binding_removed_by_verified_ownersh
 #[cfg(test)]
 mod scan_failure_contract_tests {
     use super::test_monitor_with_prefs;
+
+    #[test]
+    #[allow(clippy::await_holding_lock)]
+    fn unchanged_failed_control_retries_preserve_the_scan_revision() {
+        use std::sync::{atomic::AtomicBool, atomic::AtomicUsize, atomic::Ordering, Arc, Mutex};
+
+        use gwt_core::daemon::{DaemonFrame, RuntimeScope, RuntimeTarget};
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+
+        let _env = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _prefs_budget = super::pin_prefs_hang_guard();
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let project = tempfile::tempdir().unwrap();
+        let scope = RuntimeScope::from_project_root(project.path(), RuntimeTarget::Host).unwrap();
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let machine_path = crate::machine_agent_settings::path();
+        let marker = machine_path.with_extension("parent-sync-fail-once");
+        let _failure = ScopedEnvVar::set(
+            "GWT_TEST_FAIL_ISSUE_MONITOR_PREFS_PARENT_SYNC_ONCE",
+            &machine_path,
+        );
+        let inject = Arc::new(AtomicBool::new(false));
+        let failures = Arc::new(AtomicUsize::new(0));
+        let revisions = Arc::new(Mutex::new(Vec::new()));
+        let baseline = Arc::new(tokio::sync::Notify::new());
+        let retried = Arc::new(tokio::sync::Notify::new());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let observed = runtime.block_on(async {
+            let hub = super::BroadcastHub::new();
+            let shutdown = Arc::new(super::DaemonShutdown::new());
+            let worker = super::spawn_issue_monitor_worker_with_lease(
+                scope,
+                hub.clone(),
+                shutdown.clone(),
+                crate::IssueMonitorConfig::default(),
+                gwt_core::deadline_budget::HANG_GUARD,
+                super::IssueMonitorWorkerTestHooks {
+                    scan_override: Some(Arc::new(|mut monitor| {
+                        crate::scan_issue_monitor_candidates(
+                            &mut monitor,
+                            &[],
+                            "2026-11-06T00:00:00Z",
+                        );
+                        Ok(monitor)
+                    })),
+                    hold_effects: true,
+                    state_observer: Some(Arc::new({
+                        let (hub, baseline, inject, marker) = (
+                            hub.clone(),
+                            baseline.clone(),
+                            inject.clone(),
+                            marker.clone(),
+                        );
+                        let failures = failures.clone();
+                        move |monitor| {
+                            if hub.issue_monitor_status().is_some_and(|status| {
+                                status["last_scan_at"] == "2026-11-06T00:00:00Z"
+                            }) {
+                                baseline.notify_one();
+                            }
+                            if inject.load(Ordering::Acquire)
+                                && !marker.exists()
+                                && monitor.status_view().last_error.as_deref().is_some_and(
+                                    |error| {
+                                        error.contains(
+                                            "injected machine agent settings parent sync failure",
+                                        )
+                                    },
+                                )
+                            {
+                                failures.fetch_add(1, Ordering::Relaxed);
+                                std::fs::write(&marker, b"fail the next control retry").unwrap();
+                            }
+                        }
+                    })),
+                    control_retry_observer: Some(Arc::new({
+                        let (revisions, retried) = (revisions.clone(), retried.clone());
+                        move |before, after| {
+                            let mut revisions = revisions.lock().unwrap();
+                            revisions.push((before, after));
+                            if revisions.len() >= 2 {
+                                retried.notify_one();
+                            }
+                        }
+                    })),
+                    ..Default::default()
+                },
+                None,
+            );
+            // test-hygiene: allow-wall-clock-deadline Bound actual worker startup and retry observations, not their relative scheduling.
+            let observed = tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+                baseline.notified().await;
+                inject.store(true, Ordering::Release);
+                std::fs::write(&marker, b"fail the first control attempt").unwrap();
+                let receipt = hub
+                    .enqueue_issue_monitor_control(DaemonFrame::Event {
+                        channel: crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL.into(),
+                        payload: crate::runtime_daemon_events::issue_monitor_payload(
+                            "control",
+                            serde_json::json!({"heartbeat": {
+                                "issue_number": 5390, "at": "2026-11-06T00:00:01Z"
+                            }}),
+                            std::process::id(),
+                        ),
+                    })
+                    .await;
+                retried.notified().await;
+                receipt
+            })
+            .await;
+            inject.store(false, Ordering::Release);
+            let _ = std::fs::remove_file(&marker);
+            shutdown.request();
+            // test-hygiene: allow-wall-clock-deadline Drain the real worker after releasing its failure marker before asserting the regression.
+            let joined = tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, worker).await;
+            (observed, joined)
+        });
+        assert!(
+            observed.1.is_ok_and(|joined| joined.is_ok()),
+            "worker drains"
+        );
+        assert!(
+            observed.0.is_ok_and(|receipt| receipt.is_ok()),
+            "real retries were observed"
+        );
+        assert!(
+            failures.load(Ordering::Relaxed) >= 3,
+            "initial attempt and both retries failed"
+        );
+        let revisions = revisions.lock().unwrap();
+        assert!(revisions.len() >= 2);
+        assert!(
+            revisions.iter().all(|(before, after)| before == after),
+            "an unchanged failed transaction cannot fence a completed scan: {revisions:?}"
+        );
+    }
 
     #[test]
     fn issue_3924_degradation_survives_a_later_scan_abort() {
