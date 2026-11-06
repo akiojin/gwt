@@ -426,10 +426,10 @@ impl AgentResourceSettings {
     }
 }
 
-/// A browser can request reassessment, but cannot supply actor or provenance.
+/// A browser can reopen or cancel tracking, but cannot supply actor or provenance.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PmRequestTaskReopenRequest {
+pub struct PmRequestTaskUserRequest {
     pub operation_id: String,
     pub expected_revision: u64,
     pub reason: String,
@@ -706,7 +706,12 @@ pub enum FrontendEvent {
     ReopenPmRequestTask {
         id: String,
         request_id: u64,
-        request: PmRequestTaskReopenRequest,
+        request: PmRequestTaskUserRequest,
+    },
+    CancelPmRequestTask {
+        id: String,
+        request_id: u64,
+        request: PmRequestTaskUserRequest,
     },
     /// Inject one line of input into the pane bound to the given agent
     /// session (SPEC-3050 FR-001/FR-002). Carries a session id instead of a
@@ -4211,6 +4216,13 @@ mod tests {
                 "reason":"Needs a fresh assessment","task_id":"task"}});
         let _: FrontendEvent = serde_json::from_value(reopen.clone()).expect("user reopen");
         let mut forged = reopen;
+        forged["request"]["actor"] = serde_json::json!({"kind":"pm","id":"claimed"});
+        assert!(serde_json::from_value::<FrontendEvent>(forged).is_err());
+        let cancel = serde_json::json!({"kind":"cancel_pm_request_task", "id":"pm",
+            "request_id":3,"request":{"operation_id":"cancel","expected_revision":3,
+                "reason":"Withdraw this request","task_id":"task"}});
+        let _: FrontendEvent = serde_json::from_value(cancel.clone()).expect("user cancel");
+        let mut forged = cancel;
         forged["request"]["actor"] = serde_json::json!({"kind":"pm","id":"claimed"});
         assert!(serde_json::from_value::<FrontendEvent>(forged).is_err());
     }

@@ -4073,6 +4073,9 @@ mod tests {
                 serde_json::json!({"kind":"reopen_pm_request_task","id":"tab-owned::agent-1",
                     "request_id":2,"request":{"operation_id":"reopen","expected_revision":3,
                         "reason":"needs another review","task_id":"task"}}),
+                serde_json::json!({"kind":"cancel_pm_request_task","id":"tab-owned::agent-1",
+                    "request_id":3,"request":{"operation_id":"cancel","expected_revision":3,
+                        "reason":"withdraw this request","task_id":"task"}}),
             ] {
                 assert!(
                     agent

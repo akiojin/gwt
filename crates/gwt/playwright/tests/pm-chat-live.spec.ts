@@ -1337,7 +1337,7 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
     }
   });
 
-  test('T-UTASK-USER-REOPEN persists browser authority and reconciles the receipt after reconnect', async ({ page }, info) => {
+  test('T-UTASK-USER-REOPEN and T-UTASK-USER-CANCEL persist browser authority and reconcile receipts after reconnect', async ({ page }, info) => {
     const theme = info.project.name.includes('light') ? 'light' : 'dark';
     const windowId = 'pm-request-task-fixture';
     const taskId = 'synthetic-fixture-task';
@@ -1458,6 +1458,35 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       expect(await exchange('load_pm_request_task', { task_id: taskId,
         receipt_operation_id: request.operation_id })).toEqual(reopened);
       expect(readFileSync(statePath, 'utf8')).toBe(savedBytes);
+      const cancelRequest = { operation_id: `browser-cancel-${theme}`, expected_revision: 4,
+        reason: 'Withdraw the original request without claiming it was achieved.', task_id: taskId };
+      const cancelled = await exchange('cancel_pm_request_task', { request: cancelRequest });
+      expect(cancelled).toMatchObject({ state: 'ready', revision: 5, task: {
+        ...pendingTask, status: 'cancelled', review_generation: 3, review_required: true, completion: null,
+      }, receipt: { operation_id: cancelRequest.operation_id, action: 'cancel', revision: 5,
+        reason: cancelRequest.reason, actor: { kind: 'user' } } });
+      expect(cancelled.receipt.actor.id).toMatch(/^browser:[0-9a-f-]{36}$/i);
+      expect(cancelled.receipt.actor.id).not.toBe(reopened.receipt.actor.id);
+      const cancelledBytes = readFileSync(statePath, 'utf8');
+      const cancelledState = JSON.parse(cancelledBytes);
+      expect(cancelledState.receipts).toEqual([...seed.receipts, reopened.receipt, cancelled.receipt]);
+      expect(cancelledState.tasks[taskId]).toEqual(cancelled.task);
+      expect(cancelledState.sources).toEqual(seed.sources);
+      expect(await exchange('cancel_pm_request_task', { request: cancelRequest })).toEqual(cancelled);
+      expect(await exchange('cancel_pm_request_task', { request: { ...cancelRequest,
+        operation_id: `${cancelRequest.operation_id}-stale` } })).toMatchObject({ state: 'error', code: 'conflict',
+        current_revision: 5, recovery_operation: 'load_pm_request_task' });
+      await page.reload();
+      await page.waitForFunction(() => (window as any).__gwtPlaywrightTestBridgeInstalled === true);
+      await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+      expect(await exchange('cancel_pm_request_task', { request: cancelRequest })).toMatchObject({ state: 'error',
+        code: 'operation_conflict', recovery_operation: 'load_pm_request_task' });
+      expect(await exchange('load_pm_request_task', { task_id: taskId,
+        receipt_operation_id: cancelRequest.operation_id })).toEqual(cancelled);
+      const historical = await exchange('load_pm_request_task', { task_id: taskId,
+        receipt_operation_id: request.operation_id });
+      expect(historical).toEqual({ ...cancelled, receipt: reopened.receipt });
+      expect(readFileSync(statePath, 'utf8')).toBe(cancelledBytes);
       expect(errors).toEqual([]);
     } catch (error) {
       primaryErrors.push(error);
