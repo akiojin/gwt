@@ -3,6 +3,7 @@
 [CmdletBinding(PositionalBinding = $false)]
 param(
     [switch]$SkipBuild,
+    [string]$SourceAuditDirectory,
     [Parameter(ValueFromRemainingArguments = $true)][string[]]$PlaywrightArguments
 )
 
@@ -21,9 +22,30 @@ $savedRunner = @{}
 $exitCode = 1
 
 function Invoke-SourceEnvelope([string]$Operation, [hashtable]$Parameters) {
+    if ($SourceAuditDirectory -and $Operation -ceq 'hook.doctor') {
+        return Invoke-SourceHookAudit $Parameters
+    }
     $request = @{schema_version=1;operation=$Operation;params=$Parameters} | ConvertTo-Json -Depth 8 -Compress
     $response = $request | & $gwtd | ConvertFrom-Json
     if (!$response.ok) { throw "$Operation failed: $($response.output)" }
+    return $response
+}
+function Invoke-SourceHookAudit($Parameters) {
+    # Windows recovery workers are outside the managed caller's native ancestry.
+    # Ask that live caller to run doctor; never serialize its environment or trust.
+    $requestId = [Guid]::NewGuid().ToString('N')
+    $requestPath = Join-Path $SourceAuditDirectory "$requestId.request.json"
+    $responsePath = Join-Path $SourceAuditDirectory "$requestId.response.json"
+    $request = @{schema_version=1;operation='hook.doctor';params=$Parameters} | ConvertTo-Json -Depth 8 -Compress
+    [IO.File]::WriteAllText("$requestPath.tmp", $request, [Text.UTF8Encoding]::new($false))
+    [IO.File]::Move("$requestPath.tmp", $requestPath)
+    $deadline = [DateTime]::UtcNow.AddSeconds(180)
+    while (!(Test-Path -LiteralPath $responsePath)) {
+        if ([DateTime]::UtcNow -ge $deadline) { throw 'Managed source hook audit timed out.' }
+        Start-Sleep -Milliseconds 100
+    }
+    $response = Get-Content -LiteralPath $responsePath -Raw | ConvertFrom-Json
+    if ($response.ok -isnot [bool] -or !$response.ok) { throw "Managed source hook audit failed: $($response.output)" }
     return $response
 }
 function Assert-Preflight($Doctor) {
