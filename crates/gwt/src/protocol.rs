@@ -426,6 +426,33 @@ impl AgentResourceSettings {
     }
 }
 
+/// A browser can request reassessment, but cannot supply actor or provenance.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PmRequestTaskReopenRequest {
+    pub operation_id: String,
+    pub expected_revision: u64,
+    pub reason: String,
+    pub task_id: String,
+}
+
+/// Selected tracking data only; originals remain outside this browser adapter.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum PmRequestTaskResult {
+    Ready {
+        revision: u64,
+        task: Box<gwt_core::pm_request_tasks::Task>,
+        receipt: Option<Box<gwt_core::pm_request_tasks::Receipt>>,
+    },
+    Error {
+        code: String,
+        message: String,
+        current_revision: Option<u64>,
+        recovery_operation: String,
+    },
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FrontendEvent {
@@ -668,6 +695,18 @@ pub enum FrontendEvent {
         request_id: u64,
         #[serde(default)]
         version: Option<PmReportsVersion>,
+    },
+    LoadPmRequestTask {
+        id: String,
+        request_id: u64,
+        task_id: String,
+        #[serde(default)]
+        receipt_operation_id: Option<String>,
+    },
+    ReopenPmRequestTask {
+        id: String,
+        request_id: u64,
+        request: PmRequestTaskReopenRequest,
     },
     /// Inject one line of input into the pane bound to the given agent
     /// session (SPEC-3050 FR-001/FR-002). Carries a session id instead of a
@@ -2417,6 +2456,11 @@ pub enum BackendEvent {
         current: Option<Box<crate::pm_current::PmCurrentSnapshot>>,
         error: Option<String>,
     },
+    PmRequestTask {
+        id: String,
+        request_id: u64,
+        result: PmRequestTaskResult,
+    },
     /// Origin-client completion receipt for one authenticated pane snapshot
     /// sync (Issue #3755). Snapshot frames precede this event; these disjoint
     /// sets explain every authorized pane that produced no frame.
@@ -3258,6 +3302,11 @@ impl BackendEventPolicy {
 
 pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
     BackendEventPolicy::new(
+        "pm_request_task",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
         "pm_reports",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
@@ -3937,6 +3986,7 @@ impl BackendEvent {
             BackendEvent::TerminalSnapshot { .. } => "terminal_snapshot",
             BackendEvent::PmConversation { .. } => "pm_conversation",
             BackendEvent::PmReports { .. } => "pm_reports",
+            BackendEvent::PmRequestTask { .. } => "pm_request_task",
             BackendEvent::PaneSyncComplete { .. } => "pane_sync_complete",
             BackendEvent::TerminalStatus { .. } => "terminal_status",
             BackendEvent::PaneSendResult { .. } => "pane_send_result",
@@ -4149,6 +4199,20 @@ mod tests {
         let mut invalid = legacy;
         invalid["surface_owner"] = serde_json::json!("unknown");
         assert!(serde_json::from_value::<FrontendEvent>(invalid).is_err());
+    }
+
+    #[test]
+    fn pm_request_task_user_wire_accepts_reads_and_rejects_forged_actors() {
+        let read = serde_json::json!({"kind":"load_pm_request_task", "id":"pm",
+            "request_id":1,"task_id":"task","receipt_operation_id":"reopen"});
+        let _: FrontendEvent = serde_json::from_value(read).expect("selected task read");
+        let reopen = serde_json::json!({"kind":"reopen_pm_request_task", "id":"pm",
+            "request_id":2,"request":{"operation_id":"reopen","expected_revision":3,
+                "reason":"Needs a fresh assessment","task_id":"task"}});
+        let _: FrontendEvent = serde_json::from_value(reopen.clone()).expect("user reopen");
+        let mut forged = reopen;
+        forged["request"]["actor"] = serde_json::json!({"kind":"pm","id":"claimed"});
+        assert!(serde_json::from_value::<FrontendEvent>(forged).is_err());
     }
 
     #[test]

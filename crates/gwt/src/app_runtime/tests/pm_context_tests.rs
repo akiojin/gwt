@@ -1,5 +1,354 @@
 use super::*;
 
+fn completed_pm_request_task_fixture(repo: &Path) -> gwt_core::pm_request_tasks::TaskStore {
+    use gwt_core::pm_request_tasks::{
+        Action, Actor, ActorKind, IntakeSource, Request, TaskDraft, TaskStore,
+    };
+
+    let store = TaskStore::for_repo(repo);
+    let project = gwt_core::pm_peer::project_dir(repo);
+    let original = "Synthetic browser-adapter fixture request";
+    let source = IntakeSource {
+        id: "synthetic-source".into(),
+        project_key: project.file_name().unwrap().to_str().unwrap().into(),
+        original: original.into(),
+        authority: gwt_core::user_instruction::InstructionAuthority {
+            session_id: "synthetic-intake-fixture".into(),
+            turn_id: "synthetic-human-turn".into(),
+            prompt_sha256: gwt_core::pm_authorization::digest(original.as_bytes()),
+        },
+    };
+    for (revision, operation_id, kind, action) in [
+        (
+            0,
+            "fixture-capture",
+            ActorKind::Intake,
+            Action::Capture { source },
+        ),
+        (
+            1,
+            "fixture-decompose",
+            ActorKind::Pm,
+            Action::Decompose {
+                source_id: "synthetic-source".into(),
+                root: TaskDraft {
+                    id: "synthetic-task".into(),
+                    title: "Fixture task".into(),
+                    purpose: "Exercise only the browser adapter".into(),
+                    completion_conditions: vec!["Synthetic fixture outcome".into()],
+                    issue_numbers: vec![],
+                    goal_ids: vec![],
+                    assignee: None,
+                },
+                children: vec![],
+            },
+        ),
+        (
+            2,
+            "fixture-complete",
+            ActorKind::Pm,
+            Action::Complete {
+                task_id: "synthetic-task".into(),
+                condition_revision: 1,
+                review_generation: 1,
+                evidence: vec!["synthetic:fixture-outcome".into()],
+            },
+        ),
+    ] {
+        store
+            .apply(
+                &Actor {
+                    kind,
+                    id: "synthetic-fixture-actor".into(),
+                },
+                &Request {
+                    operation_id: operation_id.into(),
+                    expected_revision: revision,
+                    reason: "Seed the browser adapter fixture".into(),
+                    action,
+                },
+            )
+            .expect("seed completed request task");
+    }
+    store
+}
+
+fn pm_request_task_browser_reply(
+    runtime: &mut AppRuntime,
+    context: &super::super::ProjectContext,
+    tasks: &BlockingTestTaskQueue,
+    recorded: &Arc<Mutex<Vec<UserEvent>>>,
+    client: &str,
+    wire: serde_json::Value,
+) -> serde_json::Value {
+    let request_id = wire["request_id"].clone();
+    let id = wire["id"].clone();
+    let event = serde_json::from_value(wire).expect("browser request task wire request");
+    let mut replies = runtime.handle_frontend_event_for_project(context, client.into(), event);
+    drain_queued_blocking_tasks(tasks);
+    for completion in std::mem::take(&mut *recorded.lock().unwrap()) {
+        if matches!(
+            recorded_project_payload(&completion),
+            UserEvent::Dispatch(_)
+        ) {
+            let Some(UserEvent::Dispatch(events)) = runtime.accept_project_completion(completion)
+            else {
+                panic!("current project must accept its request task completion");
+            };
+            replies.extend(events);
+        }
+    }
+    assert_eq!(replies.len(), 1, "one correlated request task reply");
+    assert!(matches!(&replies[0].target, DispatchTarget::Client(target) if target == client));
+    let reply = serde_json::to_value(&replies[0].event).expect("request task reply");
+    assert_eq!(reply["kind"], "pm_request_task");
+    assert_eq!(reply["id"], id);
+    assert_eq!(reply["request_id"], request_id);
+    reply["result"].clone()
+}
+
+#[test]
+fn pm_request_task_browser_reopen_resolves_user_and_reconciles_receipts() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo(&repo);
+    let store = completed_pm_request_task_fixture(&repo);
+    let state_path =
+        gwt_core::pm_peer::project_dir(&repo).join("project-state/request-tasks/state.json");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo,
+        WindowPreset::Agent,
+        WindowProcessStatus::Stopped,
+    );
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let context = runtime.test_context();
+    assert!(
+        runtime
+            .project_state(&context)
+            .unwrap()
+            .pm_sessions
+            .is_empty(),
+        "stored tasks remain available without a running PM"
+    );
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let invoke = |runtime: &mut AppRuntime, client: &str, wire| {
+        pm_request_task_browser_reply(runtime, &context, &tasks, &recorded, client, wire)
+    };
+    let read = serde_json::json!({"kind":"load_pm_request_task", "id":"tab-1::agent-1", "request_id":1, "task_id":"synthetic-task"});
+    let selected = invoke(&mut runtime, "browser-a", read.clone());
+    assert_eq!(selected["state"], "ready");
+    assert_eq!(selected["revision"], 3);
+    assert_eq!(selected["task"]["status"], "completed");
+    assert!(selected["receipt"].is_null());
+
+    let mut reopen = serde_json::json!({"kind":"reopen_pm_request_task", "id":"tab-1::agent-1", "request_id":2,
+        "request":{"operation_id":"user-reopen", "expected_revision":2, "reason":"The original outcome is still missing", "task_id":"synthetic-task"}});
+    let before = fs::read(&state_path).unwrap();
+    let stale = invoke(&mut runtime, "browser-a", reopen.clone());
+    assert_eq!(stale["state"], "error");
+    assert_eq!(stale["code"], "conflict");
+    assert_eq!(stale["current_revision"], 3);
+    assert_eq!(stale["recovery_operation"], "load_pm_request_task");
+    assert_eq!(fs::read(&state_path).unwrap(), before);
+
+    reopen["request"]["expected_revision"] = serde_json::json!(3);
+    let applied = invoke(&mut runtime, "browser-a", reopen.clone());
+    assert_eq!(applied["state"], "ready");
+    assert_eq!(applied["revision"], 4);
+    assert_eq!(applied["task"]["status"], "pending");
+    assert_eq!(applied["task"]["review_required"], true);
+    assert_eq!(
+        applied["receipt"]["actor"],
+        serde_json::json!({"kind":"user","id":"browser:browser-a"})
+    );
+    assert_eq!(applied["receipt"]["reason"], reopen["request"]["reason"]);
+    let committed = fs::read(&state_path).unwrap();
+    assert_eq!(invoke(&mut runtime, "browser-a", reopen.clone()), applied);
+    assert_eq!(fs::read(&state_path).unwrap(), committed);
+
+    let foreign_actor = invoke(&mut runtime, "browser-b", reopen);
+    assert_eq!(foreign_actor["state"], "error");
+    assert_eq!(foreign_actor["code"], "operation_conflict");
+    assert_eq!(fs::read(&state_path).unwrap(), committed);
+    let mut receipt_read = read;
+    receipt_read["request_id"] = serde_json::json!(3);
+    receipt_read["receipt_operation_id"] = serde_json::json!("user-reopen");
+    let recovered = invoke(&mut runtime, "browser-b", receipt_read);
+    assert_eq!(
+        recovered, applied,
+        "a new browser reads the original actor's receipt without replaying as that actor"
+    );
+    assert_eq!(store.read().unwrap().unwrap().revision, 4);
+
+    store
+        .apply(
+            &gwt_core::pm_request_tasks::Actor {
+                kind: gwt_core::pm_request_tasks::ActorKind::Pm,
+                id: "synthetic-reassessment-fixture".into(),
+            },
+            &gwt_core::pm_request_tasks::Request {
+                operation_id: "fixture-fresh-reassessment".into(),
+                expected_revision: 4,
+                reason: "Fresh assessment after the browser reopened the task".into(),
+                action: gwt_core::pm_request_tasks::Action::Reassess {
+                    task_id: "synthetic-task".into(),
+                    condition_revision: 1,
+                    review_generation: 2,
+                    next_action: "Verify the remaining original outcome".into(),
+                },
+            },
+        )
+        .unwrap();
+    let current = invoke(
+        &mut runtime,
+        "browser-b",
+        serde_json::json!({"kind":"load_pm_request_task", "id":"tab-1::agent-1", "request_id":4,
+            "task_id":"synthetic-task", "receipt_operation_id":"user-reopen"}),
+    );
+    assert_eq!(current["revision"], 5);
+    assert_eq!(current["task"]["review_required"], false);
+    assert_eq!(
+        current["task"]["next_action"],
+        "Verify the remaining original outcome"
+    );
+    assert_eq!(current["receipt"], applied["receipt"]);
+    assert_eq!(current["receipt"]["revision"], 4);
+    assert_eq!(current["receipt"]["actor"]["id"], "browser:browser-a");
+    assert_eq!(current["receipt"]["tasks"][0]["review_required"], true);
+}
+
+#[test]
+fn pm_request_task_browser_refuses_foreign_windows_before_private_store_access() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    let foreign = temp.path().join("foreign");
+    for path in [&repo, &foreign] {
+        fs::create_dir_all(path).unwrap();
+        init_repo(path);
+    }
+    completed_pm_request_task_fixture(&repo);
+    let state_path =
+        gwt_core::pm_peer::project_dir(&repo).join("project-state/request-tasks/state.json");
+    let tabs = vec![
+        sample_project_tab_with_window_at(
+            "tab-1",
+            "agent-1",
+            repo,
+            WindowPreset::Agent,
+            WindowProcessStatus::Stopped,
+        ),
+        sample_project_tab_with_window_at(
+            "tab-foreign",
+            "agent-1",
+            foreign.clone(),
+            WindowPreset::Agent,
+            WindowProcessStatus::Stopped,
+        ),
+    ];
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), tabs, Some("tab-1"));
+    let context = runtime.test_context();
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let invoke = |runtime: &mut AppRuntime, client: &str, wire| {
+        pm_request_task_browser_reply(runtime, &context, &tasks, &recorded, client, wire)
+    };
+    let read = serde_json::json!({"kind":"load_pm_request_task", "id":"tab-1::agent-1", "request_id":1, "task_id":"missing-task"});
+    let missing = invoke(&mut runtime, "browser-a", read.clone());
+    assert_eq!(missing["state"], "error");
+    assert_eq!(missing["code"], "missing_task");
+    assert_eq!(missing["current_revision"], 3);
+
+    let foreign_context = runtime.project_context("tab-foreign").unwrap();
+    let mut absent_read = read.clone();
+    absent_read["id"] = serde_json::json!("tab-foreign::agent-1");
+    let absent = pm_request_task_browser_reply(
+        &mut runtime,
+        &foreign_context,
+        &tasks,
+        &recorded,
+        "browser-b",
+        absent_read,
+    );
+    assert_eq!(absent["state"], "error");
+    assert_eq!(absent["code"], "missing_task");
+
+    fs::write(&state_path, b"corrupt task fixture").unwrap();
+    for (id, code) in [
+        ("tab-foreign::agent-1", "foreign_project"),
+        ("unknown-window", "unauthorized"),
+    ] {
+        for mut wire in [
+            read.clone(),
+            serde_json::json!({"kind":"reopen_pm_request_task", "id":"tab-1::agent-1", "request_id":2,
+            "request":{"operation_id":"foreign-reopen", "expected_revision":3, "reason":"Synthetic foreign request", "task_id":"synthetic-task"}}),
+        ] {
+            wire["id"] = serde_json::json!(id);
+            let rejected = invoke(&mut runtime, "browser-a", wire);
+            assert_eq!(rejected["state"], "error");
+            assert_eq!(rejected["code"], code);
+            assert!(rejected["current_revision"].is_null());
+            assert_eq!(rejected["recovery_operation"], "load_pm_request_task");
+        }
+    }
+    let unreadable = invoke(&mut runtime, "browser-a", read);
+    assert_eq!(unreadable["state"], "error");
+    assert_eq!(unreadable["code"], "unreadable_store");
+    assert!(unreadable["current_revision"].is_null());
+    assert_eq!(unreadable["recovery_operation"], "load_pm_request_task");
+    assert_eq!(fs::read(&state_path).unwrap(), b"corrupt task fixture");
+    assert!(!gwt_core::pm_peer::project_dir(&foreign)
+        .join("project-state/request-tasks")
+        .exists());
+
+    let scope = gwt::project_transport::ClientScope::Project(context.project_key.clone());
+    runtime.tabs.retain(|tab| tab.id != "tab-1");
+    for wire in [
+        serde_json::json!({"kind":"load_pm_request_task", "id":"tab-1::agent-1", "request_id":3, "task_id":"synthetic-task"}),
+        serde_json::json!({"kind":"reopen_pm_request_task", "id":"tab-1::agent-1", "request_id":4,
+            "request":{"operation_id":"closed-project-reopen", "expected_revision":3, "reason":"Synthetic closed project request", "task_id":"synthetic-task"}}),
+    ] {
+        let request_id = wire["request_id"].clone();
+        let id = wire["id"].clone();
+        let replies = runtime.handle_frontend_event_in_scope(
+            "browser-a".into(),
+            serde_json::from_value(wire).expect("closed project task request"),
+            &scope,
+        );
+        assert_eq!(
+            replies.len(),
+            1,
+            "a closed project still receives a correlated refusal"
+        );
+        assert!(
+            matches!(&replies[0].target, DispatchTarget::Client(client) if client == "browser-a")
+        );
+        let reply = serde_json::to_value(&replies[0].event).unwrap();
+        assert_eq!(reply["kind"], "pm_request_task");
+        assert_eq!(reply["id"], id);
+        assert_eq!(reply["request_id"], request_id);
+        assert_eq!(reply["result"]["state"], "error");
+        assert_eq!(reply["result"]["code"], "foreign_project");
+        assert!(reply["result"]["current_revision"].is_null());
+        assert_eq!(
+            reply["result"]["recovery_operation"],
+            "load_pm_request_task"
+        );
+        assert_eq!(fs::read(&state_path).unwrap(), b"corrupt task fixture");
+    }
+}
+
 #[test]
 fn pm_process_refresh_replaces_prior_fresh_when_git_root_inspection_fails() {
     let _env_lock = env_test_lock()
