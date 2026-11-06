@@ -11,6 +11,9 @@ const source = readFileSync(new URL("../app.js", import.meta.url), "utf8");
 const boardSource = readFileSync(new URL("../board-logs-surface.js", import.meta.url), "utf8")
   .replace(/from "\/([^"]+)"/g, (_, path) => `from "${new URL(`../${path}`, import.meta.url).href}"`);
 const { createBoardLogsSurface } = await import(`data:text/javascript;base64,${Buffer.from(boardSource).toString("base64")}`);
+const profileSource = readFileSync(new URL("../profile-window-surface.js", import.meta.url), "utf8")
+  .replace('from "/ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`);
+const { createProfileWindowSurface } = await import(`data:text/javascript;base64,${Buffer.from(profileSource).toString("base64")}`);
 function functionSource(name) {
   const start = source.indexOf(`      function ${name}(`);
   assert.notEqual(start, -1);
@@ -205,7 +208,7 @@ test("route-bound Project tab connects its scope from the URL before any catalog
 
 test("route-bound Project tab reconnects to the same Project only", () => {
   const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
-  context.activeWorkspace = () => ({ windows: [{ id: "board" }, { id: "logs" }] });
+  context.activeWorkspace = () => ({ windows: [{ id: "board" }, { id: "logs" }, { id: "profile" }] });
   const surface = createBoardLogsSurface({
     send: event => context.send(event), windowMap: new Map(),
     activeWorkspace: context.activeWorkspace, activeProjectTab: () => null,
@@ -214,6 +217,13 @@ test("route-bound Project tab reconnects to the same Project only", () => {
   context.resyncBoardLogs = ids => {
     context.resyncCalls.push(["board-logs", ...ids]);
     surface.resyncBoardLogs(ids);
+  };
+  const profile = createProfileWindowSurface({
+    send: event => context.send(event), windowMap: new Map([["profile", {}]]),
+  });
+  context.resyncProfile = ids => {
+    context.resyncCalls.push(["profile", ...ids]);
+    profile.resyncProfile(ids);
   };
   context.connectSocket();
   sockets[1].open();
@@ -228,6 +238,12 @@ test("route-bound Project tab reconnects to the same Project only", () => {
   foreign.loading = true;
   surface.requestBoard("board");
   surface.requestLogs("logs");
+  const draft = profile.ensureProfileState("profile");
+  draft.draft = { name: "Unsent Profile draft" };
+  draft.saveInFlight = true;
+  draft.saveTimer = 17;
+  profile.requestProfile("profile");
+  profile.requestProfile("foreign-profile");
   sockets[1].close();
   assert.equal(context.closeResetCount, 1, "disconnected Project discards its close preview authority");
   context.reconnectCallbacks.at(-1)();
@@ -239,9 +255,24 @@ test("route-bound Project tab reconnects to the same Project only", () => {
     { kind: "frontend_ready" }, { kind: "get_system_settings" },
     { kind: "load_board", id: "board", all: false },
     { kind: "load_logs", id: "logs", scope: "global" },
+    { kind: "load_profile", id: "profile" },
   ], "ordinary reconnect recovers interrupted reads without replaying the pending post");
-  assert.deepEqual(context.resyncCalls, [["board-logs", "board", "logs"], ["board-logs", "board", "logs"]],
+  assert.deepEqual(context.resyncCalls, [
+    ["board-logs", "board", "logs", "profile"], ["profile", "board", "logs", "profile"],
+    ["board-logs", "board", "logs", "profile"], ["profile", "board", "logs", "profile"],
+  ],
     "normal reconnect must not broadly resync every Settings surface");
+  assert.equal(draft.draft.name, "Unsent Profile draft");
+  assert.equal(draft.saveInFlight, true);
+  assert.equal(draft.saveTimer, 17);
+  const count = sockets.at(-1).sent.length;
+  profile.requestProfile("profile");
+  profile.requestProfile("foreign-profile");
+  assert.equal(sockets.at(-1).sent.length, count, "pending own read is deduplicated and foreign read stays fenced");
+  profile.applyProfileReceiveEvent({ kind: "profile_snapshot", id: "profile", snapshot: {} });
+  profile.requestProfile("profile");
+  assert.equal(sockets.at(-1).sent.length, count + 1, "snapshot clears the lost Profile loading state");
+  assert.deepEqual(sockets.at(-1).sent.at(-1), { kind: "load_profile", id: "profile" });
   assert.equal(board.resetToLatest, true);
   assert.equal(board.composerBody, "Unsent draft");
   assert.equal(board.pendingSubmit.body, "Submitted draft");
