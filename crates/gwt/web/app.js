@@ -1347,6 +1347,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         else if (socketProjectKey) {
           send({ kind: "get_system_settings" });
           resyncHookDoctor();
+          // frontend_ready omits these snapshots; release reads lost with the old client.
+          const ids = (activeWorkspace()?.windows || []).map(entry => entry.id);
+          resyncBoardLogs(ids);
+          resyncProfile(ids);
         }
         syncRunningBranchCleanups();
         requestVisiblePmReports(true);
@@ -5307,7 +5311,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             }));
             break;
           case "update_state":
-            if (event.state === "available") {
+            if (event.state === "available" || event.state === "up_to_date") {
               applyUpdateState(event);
             }
             break;
@@ -5601,7 +5605,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
               if (worksSurface.isVisible(id)) scheduleInitialFitHandshake(id);
             }
           }
-          requestAnimationFrame(() => {
+          scheduleTerminalInitialFit(() => {
             if (!worksHost) return;
             for (const id of terminalMap.keys()) {
               if (worksSurface.isVisible(id)) {

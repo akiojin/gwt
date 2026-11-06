@@ -1,8 +1,9 @@
-//! Private, offline coordinator storage. No executable or network route uses
-//! this foundation yet. The caller supplies a trusted directory in private gwt
-//! home and must keep its ancestors trusted and non-replaceable. The separate
+//! Private, offline coordinator storage. The offline admin executable supplies
+//! a validated fixed directory in private gwt home and must keep its ancestors
+//! trusted and non-replaceable. The separate
 //! lock file must never be renamed/unlinked; a future server must retain this
-//! same guard for its entire lifetime. Windows requires a later ACL adapter.
+//! same guard for its entire lifetime. macOS extended ACL entries are rejected;
+//! Windows requires a later ACL adapter.
 
 use super::{
     encode, CoordinatorRegistry, CredentialError, CredentialIdentity, PreparedCredentialUpdate,
@@ -24,7 +25,7 @@ const MAX_CREDENTIAL_BYTES: usize = 128 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    #[error("mobile storage requires an owned 0700 directory and owned, single-link regular 0600 files; repair storage before reopening")]
+    #[error("mobile storage requires owned 0700 directories and owned, single-link regular 0600 files, with no extended ACL entries on macOS; repair storage before reopening")]
     UnsafeStorage,
     #[error("mobile coordinator storage is locked; stop the coordinator before administration")]
     Busy,
@@ -323,7 +324,7 @@ pub(crate) fn read_private_credential(_: &Path) -> Result<Vec<u8>, StoreError> {
 }
 
 #[cfg(unix)]
-fn open_directory(path: &Path) -> Result<File, StoreError> {
+pub(crate) fn open_directory(path: &Path) -> Result<File, StoreError> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let directory = OpenOptions::new()
         .read(true)
@@ -333,6 +334,8 @@ fn open_directory(path: &Path) -> Result<File, StoreError> {
     if !meta.is_dir() || meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o7777 != 0o700 {
         return Err(StoreError::UnsafeStorage);
     }
+    #[cfg(target_os = "macos")]
+    macos_acl::require_empty(&directory)?;
     Ok(directory)
 }
 
@@ -354,11 +357,71 @@ fn open_private_file(path: &Path, create: bool) -> Result<File, StoreError> {
     {
         return Err(StoreError::UnsafeStorage);
     }
+    #[cfg(target_os = "macos")]
+    macos_acl::require_empty(&file)?;
     Ok(file)
 }
 
+#[cfg(target_os = "macos")]
+mod macos_acl {
+    use super::{File, StoreError};
+    use std::{io, os::fd::AsRawFd};
+
+    // Public Darwin ACL API, absent from libc's Rust bindings. Compare public
+    // external-representation sizes instead of depending on the private layout.
+    #[link(name = "System")]
+    unsafe extern "C" {
+        fn acl_get_fd_np(fd: libc::c_int, acl_type: libc::c_int) -> *mut libc::c_void;
+        fn acl_init(count: libc::c_int) -> *mut libc::c_void;
+        fn acl_size(acl: *mut libc::c_void) -> libc::ssize_t;
+        fn acl_free(acl: *mut libc::c_void) -> libc::c_int;
+    }
+
+    struct Acl(*mut libc::c_void);
+
+    impl Drop for Acl {
+        fn drop(&mut self) {
+            // Each value owns one successful allocation from the ACL API.
+            unsafe { acl_free(self.0) };
+        }
+    }
+
+    pub(super) fn require_empty(file: &File) -> Result<(), StoreError> {
+        // ACL_TYPE_EXTENDED from the public macOS sys/acl.h.
+        let acl = unsafe { acl_get_fd_np(file.as_raw_fd(), 0x100) };
+        if acl.is_null() {
+            let error = io::Error::last_os_error();
+            // Darwin projects an absent ACL property as NULL + ENOENT even
+            // for a valid open FD. Other query failures must remain errors.
+            return if error.raw_os_error() == Some(libc::ENOENT) {
+                Ok(())
+            } else {
+                Err(error.into())
+            };
+        }
+        let acl = Acl(acl);
+        let empty = unsafe { acl_init(0) };
+        if empty.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        let empty = Acl(empty);
+        let actual_size = unsafe { acl_size(acl.0) };
+        if actual_size < 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        let empty_size = unsafe { acl_size(empty.0) };
+        if empty_size < 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        if empty_size == 0 || actual_size != empty_size {
+            return Err(StoreError::UnsafeStorage);
+        }
+        Ok(())
+    }
+}
+
 #[cfg(unix)]
-fn same_file(left: &File, right: &File) -> Result<bool, StoreError> {
+pub(crate) fn same_file(left: &File, right: &File) -> Result<bool, StoreError> {
     use std::os::unix::fs::MetadataExt;
     let left = left.metadata()?;
     let right = right.metadata()?;
@@ -366,7 +429,7 @@ fn same_file(left: &File, right: &File) -> Result<bool, StoreError> {
 }
 
 #[cfg(not(unix))]
-fn open_directory(_: &Path) -> Result<File, StoreError> {
+pub(crate) fn open_directory(_: &Path) -> Result<File, StoreError> {
     Err(StoreError::UnsupportedPrivateStorage)
 }
 #[cfg(not(unix))]
@@ -374,7 +437,7 @@ fn open_private_file(_: &Path, _: bool) -> Result<File, StoreError> {
     Err(StoreError::UnsupportedPrivateStorage)
 }
 #[cfg(not(unix))]
-fn same_file(_: &File, _: &File) -> Result<bool, StoreError> {
+pub(crate) fn same_file(_: &File, _: &File) -> Result<bool, StoreError> {
     Err(StoreError::UnsupportedPrivateStorage)
 }
 

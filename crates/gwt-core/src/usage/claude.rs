@@ -120,7 +120,9 @@ pub fn parse_oauth_usage(body: &str, now: DateTime<Utc>) -> Option<ClaudeAccount
     if windows.is_empty() && extra_usage.is_none() {
         return None;
     }
-    let limit_reached = windows.iter().any(|w| w.used_percent >= 100.0);
+    let limit_reached = windows.iter().any(|w| {
+        matches!(w.kind, WindowKind::FiveHour | WindowKind::Weekly) && w.used_percent >= 100.0
+    });
     Some(ClaudeAccount {
         windows,
         extra_usage,
@@ -591,7 +593,7 @@ mod tests {
         let acc = parse_oauth_usage(body, now()).unwrap();
         assert_eq!(acc.windows.len(), 1);
         assert_eq!(acc.windows[0].used_percent, 100.0);
-        assert!(acc.limit_reached);
+        assert!(!acc.limit_reached);
     }
 
     #[test]
@@ -686,9 +688,25 @@ mod tests {
 
     #[test]
     fn limit_reached_when_window_full() {
-        let body = r#"{"five_hour": {"utilization": 100}, "seven_day": {"utilization": 50}}"#;
+        for key in ["five_hour", "seven_day"] {
+            let body = serde_json::json!({key: {"utilization": 100}});
+            let acc = parse_oauth_usage(&body.to_string(), now()).unwrap();
+            assert!(acc.limit_reached, "shared window {key} is full");
+        }
+    }
+
+    #[test]
+    fn full_model_windows_do_not_limit_the_account() {
+        let body = r#"{
+            "five_hour": {"utilization": 29},
+            "seven_day": {"utilization": 96},
+            "seven_day_opus": {"utilization": 100},
+            "seven_day_sonnet": {"utilization": 100},
+            "seven_day_overage_included": {"utilization": 100}
+        }"#;
         let acc = parse_oauth_usage(body, now()).unwrap();
-        assert!(acc.limit_reached);
+        assert_eq!(acc.windows.len(), 5);
+        assert!(!acc.limit_reached);
     }
 
     #[test]

@@ -2806,3 +2806,32 @@ test("app.js wires attachContainerResizeReflow on the terminal container", () =>
     "app.js must import + use attachContainerResizeReflow",
   );
 });
+
+test("ready fit and refresh queues run without hidden animation frames", (t) => {
+  const tasks = [], frames = [], fitted = [], refreshed = [];
+  for (const [key, value] of Object.entries({
+    document: { hidden: true },
+    requestAnimationFrame: callback => { frames.push(callback); return frames.length; },
+    MessageChannel: class {
+      port1 = { onmessage: null, close() {} };
+      port2 = { close() {}, postMessage: () => tasks.push(() => this.port1.onmessage?.()) };
+    },
+  })) {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, key);
+    Object.defineProperty(globalThis, key, { configurable: true, value });
+    t.after(() => {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else delete globalThis[key];
+    });
+  }
+  const fits = createTerminalFitScheduler({ fitTerminal: (id, persist) => fitted.push([id, persist]) });
+  const refreshes = createTerminalViewportRefreshScheduler({ refresh: id => refreshed.push(id) });
+  fits.enqueue("ready", { persist: true }); fits.enqueue("ready");
+  refreshes.enqueue("ready"); refreshes.enqueue("ready");
+  assert.equal(tasks.length, 2, "each bounded queue gets one hidden task");
+  assert.equal(frames.length, 0, "hidden queues do not wait for suspended frames");
+  while (tasks.length) tasks.shift()();
+  assert.deepEqual(fitted, [["ready", true]]);
+  assert.deepEqual(refreshed, ["ready"]);
+  assert.equal(fits.pendingCount() + refreshes.pendingCount(), 0);
+});

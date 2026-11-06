@@ -2470,22 +2470,67 @@ async fn assert_restore_survivor_io(
     // test-hygiene: allow-wall-clock-deadline real survivor shell and PTY output markers establish progress after close; the deadline only bounds OS and IPC delivery
     while Instant::now() < deadline {
         if let Some(event) = restore_event(&mut socket).await? {
-            if event["id"] == provider_window && event["kind"] == "terminal_output" {
-                if let Some(encoded) = event["data_base64"].as_str() {
-                    let bytes = base64::engine::general_purpose::STANDARD
-                        .decode(encoded)
-                        .map_err(|error| error.to_string())?;
-                    output.push_str(&String::from_utf8_lossy(&bytes));
-                    if output.contains(&marker) {
-                        return Ok(());
-                    }
-                }
+            observe_restore_survivor_output(&event, &provider_window, &mut output)?;
+            if output.contains(&marker) {
+                return Ok(());
             }
         }
     }
     Err(format!(
         "survivor lost public input/output after target close: {output:?}"
     ))
+}
+
+fn observe_restore_survivor_output(
+    event: &serde_json::Value,
+    window: &str,
+    output: &mut String,
+) -> Result<(), String> {
+    if event["id"] == window
+        && matches!(
+            event["kind"].as_str(),
+            Some("terminal_output" | "terminal_snapshot")
+        )
+    {
+        if let Some(encoded) = event["data_base64"].as_str() {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|error| error.to_string())?;
+            if event["kind"] == "terminal_snapshot" {
+                output.clear();
+            }
+            output.push_str(&String::from_utf8_lossy(&bytes));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn survivor_probe_accepts_snapshot_only_reply() {
+    let event = |kind, id, text: &str| serde_json::json!({"kind":kind,"id":id,"data_base64":base64::engine::general_purpose::STANDARD.encode(text)});
+    let mut output = "stale screen".to_string();
+    observe_restore_survivor_output(
+        &event("terminal_snapshot", "other", "unrelated"),
+        "pane",
+        &mut output,
+    )
+    .unwrap();
+    assert_eq!(output, "stale screen");
+    let reply = "GWT-PROVIDER-REPLY:rightleft";
+    observe_restore_survivor_output(
+        &event("terminal_snapshot", "pane", reply),
+        "pane",
+        &mut output,
+    )
+    .unwrap();
+    assert_eq!(output, reply, "a snapshot replaces the previous screen");
+    observe_restore_survivor_output(
+        &event("terminal_output", "pane", "\r\n"),
+        "pane",
+        &mut output,
+    )
+    .unwrap();
+    assert_eq!(output, format!("{reply}\r\n"));
 }
 
 /// This event is emitted only after release_descriptors and successful output
