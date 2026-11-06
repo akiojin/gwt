@@ -37,6 +37,8 @@ test.describe("Issue #6732: Agent limit Auto recovery (live backend)", () => {
       const windows = page.locator('.workspace-window[data-preset="issue"]');
       const created = !(await windows.count());
       if (created) await sendLiveGwtEvent(page, { kind: "create_window", preset: "issue" });
+      // Surface selection belongs to each browser context, including the next theme.
+      await page.locator('button[data-surface="issues"]').click();
       await expect(windows.first()).toBeVisible();
       const windowId = await windows.first().getAttribute("data-id");
       try {
