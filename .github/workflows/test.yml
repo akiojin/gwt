@@ -715,6 +715,7 @@ jobs:
           # T453 receipts must describe the pushed head, not a synthetic merge.
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Snapshot real HOME project stores
+        if: ${{ hashFiles('scripts/ci_home_guard.py') != '' }}
         id: home-guard
         run: python scripts/ci_home_guard.py snapshot "${{ runner.temp }}/ci-home-projects-before.json"
       - uses: actions/setup-node@v7
@@ -866,6 +867,7 @@ jobs:
           # T453 receipts must describe the pushed head, not a synthetic merge.
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Snapshot real HOME project stores
+        if: ${{ hashFiles('scripts/ci_home_guard.py') != '' }}
         id: home-guard
         run: python scripts/ci_home_guard.py snapshot "${{ runner.temp }}/ci-home-projects-before.json"
       - uses: actions/setup-node@v7
