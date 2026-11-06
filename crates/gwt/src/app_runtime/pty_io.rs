@@ -184,6 +184,31 @@ fn stop_all_before_joining<I, T>(
 }
 
 impl AppRuntime {
+    pub(super) fn discard_pending_remote_input(
+        &mut self,
+        id: &str,
+        reason: &str,
+    ) -> Vec<OutboundEvent> {
+        let Some(runtime) = self.runtimes.get_mut(id) else {
+            return Vec::new();
+        };
+        runtime.input_in_flight = None;
+        let pending = std::mem::take(&mut runtime.pending_input_commands);
+        let mut events = Vec::new();
+        let mut raw_reported = false;
+        for (_, kind) in pending {
+            if matches!(
+                kind,
+                super::RemoteRuntimeCommandKind::Input { reply_client: None }
+            ) && std::mem::replace(&mut raw_reported, true)
+            {
+                continue;
+            }
+            events.extend(self.remote_command_refusal(id, &kind, reason.into()));
+        }
+        events
+    }
+
     fn remote_command_refusal(
         &self,
         id: &str,
@@ -255,6 +280,35 @@ impl AppRuntime {
         let failure_id = id.clone();
         let failure_kind = kind.clone();
         let proxy = self.proxy.clone();
+        let is_input = matches!(kind, super::RemoteRuntimeCommandKind::Input { .. });
+        let mut events = Vec::new();
+        if is_input
+            && runtime
+                .input_in_flight
+                .is_some_and(|(previous, _)| previous != connection_id)
+        {
+            events.extend(self.discard_pending_remote_input(
+                &id,
+                "Queued input was discarded after the project reconnected. Retype it.",
+            ));
+        }
+        let input_command_id = if is_input {
+            let runtime = self.runtimes.get_mut(&id).expect("validated remote input");
+            // Preserve browser order before spawning any HTTP worker. A mutex
+            // acquired inside those workers cannot undo their scheduling order.
+            runtime
+                .has_unsent_user_input
+                .store(true, std::sync::atomic::Ordering::Release);
+            if runtime.input_in_flight.is_some() {
+                runtime.pending_input_commands.push_back((command, kind));
+                return events;
+            }
+            let token = uuid::Uuid::new_v4();
+            runtime.input_in_flight = Some((connection_id, token));
+            Some(token)
+        } else {
+            None
+        };
         if approval_resolution_started {
             self.begin_runtime_approval_resolution(&id);
         }
@@ -289,6 +343,7 @@ impl AppRuntime {
                     incarnation,
                     kind,
                     approval_resolution_started,
+                    input_command_id,
                     result,
                 },
             )));
@@ -296,9 +351,31 @@ impl AppRuntime {
             if approval_resolution_started {
                 self.cancel_runtime_approval_resolution(&failure_id);
             }
-            return self.remote_command_refusal(&failure_id, &failure_kind, error.to_string());
+            events.extend(self.remote_command_refusal(
+                &failure_id,
+                &failure_kind,
+                error.to_string(),
+            ));
+            if is_input {
+                events.extend(self.discard_pending_remote_input(
+                    &failure_id,
+                    "Queued input was discarded because input dispatch failed. Retype it.",
+                ));
+                // No worker started, so no new physical input is uncertain.
+                // Remove this lane's speculative busy hint, retaining the last
+                // owner fact (or staying conservative when it is unavailable).
+                if let Some(runtime) = self.runtimes.get_mut(&failure_id) {
+                    runtime.has_unsent_user_input.store(
+                        runtime
+                            .input_observation
+                            .is_none_or(|observation| observation.has_unsent_user_input),
+                        std::sync::atomic::Ordering::Release,
+                    );
+                }
+            }
+            return events;
         }
-        Vec::new()
+        events
     }
 
     pub(crate) fn handle_remote_runtime_command_complete(
@@ -313,6 +390,7 @@ impl AppRuntime {
             incarnation,
             kind,
             approval_resolution_started,
+            input_command_id,
             result,
         } = completion;
         if !self.project_owner_event_is_current(&context, connection_id, &identity)
@@ -320,12 +398,26 @@ impl AppRuntime {
         {
             return Vec::new();
         }
+        if let Some(token) = input_command_id {
+            let runtime = self.runtimes.get_mut(&id).expect("fenced input ACK");
+            if runtime.input_in_flight != Some((connection_id, token)) {
+                return Vec::new();
+            }
+            runtime.input_in_flight = None;
+        }
         let observation = match result {
             Err(error) => {
                 if approval_resolution_started {
                     self.cancel_runtime_approval_resolution(&id);
                 }
-                return self.remote_command_refusal(&id, &kind, error);
+                let mut events = self.remote_command_refusal(&id, &kind, error);
+                if input_command_id.is_some() {
+                    events.extend(self.discard_pending_remote_input(
+                        &id,
+                        "Queued input was discarded because earlier input failed. Retype it.",
+                    ));
+                }
+                return events;
             }
             Ok(observation) => observation,
         };
@@ -336,23 +428,23 @@ impl AppRuntime {
                 .is_none_or(|old| old.revision <= observation.revision)
             {
                 runtime.has_unsent_user_input.store(
-                    observation.has_unsent_user_input,
+                    observation.has_unsent_user_input || runtime.input_delivery_pending(),
                     std::sync::atomic::Ordering::Release,
                 );
                 runtime.observe_input(Some(observation));
             }
-            if !observation.has_unsent_user_input {
+            if !observation.has_unsent_user_input && !self.runtimes[&id].input_delivery_pending() {
                 self.flush_pending_pm_wake(&id);
             }
         }
-        match kind {
+        let mut events = match kind {
             super::RemoteRuntimeCommandKind::Input {
                 reply_client: Some(client_id),
             } => vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::PaneSendResult {
                     ok: true,
-                    window_id: Some(id),
+                    window_id: Some(id.clone()),
                     error: None,
                 },
             )],
@@ -365,7 +457,19 @@ impl AppRuntime {
                 self.apply_owner_status_projection(&id, WindowProcessStatus::Stopped, None)
             }
             _ => Vec::new(),
+        };
+        // Only this lane's exact ACK advances it. Mobile input also publishes
+        // observations through this handler and must not release a desktop write.
+        if input_command_id.is_some() {
+            let next = self
+                .runtimes
+                .get_mut(&id)
+                .and_then(|runtime| runtime.pending_input_commands.pop_front());
+            if let Some((command, kind)) = next {
+                events.extend(self.queue_remote_runtime_command(&id, command, kind));
+            }
         }
+        events
     }
 
     /// Immediate repair comes from the immutable owner cache; a fresh private snapshot follows.
