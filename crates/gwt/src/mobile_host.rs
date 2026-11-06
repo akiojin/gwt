@@ -7,8 +7,13 @@
 //! Renewal scheduling (every ten seconds) and that runtime wiring are separate.
 //! The credential module provides strict reads and explicit immutable private
 //! imports only; neither operation registers or enables this Host.
+//! Configuration selects an explicit imported identity from fixed private
+//! storage; loading it likewise grants no registration or device authority.
 
 pub mod credential;
+
+mod config;
+pub use config::{HostConfigError, MobileHostConfig};
 
 use std::time::{Duration, Instant};
 use uuid::Uuid;
