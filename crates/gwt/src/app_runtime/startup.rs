@@ -1791,7 +1791,34 @@ impl AppRuntime {
                 pending_source_matches = self.pending_auto_resume_sources.iter().filter(|(window, source)| self.window_lookup.contains_key(*window) && *source == &session.id).count(),
                 "saved Session restart routing");
         }
-        if source_reserved {
+        // Keep the source reservation while an exact terminal restart is
+        // routed to the physical owner, which alone may retire its predecessor.
+        let retained_restart = origin == RestoreOrigin::UserRequested
+            && !self
+                .pending_startup_auto_resume_sessions
+                .iter()
+                .any(|p| p.session.id == session.id)
+            && !self
+                .pending_auto_resume_sources
+                .iter()
+                .any(|(id, source)| self.window_lookup.contains_key(id) && source == &session.id)
+            && {
+                let mut active = self
+                    .active_agent_sessions
+                    .values()
+                    .filter(|active| active.session_id == session.id);
+                active.next().is_some_and(|active| {
+                    active.tab_id == tab_id
+                        && self.runtimes.get(&active.window_id).is_some_and(|runtime| {
+                            runtime.exit_confirmed
+                                && matches!(
+                                    runtime.status,
+                                    WindowProcessStatus::Error | WindowProcessStatus::Stopped
+                                )
+                        })
+                }) && active.next().is_none()
+            };
+        if source_reserved && !retained_restart {
             return Vec::new();
         }
         let Some(context) = self.project_context(tab_id) else {

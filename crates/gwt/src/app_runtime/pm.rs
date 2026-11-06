@@ -2810,6 +2810,16 @@ mod delivery_tests {
         let _home = ScopedGwtHome::set(temp.path());
         let (repo, mut runtime, window_id) = pm_wake_fixture(&temp);
         let _pane = attach_live_pm_pane(&mut runtime, &window_id);
+        // Restore the injected fault before the real PM owner drains, including
+        // on assertion panic: exact member cleanup requires readable PM prefs.
+        struct RestorePrefs(PathBuf, Vec<u8>);
+        impl Drop for RestorePrefs {
+            fn drop(&mut self) {
+                std::fs::write(&self.0, &self.1).expect("restore PM prefs before owner teardown");
+            }
+        }
+        let prefs_path = pm_registry::pm_prefs_path_for_repo_path(&repo);
+        let _restore_prefs = RestorePrefs(prefs_path.clone(), std::fs::read(&prefs_path).unwrap());
         let (spawner, tasks) = BlockingTaskSpawner::queued();
         runtime.blocking_tasks = spawner;
         let trace_path = temp.path().join("wake-preparation-failure.jsonl");
@@ -2823,7 +2833,7 @@ mod delivery_tests {
                 .finish(),
         );
         let decision = normal_wake(repo.clone(), window_id.clone());
-        std::fs::write(pm_registry::pm_prefs_path_for_repo_path(&repo), "invalid").unwrap();
+        std::fs::write(&prefs_path, "invalid").unwrap();
         assert_eq!(
             runtime.write_pm_wake_prompt(&decision),
             Ok(PmWakeWrite::Deferred)

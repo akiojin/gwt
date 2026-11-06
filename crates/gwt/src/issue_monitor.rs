@@ -45020,8 +45020,8 @@ mod tests {
         let sessions = gwt_core::paths::gwt_sessions_dir();
         let roster = crate::agent_names::read_project_roster(&a_root, &sessions).unwrap();
         assert_eq!(
-            roster.schema_version, 2,
-            "the first roster read activates common ownership"
+            roster.schema_version, 3,
+            "the first roster read activates role-aware common ownership"
         );
         assert_eq!(roster.members.len(), 2);
         let global_member = roster

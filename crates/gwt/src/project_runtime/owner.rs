@@ -4405,10 +4405,81 @@ impl OwnerState {
                     reply,
                     Some(*pending),
                     None,
+                    None,
                 );
             }
         }
     }
+    /// An explicit saved-Session restart may replace only its unique,
+    /// physically exited diagnostic predecessor in this fixed owner.
+    fn retained_restore_predecessor(
+        &self,
+        source: &gwt_agent::Session,
+        origin: gwt_agent::SessionLaunchOrigin,
+    ) -> Result<Option<String>, String> {
+        if origin != gwt_agent::SessionLaunchOrigin::UserRestart {
+            return Ok(None);
+        }
+        let installed = self
+            .runtimes
+            .iter()
+            .filter(|(_, runtime)| {
+                runtime.agent.as_ref().is_some_and(|agent| {
+                    agent.active.session_id == source.id || agent.snapshot.id == source.id
+                })
+            })
+            .collect::<Vec<_>>();
+        let [(id, runtime)] = installed.as_slice() else {
+            return if installed.is_empty() {
+                Ok(None)
+            } else {
+                Err("The restart source has multiple installed runtimes".into())
+            };
+        };
+        let agent = runtime.agent.as_ref().expect("installed predecessor");
+        if runtime.project_root != self.root
+            || !same_legacy_session_source(&agent.snapshot, source)
+            || agent.snapshot.project_state_root != source.project_state_root
+            || agent.snapshot.execution_binding != source.execution_binding
+            || agent.active.session_id != source.id
+            || self.closing.contains_key(*id)
+            || self.readiness.contains_key(*id)
+            || self.retirements.keys().any(|(retired, _)| retired == *id)
+            || agent.binding_repair_inflight
+            || agent.monitor_commit_inflight
+            || agent.monitor_answer_inflight
+            || agent.pending_fresh.is_some()
+            || agent.pending_continue.is_some()
+            || !matches!(
+                Self::runtime_status(runtime),
+                crate::WindowProcessStatus::Error | crate::WindowProcessStatus::Stopped
+            )
+            || runtime
+                .pty
+                .try_wait()
+                .map_err(|error| error.to_string())?
+                .is_none()
+            || runtime
+                .pane
+                .lock()
+                .map_err(|error| error.to_string())?
+                .last_exit()
+                .is_none()
+        {
+            return Err("The exact restart source is live, unconfirmed, or changed".into());
+        }
+        let saved = gwt_agent::Session::load(
+            &gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", source.id)),
+        )
+        .map_err(|error| error.to_string())?;
+        if serde_json::to_value(&saved).map_err(|error| error.to_string())?
+            != serde_json::to_value(source).map_err(|error| error.to_string())?
+        {
+            return Err("The saved restart source changed before capture".into());
+        }
+        Ok(Some((*id).clone()))
+    }
+
     fn restore_saved_session(&mut self, command: OwnerCommand, reply: oneshot::Sender<OwnerReply>) {
         let request = match serde_json::to_value(&command) {
             Ok(request) => request,
@@ -4444,13 +4515,21 @@ impl OwnerState {
             ));
             return;
         }
-        let reserved = self.runtimes.values().any(|runtime| {
-            runtime.agent.as_ref().is_some_and(|agent| {
-                crate::launch_runtime::same_worktree_path(
-                    &agent.snapshot.worktree_path,
-                    &expected_source.worktree_path,
-                )
-            })
+        let predecessor = match self.retained_restore_predecessor(&expected_source, origin) {
+            Ok(predecessor) => predecessor,
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return;
+            }
+        };
+        let reserved = self.runtimes.iter().any(|(id, runtime)| {
+            predecessor.as_ref() != Some(id)
+                && runtime.agent.as_ref().is_some_and(|agent| {
+                    crate::launch_runtime::same_worktree_path(
+                        &agent.snapshot.worktree_path,
+                        &expected_source.worktree_path,
+                    )
+                })
         }) || self
             .agent_operations
             .values()
@@ -4473,6 +4552,17 @@ impl OwnerState {
                             )
                         })
                     })
+            })
+            || self.retirements.values().flatten().any(|retirement| {
+                let path = match retirement {
+                    Retirement::Runtime { runtime, .. } => {
+                        runtime.agent.as_ref().map(|a| &a.snapshot.worktree_path)
+                    }
+                    _ => None,
+                };
+                path.is_some_and(|path| {
+                    crate::launch_runtime::same_worktree_path(path, &expected_source.worktree_path)
+                })
             });
         let registry = match &self.agent_registry {
             Ok(registry) => registry.clone(),
@@ -4524,6 +4614,7 @@ impl OwnerState {
             reply,
             None,
             Some(restore),
+            predecessor,
         );
     }
 
@@ -4906,7 +4997,7 @@ impl OwnerState {
     }
 
     fn launch_agent(&mut self, command: OwnerCommand, reply: oneshot::Sender<OwnerReply>) {
-        self.launch_agent_inner(command, reply, None, None);
+        self.launch_agent_inner(command, reply, None, None, None);
     }
     fn launch_agent_inner(
         &mut self,
@@ -4914,6 +5005,7 @@ impl OwnerState {
         reply: oneshot::Sender<OwnerReply>,
         continuation: Option<super::launch_payload::PendingContinueWork>,
         mut restore: Option<super::installation::OwnerSavedSessionRestore>,
+        restore_predecessor: Option<String>,
     ) {
         if let Err(error) = &self.agent_registry {
             let _ = reply.send(Err(error.clone()));
@@ -5151,7 +5243,12 @@ impl OwnerState {
                 return;
             }
         }
-        if self.runtimes.contains_key(&id)
+        let restore_predecessor = restore_predecessor.filter(|_| {
+            restore
+                .as_ref()
+                .is_some_and(|restore| !restore.worktree_reserved)
+        });
+        if (self.runtimes.contains_key(&id) && restore_predecessor.as_ref() != Some(&id))
             || self.pending.contains_key(&id)
             || self.closing.contains_key(&id)
             || self
@@ -5243,6 +5340,33 @@ impl OwnerState {
         } else {
             None
         };
+        let restore_stop = restore_predecessor.map(|id| {
+            let runtime = self
+                .runtimes
+                .remove(&id)
+                .expect("exact restore predecessor");
+            runtime.current.store(false, Ordering::Release);
+            runtime.pty.revoke_input_generation();
+            runtime
+                .agent
+                .as_ref()
+                .expect("restore agent")
+                .current
+                .store(false, Ordering::Release);
+            self.closing.insert(
+                id.clone(),
+                ClosingRuntime {
+                    incarnation: runtime.incarnation,
+                    pm_worktree: runtime_uses_pm_worktree(&runtime),
+                },
+            );
+            let (reply, closed) = oneshot::channel();
+            self.close_replies
+                .entry((id.clone(), runtime.incarnation))
+                .or_default()
+                .push(reply);
+            (id, runtime, closed)
+        });
         self.next_incarnation += 1;
         let incarnation = self.next_incarnation;
         let current = Arc::new(AtomicBool::new(true));
@@ -5291,6 +5415,7 @@ impl OwnerState {
         let materializer_id = self.host_instance_id.clone();
         let sender = self.sender.clone();
         let events = self.events.clone();
+        let restore_writers = self.pty_writers.clone();
         let live_pm_session_ids = self
             .runtimes
             .values()
@@ -5364,6 +5489,39 @@ impl OwnerState {
                 }
             });
 
+            let restore_stop_result = if let Some((id, mut runtime, closed)) = restore_stop {
+                let registry_result = super::agent_dispatch::forget_owner_writer(
+                    &restore_writers,
+                    &id,
+                    &runtime.current,
+                );
+                let result = close_runtime_inner(
+                    &id,
+                    &mut runtime,
+                    CloseCause::GuiLifetime,
+                    Some(&restore.as_ref().expect("saved restore capture").source),
+                )
+                .and(registry_result);
+                if sender
+                    .send(OwnerMessage::Closed {
+                        id,
+                        incarnation: runtime.incarnation,
+                        runtime: Box::new(runtime),
+                        cause: CloseCause::GuiLifetime,
+                        result,
+                    })
+                    .is_ok()
+                {
+                    closed
+                        .blocking_recv()
+                        .map_err(|_| "owner stopped before restore retirement".to_string())
+                        .and_then(|reply| reply.map(|_| ()))
+                } else {
+                    Err("owner stopped before restore retirement".into())
+                }
+            } else {
+                Ok(())
+            };
             let had_manual_predecessor = manual_stop.is_some();
             let manual_stop_result = if let Some((predecessor_id, mut runtime, identity)) =
                 manual_stop
@@ -5526,7 +5684,7 @@ impl OwnerState {
             let output_operation_id = operation_id.clone();
             let mut purpose_title = None;
             let mut manual_successor_prepared = false;
-            let result = manual_stop_result
+            let result = restore_stop_result.and(manual_stop_result)
                 .map_err(AgentLaunchError::from)
                 .and_then(|()| {
                     if let Some(restore) = restore.as_mut() {
@@ -11270,10 +11428,94 @@ fn close_agent_runtime(
     Ok(fresh_rolled_back)
 }
 
+/// Preserve the exact saved source while retiring its already-exited child.
+/// Bound sources use the same owner-before-Session cleanup lease and temporary
+/// durable handoff fence as ordinary close. No terminal persistence is needed.
+fn drain_retained_restore_runtime(
+    id: &str,
+    runtime: &WindowRuntime,
+    source: &gwt_agent::Session,
+) -> Result<bool, String> {
+    let sessions = gwt_core::paths::gwt_sessions_dir();
+    let identity = gwt_agent::SessionExecutionIdentity::from_session(source)?;
+    let drain = || -> std::io::Result<()> {
+        let saved = gwt_agent::Session::load(&sessions.join(format!("{}.toml", source.id)))?;
+        let proof = gwt_agent::SessionRuntimeState::load(&gwt_agent::runtime_state_path(
+            &sessions, &source.id,
+        ))?;
+        if serde_json::to_value(&saved)? != serde_json::to_value(source)?
+            || runtime
+                .agent
+                .as_ref()
+                .is_none_or(|agent| agent.active.session_id != source.id)
+            || proof.execution_identity.as_ref() != identity.as_ref()
+            || proof.runtime_incarnation != Some(runtime.incarnation)
+            || proof.host_started_at != crate::process::host_process_start_time(std::process::id())
+            || proof.host_started_at.is_none()
+            || proof.child_pid != runtime.pty.process_id()
+            || proof.child_pid.is_none()
+            || proof.child_started_at != runtime.child_started_at
+            || proof.child_started_at.is_none_or(|birth| birth == 0)
+            || runtime
+                .pty
+                .try_wait()
+                .map_err(std::io::Error::other)?
+                .is_none()
+            || runtime
+                .pane
+                .lock()
+                .map_err(|error| std::io::Error::other(error.to_string()))?
+                .last_exit()
+                .is_none()
+        {
+            return Err(std::io::Error::other(
+                "The exact saved restart source or physical proof changed",
+            ));
+        }
+        if !crate::session_finalizer::kill_and_reap(&runtime.pty, id)? {
+            return Err(std::io::Error::other(
+                "The exact restart source tree has not exited",
+            ));
+        }
+        Ok(())
+    };
+    if let Some(identity) = identity.as_ref() {
+        crate::cli::execution_state::with_exact_owned_runtime_cleanup_lease(
+            &sessions,
+            identity,
+            gwt_agent::ManualLaunchRuntimeProof {
+                host_pid: std::process::id(),
+                runtime_incarnation: runtime.incarnation,
+            },
+            drain,
+        )
+        .map_err(|error| error.to_string())?
+        .ok_or("The exact restart source cleanup authority changed")?;
+    } else {
+        gwt_agent::with_session_path_lease(&sessions, &source.id, |_| drain())
+            .map_err(|error| error.to_string())?;
+    }
+    if let Some(agent) = runtime.agent.as_ref() {
+        if let Some(token) = agent.capability_token.as_ref() {
+            agent.issuer.revoke_token(token);
+        }
+    }
+    Ok(false)
+}
+
 pub(crate) fn close_runtime(
     id: &str,
     runtime: &mut WindowRuntime,
     cause: CloseCause,
+) -> Result<(), String> {
+    close_runtime_inner(id, runtime, cause, None)
+}
+
+fn close_runtime_inner(
+    id: &str,
+    runtime: &mut WindowRuntime,
+    cause: CloseCause,
+    retained_restore_source: Option<&gwt_agent::Session>,
 ) -> Result<(), String> {
     if runtime.close_handoff.is_none() {
         if let Some(agent) = runtime.agent.as_ref() {
@@ -11301,7 +11543,9 @@ pub(crate) fn close_runtime(
             }
         }
     }
-    let stopped = if let Some(agent) = &runtime.agent {
+    let stopped = if let Some(source) = retained_restore_source {
+        drain_retained_restore_runtime(id, runtime, source)
+    } else if let Some(agent) = &runtime.agent {
         close_agent_runtime(id, runtime, agent, cause.restore_policy())
     } else if !crate::session_finalizer::kill_and_reap(&runtime.pty, id)
         .map_err(|e| e.to_string())?
@@ -12298,6 +12542,7 @@ mod tests {
         )
         .unwrap();
         let original_workspace = std::fs::read(&workspace_path).unwrap();
+        super::super::test_support::seed_actual_project_view(&root).unwrap();
         let registry_path = crate::agent_registry::path();
         std::fs::create_dir_all(registry_path.parent().unwrap()).unwrap();
         std::fs::write(&registry_path, b"{").unwrap();

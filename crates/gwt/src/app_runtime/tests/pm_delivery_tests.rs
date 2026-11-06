@@ -11,6 +11,13 @@ pub(super) struct PmDeliveryFixture {
 }
 
 pub(super) fn pm_delivery_owner_fixture(temp: &Path) -> PmDeliveryFixture {
+    pm_delivery_owner_fixture_with_target_role(temp, false)
+}
+
+pub(super) fn pm_delivery_owner_fixture_with_target_role(
+    temp: &Path,
+    pm_role_target: bool,
+) -> PmDeliveryFixture {
     use super::pane_control_tests::{
         control_launch_config, control_owner_agent, control_owner_launch, control_register_pm,
     };
@@ -19,7 +26,9 @@ pub(super) fn pm_delivery_owner_fixture(temp: &Path) -> PmDeliveryFixture {
     seed_owner_fixture_roster(&repo, 8);
     configure_owner_fixture_tools(&repo, &["pane-contract-fixture", "codex"]);
     let (owner, pm) = control_owner_agent(&repo, "pm", 42);
-    control_register_pm(&repo, &pm);
+    if !pm_role_target {
+        control_register_pm(&repo, &pm);
+    }
     let runner = temp.join(if cfg!(windows) {
         "pm-codex.cmd"
     } else {
@@ -33,15 +42,33 @@ pub(super) fn pm_delivery_owner_fixture(temp: &Path) -> PmDeliveryFixture {
     }
     #[cfg(windows)]
     fs::write(&runner, "@echo off\r\nif \"%~1\"==\"--version\" (echo 1.2.3& exit /b 0)\r\nif \"%~1\"==\"features\" exit /b 0\r\npowershell -NoProfile -Command \"while ($null -ne [Console]::ReadLine()) {}\"\r\n").unwrap();
-    let location = control_launch_config(&repo, 43);
-    let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
-        .working_dir(location.working_dir.unwrap())
-        .branch(location.branch.unwrap())
-        .base_branch(location.base_branch.unwrap())
-        .build();
+    let mut config = if pm_role_target {
+        let worktree = create_detached_pm_worktree_fixture(&repo);
+        gwt::pm_registry::mutate_pm_prefs(
+            &gwt::pm_registry::pm_prefs_path_for_repo_path(&repo),
+            |prefs| {
+                prefs.settings.launch_profile = Some(gwt::pm_registry::PmLaunchProfile {
+                    agent_id: "codex".into(),
+                    model: None,
+                    reasoning: None,
+                    version: None,
+                });
+            },
+        )
+        .unwrap();
+        AppRuntime::pm_new_launch_config(&repo, &worktree).unwrap()
+    } else {
+        let location = control_launch_config(&repo, 43);
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .working_dir(location.working_dir.unwrap())
+            .branch(location.branch.unwrap())
+            .base_branch(location.base_branch.unwrap())
+            .build();
+        config.linked_issue_number = Some(43);
+        config.explicit_follow_up = true;
+        config
+    };
     config.command = runner.display().to_string();
-    config.linked_issue_number = Some(43);
-    config.explicit_follow_up = true;
     let target = control_owner_launch(&owner, "target", config);
     owner_runtime_status_event(&owner, &target, "Working", "SessionStart");
     let target = owner_fixture_block_on(owner.probe(&target.id, target.incarnation)).unwrap();
@@ -57,6 +84,44 @@ pub(super) fn pm_delivery_owner_fixture(temp: &Path) -> PmDeliveryFixture {
         target.session.as_ref().unwrap().agent_id,
         gwt_agent::AgentId::Codex
     );
+    if pm_role_target {
+        // The real PM retires its own authority; pm.stop keeps its live pane.
+        // Registering the legacy principal below must not replace a live PM.
+        target.with_agent_environment(|| {
+            let mut env = gwt::cli::TestEnv::new(repo.clone());
+            let code = gwt::cli::dispatch_json_input(
+                &mut env,
+                "gwtd",
+                &serde_json::json!({
+                    "schema_version": 1,
+                    "operation": "pm.stop",
+                    "params": { "project_root": repo },
+                })
+                .to_string(),
+            );
+            assert_eq!(code, 0, "pm.stop: {}", String::from_utf8_lossy(&env.stdout));
+            let envelope: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
+            let report: serde_json::Value =
+                serde_json::from_str(envelope["output"].as_str().unwrap()).unwrap();
+            assert_eq!(
+                report["stopped_session_id"],
+                target.session.as_ref().unwrap().id
+            );
+            assert_eq!(report["registration_cleared"], true);
+        });
+        assert!(
+            gwt::pm_registry::load_pm_prefs(&gwt::pm_registry::pm_prefs_path_for_repo_path(&repo))
+                .unwrap()
+                .registration
+                .is_none(),
+            "the real pm.stop must clear registration before the legacy principal is registered"
+        );
+        assert!(
+            target.pty.try_wait().unwrap().is_none(),
+            "pm.stop retains the protected live PM-role pane"
+        );
+        control_register_pm(&repo, &pm);
+    }
     PmDeliveryFixture {
         repo,
         owner,

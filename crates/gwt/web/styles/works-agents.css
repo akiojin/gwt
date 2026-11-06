@@ -219,6 +219,7 @@
 .works-preview-output { flex: 1; min-width: 0; min-height: 0; padding: var(--space-3); overflow: auto; }
 .surface-readonly-note { flex-shrink: 0; margin: 0; padding: var(--space-2); color: var(--color-text-muted); font-size: var(--type-xs); }
 .agents-surface { gap: var(--space-3); padding: var(--space-4) var(--space-5); overflow: auto; }
+.agents-surface .settings-status { overflow-wrap: anywhere; }
 .roster-pm-identity { border: 1px solid var(--color-border); padding: var(--space-3); background: var(--color-surface-elevated); }
 .roster-pm-name { min-width: 0; overflow-wrap: anywhere; font-size: var(--type-base); font-weight: 600; }
 .roster-tabs { display: flex; flex-wrap: wrap; gap: var(--space-1); }

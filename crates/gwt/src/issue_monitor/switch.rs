@@ -769,7 +769,7 @@ mod tests {
         value["agent_switch_intents"] = serde_json::json!({
             "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa": {
                 "request": {"operation_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "member_id":"member", "expected_roster_revision":1, "target_issue_number":42},
-                "source": {"assignment":{"reservation_id":"reservation", "session_id":"session", "issue_number":41, "spec_number":null, "delivery_id":"delivery", "host_id":"host", "host_pid":1, "host_started_at":2}, "window_id":"window", "claim_id":"claim", "confirmation":{"window_id":"window", "claim_id":"claim", "delivery_id":"delivery", "confirmed_at":"2026-10-25T00:00:00Z"}},
+                "source": {"assignment":{"role":"implementation", "reservation_id":"reservation", "session_id":"session", "issue_number":41, "spec_number":null, "delivery_id":"delivery", "host_id":"host", "host_pid":1, "host_started_at":2}, "window_id":"window", "claim_id":"claim", "confirmation":{"window_id":"window", "claim_id":"claim", "delivery_id":"delivery", "confirmed_at":"2026-10-25T00:00:00Z"}},
                 "stage":"requested", "source_input_revision":7
             }
         });

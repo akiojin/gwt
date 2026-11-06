@@ -67,6 +67,13 @@ test("initial navigation honors pending choices and containment owners", () => {
     const dismissOperatorBriefing = () => {}, connectSocket = () => {}, applyStatus = () => {};
     const traceMeasure = (_event, _detail, render) => render();
     const UI_TRACE_EVENT = {}, versionState = {}, detailMap = new Map();
+    const worksSurface = { prepareWorkspaceReconciliation() {} };
+    const windowRuntimeStateMap = new Map(), windowRuntimeStateSinceMap = new Map();
+    const renderedRuntimeStatusKeys = new Map(), pendingSnapshotMap = new Map(), renderedTerminalPackets = new Map();
+    const allProjectWindowIdSet = () => new Set(appState.tabs.flatMap(tab => (tab.workspace?.windows || []).map(window => window.id)));
+    const agentAttentionToaster = { forgetWindow() {} }, alertsToasts = { dismiss() {} };
+    const terminalOutputBatcher = { prune: () => [] }, socket = null;
+    const removePmWindowState = () => {}, projectExecutionPolicy = { applyStatus() {} };
     const setVersionState = () => {}, renderProjectPicker = () => {}, renderProjectOnboarding = () => {};
     const document = { getElementById: () => ({}) };
     const activeProjectTab = () => appState.tabs.find(tab => tab.id === appState.active_tab_id);

@@ -12004,6 +12004,13 @@ pub(super) fn attach_live_pm_pane(runtime: &mut AppRuntime, window_id: &str) -> 
         create_detached_pm_worktree_fixture(&root);
     }
     pin_live_pm_fixture_agents(runtime, &root);
+    // Replace pm_wake_fixture's metadata-only placeholder through the normal
+    // intentional-stop writer before asking the owner for an actual NEW PM.
+    gwt::pm_registry::deregister_pm(
+        &gwt::pm_registry::pm_prefs_path_for_repo_path(&root),
+        "pm-session-live",
+    )
+    .expect("retire metadata-only PM wake registration");
     let config = AppRuntime::pm_new_launch_config(&root, &worktree)
         .expect("the same readonly NEW draft as the PM launcher");
     let owner = project_owner_fixture(runtime, window_id);
@@ -12481,24 +12488,28 @@ fn assert_pm_delivery_refused(
     other_session: bool,
     pending_refusal: bool,
 ) {
-    use self::pane_control_tests::{control_close, control_launch_config, control_owner_launch};
+    use self::pane_control_tests::control_close;
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _home = ScopedGwtHome::set(temp.path());
-    let fixture = pm_delivery_tests::pm_delivery_owner_fixture(temp.path());
-    let other = other_session.then(|| {
-        let worktree = create_detached_pm_worktree_fixture(&fixture.repo);
-        let mut config = control_launch_config(&fixture.repo, 44);
-        config.working_dir = Some(worktree);
-        config.branch = None;
-        config.linked_issue_number = None;
-        config.explicit_follow_up = false;
-        config.suppress_execution_control = true;
-        control_owner_launch(&fixture.owner, "other-pm-role", config)
-    });
-    let target = other.as_ref().unwrap_or(&fixture.pm);
+    let fixture =
+        pm_delivery_tests::pm_delivery_owner_fixture_with_target_role(temp.path(), other_session);
+    let target = if other_session {
+        &fixture.target
+    } else {
+        &fixture.pm
+    };
     let target_id = target.id.clone();
+    if other_session {
+        let session = target.session.as_ref().unwrap();
+        assert_ne!(session.id, fixture.pm.session.as_ref().unwrap().id);
+        assert!(gwt::pm_registry::pane_is_pm(
+            &fixture.repo,
+            Some(&session.worktree_path),
+            Some(&session.id),
+        ));
+    }
     let operation_id = uuid::Uuid::new_v4().to_string();
     let pending = pending_refusal.then(|| {
         let path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&fixture.repo);
@@ -12589,8 +12600,8 @@ fn assert_pm_delivery_refused(
         .reason
         .as_ref()
         .is_some_and(|reason| reason.contains("self") && reason.contains(&target_id)));
-    if let Some(other) = other {
-        control_close(&fixture.owner, &other);
+    if other_session {
+        control_close(&fixture.owner, &fixture.target);
     }
 }
 

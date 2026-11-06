@@ -4309,6 +4309,7 @@ fn agent_name_backfills_registered_pm_without_joining_the_member_pool() {
     seed_owner_fixture_roster(&root, 8);
     let worktree = create_detached_pm_worktree_fixture(&root);
     let (mut row, mut session) = legacy_name_session_row(&root, "pm", WindowPreset::Agent, None);
+    session.agent_id = gwt_agent::AgentId::ClaudeCode;
     session.worktree_path = worktree.clone();
     session.agent_name = Some("Falcon".into());
     session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();

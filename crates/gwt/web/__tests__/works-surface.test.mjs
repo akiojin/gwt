@@ -509,6 +509,7 @@ test("Works and Agents CSS uses Operator tokens, responsive wrapping and an in-s
   assert.match(css, /data-state="waiting"[^}]*\.work-spark[^}]*--color-state-needs-input/s);
   assert.match(css, /\.works-full[\s\S]*min-height:\s*0/);
   assert.match(css, /\.works-availability[^}]*var\(--type-xs\)[^}]*overflow-wrap:\s*anywhere/s);
+  assert.match(css, /\.agents-surface \.settings-status\s*\{[^}]*overflow-wrap:\s*anywhere/s);
 });
 
 

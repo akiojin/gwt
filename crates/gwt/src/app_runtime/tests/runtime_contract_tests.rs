@@ -1143,10 +1143,22 @@ fn deregistering_pty_writer_can_finish_while_a_reserved_submit_is_settling() {
 
 #[test]
 fn terminal_agent_error_invalidates_input_even_when_pane_is_kept_for_diagnostics() {
+    retained_diagnostic_contract(false);
+}
+
+#[test]
+fn explicit_restart_drains_retained_diagnostic_before_exact_restore() {
+    retained_diagnostic_contract(true);
+}
+
+fn retained_diagnostic_contract(restart: bool) {
     use gwt::project_runtime::{
         events::{OwnerCommand, OwnerEvent},
         test_support::ProjectOwnerHarness,
     };
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
@@ -1167,6 +1179,15 @@ fn terminal_agent_error_invalidates_input_even_when_pane_is_kept_for_diagnostics
     );
     seed_owner_fixture_roster(&repo, 1);
     configure_owner_fixture_tools(&repo, &["pane-contract-fixture"]);
+    if restart {
+        gwt_agent::save_stored_custom_agents_to_path(
+            &gwt_core::paths::gwt_config_path(),
+            &[gwt_agent::StoredCustomAgent::new(
+                super::pane_control_tests::control_custom_agent(),
+            )],
+        )
+        .expect("persist the actual Custom provider used by saved-Session restart");
+    }
     let owner = owner_fixture_block_on(ProjectOwnerHarness::start(&repo)).unwrap();
     let mut config = super::pane_control_tests::control_launch_config(&repo, 42);
     config.pending_initial_prompt =
@@ -1259,6 +1280,30 @@ fn terminal_agent_error_invalidates_input_even_when_pane_is_kept_for_diagnostics
     );
     let prompt_path = &prompt_paths[0];
     let session = probe.session.as_ref().unwrap();
+    if restart {
+        let hook = serde_json::json!({
+            "hook_event_name": "SessionStart",
+            "session_id": "retained-diagnostic-native",
+            "cwd": session.worktree_path,
+        })
+        .to_string();
+        probe.with_agent_environment(|| {
+            gwt::daemon_runtime::handle_runtime_state("SessionStart", &hook).unwrap();
+            gwt::daemon_runtime::handle_forward_for_event("SessionStart", &hook).unwrap();
+        });
+        let learned = gwt_agent::Session::load(
+            &gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", session.id)),
+        )
+        .unwrap();
+        assert_eq!(
+            learned.exact_resume_session_id(),
+            Some("retained-diagnostic-native")
+        );
+        assert!(learned
+            .session_history
+            .iter()
+            .any(|entry| entry.agent_session_id == "retained-diagnostic-native"));
+    }
     let mut idle = runtime_hook_state_for_event("Idle", "Stop", &session.id);
     idle.project_root = Some(repo.display().to_string());
     idle.branch = Some(session.branch.clone());
@@ -1349,6 +1394,65 @@ fn terminal_agent_error_invalidates_input_even_when_pane_is_kept_for_diagnostics
     assert!(generation
         .write_input(b"late input after confirmed exit")
         .is_err());
+    if restart {
+        gui.sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let (spawner, tasks) = BlockingTaskSpawner::queued();
+        gui.blocking_tasks = spawner;
+        let source =
+            gwt_agent::Session::load(&gui.sessions_dir.join(format!("{}.toml", session.id)))
+                .unwrap();
+        assert_eq!(
+            source.exact_resume_session_id(),
+            Some("retained-diagnostic-native")
+        );
+        gui.restart_window_events(&gui_id);
+        assert!(
+            gui.active_agent_sessions.contains_key(&gui_id),
+            "routing must keep the old source reserved until the exact Closed ACK"
+        );
+        assert!(
+            gui.pending_launch_completions.contains_key(&gui_id),
+            "a confirmed retained diagnostic must reach the existing owner launch adapter"
+        );
+        let events = drain_owner_launch_fixtures(&mut gui, &tasks);
+        assert!(
+            gui.runtimes.contains_key(&gui_id),
+            "actual restore receipts: {events:?}"
+        );
+        let projection = &gui.runtimes[&gui_id];
+        assert_eq!(projection.owner_identity, identity);
+        let successor =
+            owner_fixture_block_on(owner.probe(&projection.owner_pane_id, projection.incarnation))
+                .expect("the captured owner owns the exact replacement projection");
+        assert!(
+            successor.incarnation > probe.incarnation,
+            "actual restore receipts: {events:?}"
+        );
+        assert_eq!(
+            successor
+                .session
+                .as_ref()
+                .unwrap()
+                .exact_resume_session_id(),
+            source.exact_resume_session_id()
+        );
+        assert_eq!(
+            successor.session.as_ref().unwrap().agent_member_id,
+            source.agent_member_id
+        );
+        assert!(probe.pty.tree_exit_confirmed());
+        assert!(owner_fixture_block_on(owner.probe(&probe.id, probe.incarnation)).is_err());
+        assert!(generation.write_input(b"late input after restart").is_err());
+        assert!(successor.pty.try_wait().unwrap().is_none());
+        owner_fixture_block_on(owner.command(OwnerCommand::Close {
+            id: successor.id.clone(),
+            incarnation: successor.incarnation,
+        }))
+        .expect("close the exact successor through its captured physical owner");
+        assert!(successor.pty.tree_exit_confirmed());
+        owner_fixture_block_on(owner.shutdown());
+        return;
+    }
     owner_fixture_block_on(owner.command(OwnerCommand::Close {
         id: probe.id.clone(),
         incarnation: probe.incarnation,
