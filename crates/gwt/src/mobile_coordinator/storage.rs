@@ -324,7 +324,7 @@ pub(crate) fn read_private_credential(_: &Path) -> Result<Vec<u8>, StoreError> {
 }
 
 #[cfg(unix)]
-pub(super) fn open_directory(path: &Path) -> Result<File, StoreError> {
+pub(crate) fn open_directory(path: &Path) -> Result<File, StoreError> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let directory = OpenOptions::new()
         .read(true)
@@ -421,7 +421,7 @@ mod macos_acl {
 }
 
 #[cfg(unix)]
-pub(super) fn same_file(left: &File, right: &File) -> Result<bool, StoreError> {
+pub(crate) fn same_file(left: &File, right: &File) -> Result<bool, StoreError> {
     use std::os::unix::fs::MetadataExt;
     let left = left.metadata()?;
     let right = right.metadata()?;
@@ -429,7 +429,7 @@ pub(super) fn same_file(left: &File, right: &File) -> Result<bool, StoreError> {
 }
 
 #[cfg(not(unix))]
-pub(super) fn open_directory(_: &Path) -> Result<File, StoreError> {
+pub(crate) fn open_directory(_: &Path) -> Result<File, StoreError> {
     Err(StoreError::UnsupportedPrivateStorage)
 }
 #[cfg(not(unix))]
@@ -437,7 +437,7 @@ fn open_private_file(_: &Path, _: bool) -> Result<File, StoreError> {
     Err(StoreError::UnsupportedPrivateStorage)
 }
 #[cfg(not(unix))]
-pub(super) fn same_file(_: &File, _: &File) -> Result<bool, StoreError> {
+pub(crate) fn same_file(_: &File, _: &File) -> Result<bool, StoreError> {
     Err(StoreError::UnsupportedPrivateStorage)
 }
 

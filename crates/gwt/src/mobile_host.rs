@@ -5,6 +5,8 @@
 //! the Host authorization fence, and check it at the final read/input effect.
 //! Network failure/EOF must invalidate it and disable the Host with a new epoch.
 //! Renewal scheduling (every ten seconds) and that runtime wiring are separate.
+//! The credential module provides strict reads and explicit immutable private
+//! imports only; neither operation registers or enables this Host.
 
 pub mod credential;
 
