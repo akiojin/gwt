@@ -403,6 +403,22 @@ gwtd <<'JSON'
 JSON
 ```
 
+`workspace.project_scan` reports host endpoint discovery costs, including cache
+hits, enumerated entries and elapsed milliseconds. Missing roots and stopped
+hosts are excluded before repository identity resolution. Its shared candidate
+cache never replaces fresh endpoint and process checks.
+
+`workspace.project_prune` inspects abandoned stores under `~/.gwt/projects`
+without changing them by default. Review its candidate hashes and `manifest_hash`,
+then pass `dry_run:false` with that hash to move eligible stores to
+`~/.gwt/project-quarantine/<id>/`. No files are deleted. Open projects, active
+Sessions, PM stores, recent writes, unknown data and malformed state are retained.
+A dry run reports `protection_changed:true` if the fleet changes during inspection;
+applying always reloads protection and refuses further changes. A changed plan
+requires another dry run. Each quarantine includes a recovery
+manifest; after closing gwt, a store can be moved back to its original hash only
+if that destination is absent.
+
 `fleet.inventory` returns project agent processes, panes, and Monitor rows in one
 JSON report, including unmatched rows, duplicate worktrees, delivery evidence,
 and partial-source diagnostics. `fleet.orphans` lists processes without an
