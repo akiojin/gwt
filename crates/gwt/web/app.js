@@ -5311,7 +5311,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             }));
             break;
           case "update_state":
-            if (event.state === "available") {
+            if (event.state === "available" || event.state === "up_to_date") {
               applyUpdateState(event);
             }
             break;

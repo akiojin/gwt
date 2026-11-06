@@ -15,6 +15,43 @@ const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:0/";
 test.describe("Update modal", () => {
   test.skip(!process.env.GWT_PLAYWRIGHT_BASE_URL, "no GWT_PLAYWRIGHT_BASE_URL set");
 
+  test("up_to_date removes a failed staged release and restores the current header", async ({ page }, testInfo) => {
+    const errors: string[] = [];
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    page.on("pageerror", error => errors.push(error.message));
+    await gotoLiveGwt(page, BASE, {
+      enableTestBridge: true, suppressProjectSurfaces: true, suppressUpdateApplyStart: true,
+    });
+    const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    const header = page.locator("#app-version");
+    await expect(header).toHaveText(/^v\d+\.\d+\.\d+$/);
+    const current = (await header.innerText()).slice(1);
+    const inject = (detail: Record<string, unknown>) => page.evaluate(payload => {
+      window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: payload }));
+    }, detail);
+    await inject({ kind: "update_state", state: "available", current, latest: "9.147.0" });
+    const cta = page.locator("#update-cta");
+    const modal = page.locator("#update-modal");
+    await cta.click();
+    await inject({ kind: "update_ready", version: "9.147.0" });
+    await expect(modal).toHaveAttribute("data-state", "ready");
+    await inject({ kind: "update_apply_pending_persisted", version: "9.147.0" });
+    await expect(cta).toContainText("Restart now");
+    await expect(header).toHaveText(`v${current} -> v9.147.0`);
+
+    await inject({ kind: "update_state", state: "up_to_date" });
+    await expect(cta).toHaveCount(0);
+    await expect(modal).toHaveCount(0);
+    await expect(header).toHaveText(`v${current}`);
+    await inject({ kind: "update_state", state: "up_to_date" });
+    await expect(cta).toHaveCount(0);
+    await expect(modal).toHaveCount(0);
+    await expect(header).toHaveText(`v${current}`);
+    await page.screenshot({ path: testInfo.outputPath(`update-failure-cleared-${theme}.png`) });
+    expect(errors).toEqual([]);
+  });
+
   test("shared availability and auto-apply phases preserve cancel and supersession", async ({ page }, testInfo) => {
     const errors: string[] = [];
     page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });

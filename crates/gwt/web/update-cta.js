@@ -407,14 +407,32 @@ export function createUpdateCtaController({
   }
 
   function handleUpdateState(event) {
-    if (!event || event.state !== "available") {
+    if (!event || (event.state !== "available" && event.state !== "up_to_date")) {
       return;
     }
-    availabilityModel.update(() => ({ current: event.current, latest: event.latest }));
+    availabilityModel.update(() => ({ state: event.state, current: event.current, latest: event.latest }));
   }
 
   function renderUpdateState(event) {
     removeLegacyUpdateSurfaces();
+    if (event.state === "up_to_date") {
+      // The backend has discarded a failed or obsolete staged release.
+      latestVersion = null;
+      pendingVersion = null;
+      pendingReadyReason = null;
+      status = "idle";
+      autoApplyModel.update(() => null);
+      stagedModel.update(() => null);
+      progressModel.update(() => null);
+      errorModel.update(() => null);
+      drainBlockers = [];
+      dismissedDrainVersion = null;
+      closeModal();
+      document.getElementById(shellId)?.remove();
+      setVersionState(event.current, null);
+      announceUpdateDismissed();
+      return;
+    }
     setVersionState(event.current, event.latest);
     const previousVersion = pendingVersion || latestVersion;
     if (event.latest && previousVersion && previousVersion !== event.latest) {
