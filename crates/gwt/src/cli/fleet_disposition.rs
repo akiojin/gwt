@@ -531,6 +531,8 @@ mod tests {
 
     #[cfg(unix)]
     fn selected_orphan(worktree: &Path) -> (OwnedChild, Value, FleetTarget) {
+        use std::os::unix::process::CommandExt;
+
         std::fs::create_dir_all(worktree).unwrap();
         crate::cli::trusted_store::init_git_repo_with_origin(worktree);
         let mut session =
@@ -551,9 +553,12 @@ mod tests {
                 .unwrap();
             assert!(signed.status.success(), "{signed:?}");
         }
+        // Multicall cat dispatches by argv[0]; keep the executable path named
+        // codex for the process identity checks.
         let mut child = OwnedChild(
             resolved_command(ProcessPlanRequest::new(&executable))
                 .unwrap()
+                .arg0("cat")
                 .current_dir(worktree)
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
