@@ -1351,6 +1351,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           const ids = (activeWorkspace()?.windows || []).map(entry => entry.id);
           resyncBoardLogs(ids);
           resyncProfile(ids);
+          resyncProjectIndexSearch(ids);
         }
         syncRunningBranchCleanups();
         requestVisiblePmReports(true);
