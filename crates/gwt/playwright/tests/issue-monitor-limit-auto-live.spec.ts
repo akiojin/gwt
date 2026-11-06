@@ -34,45 +34,37 @@ test.describe("Issue #6732: Agent limit Auto recovery (live backend)", () => {
       await gotoLiveGwt(page, BASE, { enableTestBridge: true });
       await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
         .some(({ payload }: any) => payload.kind === "workspace_state"));
-      const windows = page.locator('.workspace-window[data-preset="issue"]');
-      const created = !(await windows.count());
-      if (created) await sendLiveGwtEvent(page, { kind: "create_window", preset: "issue" });
-      // Surface selection belongs to each browser context, including the next theme.
       await page.locator('button[data-surface="issues"]').click();
-      await expect(windows.first()).toBeVisible();
-      const windowId = await windows.first().getAttribute("data-id");
-      try {
-        // Each theme exercises the same transition through the real save lane.
-        await sendLiveGwtEvent(page, { kind: "set_issue_monitor_max_active_agents", max_active_agents: 8 });
-        await expect.poll(policy).toMatchObject({ mode: "manual", manual_limit: 8 });
-        await expect.poll(() => latestStatus(page)).toMatchObject({ enabled: false, max_active_agents_override: 8 });
-        const roster = JSON.parse(await readFile(preferences, "utf8")).agent_roster;
-        expect(roster.members.some((member: any) => member.enabled)).toBe(true);
-        const auto = windows.first().getByRole("button", { name: "Set Agent limit to Auto", exact: true });
-        await auto.scrollIntoViewIfNeeded();
-        await expect(auto).toBeVisible();
-        await expect(auto).toBeEnabled();
-        await testInfo.attach(`agent-limit-manual-${testInfo.project.name}`, {
-          body: await windows.first().screenshot({ path: testInfo.outputPath("agent-limit-manual.png") }), contentType: "image/png",
-        });
-        await auto.click();
-        await expect.poll(policy).toMatchObject({ mode: "auto", manual_limit: null,
-          last_change: { source: "gui", max_active_agents_override: null } });
-        await expect.poll(() => latestStatus(page)).toMatchObject({ enabled: false, max_active_agents_override: null });
-        await expect(auto).toBeDisabled();
-        expect((await latestStatus(page)).last_error ?? "").not.toMatch(/authority recovery|accepted control|control rejected/i);
-        await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.endsWith("light") ? "light" : "dark");
-        await testInfo.attach(`agent-limit-auto-${testInfo.project.name}`, {
-          body: await windows.first().screenshot({ path: testInfo.outputPath("agent-limit-auto.png") }), contentType: "image/png",
-        });
-        await page.reload();
-        await expect.poll(() => latestStatus(page)).toMatchObject({ enabled: false, max_active_agents_override: null });
-        await expect(windows.first().getByRole("button", { name: "Set Agent limit to Auto", exact: true })).toBeDisabled();
-        expect(await policy()).toMatchObject({ mode: "auto", manual_limit: null });
-        expect(JSON.parse(await readFile(preferences, "utf8")).enabled).toBe(false);
-      } finally {
-        if (created && !page.isClosed()) await sendLiveGwtEvent(page, { kind: "close_window", id: windowId });
-      }
+      const surface = page.locator('.split-pane[data-active="true"][data-surface="issues"] .workspace-window[data-preset="issue"]');
+      await expect(surface).toBeVisible();
+      // Each theme exercises the same transition through the real save lane.
+      await sendLiveGwtEvent(page, { kind: "set_issue_monitor_max_active_agents", max_active_agents: 8 });
+      await expect.poll(policy).toMatchObject({ mode: "manual", manual_limit: 8 });
+      await expect.poll(() => latestStatus(page)).toMatchObject({ enabled: false, max_active_agents_override: 8 });
+      const roster = JSON.parse(await readFile(preferences, "utf8")).agent_roster;
+      expect(roster.members.some((member: any) => member.enabled)).toBe(true);
+      const auto = surface.getByRole("button", { name: "Set Agent limit to Auto", exact: true });
+      await auto.scrollIntoViewIfNeeded();
+      await expect(auto).toBeVisible();
+      await expect(auto).toBeEnabled();
+      await testInfo.attach(`agent-limit-manual-${testInfo.project.name}`, {
+        body: await surface.screenshot({ path: testInfo.outputPath("agent-limit-manual.png") }), contentType: "image/png",
+      });
+      await auto.click();
+      await expect.poll(policy).toMatchObject({ mode: "auto", manual_limit: null,
+        last_change: { source: "gui", max_active_agents_override: null } });
+      await expect.poll(() => latestStatus(page)).toMatchObject({ enabled: false, max_active_agents_override: null });
+      await expect(auto).toBeDisabled();
+      expect((await latestStatus(page)).last_error ?? "").not.toMatch(/authority recovery|accepted control|control rejected/i);
+      await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.endsWith("light") ? "light" : "dark");
+      await testInfo.attach(`agent-limit-auto-${testInfo.project.name}`, {
+        body: await surface.screenshot({ path: testInfo.outputPath("agent-limit-auto.png") }), contentType: "image/png",
+      });
+      await page.reload();
+      await expect.poll(() => latestStatus(page)).toMatchObject({ enabled: false, max_active_agents_override: null });
+      await expect(surface.getByRole("button", { name: "Set Agent limit to Auto", exact: true })).toBeDisabled();
+      expect(await policy()).toMatchObject({ mode: "auto", manual_limit: null });
+      expect(JSON.parse(await readFile(preferences, "utf8")).enabled).toBe(false);
       expect(errors, "zero console/page errors").toEqual([]);
     });
   });
