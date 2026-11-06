@@ -4604,7 +4604,22 @@ fn agent_error_frees_the_monitor_slot_even_when_the_pane_is_kept_for_diagnosis()
         );
         if !live_hook {
             let _ = finish_managed_exit(&owner, &probe, &mut runtime, &mut observed);
-            return owner_monitor_read(&repo, 42);
+            return owner_fixture_block_on(async {
+                // test-hygiene: allow-wall-clock-deadline Bounds actual Monitor/census convergence after the confirmed control exit; observed state controls progress.
+                tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+                    loop {
+                        owner.wait_monitor_idle().await.unwrap();
+                        let monitor = owner_monitor_read(&repo, 42);
+                        if monitor.active_count() == 0 && !monitor.prefs().failed_issues.is_empty()
+                        {
+                            break monitor;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("the control exit must release and notify its Monitor slot")
+            });
         }
         let mut hook =
             runtime_hook_state_for_event("Idle", "Stop", &probe.session.as_ref().unwrap().id);
