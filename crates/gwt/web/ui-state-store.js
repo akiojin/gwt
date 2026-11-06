@@ -2,7 +2,7 @@
 // Stream notifications stay synchronous; views can opt into frame batching.
 const owned = new WeakSet();
 
-function defaultScheduleFrame(callback) {
+export function defaultScheduleFrame(callback) {
   let finished = false;
   let frame = null;
   let timer = null;

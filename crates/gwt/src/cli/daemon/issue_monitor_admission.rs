@@ -190,6 +190,7 @@ mod tests {
                 .status
                 .success());
         }
+        crate::project_runtime::test_support::seed_actual_project_view(&root).unwrap();
         gwt_core::daemon::RuntimeScope::new(
             "abcdef0123456789",
             "feedfacecafebeef",
@@ -442,6 +443,9 @@ mod tests {
         let _prefs_budget = super::super::pin_prefs_hang_guard();
         let temp = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let _process_home = gwt_core::test_support::ScopedEnvVar::set("HOME", temp.path());
+        let _process_profile =
+            gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", temp.path());
         let scope = fixture_scope(temp.path().join("repo"));
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
         let monitor = queued_monitor();

@@ -83,6 +83,42 @@ test("default scheduler advances state while animation frames are suspended", (t
   assert.equal(frames.size, 0, "timer winner cancels the suspended frame");
   staleFrame();
   assert.equal(received.length, 1, "a late frame cannot repeat delivery");
+
+  const tasks = [];
+  for (const [key, replacement] of Object.entries({
+    document: { hidden: true },
+    MessageChannel: class {
+      constructor() {
+        this.closed = 0;
+        this.posted = 0;
+        this.port1 = { onmessage: null, close: () => this.closed++ };
+        this.port2 = { postMessage: () => this.posted++, close: () => this.closed++ };
+        tasks.push(this);
+      }
+    },
+  })) {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, key);
+    Object.defineProperty(globalThis, key, { configurable: true, value: replacement });
+    t.after(() => {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else delete globalThis[key];
+    });
+  }
+  t.after(() => dispatcher.dispose());
+  dispatcher.handle({ data: JSON.stringify({ kind: "workspace_state", revision: 3 }) });
+  dispatcher.handle({ data: JSON.stringify({ kind: "workspace_state", revision: 4 }) });
+  assert.equal(tasks.length, 1, "hidden input must schedule a yielding task without timer/frame progress");
+  assert.equal(tasks[0].posted, 1);
+  assert.equal(timers.size + frames.size, 0, "hidden delivery must not depend on clamped timers or suspended frames");
+  tasks[0].port1.onmessage();
+  assert.deepEqual(received, [{ kind: "workspace_state", revision: 2 }, { kind: "workspace_state", revision: 4 }]);
+  assert.equal(tasks[0].closed, 2, "delivery closes both task ports");
+  dispatcher.enqueue({ kind: "workspace_state", revision: 5 });
+  const staleTask = tasks[1].port1.onmessage;
+  dispatcher.dispose();
+  assert.equal(tasks[1].closed, 2, "dispose closes both pending task ports");
+  staleTask();
+  assert.equal(received.length, 2, "a disposed task cannot deliver stale input");
 });
 
 test("animation frame winner cancels its fallback timer", (t) => {
@@ -822,6 +858,37 @@ test("onReceiveError reports a throwing receive and the flush continues", () => 
   assert.equal(errors.length, 1);
   assert.equal(errors[0].eventKind, "workspace_state");
   assert.match(String(errors[0].error), /render exploded/);
+});
+
+test("a failed terminal receive discards the torn stream and requests one snapshot recovery", () => {
+  for (const kind of ["terminal_output", "terminal_snapshot"]) {
+    const scheduler = manualScheduler();
+    const received = [], errors = [], recovery = [];
+    const dispatcher = createSocketReceiveDispatcher({
+      receive(event) {
+        if (event.data === "failed") {
+          dispatcher.enqueue({ kind: "terminal_output", data: "reentrant suffix" });
+          throw new Error("terminal subscriber failed");
+        }
+        received.push(event.data);
+      },
+      schedule: scheduler.schedule,
+      now: () => 0,
+      onReceiveError: (error, eventKind) => errors.push(eventKind),
+      onResync(reason) {
+        recovery.push(reason);
+        dispatcher.enqueue({ kind: "terminal_snapshot", data: "fresh snapshot" });
+      },
+    });
+    dispatcher.handle({ data: JSON.stringify({ kind, data: "failed" }) });
+    dispatcher.enqueue({ kind: "terminal_output", data: "queued suffix" });
+    scheduler.runOnce();
+    dispatcher.enqueue({ kind: "terminal_output", data: "intervening suffix" });
+    scheduler.runAll();
+    assert.deepEqual(errors, [kind]);
+    assert.deepEqual(recovery, ["receive-error"]);
+    assert.deepEqual(received, ["fresh snapshot"]);
+  }
 });
 
 test("onReceiveError receives the kind hint for raw string payloads", () => {

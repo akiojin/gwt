@@ -88,7 +88,8 @@ for CHECK_THEME in dark light; do
 done
 
 # The isolation suite needs an independent Project B, with no resident agents.
-if [ "${GWT_PLAYWRIGHT_LIVE_SPEC:-}" = crates/gwt/playwright/tests/project-per-browser-tab.spec.ts ]; then
+if [[ "${GWT_PLAYWRIGHT_LIVE_SPEC:-}" == crates/gwt/playwright/tests/project-per-browser-tab.spec.ts \
+   || "${GWT_PLAYWRIGHT_LIVE_SPEC:-}" == crates/gwt/playwright/tests/project-close-detach.spec.ts ]]; then
   CHECK_SECOND_ROOT="$CHECK_HOME/project-b"
   mkdir -p "$CHECK_SECOND_ROOT"
   # A .git marker keeps this fixture on the supported workspace route,
@@ -107,6 +108,47 @@ if [ "${GWT_PLAYWRIGHT_LIVE_SPEC:-}" = crates/gwt/playwright/tests/project-per-b
     '.tabs += [{id:"isolation-b",title:"Isolation B",project_root:$root,kind:"git"}]' \
     "$CHECK_HOME/.gwt/session.json" > "$CHECK_HOME/session-with-b.json"
   mv "$CHECK_HOME/session-with-b.json" "$CHECK_HOME/.gwt/session.json"
+fi
+
+if [ "${GWT_PLAYWRIGHT_LIVE_SPEC:-}" = crates/gwt/playwright/tests/project-close-detach.spec.ts ]; then
+  # A real provider reports SessionStart from its launched process. The shell
+  # fixture does the same before becoming interactive; the normal hook validates
+  # its inherited Session/capability and publishes readiness to the owner.
+  cat > "$CHECK_HOME/pw1-shell-start.cjs" <<'JS'
+const { spawnSync } = require('node:child_process');
+const { randomUUID } = require('node:crypto');
+if (!process.env.GWT_BIN_PATH) throw new Error('Fixture launch has no native hook runtime');
+const result = spawnSync(process.env.GWT_BIN_PATH, ['hook', 'event', 'SessionStart'], {
+  input: JSON.stringify({ session_id: randomUUID(), hook_event_name: 'SessionStart',
+    source: 'startup', cwd: process.cwd() }),
+  stdio: ['pipe', 'ignore', 'inherit'], timeout: 60000,
+});
+if (result.error || result.status !== 0) throw new Error('Fixture SessionStart hook failed');
+JS
+  cat > "$CHECK_HOME/pw1-shell.sh" <<'SH'
+#!/bin/sh
+set -eu
+node "$HOME/pw1-shell-start.cjs"
+exec /bin/sh -i
+SH
+  cat > "$CHECK_HOME/.gwt/config.toml" <<TOML
+[tools.customCodingAgents.pw1-shell]
+displayName = "PW1 acceptance shell"
+agentType = "command"
+command = "/bin/sh"
+defaultArgs = ["$CHECK_HOME/pw1-shell.sh"]
+TOML
+  # The production owner reserves a registered person with a fixed tool.
+  # Seed the disposable shell member before the first roster read can create
+  # a default Codex member that cannot run this custom Agent.
+  jq '.agent_roster = {schema_version:1,revision:1,members:[{
+    agent_member_id:"pw1-shell-acceptance",agent_id:"pw1-shell",
+    name:"PW1 acceptance member",enabled:true,created_at:(now | todateiso8601),
+    last_issue_number:null,last_spec_number:null,assignment:null
+  }]}' "$CHECK_PROJECT_STATE/issue-monitor.json" > "$CHECK_HOME/pw1-issue-monitor.json"
+  mv "$CHECK_HOME/pw1-issue-monitor.json" "$CHECK_PROJECT_STATE/issue-monitor.json"
+  export GWT_PLAYWRIGHT_CLOSE_AGENT_ID=pw1-shell
+  export GWT_PLAYWRIGHT_BRANCH_NAME="$(git symbolic-ref --short HEAD)"
 fi
 
 # browser-check-hook-authority-begin
@@ -147,50 +189,47 @@ if [ -z "$CHECK_HOOK_BIN" ]; then
 fi
 # browser-check-hook-authority-end
 
+# These suites audit their own ordinary managed Source before/after UI checks.
+# A canonical daemon runner is not a descendant of the caller's managed pane.
+# Other suites retain the current-caller preflight below.
+CHECK_SUITE_SOURCE=0
+case "${GWT_PLAYWRIGHT_LIVE_SPEC:-}" in
+  crates/gwt/playwright/tests/project-close-detach.spec.ts|\
+  crates/gwt/playwright/tests/project-open-surfaces.spec.ts|\
+  crates/gwt/playwright/tests/project-per-browser-tab.spec.ts) CHECK_SUITE_SOURCE=1 ;;
+esac
+
 # Audit the managed hook fallback with the real HOME, as required by browser-check.
-ALLOW_MISSING_LOGICAL_FALLBACK=false
-if [ "$CHECK_HOOK_BIN" = gwtd ] && ! command -v gwtd >/dev/null 2>&1; then
-  ALLOW_MISSING_LOGICAL_FALLBACK=true
-fi
 assert_hook_health() {
   local health_json
   health_json="$(cat)"
-  if ! printf '%s' "$health_json" | jq -e --argjson allow_missing_logical "$ALLOW_MISSING_LOGICAL_FALLBACK" '
-    [.issues[] | select(
-      ($allow_missing_logical and startswith("managed hook binary missing: ") and endswith(" uses gwtd"))
-      or (startswith("managed hook failure: ") and test(" state=fail-open( |$)")) | not)] as $blocking
-    | .status != "inactive" and ($blocking | length == 0)
+  if ! printf '%s' "$health_json" | jq -e '
+    .preflight.result == "proceed"
+    and .preflight.schema_version == 1
+    and .preflight.context == "current"
+    and .preflight.normal_completion == "normal"
+    and .preflight.convergence == "converged"
+    and (.preflight.reasons | type == "array" and length == 0)
+    and (.preflight.diagnostics | type == "array")
+    and all(.preflight.diagnostics[];
+      (.id | type == "string" and length > 0)
+      and (.classification as $kind | ["recovered", "fail_open", "foreign"] | index($kind) != null))
   ' >/dev/null; then
     echo 'browser-check hook convergence failed' >&2
-    printf '%s' "$health_json" | jq '{status, issues}' >&2
+    printf '%s' "$health_json" | jq '{preflight, health}' >&2
     return 1
   fi
 }
 # browser-check-hook-repair-begin
+if [ "$CHECK_SUITE_SOURCE" = 0 ]; then
 HOOK_DOCTOR_ENVELOPE="$(
   jq -n --arg expected_hook_bin "$CHECK_HOOK_BIN" \
-    --arg runtime_state_path "$CHECK_HOME/.gwt/browser-check-missing-runtime-state.json" \
-    '{schema_version:1,operation:"hook.doctor",params:{repair:true,expected_hook_bin:$expected_hook_bin,runtime_state_path:$runtime_state_path}}' \
+    '{schema_version:1,operation:"hook.doctor",params:{purpose:"managed_browser",repair:true,expected_hook_bin:$expected_hook_bin}}' \
     | env -u GWT_BIN_PATH GWT_HOOK_BIN="$CHECK_HOOK_BIN" "$CHECKOUT_GWTD"
 )"
-# Issue #5270: the shared root can retain an older managed-hook identity
-# after repair. Apply the diagnostic's canonical recovery, limited to verified
-# gwt-managed commands, then require the full health audit to pass.
-printf '%s' "$HOOK_DOCTOR_ENVELOPE" | jq -e 'select(.ok == true)' >/dev/null
-HOOK_TRUST_ENVELOPE="$(
-  jq -n --arg root "$REPO_ROOT" --arg config "$HOME/.codex/config.toml" \
-    '{schema_version:1,operation:"hook.register_codex_managed_hook_trust",params:{project_root:$root,codex_config:$config,codex_hook_discovery:"both"}}' \
-    | env -u GWT_BIN_PATH GWT_HOOK_BIN="$CHECK_HOOK_BIN" "$CHECKOUT_GWTD"
-)"
-printf '%s' "$HOOK_TRUST_ENVELOPE" | jq -e 'select(.ok == true)' >/dev/null
-HOOK_RECOVERY_ENVELOPE="$(
-  jq -n --arg expected_hook_bin "$CHECK_HOOK_BIN" \
-    --arg runtime_state_path "$CHECK_HOME/.gwt/browser-check-missing-runtime-state.json" \
-    '{schema_version:1,operation:"hook.health",params:{expected_hook_bin:$expected_hook_bin,runtime_state_path:$runtime_state_path}}' \
-    | env -u GWT_BIN_PATH "$CHECKOUT_GWTD"
-)"
-HOOK_DOCTOR_HEALTH_JSON="$(printf '%s' "$HOOK_RECOVERY_ENVELOPE" | jq -er 'select(.ok == true) | .output | fromjson')"
+HOOK_DOCTOR_HEALTH_JSON="$(printf '%s' "$HOOK_DOCTOR_ENVELOPE" | jq -er 'select(.ok == true) | .output | fromjson')"
 printf '%s' "$HOOK_DOCTOR_HEALTH_JSON" | assert_hook_health
+fi
 # browser-check-hook-repair-end
 
 CHECK_GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
@@ -259,14 +298,15 @@ fi
 printf '%s\n' "$CHECK_URL" > "$URL_FILE"
 
 # browser-check-hook-audit-begin
+if [ "$CHECK_SUITE_SOURCE" = 0 ]; then
 HOOK_HEALTH_ENVELOPE="$(
   jq -n --arg expected_hook_bin "$CHECK_HOOK_BIN" \
-    --arg runtime_state_path "$CHECK_HOME/.gwt/browser-check-missing-runtime-state.json" \
-    '{schema_version:1,operation:"hook.health",params:{expected_hook_bin:$expected_hook_bin,runtime_state_path:$runtime_state_path}}' \
+    '{schema_version:1,operation:"hook.doctor",params:{purpose:"managed_browser",expected_hook_bin:$expected_hook_bin}}' \
     | env -u GWT_BIN_PATH "$CHECKOUT_GWTD"
 )"
 HOOK_HEALTH_JSON="$(printf '%s' "$HOOK_HEALTH_ENVELOPE" | jq -er 'select(.ok == true) | .output | fromjson')"
 printf '%s' "$HOOK_HEALTH_JSON" | assert_hook_health
+fi
 # browser-check-hook-audit-end
 
 # Issue #5219: fixture-only tests leave no live browser connected. Retain

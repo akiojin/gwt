@@ -411,6 +411,21 @@ impl AppRuntime {
                 return Vec::new();
             }
         };
+        let mut lineage = vec!["pm".to_string()];
+        lineage.extend(
+            prefs
+                .registration
+                .as_ref()
+                .map(|registration| format!("session:{}", registration.session_id)),
+        );
+        if let Err(reason) = self
+            .project_context(tab_id)
+            .ok_or_else(|| "Project context is unavailable".to_string())
+            .and_then(|context| self.project_execution_admission(&context, &lineage))
+        {
+            tracing::info!(project_root = %project_root.display(), %reason, "PM ensure withheld by Project execution policy");
+            return Vec::new();
+        }
         self.sync_pm_session_cache(&project_root, prefs.registration.as_ref());
         if trigger == PmEnsureTrigger::Automatic && !prefs.settings.auto_start {
             tracing::info!(

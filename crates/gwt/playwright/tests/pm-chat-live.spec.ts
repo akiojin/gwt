@@ -5,8 +5,9 @@ import { createHash, randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { startExactRelaunchFixture } from './_helpers/exact-relaunch';
-import { gotoLiveGwt, readLiveHubCatalog, sendLiveGwtEvent, withLiveGwtBackendLock } from './_helpers/live-gwt';
+import { gotoLiveGwt, installLiveGwtInitScript, readLiveHubCatalog, sendLiveGwtEvent, withLiveGwtBackendLock } from './_helpers/live-gwt';
 import { startManagedBrowserSource } from './_helpers/managed-browser-source';
+import { withNativeHiddenPage } from './_helpers/native-chromium';
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? 'http://127.0.0.1:0/';
 const HOME = process.env.GWT_PLAYWRIGHT_CHECK_HOME ?? '';
@@ -163,7 +164,7 @@ test.describe('PM reports', () => {
     });
   });
 
-  test('Reports and Execution log render the same window version for every receive without focus or animation frames', async ({ page }, info) => {
+  test('Reports and Execution log render the same window version for every receive without focus or animation frames', async ({ page, playwright }, info) => {
     await withLiveGwtBackendLock(BASE, info, async () => {
       const errors: string[] = [];
       page.on('pageerror', error => errors.push(error.message));
@@ -322,6 +323,88 @@ test.describe('PM reports', () => {
       await info.attach('Per-receive window versions (controlled inbound frames)', {
         path: versionsFile, contentType: 'application/json',
       });
+      if (info.project.use.headless === false) {
+        const native = await withNativeHiddenPage(playwright.chromium, info, async nativePage => {
+          await installLiveGwtInitScript(nativePage, { enableTestBridge: true });
+          await nativePage.addInitScript(theme => localStorage.setItem('gwt:ui:theme', theme), theme);
+          await nativePage.goto(page.url());
+          await expect.poll(() => nativePage.evaluate(() => document.documentElement.dataset.theme)).toBe(theme);
+          await expect.poll(() => nativePage.evaluate(() => document.querySelectorAll('.pm-chat').length)).toBe(1);
+          await expect.poll(() => nativePage.evaluate(() => document.querySelector('#op-pm-entry')?.getAttribute('data-pm-state'))).toBe('stopped');
+          await nativePage.evaluate(() => (document.querySelector('#op-pm-entry') as HTMLElement).click());
+          await expect.poll(() => nativePage.evaluate(id => (window as any).__gwtPlaywrightMessages
+            .some((entry: any) => entry.payload.kind === 'pm_reports' && entry.payload.id === id), id)).toBe(true);
+          await expect.poll(() => nativePage.evaluate(() => document.querySelector('.pm-chat')?.textContent
+            ?.includes('Persisted before restart'))).toBe(true);
+          // Hidden windows intentionally suppress polling. Capture the normal
+          // model-issued token while visible, then deliver its response hidden.
+          await nativePage.evaluate(id => {
+            const socket = (window as any).__gwtPlaywrightSockets.find((candidate: WebSocket) =>
+              candidate.readyState === WebSocket.OPEN && new URL(candidate.url).searchParams.has('repo_hash'));
+            const send = socket.send;
+            socket.send = function (data: string) {
+              const request = JSON.parse(data);
+              if (request.kind === 'load_pm_reports' && request.id === id) (window as any).__nativeReportsRequest = request;
+              else send.call(this, data);
+            };
+            try { document.dispatchEvent(new Event('visibilitychange')); }
+            finally { socket.send = send; }
+            if (!(window as any).__nativeReportsRequest) throw new Error('Missing visible model-issued Reports token');
+          }, id);
+        }, async ({ id, marker }) => {
+          const pane = document.querySelector(`.workspace-window[data-id="${id}"]`)!;
+          const reports = pane.querySelector<HTMLElement>('.pm-chat')!;
+          const log = pane.querySelector<HTMLElement>('.pm-conversation-log')!;
+          const versions = () => [reports.dataset.stateVersion, log.dataset.stateVersion];
+          const before = versions(), hiddenBefore = document.hidden, focusedBefore = document.hasFocus();
+          const socket = (window as any).__gwtPlaywrightSockets.find((candidate: WebSocket) =>
+            candidate.readyState === WebSocket.OPEN && new URL(candidate.url).searchParams.has('repo_hash'));
+          const original = (window as any).__gwtPlaywrightMessages.map((entry: any) => entry.payload)
+            .findLast((event: any) => event.kind === 'pm_reports' && event.id === id);
+          const request = (window as any).__nativeReportsRequest;
+          let focusEvents = 0, visibilityChanges = 0;
+          const onFocus = () => { focusEvents++; }, onVisibility = () => { visibilityChanges++; };
+          window.addEventListener('focus', onFocus);
+          pane.addEventListener('focusin', onFocus);
+          document.addEventListener('visibilitychange', onVisibility);
+          try {
+            return await new Promise<any>((resolve, reject) => {
+              const startedAt = performance.now();
+              const finish = () => { observer.disconnect(); clearTimeout(timer); };
+              const observer = new MutationObserver(() => {
+                if (!reports.textContent!.includes(marker)) return;
+                const elapsedMs = performance.now() - startedAt;
+                finish();
+                resolve({ before, after: versions(), elapsedMs, hiddenBefore, focusedBefore,
+                  hiddenAfter: document.hidden, focusedAfter: document.hasFocus(), focusEvents, visibilityChanges });
+              });
+              const timer = setTimeout(() => { finish(); reject(new Error('Native hidden Reports did not render within one second')); }, 1000);
+              observer.observe(pane, { attributes: true, childList: true, characterData: true, subtree: true });
+              socket.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ ...original,
+                request_id: request.request_id, snapshot: true,
+                version: { epoch: original.version.epoch, revision: original.version.revision + 1 },
+                reports: [...original.reports, { id: 'native-shared-version-report', kind: 'progress',
+                  created_at: '2026-11-05T00:00:00Z', body: `## ${marker}`, body_html: `<h2>${marker}</h2>` }],
+              }) }));
+            });
+          } finally {
+            window.removeEventListener('focus', onFocus);
+            pane.removeEventListener('focusin', onFocus);
+            document.removeEventListener('visibilitychange', onVisibility);
+            delete (window as any).__nativeReportsRequest;
+          }
+        }, { id, marker: `Native shared version ${theme}` });
+        await info.attach('native-hidden-shared-window-versions.json', { contentType: 'application/json', body: JSON.stringify(native) });
+        expect(native.before[0]).toMatch(/^\d+$/);
+        expect(native.before[1]).toBe(native.before[0]);
+        expect(native.after).toEqual([String(Number(native.before[0]) + 1), String(Number(native.before[0]) + 1)]);
+        expect(native.elapsedMs).toBeGreaterThanOrEqual(0);
+        expect(native.elapsedMs).toBeLessThanOrEqual(1000);
+        expect([native.hiddenBefore, native.hiddenAfter]).toEqual([true, true]);
+        expect([native.focusedBefore, native.focusedAfter]).toEqual([false, false]);
+        expect(native.focusEvents).toBe(0);
+        expect(native.visibilityChanges).toBe(0);
+      }
       expect(errors).toEqual([]);
     });
   });

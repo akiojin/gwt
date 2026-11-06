@@ -178,10 +178,10 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::ReopenRecentProject { path, .. } => {
             FrontendUserActionLog::new("reopen_recent_project", "project").target(path)
         }
-        FrontendEvent::PreviewCloseProject { project_key } => {
+        FrontendEvent::PreviewCloseProject { project_key, .. } => {
             FrontendUserActionLog::new("preview_close_project", "project").target(project_key)
         }
-        FrontendEvent::ConfirmCloseProject { token } => {
+        FrontendEvent::ConfirmCloseProject { token, .. } => {
             FrontendUserActionLog::new("confirm_close_project", "project")
                 .target(&token.project_key)
         }
@@ -503,6 +503,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             }
             log
         }
+        FrontendEvent::CheckForUpdates => FrontendUserActionLog::new("check_for_updates", "update"),
         FrontendEvent::ApplyUpdate => FrontendUserActionLog::new("apply_update", "update"),
         FrontendEvent::ApplyUpdateStart => {
             FrontendUserActionLog::new("apply_update_start", "update")
@@ -802,6 +803,8 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         | FrontendEvent::AttachmentUploadFailed { .. }
         | FrontendEvent::AttachFiles { .. }
         | FrontendEvent::ReportKnowledgeError { .. }
+        | FrontendEvent::ProjectViewReady { .. }
+        | FrontendEvent::GetProjectExecutionStatus { .. }
         | FrontendEvent::CheckKnowledgeRevision { .. } => return None,
     };
     Some(log)

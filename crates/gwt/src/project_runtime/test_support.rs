@@ -2,6 +2,41 @@
 
 use std::sync::{atomic::AtomicBool, Arc, Mutex};
 
+/// Model a visible Project accepted by the fixture's live controller process.
+/// This supplies only the actual-view prerequisite, never a Continue choice.
+#[doc(hidden)]
+pub fn seed_actual_project_view(root: &std::path::Path) -> Result<(), String> {
+    let receipt = crate::project_execution_policy::ActualViewReceipt {
+        receipt_id: uuid::Uuid::new_v4().to_string(),
+        accepted_at: chrono::Utc::now(),
+        admitted_policy_revision: gwt_core::project_execution_policy::load(root)
+            .map_or(0, |policy| policy.revision),
+    };
+    crate::project_execution_policy::write_observation(
+        root,
+        &crate::project_execution_policy::RuntimeObservation {
+            schema_version: 1,
+            project_key: gwt_core::paths::resolve_project_scope(root)
+                .hash
+                .to_string(),
+            project_root: root.to_path_buf(),
+            generation: 1,
+            host_pid: std::process::id(),
+            host_started_at: crate::process::host_process_start_time(std::process::id())
+                .ok_or("fixture process birth unavailable")?,
+            view_set_revision: 0,
+            views: std::collections::BTreeMap::from([(
+                "fixture-visible-view".into(),
+                receipt.clone(),
+            )]),
+            last_open_receipt: Some(receipt),
+            close_intents: Default::default(),
+            observed_at: chrono::Utc::now(),
+        },
+    )
+    .map_err(|error| error.to_string())
+}
+
 /// Captured only by the owner's mailbox after an exact pane/incarnation match.
 /// These are the production resources, never a second GUI runtime or registry.
 #[doc(hidden)]
@@ -257,6 +292,12 @@ impl ProjectOwnerHarness {
     }
 
     fn bind(root: &std::path::Path, with_monitor: bool) -> Result<Self, String> {
+        // A physical owner can attach to its controller's accepted view.
+        // Other owner fixtures model an already opened Project; policy
+        // rejection tests remove that receipt rather than bypassing admission.
+        if !crate::project_execution_policy::actual_open(root).unwrap_or(false) {
+            seed_actual_project_view(root)?;
+        }
         let scope = gwt_core::daemon::RuntimeScope::from_project_root(
             root,
             gwt_core::daemon::RuntimeTarget::Host,

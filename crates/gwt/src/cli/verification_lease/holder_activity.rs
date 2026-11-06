@@ -1093,7 +1093,57 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn issue_3809_owned_windows_child_reports_silent_cpu_progress() {
+        use std::io::Write;
+        use std::os::windows::io::AsRawHandle;
         use std::process::{Child, Stdio};
+        use windows::Win32::{
+            Foundation::{FILETIME, HANDLE},
+            System::Threading::GetProcessTimes,
+        };
+
+        fn log_child(phase: &str, child: &mut Child, samples: Option<&[ProcessSample]>) {
+            let (mut birth, mut exit, mut kernel, mut user) = (
+                FILETIME::default(),
+                FILETIME::default(),
+                FILETIME::default(),
+                FILETIME::default(),
+            );
+            let ticks = |time: FILETIME| {
+                (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime)
+            };
+            // This adjacent native observation cannot recover sysinfo's discarded
+            // GetProcessTimes result. Keep its own error distinct from CPU zero.
+            // SAFETY: Child retains the live process handle and all buffers are writable.
+            let native_times = unsafe {
+                GetProcessTimes(
+                    HANDLE(child.as_raw_handle()),
+                    &mut birth,
+                    &mut exit,
+                    &mut kernel,
+                    &mut user,
+                )
+            }
+            .map(|()| {
+                format!(
+                    "birth_100ns={} kernel_100ns={} user_100ns={}",
+                    ticks(birth),
+                    ticks(kernel),
+                    ticks(user)
+                )
+            });
+            let sampled_child =
+                samples.and_then(|samples| samples.iter().find(|sample| sample.pid == child.id()));
+            // Bypass libtest capture so passing Windows CI keeps the observations too.
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "owned_child_observation phase={phase} pid={} table_available={} \
+                 sampled_child={sampled_child:?} independent_native_times={native_times:?} \
+                 child_state={:?}",
+                child.id(),
+                samples.is_some(),
+                child.try_wait()
+            );
+        }
 
         struct OwnedChild(Child);
         impl Drop for OwnedChild {
@@ -1109,7 +1159,7 @@ mod tests {
         assert!(progressing_descendants(&[(0, 0), (root, started_at + 1)])
             .unwrap()
             .is_empty());
-        let child = OwnedChild(
+        let mut child = OwnedChild(
             gwt_core::process::hidden_command("powershell.exe")
                 .args([
                     "-NoLogo",
@@ -1125,12 +1175,16 @@ mod tests {
                 .expect("spawn an owned silent CPU child"),
         );
         let child_pid = child.0.id();
-        let first = read_processes().expect("first process observation");
+        let first = read_processes();
         let taken_at = Instant::now();
+        log_child("first", &mut child.0, first.as_deref());
+        let first = first.expect("first process observation");
         let progressing =
             progressing_descendants(&[(root, started_at)]).expect("observe owned descendants");
-        let second = read_processes().expect("second process observation");
+        let second = read_processes();
         let window_ms = u64::try_from(taken_at.elapsed().as_millis()).unwrap();
+        log_child("second", &mut child.0, second.as_deref());
+        let second = second.expect("second process observation");
         let child_cpu = |samples: &[ProcessSample]| {
             samples
                 .iter()

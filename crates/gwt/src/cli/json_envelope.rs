@@ -1034,6 +1034,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         | "pr.review.submit"
         | "pr.auto_merge.enable"
         | "update.settings.set"
+        | "project.execution.choose"
         | "pm.approval.request"
         | "pm.approval.status"
         | "pm.approval.revoke"
@@ -1875,6 +1876,17 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 text: required_string(params, "text")?,
                 operation_id,
             })
+        }
+        "project.execution.status" => {
+            let operation_id = optional_string(params, "operation_id")?;
+            if operation_id.as_ref().is_some_and(|id| {
+                !uuid::Uuid::parse_str(id).is_ok_and(|parsed| parsed.to_string() == *id)
+            }) {
+                return Err(CliParseError::InvalidJson(
+                    "operation_id must be a canonical lowercase UUID".into(),
+                ));
+            }
+            CliCommand::Pm(crate::cli::pm::PmCommand::ProjectExecutionStatus { operation_id })
         }
         "pm.capabilities" => CliCommand::Pm(crate::cli::pm::PmCommand::Capabilities),
         "pm.request_tasks.read" => {
@@ -8179,6 +8191,45 @@ mod tests {
     }
 
     #[test]
+    fn pm_request_tasks_candidate_selectors_are_bounded_and_path_free() {
+        let id = format!(
+            "{}/{}",
+            "a".repeat(64),
+            "12345678-1234-4234-8234-123456789abc"
+        );
+        let digest = "b".repeat(64);
+        for selector in [
+            json!({"kind":"candidates"}),
+            json!({"kind":"candidates","limit":100,"after":id,"expected_inventory_sha256":digest}),
+            json!({"kind":"candidate","id":id}),
+            json!({"kind":"candidate_chunk","id":id}),
+            json!({"kind":"candidate_chunk","id":id,"offset":u64::MAX}),
+        ] {
+            ok("pm.request_tasks.read", json!({"selector":selector}));
+        }
+        for selector in [
+            json!({"kind":"candidates","limit":0}),
+            json!({"kind":"candidates","limit":101}),
+            json!({"kind":"candidates","after":id}),
+            json!({"kind":"candidates","expected_inventory_sha256":"invalid"}),
+            json!({"kind":"candidates","after":"../foreign","expected_inventory_sha256":digest}),
+            json!({"kind":"candidate","id":"../foreign"}),
+            json!({"kind":"candidate","id":id.to_uppercase()}),
+            json!({"kind":"candidate","id":id,"session_id":"forged"}),
+            json!({"kind":"candidate_chunk","id":"../foreign"}),
+            json!({"kind":"candidate_chunk","id":id,"offset":-1}),
+            json!({"kind":"candidate_chunk","id":id,"offset":1.5}),
+            json!({"kind":"candidate_chunk","id":id,"limit":1000000}),
+            json!({"kind":"candidates","path":"/tmp/foreign"}),
+        ] {
+            assert!(matches!(
+                err("pm.request_tasks.read", json!({"selector":selector})),
+                CliParseError::InvalidJson(_)
+            ));
+        }
+    }
+
+    #[test]
     fn pm_plan_status_accepts_only_empty_params() {
         assert!(matches!(
             ok("pm.plan.status", json!({})),
@@ -8383,6 +8434,67 @@ mod tests {
                 "pm.capabilities"
             )
         );
+    }
+
+    #[test]
+    fn project_execution_policy_operations_are_typed_and_project_fixed() {
+        assert!(matches!(
+            ok("project.execution.status", json!({})),
+            CliCommand::Pm(crate::cli::pm::PmCommand::ProjectExecutionStatus {
+                operation_id: None
+            })
+        ));
+        match ok(
+            "project.execution.status",
+            json!({"operation_id":"00000000-0000-4000-8000-000000000001"}),
+        ) {
+            CliCommand::Pm(crate::cli::pm::PmCommand::ProjectExecutionStatus { operation_id }) => {
+                assert_eq!(
+                    operation_id.as_deref(),
+                    Some("00000000-0000-4000-8000-000000000001")
+                );
+            }
+            _ => panic!("expected typed ProjectExecutionStatus"),
+        }
+        let choice = json!({
+            "operation_id":"00000000-0000-4000-8000-000000000001",
+            "expected_revision":0,"expected_generation":1,"choice":"continue",
+            "instruction_id":"human-instruction"
+        });
+        let _ = ok("project.execution.choose", choice.clone());
+        assert!(
+            crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "project.execution.status"
+            )
+        );
+        assert!(
+            !crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "project.execution.choose"
+            )
+        );
+        for (key, value) in [
+            ("project_root", json!("/other")),
+            ("approved", json!(true)),
+            ("choice", json!("cancel")),
+            ("operation_id", json!("not-a-uuid")),
+        ] {
+            let mut invalid = choice.clone();
+            invalid[key] = value;
+            let _ = err("project.execution.choose", invalid);
+        }
+        for operation_id in [
+            "550E8400-E29B-41D4-A716-446655440000",
+            "550e8400e29b41d4a716446655440000",
+        ] {
+            let _ = err(
+                "project.execution.status",
+                json!({"operation_id": operation_id}),
+            );
+            let mut invalid = choice.clone();
+            invalid["operation_id"] = operation_id.into();
+            let _ = err("project.execution.choose", invalid);
+        }
+        let _ = err("project.execution.status", json!({"project_root":"/other"}));
     }
 
     // Issue #3607: PM stop/deregister parse variants.

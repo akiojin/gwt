@@ -1015,6 +1015,16 @@ fn pm_worktree_gwt_pm_guidance_is_regenerated_when_absent_or_tampered() {
         gwt_skills::pm_guidance::render_skill_md(ManagedAssetTarget::ClaudeCode)
     );
     let original_contract = read_skill_contract(&path);
+    assert!(
+        original_contract.contains("## Request task reconciliation"),
+        "refresh must restore the request tracking contract as well as its router"
+    );
+    assert!(
+        original_contract.contains("`expected_inventory_sha256`")
+            && original_contract.contains("`candidate_chunk`")
+            && original_contract.contains("Candidates are not authenticated sources"),
+        "materialized guidance must preserve candidate discovery, recovery and authority boundaries"
+    );
 
     for leaf in gwt_skills::pm_guidance::managed_paths(
         &worktree.parent().unwrap().join("runtime/.claude/skills"),
@@ -1095,6 +1105,10 @@ fn pm_guidance_mirrors_match_the_canonical_nonblocking_loop() {
             "Provider approval prompts may be forwarded or answered only with explicit applicable instruction or approval scoped to the actual target and action",
             "Without applicable authority, do not call `pm.message.send` or any other input operation to select an option; only the human may resolve that prompt in the pane",
             "For an authorized response, use `pm.operation.execute` with `operation:\"pm.message.send\"` and the exact target `id` and response `text` in `params`. `pane.send` remains forbidden",
+            "On PM startup, on a new human turn, and in every resident cycle",
+            "`absent` does not prove zero requests or completion",
+            "Do not apply mutations while enumerating pages",
+            "Never use `Capture` or claim an Intake actor",
         ] {
             assert!(
                 normalized.contains(phrase),
