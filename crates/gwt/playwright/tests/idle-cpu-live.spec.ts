@@ -76,7 +76,8 @@ test.describe("Issue #5658 idle GUI CPU", () => {
       if (maxDaemonCores > 0) expect(daemonPid, "daemon CPU acceptance requires an owned daemon").toBeGreaterThan(0);
       if (paneCount === 5) expect(process.env.GWT_IDLE_FIXTURE_PROJECT, "startup intake requires the primary fixture project").toBeTruthy();
       const theme = info.project.name.includes("light") ? "light" : "dark";
-      const sampleMs = theme === "dark" ? requestedMs : Math.min(requestedMs, 30_000);
+      // CPU acceptance uses the full requested window in every theme.
+      const sampleMs = theme === "dark" || assertCpuBudget || maxDaemonCores > 0 ? requestedMs : Math.min(requestedMs, 30_000);
       const errors: string[] = [];
       const created: string[] = [];
       const agents: Agent[] = [];

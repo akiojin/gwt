@@ -414,3 +414,28 @@ Issue #6743 と配送 PR に記録する。branch 上の source や旧測定値�
 AC を完了したり Issue を閉じたりしない。
 
 User Verification Result: n/a (autonomous)
+
+## 2026-11-07 の canonical 計測区間の修正
+
+サラ・カトウ。最終候補 `f5d4e3e1e4f55f1417205714cca7e9946169bfc7` の canonical
+`vrr-e88a0e143f6247bfaab3720f18c6b11e` は Debug headed dark/light 各 1 PASS、
+関連 Rust / index / hygiene / helper と Release build まで成功した。
+Release の Dark は Work 1,792 件・missing 0・現在 5/5 Session の監査完了後に測った。
+
+| Process | CPU 秒 | wall 秒 | logical-core CPU | 600 秒の判定 |
+| --- | ---: | ---: | ---: | --- |
+| GUI | 26.5625 | 600.0602237 | 4.426639% | PASS (<5%) |
+| Monitor OFF daemon | 4.6875 | 600.0724527 | 0.781156% | PASS (<1%) |
+
+一方、Light は harness が区間を 30 秒へ短縮したまま同じ閾値を適用していた。
+GUI は 1.515625 / 30.0562746 秒 = 5.042624%、daemon は 0.375 / 30.0535454 秒 =
+1.247773% で daemon の budget assertion が失敗した。両テーマの errors は空だった。
+この run 全体を PASS と扱わず、原 artifact `issue-5658-after-5fa99ba8a7da42738f07f04b982ae2e0`
+と canonical 記録を保全する。30 秒の値は 600 秒 AC の未達を示すものではない。
+
+根因は CPU 判定の要求時間と Light の実測時間の不一致。親 SPEC #5390 の plan/tasks を
+更新し、いずれかの CPU budget を要求した場合は両テーマで指定された全区間を測る。
+budget を要求しない Light の短い診断は保持する。変更は既存 E2E の区間選択と本報告だけで、
+runtime、閾値、監査・IPC・入力・エラー・cleanup の assertion は維持する。
+既存の canonical failure を RED 証跡とし、修正後の fresh full matrix で GREEN を確認する。
+配送はその後の Ready PR / 必須 CI / auto-merge / develop 包含確認で確定する。
