@@ -1,6 +1,61 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.152.0] - 2026-11-06
+
+### Bug Fixes
+
+- **web:** 通常再接続でProfile読込を回復する
+- **web:** 未確認rename中のProfile編集を保持する
+- **usage:** Restrict Claude account totals to shared windows
+- **usage:** Route resumed acceptance to the live project
+- **usage:** Harden browser check setup and cleanup
+- **usage:** Scope browser check to model limit regression
+- **update:** Discard failed staged updates and prevent replay
+- **ci:** Migrate release macOS runners to macos-15
+- **execution:** 完了履歴の通信失敗を警告として扱う
+- **web:** Recover index searches after reconnect
+- **terminal:** 再接続と出力修復でスクロール履歴を保持
+- **terminal:** Keep snapshot repair advancing during output
+- **terminal:** Keep reconnect snapshots ahead of live output
+- **terminal:** Broadcast snapshots that overtake live output
+- **terminal:** Retry failed history snapshots while output is idle
+
+### Documentation
+
+- **perf:** Reconcile delivered child acceptance for issue 5390
+
+### Features
+
+- **pm:** Capture selected native requests for tracking
+- **pm:** Expose browser task reassessment
+
+### Miscellaneous Tasks
+
+- **work:** Profile回復PRの関連付けを保存する
+- **work:** Native wake修復の配送検証を記録
+- **work:** Rename保護PRの関連付けを保存する
+- **work:** Record usage fix delivery verification
+- **work:** Resume update failure delivery
+- **work:** Deliver verified update failure recovery
+- **work:** Resume failed update delivery
+- **work:** Record index reconnect PR association
+- **work:** Native選択受付PRの関連付けを保存する
+- **work:** Record scrollback repair delivery continuation
+- **work:** Record scrollback delivery verification scope
+- **work:** Preserve scrollback environment handoff
+- **work:** Preserve scrollback retry verification handoff
+- **work:** Record scrollback delivery scope
+- **work:** 端末履歴修復の配信範囲を確定
+
+### Testing
+
+- **pm:** Reject unconfirmed native wake before file wait
+- **pm:** Wake回帰fixtureのHOMEを隔離する
+- **windows:** Observe snapshots in survivor output probe
+- **pm:** Reject unconfirmed native wake before file wait
+- **terminal:** Align async snapshot fixtures with scrollback restore
+
 ## [9.151.0] - 2026-11-06
 
 ### Bug Fixes

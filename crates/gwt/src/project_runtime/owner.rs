@@ -3532,7 +3532,7 @@ impl OwnerState {
             let agent = runtime.agent.as_ref();
             Ok(json!({
                 "id":id, "incarnation":incarnation, "screen":pane.screen().contents(),
-                "screen_ansi":pane.screen().contents_formatted(), "screen_seq":pane.output_seq(), "seq":pane.output_seq(),
+                "screen_ansi":pane.snapshot_bytes(), "screen_seq":pane.output_seq(), "seq":pane.output_seq(),
                 "has_unsent_user_input":pane.has_unsent_user_input(),
                 "input_observation":super::events::OwnerInputObservation::capture(&runtime.pty),
                 "child_pid":runtime.pty.process_id(), "started_at_ms":runtime.started_at_ms,
@@ -6954,7 +6954,7 @@ impl OwnerState {
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 super::events::OwnerFinalScreen {
                     screen: pane.screen().contents(),
-                    screen_ansi: pane.screen().contents_formatted(),
+                    screen_ansi: pane.snapshot_bytes(),
                     screen_seq: pane.output_seq(),
                 }
             });

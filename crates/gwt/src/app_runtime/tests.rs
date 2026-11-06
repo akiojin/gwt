@@ -960,6 +960,7 @@ fn project_event_isolation_full_sync_filters_each_project_payload() {
         tab
     });
     let mut runtime = sample_runtime(temp.path(), tabs.into(), Some("a"));
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
     for tab_id in ["a", "b"] {
         let id = combined_window_id(tab_id, "agent");
         insert_test_pane_runtime(&mut runtime, &id);
@@ -980,7 +981,7 @@ fn project_event_isolation_full_sync_filters_each_project_payload() {
         let context = runtime.project_context(tab_id).unwrap();
         let client = format!("client-{tab_id}");
         let id = combined_window_id(tab_id, "agent");
-        let events = runtime.handle_frontend_event_in_scope(
+        let mut events = runtime.handle_frontend_event_in_scope(
             client.clone(),
             FrontendEvent::FrontendReady,
             &super::ClientScope::Project(context.project_key),
@@ -1001,6 +1002,10 @@ fn project_event_isolation_full_sync_filters_each_project_payload() {
             statuses,
             vec![(id.clone(), Some(format!("detail-{tab_id}")))]
         );
+        events.extend(drain_owner_snapshot_completions(&mut runtime));
+        assert!(events
+            .iter()
+            .all(|event| event.target == DispatchTarget::Client(client.clone())));
         let snapshots: Vec<_> = events
             .iter()
             .filter_map(|event| match &event.event {
@@ -1738,6 +1743,7 @@ pub(crate) fn owner_browser_input_fixture(
         },
     ))
     .unwrap();
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
     runtime.install_remote_owner_projection(
         &context,
         &id,
@@ -1745,7 +1751,7 @@ pub(crate) fn owner_browser_input_fixture(
         serde_json::from_value(snapshot).unwrap(),
         probe.session.clone(),
     );
-    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
+    drain_owner_snapshot_completions(&mut runtime);
     (runtime, probe, id)
 }
 
@@ -1778,6 +1784,40 @@ pub(crate) fn drain_browser_owner_input(runtime: &mut AppRuntime) -> Vec<Outboun
         }
         if !had_tasks && !had_completions {
             break;
+        }
+    }
+    events
+}
+
+fn drain_owner_snapshot_completions(runtime: &mut AppRuntime) -> Vec<OutboundEvent> {
+    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+        panic!("queued owner snapshot workers");
+    };
+    let tasks = Arc::clone(tasks);
+    let AppEventProxy::Stub(completions) = &runtime.proxy else {
+        panic!("owner snapshot event sink");
+    };
+    let completions = Arc::clone(completions);
+    drain_queued_blocking_tasks(&tasks);
+    let mut events = Vec::new();
+    loop {
+        let event = {
+            let mut completions = completions.lock().unwrap();
+            completions
+                .iter()
+                .position(|event| {
+                    matches!(
+                        recorded_project_payload(event),
+                        UserEvent::ProjectOwnerSnapshot(_)
+                    )
+                })
+                .map(|index| completions.remove(index))
+        };
+        let Some(event) = event else { break };
+        if let Some(UserEvent::ProjectOwnerSnapshot(completion)) =
+            runtime.accept_project_completion(event)
+        {
+            events.extend(runtime.handle_project_owner_snapshot(*completion));
         }
     }
     events
@@ -1840,6 +1880,13 @@ fn insert_test_pane_runtime_with_command(
         .identity()
         .expect("authenticated owner identity")
         .clone();
+    let context = runtime
+        .project_context(&runtime.window_lookup[window_id].tab_id)
+        .expect("fixture project context");
+    runtime
+        .project_state_mut(&context)
+        .unwrap()
+        .project_owner_identity = Some(identity.clone());
     let mut projection = WindowRuntime::remote(
         id,
         reply["incarnation"].as_u64().expect("owner incarnation"),
@@ -1872,7 +1919,7 @@ fn process_test_owner_output(runtime: &mut AppRuntime, window_id: &str, bytes: &
         pane.process_bytes(bytes);
         (
             pane.screen().contents(),
-            pane.snapshot_bytes(),
+            pane.screen().contents_formatted(),
             pane.output_seq(),
         )
     };
@@ -1890,7 +1937,7 @@ fn process_test_owner_output(runtime: &mut AppRuntime, window_id: &str, bytes: &
             data: bytes.to_vec(),
             seq,
             screen: Some(screen.clone()),
-            screen_ansi: None,
+            screen_ansi: Some(screen_ansi.clone()),
         }),
     )
     .expect("production owner consumes fixture output");
@@ -10906,6 +10953,108 @@ fn native_pm_fixture_result(
     })
 }
 
+fn require_native_pm_wake_acknowledgement(
+    receipt: &gwt::pm_registry::PmDeliveryReceipt,
+) -> Result<(), String> {
+    // The native runner attempts its exact ACK before writing the observation
+    // file. A completed but unconfirmed delivery is an acceptance failure,
+    // not evidence that another file will eventually arrive. It may still
+    // receive a late ACK; do not change or reinterpret its durable outcome.
+    if receipt.status == gwt::pm_registry::PmDeliveryReceiptStatus::Verified {
+        Ok(())
+    } else {
+        Err(format!(
+            "native PM wake lacks a verified acknowledgement; do not wait for a provider file: {receipt:?}"
+        ))
+    }
+}
+
+#[test]
+fn native_pm_wake_expiry_requires_ack_before_provider_file_wait() {
+    use gwt::pm_registry::{self, PmDeliveryReceiptStatus as Status};
+    use std::cell::Cell;
+
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let path = temp.path().join("receipts.jsonl");
+    // The same expiry can precede the first CR or a later retry. Neither
+    // history proves acknowledgement; the latter can still receive a late ACK.
+    for submits_before_expiry in [0, 1] {
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let prepared = pm_registry::PmDeliveryReceipt {
+            operation_id: operation_id.clone(),
+            recorded_at: "2026-11-06T00:00:00Z".into(),
+            status: Status::Prepared,
+            principal_session_id: format!("gwt-wake:{operation_id}"),
+            target_window_id: "pm-pane".into(),
+            target_session_id: "pm-session".into(),
+            body_sha256: pm_registry::pm_delivery_prompt_sha256("protected wake"),
+            reason: None,
+        };
+        pm_registry::prepare_pm_delivery_receipt(&path, &prepared).unwrap();
+        let bodies = Cell::new(0);
+        let submits = Cell::new(0);
+        let expired = Cell::new(false);
+        let result = gwt::project_runtime::agent_dispatch::drive_verified_pane_submit(
+            "protected wake\r",
+            false,
+            2,
+            |bytes| {
+                if expired.get() {
+                    return Err(
+                        "PTY I/O error: PM wake deadline expired before physical commit".into(),
+                    );
+                }
+                if bytes == b"\r" {
+                    submits.set(submits.get() + 1);
+                } else {
+                    bodies.set(bodies.get() + 1);
+                }
+                Ok(())
+            },
+            |_| expired.set(submits.get() == submits_before_expiry),
+            || Ok(false),
+        );
+        assert_eq!(bodies.get(), 1);
+        assert_eq!(submits.get(), submits_before_expiry);
+        let reason = result.unwrap_err();
+        assert!(reason.contains("deadline expired before physical commit"));
+        pm_registry::finish_pm_delivery_receipt(
+            &path,
+            &operation_id,
+            &prepared.target_session_id,
+            &prepared.body_sha256,
+            Status::Unconfirmed,
+            Some(&reason),
+        )
+        .unwrap();
+        let receipt = pm_registry::pm_delivery_receipt_for_operation(&path, &operation_id)
+            .unwrap()
+            .unwrap();
+        let error = require_native_pm_wake_acknowledgement(&receipt)
+            .expect_err("Unconfirmed must fail acceptance before waiting for a provider file");
+        assert!(error.contains(&operation_id) && error.contains(&reason));
+        assert_eq!(receipt.status, Status::Unconfirmed);
+        if submits_before_expiry == 1 {
+            // Domain transition control only; the existing native tests below
+            // require the real provider to own its ACK, operation and digest.
+            pm_registry::finish_pm_delivery_receipt(
+                &path,
+                &operation_id,
+                &prepared.target_session_id,
+                &prepared.body_sha256,
+                Status::Verified,
+                None,
+            )
+            .unwrap();
+            let latest = pm_registry::pm_delivery_receipt_for_operation(&path, &operation_id)
+                .unwrap()
+                .unwrap();
+            require_native_pm_wake_acknowledgement(&latest).unwrap();
+        }
+    }
+}
+
 fn assert_native_pm_received_periodic_wake(
     repo: &Path,
     result_path: &Path,
@@ -10925,15 +11074,7 @@ fn assert_native_pm_received_periodic_wake(
     .unwrap();
     let receipt = receipts.iter().rev().find(|receipt| receipt.operation_id == operation_id)
         .unwrap_or_else(|| panic!("selected periodic wake has no physical delivery receipt: loop={state:?}; receipts={receipts:?}"));
-    assert!(
-        matches!(
-            receipt.status,
-            gwt::pm_registry::PmDeliveryReceiptStatus::Prepared
-                | gwt::pm_registry::PmDeliveryReceiptStatus::Unconfirmed
-                | gwt::pm_registry::PmDeliveryReceiptStatus::Verified
-        ),
-        "native PM delivery was not submitted: {receipt:?}"
-    );
+    require_native_pm_wake_acknowledgement(receipt).unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(receipt.target_window_id, probe.id);
     assert_eq!(
         receipt.target_session_id,
