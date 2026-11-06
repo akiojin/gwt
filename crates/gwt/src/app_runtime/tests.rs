@@ -10928,6 +10928,7 @@ fn native_pm_wake_expiry_requires_ack_before_provider_file_wait() {
     use std::cell::Cell;
 
     let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let path = temp.path().join("receipts.jsonl");
     // The same expiry can precede the first CR or a later retry. Neither
     // history proves acknowledgement; the latter can still receive a late ACK.
