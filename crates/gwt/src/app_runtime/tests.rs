@@ -960,6 +960,7 @@ fn project_event_isolation_full_sync_filters_each_project_payload() {
         tab
     });
     let mut runtime = sample_runtime(temp.path(), tabs.into(), Some("a"));
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
     for tab_id in ["a", "b"] {
         let id = combined_window_id(tab_id, "agent");
         insert_test_pane_runtime(&mut runtime, &id);
@@ -980,7 +981,7 @@ fn project_event_isolation_full_sync_filters_each_project_payload() {
         let context = runtime.project_context(tab_id).unwrap();
         let client = format!("client-{tab_id}");
         let id = combined_window_id(tab_id, "agent");
-        let events = runtime.handle_frontend_event_in_scope(
+        let mut events = runtime.handle_frontend_event_in_scope(
             client.clone(),
             FrontendEvent::FrontendReady,
             &super::ClientScope::Project(context.project_key),
@@ -1001,6 +1002,10 @@ fn project_event_isolation_full_sync_filters_each_project_payload() {
             statuses,
             vec![(id.clone(), Some(format!("detail-{tab_id}")))]
         );
+        events.extend(drain_owner_snapshot_completions(&mut runtime));
+        assert!(events
+            .iter()
+            .all(|event| event.target == DispatchTarget::Client(client.clone())));
         let snapshots: Vec<_> = events
             .iter()
             .filter_map(|event| match &event.event {
@@ -1738,6 +1743,7 @@ pub(crate) fn owner_browser_input_fixture(
         },
     ))
     .unwrap();
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
     runtime.install_remote_owner_projection(
         &context,
         &id,
@@ -1745,7 +1751,7 @@ pub(crate) fn owner_browser_input_fixture(
         serde_json::from_value(snapshot).unwrap(),
         probe.session.clone(),
     );
-    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
+    drain_owner_snapshot_completions(&mut runtime);
     (runtime, probe, id)
 }
 
@@ -1778,6 +1784,40 @@ pub(crate) fn drain_browser_owner_input(runtime: &mut AppRuntime) -> Vec<Outboun
         }
         if !had_tasks && !had_completions {
             break;
+        }
+    }
+    events
+}
+
+fn drain_owner_snapshot_completions(runtime: &mut AppRuntime) -> Vec<OutboundEvent> {
+    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+        panic!("queued owner snapshot workers");
+    };
+    let tasks = Arc::clone(tasks);
+    let AppEventProxy::Stub(completions) = &runtime.proxy else {
+        panic!("owner snapshot event sink");
+    };
+    let completions = Arc::clone(completions);
+    drain_queued_blocking_tasks(&tasks);
+    let mut events = Vec::new();
+    loop {
+        let event = {
+            let mut completions = completions.lock().unwrap();
+            completions
+                .iter()
+                .position(|event| {
+                    matches!(
+                        recorded_project_payload(event),
+                        UserEvent::ProjectOwnerSnapshot(_)
+                    )
+                })
+                .map(|index| completions.remove(index))
+        };
+        let Some(event) = event else { break };
+        if let Some(UserEvent::ProjectOwnerSnapshot(completion)) =
+            runtime.accept_project_completion(event)
+        {
+            events.extend(runtime.handle_project_owner_snapshot(*completion));
         }
     }
     events
@@ -1840,6 +1880,13 @@ fn insert_test_pane_runtime_with_command(
         .identity()
         .expect("authenticated owner identity")
         .clone();
+    let context = runtime
+        .project_context(&runtime.window_lookup[window_id].tab_id)
+        .expect("fixture project context");
+    runtime
+        .project_state_mut(&context)
+        .unwrap()
+        .project_owner_identity = Some(identity.clone());
     let mut projection = WindowRuntime::remote(
         id,
         reply["incarnation"].as_u64().expect("owner incarnation"),
@@ -1872,7 +1919,7 @@ fn process_test_owner_output(runtime: &mut AppRuntime, window_id: &str, bytes: &
         pane.process_bytes(bytes);
         (
             pane.screen().contents(),
-            pane.snapshot_bytes(),
+            pane.screen().contents_formatted(),
             pane.output_seq(),
         )
     };
@@ -1890,7 +1937,7 @@ fn process_test_owner_output(runtime: &mut AppRuntime, window_id: &str, bytes: &
             data: bytes.to_vec(),
             seq,
             screen: Some(screen.clone()),
-            screen_ansi: None,
+            screen_ansi: Some(screen_ansi.clone()),
         }),
     )
     .expect("production owner consumes fixture output");
