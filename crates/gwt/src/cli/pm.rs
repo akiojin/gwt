@@ -30,10 +30,18 @@ use crate::pm_registry;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PmCommand {
     /// Read a summary, bounded IDs or one record, without a raw-store dump.
-    RequestTasksRead { selector: RequestTaskSelector },
+    RequestTasksRead {
+        selector: RequestTaskSelector,
+    },
     /// Mutate tracking state as the current PM, never as an intake/user actor.
     RequestTasksApply {
         request: Box<gwt_core::pm_request_tasks::Request>,
+    },
+    RequestTasksCapture {
+        request: Box<NativeCaptureRequest>,
+    },
+    ProjectExecutionStatus {
+        operation_id: Option<String>,
     },
     /// Read the canonical project's durable planning snapshot.
     PlanStatus,
@@ -62,7 +70,9 @@ pub enum PmCommand {
         submission: Box<pm_report::Submission>,
     },
     /// Read the project's reports in posting order.
-    ReportList { project_root: Option<String> },
+    ReportList {
+        project_root: Option<String>,
+    },
     /// Replace the displayed PM status while retaining its authored history.
     StatusSet {
         project_root: Option<String>,
@@ -71,7 +81,9 @@ pub enum PmCommand {
     /// `pm.status` — optional explicit `project_root`; defaults to the
     /// current repository path (container/bare setups must pass it
     /// explicitly, same convention as the Issue Monitor queue operations).
-    Status { project_root: Option<String> },
+    Status {
+        project_root: Option<String>,
+    },
     /// Persistently pause or resume the autonomous resident loop.
     SetPaused {
         project_root: Option<String>,
@@ -93,6 +105,24 @@ pub enum PmCommand {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RequestTaskSelector {
     Summary {},
+    NativeTurns {},
+    NativeTurn {
+        provider: String,
+        conversation_id: String,
+        id: String,
+    },
+    Candidates {
+        limit: Option<usize>,
+        after: Option<String>,
+        expected_inventory_sha256: Option<String>,
+    },
+    Candidate {
+        id: String,
+    },
+    CandidateChunk {
+        id: String,
+        offset: Option<u64>,
+    },
     Pending {
         limit: Option<usize>,
         expected_revision: Option<u64>,
@@ -114,10 +144,87 @@ pub enum RequestTaskSelector {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeCaptureRequest {
+    pub operation_id: String,
+    pub expected_revision: u64,
+    pub reason: String,
+    pub provider: String,
+    pub conversation_id: String,
+    pub id: String,
+    pub prompt_sha256: String,
+}
+
+fn validate_native_selection(
+    provider: &str,
+    conversation_id: &str,
+    id: &str,
+) -> Result<(), &'static str> {
+    if [provider, conversation_id, id]
+        .iter()
+        .any(|value| value.trim().is_empty())
+    {
+        return Err("native provider, conversation and message identities are required");
+    }
+    Ok(())
+}
+
+impl NativeCaptureRequest {
+    pub(super) fn validate(&self) -> Result<(), &'static str> {
+        validate_native_selection(&self.provider, &self.conversation_id, &self.id)?;
+        if self.operation_id.trim().is_empty()
+            || self.reason.trim().is_empty()
+            || !super::hook::pm_reporting::candidate_digest_valid(&self.prompt_sha256)
+        {
+            return Err(
+                "native capture requires an operation ID, reason and canonical prompt SHA256",
+            );
+        }
+        Ok(())
+    }
+}
+
 impl RequestTaskSelector {
     pub(super) fn validate(&self) -> Result<(), &'static str> {
         let id = match self {
             Self::Summary {} => return Ok(()),
+            Self::NativeTurns {} => return Ok(()),
+            Self::NativeTurn {
+                provider,
+                conversation_id,
+                id,
+            } => {
+                return validate_native_selection(provider, conversation_id, id);
+            }
+            Self::Candidates {
+                limit,
+                after,
+                expected_inventory_sha256,
+            } => {
+                if !(1..=100).contains(&limit.unwrap_or(50)) {
+                    return Err("page limit must be between 1 and 100");
+                }
+                if after.is_some() && expected_inventory_sha256.is_none() {
+                    return Err("candidate continuation requires expected_inventory_sha256; restart without after");
+                }
+                if expected_inventory_sha256.as_deref().is_some_and(|digest| {
+                    !crate::cli::hook::pm_reporting::candidate_digest_valid(digest)
+                }) || after
+                    .as_deref()
+                    .is_some_and(|id| !crate::cli::hook::pm_reporting::candidate_id_valid(id))
+                {
+                    return Err("candidate token or identity is not canonical");
+                }
+                return Ok(());
+            }
+            Self::Candidate { id } | Self::CandidateChunk { id, .. } => {
+                return if crate::cli::hook::pm_reporting::candidate_id_valid(id) {
+                    Ok(())
+                } else {
+                    Err("candidate identity must be a lowercase session digest/canonical UUID")
+                }
+            }
             Self::Pending {
                 limit,
                 expected_revision,
@@ -208,6 +315,10 @@ const CAPABILITY_GAPS: &[(&str, &str, CapabilityGapReason, &str)] = &[
     (
         "actions.release_policy.rollback", r#"{}"#, CapabilityGapReason::Permission,
         "Read actions.release_policy.status and use fresh exact scoped authority plus added_by naming the successful add; its post-state must be unchanged and preexisting permission cannot be removed",
+    ),
+    (
+        "project.execution.choose", r#"{}"#, CapabilityGapReason::Permission,
+        "Use project.execution.status, then a scoped instruction_id or pm.approval.request bound to this operation_id, revision, generation and choice",
     ),
     (
         "discussion.create",
@@ -334,10 +445,21 @@ pub(super) fn run<E: CliEnv>(
 ) -> Result<i32, SpecOpsError> {
     match command {
         PmCommand::RequestTasksRead { selector } => {
-            request_tasks(env.repo_path(), Some(selector), None, out)
+            request_tasks(env.repo_path(), Some(selector), None, None, out)
         }
         PmCommand::RequestTasksApply { request } => {
-            request_tasks(env.repo_path(), None, Some(&request), out)
+            request_tasks(env.repo_path(), None, Some(&request), None, out)
+        }
+        PmCommand::RequestTasksCapture { request } => {
+            request_tasks(env.repo_path(), None, None, Some(&request), out)
+        }
+        PmCommand::ProjectExecutionStatus { operation_id } => {
+            let status =
+                super::project_execution_policy::status(env.repo_path(), operation_id.as_deref())
+                    .map_err(super::io_as_api_error)?;
+            out.push_str(&serde_json::to_string(&status).map_err(super::serde_as_api_error)?);
+            out.push('\n');
+            Ok(0)
         }
         PmCommand::PlanStatus => {
             let state = crate::pm_planning::load_planning_state(
@@ -768,6 +890,7 @@ fn request_tasks(
     repo: &Path,
     selector: Option<RequestTaskSelector>,
     request: Option<&gwt_core::pm_request_tasks::Request>,
+    capture: Option<&NativeCaptureRequest>,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     use gwt_core::pm_request_tasks::{Actor, ActorKind, TaskError, TaskStore};
@@ -791,6 +914,33 @@ fn request_tasks(
         .map_err(|error| TaskError::PersistenceUnconfirmed(error.to_string()))?;
         if !pm_registry::session_is_registered_pm(&record.prefs_path, &actor) {
             return Err(TaskError::Unauthorized);
+        }
+        if capture.is_some()
+            || matches!(
+                selector,
+                Some(RequestTaskSelector::NativeTurns {} | RequestTaskSelector::NativeTurn { .. })
+            )
+        {
+            let result = native_request_tasks(&actor, &record, &store, selector.as_ref(), capture);
+            if capture.is_some() {
+                current_revision = store
+                    .read()
+                    .ok()
+                    .map(|state| state.map_or(0, |state| state.revision));
+            }
+            return result;
+        }
+        if let Some(
+            selector @ (RequestTaskSelector::Candidates { .. }
+            | RequestTaskSelector::Candidate { .. }
+            | RequestTaskSelector::CandidateChunk { .. }),
+        ) = &selector
+        {
+            selector
+                .validate()
+                .map_err(|error| TaskError::Invalid(error.into()))?;
+            return read_candidates(&record.project_dir, selector)
+                .map_err(|error| TaskError::Unreadable(error.to_string()));
         }
         if let Some(request) = request {
             // Domain authorization rejects Capture even for an internal caller
@@ -877,6 +1027,13 @@ fn request_tasks(
         }
         let Some(state) = state else {
             return match selector {
+                RequestTaskSelector::NativeTurns {}
+                | RequestTaskSelector::NativeTurn { .. }
+                | RequestTaskSelector::Candidates { .. }
+                | RequestTaskSelector::Candidate { .. }
+                | RequestTaskSelector::CandidateChunk { .. } => {
+                    unreachable!("private native/candidate reads precede TaskStore")
+                }
                 RequestTaskSelector::Pending { .. } | RequestTaskSelector::Tasks { .. } => {
                     unreachable!("ID pages handled above")
                 }
@@ -892,6 +1049,13 @@ fn request_tasks(
         };
         let mut value = json!({"schema_version":1,"ok":true,"state":"ready","project_key":state.project_key,"revision":state.revision});
         match selector {
+            RequestTaskSelector::NativeTurns {}
+            | RequestTaskSelector::NativeTurn { .. }
+            | RequestTaskSelector::Candidates { .. }
+            | RequestTaskSelector::Candidate { .. }
+            | RequestTaskSelector::CandidateChunk { .. } => {
+                unreachable!("private native/candidate reads precede TaskStore")
+            }
             RequestTaskSelector::Pending { .. } | RequestTaskSelector::Tasks { .. } => {
                 unreachable!("ID pages handled above")
             }
@@ -916,7 +1080,9 @@ fn request_tasks(
         Ok(value)
     })();
     let (code, value) = match result {
-        Ok(value) => (0, value),
+        // Candidate inventory conflicts use their own token, never a fabricated
+        // TaskStore revision. Their typed error envelope also sets exit status.
+        Ok(value) => (i32::from(value["ok"] == false), value),
         Err(error) => {
             let error_code = match &error {
                 TaskError::Unauthorized => "unauthorized",
@@ -952,6 +1118,224 @@ fn request_tasks(
     out.push_str(&value.to_string());
     out.push('\n');
     Ok(code)
+}
+
+/// Native selection never consumes a hook observation or accepts authored text.
+fn native_request_tasks(
+    actor: &str,
+    record: &pm_registry::PmStoreRegistration,
+    store: &gwt_core::pm_request_tasks::TaskStore,
+    selector: Option<&RequestTaskSelector>,
+    capture: Option<&NativeCaptureRequest>,
+) -> Result<serde_json::Value, gwt_core::pm_request_tasks::TaskError> {
+    use crate::pm_conversation::{PmConversationAvailability, PmConversationRole};
+    use gwt_core::pm_request_tasks::{Action, Actor, ActorKind, IntakeSource, Request, TaskError};
+    use serde_json::json;
+
+    gwt_agent::validate_session_id_path_component(actor).map_err(|_| TaskError::Unauthorized)?;
+    let session = gwt_agent::Session::load(&gwt_sessions_dir().join(format!("{actor}.toml")))
+        .map_err(|error| TaskError::Unreadable(error.to_string()))?;
+    if session.id != actor
+        || session.agent_id.command() != record.registration.agent_id
+        || peer_project_dir(&session.worktree_path) != record.project_dir
+        || session.worktree_path != Path::new(&record.registration.worktree_path)
+    {
+        return Err(TaskError::Unauthorized);
+    }
+    let native = crate::pm_conversation::read_for_session(&session);
+    if native.availability != PmConversationAvailability::Ready {
+        return Err(TaskError::Unreadable(format!(
+            "native conversation is {:?}: {}",
+            native.availability,
+            native
+                .detail
+                .as_deref()
+                .unwrap_or("retry native_turns after the native store becomes ready")
+        )));
+    }
+    let conversation_id = native.conversation_id.as_deref().ok_or_else(|| {
+        TaskError::Unreadable("native conversation identity is unavailable".into())
+    })?;
+    let provider = session.agent_id.command();
+    let turns: Vec<_> = native
+        .messages
+        .iter()
+        .filter(|message| {
+            message.role == PmConversationRole::User
+                && !crate::pm_conversation::internal_prompt(&message.text)
+        })
+        .collect();
+    let mut value = json!({"schema_version":1,"ok":true,"provider":provider,
+        "conversation_id":conversation_id,"window_only":true,"detail":native.detail});
+    let (expected_provider, expected_conversation, id) = if let Some(request) = capture {
+        request
+            .validate()
+            .map_err(|error| TaskError::Invalid(error.into()))?;
+        (&request.provider, &request.conversation_id, &request.id)
+    } else {
+        match selector.expect("native read has a selector") {
+            RequestTaskSelector::NativeTurns {} => {
+                value["turns"] = json!(turns
+                    .iter()
+                    .map(|message| json!({"id":message.id,
+                    "prompt_sha256":gwt_core::pm_authorization::digest(message.text.as_bytes())}))
+                    .collect::<Vec<_>>());
+                return Ok(value);
+            }
+            RequestTaskSelector::NativeTurn {
+                provider,
+                conversation_id,
+                id,
+            } => {
+                validate_native_selection(provider, conversation_id, id)
+                    .map_err(|error| TaskError::Invalid(error.into()))?;
+                (provider, conversation_id, id)
+            }
+            _ => unreachable!("native selector only"),
+        }
+    };
+    if expected_provider != provider || expected_conversation != conversation_id {
+        return Err(TaskError::Invalid(
+            "native selection changed; reread native_turns".into(),
+        ));
+    }
+    let message = turns.into_iter().find(|message| &message.id == id)
+        .ok_or_else(|| TaskError::Invalid("native turn is not in the current human window; retry native_turns; absence does not prove no request".into()))?;
+    let prompt_sha256 = gwt_core::pm_authorization::digest(message.text.as_bytes());
+    if let Some(request) = capture {
+        if request.prompt_sha256 != prompt_sha256 {
+            return Err(TaskError::Invalid(
+                "native text changed; reread the selected native_turn".into(),
+            ));
+        }
+        let current = gwt_agent::Session::load(&gwt_sessions_dir().join(format!("{actor}.toml")))
+            .map_err(|error| TaskError::Unreadable(error.to_string()))?;
+        if current.id != session.id
+            || current.agent_id != session.agent_id
+            || current.worktree_path != session.worktree_path
+            || current.exact_resume_session_id() != Some(conversation_id)
+        {
+            return Err(TaskError::Invalid(
+                "native session changed; reread native_turns".into(),
+            ));
+        }
+        // Both source and intake actor survive replacement of the GWT Session.
+        // Native provenance is tracking data, never instruction authority.
+        let native_session = serde_json::to_string(&(provider, conversation_id))
+            .map_err(|error| TaskError::Invalid(error.to_string()))?;
+        let source_id = format!(
+            "native:{}",
+            gwt_core::pm_authorization::digest(
+                &serde_json::to_vec(&(provider, conversation_id, &message.id))
+                    .map_err(|error| TaskError::Invalid(error.to_string()))?
+            )
+        );
+        let source = IntakeSource {
+            id: source_id,
+            project_key: record
+                .project_dir
+                .file_name()
+                .and_then(|key| key.to_str())
+                .ok_or(TaskError::ForeignProject)?
+                .into(),
+            original: message.text.clone(),
+            authority: gwt_core::user_instruction::InstructionAuthority {
+                session_id: native_session.clone(),
+                turn_id: message.id.clone(),
+                prompt_sha256,
+            },
+        };
+        let receipt = store.apply(
+            &Actor {
+                kind: ActorKind::Intake,
+                id: native_session,
+            },
+            &Request {
+                operation_id: request.operation_id.clone(),
+                expected_revision: request.expected_revision,
+                reason: request.reason.clone(),
+                action: Action::Capture { source },
+            },
+        )?;
+        value["receipt"] = json!(receipt);
+    } else {
+        value["turn"] =
+            json!({"id":message.id,"original":message.text,"prompt_sha256":prompt_sha256});
+    }
+    Ok(value)
+}
+
+fn read_candidates(
+    repo: &Path,
+    selector: &RequestTaskSelector,
+) -> std::io::Result<serde_json::Value> {
+    use crate::cli::hook::pm_reporting;
+    use serde_json::json;
+    match selector {
+        RequestTaskSelector::Candidates {
+            limit,
+            after,
+            expected_inventory_sha256,
+        } => {
+            let (present, ids, digest) = pm_reporting::candidate_inventory(repo)?;
+            if expected_inventory_sha256
+                .as_ref()
+                .is_some_and(|expected| expected != &digest)
+            {
+                return Ok(
+                    json!({"schema_version":1,"ok":false,"current_inventory_sha256":digest,
+                    "error":{"code":"conflict","message":"Candidate inventory changed; restart without after",
+                    "recovery_operation":"pm.request_tasks.read"}}),
+                );
+            }
+            let mut ids: Vec<_> = ids
+                .into_iter()
+                .filter(|id| after.as_ref().is_none_or(|after| id > after))
+                .take(limit.unwrap_or(50) + 1)
+                .collect();
+            let next_after = if ids.len() > limit.unwrap_or(50) {
+                ids.pop();
+                ids.last().cloned()
+            } else {
+                None
+            };
+            Ok(
+                json!({"schema_version":1,"ok":true,"state":if present {"ready"} else {"absent"},
+                "inventory_sha256":digest,"ids":ids,"next_after":next_after}),
+            )
+        }
+        RequestTaskSelector::Candidate { id } | RequestTaskSelector::CandidateChunk { id, .. } => {
+            let result = match selector {
+                RequestTaskSelector::CandidateChunk { offset, .. } => {
+                    pm_reporting::read_intake_candidate_chunk(repo, id, offset.unwrap_or(0))
+                }
+                _ => pm_reporting::read_intake_candidate(repo, id)
+                    .map(|candidate| json!({"schema_version":1,"ok":true,"candidate":candidate})),
+            };
+            match result {
+                Ok(value) => Ok(value),
+                Err(error) if error.kind() == std::io::ErrorKind::FileTooLarge => {
+                    Ok(json!({"schema_version":1,"ok":false,
+                        "error":{"code":"candidate_too_large","message":"Serialized candidate exceeds detail byte limit; recover raw chunks and validate the assembled record",
+                        "limit_bytes":pm_reporting::MAX_CANDIDATE_RECORD_BYTES,
+                        "recovery_operation":"pm.request_tasks.read",
+                        "recovery_selector":{"kind":"candidate_chunk","id":id,"offset":0}}}))
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => {
+                    Ok(json!({"schema_version":1,"ok":false,
+                        "error":{"code":"invalid_request","message":error.to_string(),
+                        "recovery_operation":"pm.request_tasks.read",
+                        "recovery_selector":{"kind":"candidate_chunk","id":id,"offset":0}}}))
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    Ok(json!({"schema_version":1,"ok":false,
+                "error":{"code":"missing_candidate","message":"PM candidate not found","recovery_operation":"pm.request_tasks.read"}}))
+                }
+                Err(error) => Err(error),
+            }
+        }
+        _ => unreachable!("candidate selector only"),
+    }
 }
 
 fn apply_plan(
@@ -1174,6 +1558,411 @@ mod tests {
     use super::*;
     use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
     use std::fs;
+
+    #[test]
+    fn pm_request_tasks_native_capture_preserves_exact_turns_across_resume() {
+        use serde_json::{json, Value};
+        let _lock = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let _claude = ScopedEnvVar::set("CLAUDE_CONFIG_DIR", home.path().join("claude"));
+        let _codex = ScopedEnvVar::set("CODEX_HOME", home.path().join("codex"));
+        let _pm = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-a");
+        let invoke = |repo: &Path, operation: &str, params: Value| {
+            let command = crate::cli::json_envelope::parse_operation(operation, &params)
+                .expect("native selection must have a canonical operation");
+            let (code, output) = crate::cli::run_collect(
+                &mut crate::cli::env::TestEnv::new(repo.to_path_buf()),
+                command,
+            )
+            .unwrap();
+            (code, serde_json::from_str::<Value>(&output).unwrap())
+        };
+        for agent in [gwt_agent::AgentId::ClaudeCode, gwt_agent::AgentId::Codex] {
+            let repo = home.path().join(agent.command());
+            fs::create_dir_all(&repo).unwrap();
+            let worktree = pm_registry::pm_worktree_path_for_repo_path(&repo);
+            fs::create_dir_all(&worktree).unwrap();
+            let prefs = pm_registry::pm_prefs_path_for_repo_path(&repo);
+            let register = |id: &str| {
+                pm_registry::save_pm_prefs(
+                    &prefs,
+                    &pm_registry::PmPrefs {
+                        registration: Some(pm_registry::PmRegistration {
+                            session_id: id.into(),
+                            agent_id: agent.command().into(),
+                            worktree_path: worktree.display().to_string(),
+                            created_at: None,
+                            consecutive_crashes: 0,
+                            next_not_before: None,
+                        }),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                let mut session = gwt_agent::Session::new(&worktree, "pm", agent.clone());
+                session.id = id.into();
+                session.agent_session_id = Some("native-conversation".into());
+                fs::create_dir_all(gwt_core::paths::gwt_sessions_dir()).unwrap();
+                session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+            };
+            register("pm-a");
+            let original = "Keep this request.\nPreserve its exact original.";
+            let row = |id: &str| match agent {
+                gwt_agent::AgentId::ClaudeCode => json!({"type":"user","uuid":id,
+                    "sessionId":"native-conversation","cwd":worktree,
+                    "message":{"role":"user","content":original}}),
+                _ => json!({"type":"response_item","payload":{"type":"message","id":id,
+                    "role":"user","content":[{"type":"input_text","text":original}]}}),
+            };
+            let (path, mut rows) = if agent == gwt_agent::AgentId::ClaudeCode {
+                (
+                    home.path()
+                        .join("claude/projects/project/native-conversation.jsonl"),
+                    vec![],
+                )
+            } else {
+                (
+                    home.path()
+                        .join("codex/sessions/rollout-native-conversation.jsonl"),
+                    vec![
+                        json!({"type":"session_meta","payload":{"id":"native-conversation","cwd":worktree}}),
+                    ],
+                )
+            };
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            rows.push(row("native-1"));
+            let write = |rows: &[Value]| {
+                fs::write(
+                    &path,
+                    rows.iter()
+                        .map(|row| format!("{row}\n"))
+                        .collect::<String>(),
+                )
+                .unwrap()
+            };
+            write(&rows);
+            let read = |selector: Value| {
+                invoke(&repo, "pm.request_tasks.read", json!({"selector":selector}))
+            };
+            let inventory = read(json!({"kind":"native_turns"}));
+            assert_eq!(inventory.0, 0, "{}", inventory.1);
+            assert_eq!(inventory.1["window_only"], true);
+            assert_eq!(inventory.1["turns"].as_array().unwrap().len(), 1);
+            let selector = json!({"kind":"native_turn","provider":agent.command(),
+                "conversation_id":"native-conversation","id":"native-1"});
+            let detail = read(selector.clone());
+            assert_eq!(detail.0, 0, "{}", detail.1);
+            assert_eq!(detail.1["turn"]["original"], original);
+            let request = json!({"operation_id":"capture-1","expected_revision":0,"reason":"Unclassified native request",
+                "provider":agent.command(),"conversation_id":"native-conversation","id":"native-1",
+                "prompt_sha256":detail.1["turn"]["prompt_sha256"]});
+            let capture = |request: Value| invoke(&repo, "pm.request_tasks.capture", request);
+            let state_path = peer_project_dir(&repo).join("project-state/request-tasks/state.json");
+            for (field, value) in [
+                ("id", json!("native-2")),
+                ("conversation_id", json!("another")),
+                ("provider", json!("another")),
+                ("prompt_sha256", json!("b".repeat(64))),
+            ] {
+                let mut bad = request.clone();
+                bad[field] = value;
+                assert_eq!(capture(bad).0, 1);
+                assert!(!state_path.exists());
+            }
+            let first = capture(request.clone());
+            assert_eq!(first.0, 0, "{}", first.1);
+            let source = first.1["receipt"]["source_id"].as_str().unwrap().to_owned();
+            let saved = fs::read(&state_path).unwrap();
+            assert_eq!(capture(request.clone()), first);
+            assert_eq!(fs::read(&state_path).unwrap(), saved);
+            let mut second = request.clone();
+            second["operation_id"] = json!("capture-2");
+            second["expected_revision"] = json!(1);
+            second["id"] = json!("native-2");
+            assert_eq!(capture(second.clone()).0, 1);
+            assert_eq!(fs::read(&state_path).unwrap(), saved);
+            rows.push(row("native-2"));
+            write(&rows);
+            assert_eq!(capture(second).0, 0);
+            let classified = invoke(
+                &repo,
+                "pm.request_tasks.apply",
+                json!({"operation_id":"classify-1",
+                "expected_revision":2,"reason":"This turn was a question","action":{"kind":"classify_non_task","source_id":source}}),
+            );
+            assert_eq!(classified.0, 0, "{}", classified.1);
+            register("pm-b");
+            let _resumed = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-b");
+            assert_eq!(capture(request.clone()), first);
+            let mut again = request.clone();
+            again["operation_id"] = json!("capture-again");
+            again["expected_revision"] = json!(3);
+            assert_eq!(capture(again).0, 0);
+            let state = gwt_core::pm_request_tasks::TaskStore::for_repo(&repo)
+                .read()
+                .unwrap()
+                .unwrap();
+            assert_eq!(state.sources.len(), 2);
+            assert_eq!(state.pending.len(), 1);
+            assert!(state.tasks.is_empty());
+            assert_eq!(state.sources[&source].original, original);
+            let saved = fs::read(&state_path).unwrap();
+            for caller in ["pm-a", "foreign-agent"] {
+                let _caller = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, caller);
+                assert_eq!(read(selector.clone()).0, 1);
+                assert_eq!(capture(request.clone()).0, 1);
+            }
+            assert_eq!(fs::read(&state_path).unwrap(), saved);
+        }
+    }
+
+    #[test]
+    fn pm_request_tasks_candidates_survive_replacement_and_stay_unverified() {
+        use serde_json::{json, Value};
+        let _lock = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let worktree = pm_registry::pm_worktree_path_for_repo_path(&repo);
+        fs::create_dir_all(&worktree).unwrap();
+        let prefs = pm_registry::pm_prefs_path_for_repo_path(&repo);
+        let register = |id: &str| {
+            pm_registry::save_pm_prefs(
+                &prefs,
+                &pm_registry::PmPrefs {
+                    registration: Some(pm_registry::PmRegistration {
+                        session_id: id.into(),
+                        agent_id: "codex".into(),
+                        worktree_path: worktree.display().to_string(),
+                        created_at: None,
+                        consecutive_crashes: 0,
+                        next_not_before: None,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        };
+        let invoke = |path: &Path, selector: Value| {
+            let command = crate::cli::json_envelope::parse_operation(
+                "pm.request_tasks.read",
+                &json!({"selector":selector}),
+            )
+            .expect("candidate selectors provide the existing PM read boundary");
+            let mut env = crate::cli::env::TestEnv::new(path.to_path_buf());
+            let (code, output) = crate::cli::run_collect(&mut env, command).unwrap();
+            (code, serde_json::from_str::<Value>(&output).unwrap())
+        };
+        register("pm-old");
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-old");
+        let absent = invoke(&repo, json!({"kind":"candidates"}));
+        assert_eq!(absent.0, 0);
+        assert_eq!(absent.1["state"], "absent");
+        let project = peer_project_dir(&repo);
+        assert!(!project
+            .join("project-state/pm-reporting/intake-candidates")
+            .exists());
+        for _ in 0..2 {
+            crate::cli::hook::pm_reporting::handle_user_prompt_submit(
+                &worktree,
+                r#"{"prompt":"同じ依頼\n原文を保持"}"#,
+            )
+            .unwrap();
+        }
+        register("pm-new");
+        let _next = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-new");
+        crate::cli::hook::pm_reporting::handle_user_prompt_submit(
+            &worktree,
+            r#"{"prompt":"状況は？"}"#,
+        )
+        .unwrap();
+        let first = invoke(&repo, json!({"kind":"candidates","limit":2}));
+        assert_eq!(first.0, 0);
+        assert_eq!(first.1["ids"].as_array().unwrap().len(), 2);
+        assert!(first.1.get("original").is_none());
+        assert!(first.1.get("revision").is_none());
+        let digest = first.1["inventory_sha256"].clone();
+        let second = invoke(
+            &worktree,
+            json!({"kind":"candidates","limit":2,
+            "after":first.1["next_after"],"expected_inventory_sha256":digest}),
+        );
+        assert_eq!(second.0, 0);
+        assert!(second.1["next_after"].is_null());
+        let ids: Vec<_> = first.1["ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(second.1["ids"].as_array().unwrap())
+            .cloned()
+            .collect();
+        assert_eq!(ids.len(), 3);
+        assert!(ids
+            .windows(2)
+            .all(|pair| pair[0].as_str() < pair[1].as_str()));
+        let mut originals = Vec::new();
+        let mut saved = Vec::new();
+        for id in &ids {
+            let path = project
+                .join("project-state/pm-reporting/intake-candidates")
+                .join(format!("{}.json", id.as_str().unwrap()));
+            saved.push((path.clone(), fs::read(&path).unwrap()));
+            let detail = invoke(&repo, json!({"kind":"candidate","id":id}));
+            assert_eq!(detail.0, 0);
+            assert_eq!(detail.1["candidate"]["state"], "unverified");
+            assert!(detail.1["candidate"].get("authority").is_none());
+            assert!(detail.1["candidate"].get("source_id").is_none());
+            originals.push(
+                detail.1["candidate"]["original"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            );
+        }
+        originals.sort();
+        assert_eq!(
+            originals,
+            vec!["同じ依頼\n原文を保持", "同じ依頼\n原文を保持", "状況は？"]
+        );
+        // Oversize legacy records remain recoverable without changing storage.
+        let mut large: Value = serde_json::from_slice(&saved[0].1).unwrap();
+        large["original"] = json!("大\n".repeat(1024 * 1024));
+        large["prompt_sha256"] = json!(gwt_core::pm_authorization::digest(
+            large["original"].as_str().unwrap().as_bytes()
+        ));
+        let large = serde_json::to_vec(&large).unwrap();
+        fs::write(&saved[0].0, &large).unwrap();
+        let rejected = invoke(&repo, json!({"kind":"candidate","id":ids[0]}));
+        assert_eq!(rejected.0, 1, "oversize detail must fail before decoding");
+        assert_eq!(rejected.1["error"]["code"], "candidate_too_large");
+        assert_eq!(rejected.1["error"]["limit_bytes"], 4 * 1024 * 1024);
+        assert_eq!(
+            rejected.1["error"]["recovery_operation"],
+            "pm.request_tasks.read"
+        );
+        let mut selector = rejected.1["error"]["recovery_selector"].clone();
+        assert_eq!(
+            selector,
+            json!({"kind":"candidate_chunk","id":ids[0],"offset":0})
+        );
+        let mut recovered = Vec::new();
+        loop {
+            use base64::Engine;
+            let chunk = invoke(&worktree, selector.clone());
+            assert_eq!(chunk.0, 0);
+            assert_eq!(chunk.1["state"], "unverified_raw");
+            assert!(chunk.1.get("candidate").is_none());
+            assert_eq!(chunk.1["offset"], recovered.len());
+            assert_eq!(chunk.1["observed_total_bytes"], large.len());
+            let encoded = chunk.1["bytes_base64"].as_str().unwrap();
+            assert!(encoded.len() <= 64 * 1024);
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .unwrap();
+            assert!(bytes.len() <= 48 * 1024);
+            recovered.extend(bytes);
+            if chunk.1["next_offset"].is_null() {
+                break;
+            }
+            assert_eq!(chunk.1["next_offset"], recovered.len());
+            selector["offset"] = chunk.1["next_offset"].clone();
+        }
+        assert_eq!(recovered, large);
+        assert_eq!(fs::read(&saved[0].0).unwrap(), large);
+        let invalid = invoke(
+            &repo,
+            json!({"kind":"candidate_chunk","id":ids[0],"offset":u64::MAX}),
+        );
+        assert_eq!(invalid.0, 1);
+        assert_eq!(invalid.1["error"]["code"], "invalid_request");
+        {
+            let _foreign = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-old");
+            assert_eq!(invoke(&repo, selector).1["error"]["code"], "unauthorized");
+        }
+        fs::write(&saved[0].0, &saved[0].1).unwrap();
+        // Candidate recovery is independent of unavailable task tracking.
+        let task_dir = project.join("project-state/request-tasks");
+        assert!(!task_dir.exists());
+        fs::create_dir_all(&task_dir).unwrap();
+        fs::write(task_dir.join("state.json"), b"corrupt").unwrap();
+        assert_eq!(invoke(&repo, json!({"kind":"candidate","id":ids[0]})).0, 0);
+        assert_eq!(invoke(&repo, json!({"kind":"candidates"})).0, 0);
+        assert_eq!(fs::read(task_dir.join("state.json")).unwrap(), b"corrupt");
+        {
+            let _foreign = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-old");
+            let denied = invoke(&repo, json!({"kind":"candidate","id":ids[0]}));
+            assert_eq!(denied.1["error"]["code"], "unauthorized");
+        }
+        assert_eq!(
+            invoke(home.path(), json!({"kind":"candidates"})).1["error"]["code"],
+            "unauthorized"
+        );
+        crate::cli::hook::pm_reporting::handle_user_prompt_submit(
+            &worktree,
+            r#"{"prompt":"追加候補"}"#,
+        )
+        .unwrap();
+        let conflict = invoke(
+            &repo,
+            json!({"kind":"candidates","after":ids[0],
+            "expected_inventory_sha256":digest}),
+        );
+        assert_eq!(conflict.0, 1);
+        assert_eq!(conflict.1["error"]["code"], "conflict");
+        assert_ne!(conflict.1["current_inventory_sha256"], digest);
+        for (path, bytes) in &saved {
+            assert_eq!(fs::read(path).unwrap(), *bytes);
+        }
+        fs::write(&saved[0].0, b"broken").unwrap();
+        let unreadable = invoke(&repo, json!({"kind":"candidate","id":ids[0]}));
+        assert_eq!(unreadable.1["error"]["code"], "unreadable_store");
+        assert!(unreadable.1.get("candidate").is_none());
+        let mut foreign: Value = serde_json::from_slice(&saved[0].1).unwrap();
+        foreign["project_key"] = json!("foreign");
+        fs::write(&saved[0].0, foreign.to_string()).unwrap();
+        assert_eq!(invoke(&repo, json!({"kind":"candidate","id":ids[0]})).0, 1);
+        fs::write(&saved[0].0, &saved[0].1).unwrap();
+        for (field, value) in [("session_id", "foreign"), ("turn_id", "foreign")] {
+            foreign = serde_json::from_slice(&saved[0].1).unwrap();
+            foreign["observation"][field] = json!(value);
+            fs::write(&saved[0].0, foreign.to_string()).unwrap();
+            assert_eq!(invoke(&repo, json!({"kind":"candidate","id":ids[0]})).0, 1);
+        }
+        foreign = serde_json::from_slice(&saved[0].1).unwrap();
+        foreign["original"] = json!("changed original");
+        fs::write(&saved[0].0, foreign.to_string()).unwrap();
+        assert_eq!(invoke(&repo, json!({"kind":"candidate","id":ids[0]})).0, 1);
+        fs::write(&saved[0].0, &saved[0].1).unwrap();
+        foreign = serde_json::from_slice(&saved[0].1).unwrap();
+        foreign["authority"] = json!({"trusted":true});
+        fs::write(&saved[0].0, foreign.to_string()).unwrap();
+        assert_eq!(invoke(&repo, json!({"kind":"candidate","id":ids[0]})).0, 1);
+        fs::write(&saved[0].0, &saved[0].1).unwrap();
+        let missing = format!("{}/00000000-0000-4000-8000-000000000000", "a".repeat(64));
+        assert_eq!(
+            invoke(&repo, json!({"kind":"candidate","id":missing})).1["error"]["code"],
+            "missing_candidate"
+        );
+        let root = project.join("project-state/pm-reporting/intake-candidates");
+        let backup = root.with_extension("saved");
+        fs::rename(&root, &backup).unwrap();
+        fs::write(&root, b"blocked directory").unwrap();
+        let unreadable = invoke(&repo, json!({"kind":"candidates"}));
+        assert_eq!(unreadable.1["error"]["code"], "unreadable_store");
+        fs::remove_file(&root).unwrap();
+        fs::rename(&backup, &root).unwrap();
+        #[cfg(unix)]
+        {
+            let target = home.path().join("outside.json");
+            fs::write(&target, &saved[0].1).unwrap();
+            fs::remove_file(&saved[0].0).unwrap();
+            std::os::unix::fs::symlink(&target, &saved[0].0).unwrap();
+            assert_eq!(invoke(&repo, json!({"kind":"candidate","id":ids[0]})).0, 1);
+            assert_eq!(invoke(&repo, json!({"kind":"candidates"})).0, 1);
+        }
+    }
 
     #[test]
     fn pm_request_tasks_adapter_preserves_authority_project_and_receipt_boundaries() {

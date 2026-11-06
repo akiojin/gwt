@@ -43,6 +43,10 @@
             <button class="arrange-button" id="split-view-button" type="button" aria-pressed="false" title="Show two surfaces side by side">Split view</button>
             <button class="arrange-button" id="close-project-button" type="button">Close Project</button>
             <span class="app-version" id="app-version" role="button" tabindex="0" hidden></span>
+            <span class="update-check" id="update-check">
+              <button class="arrange-button" id="update-check-button" type="button" title="Check for updates now">Check</button>
+              <span class="update-check-status" id="update-check-status" role="status" aria-live="polite"></span>
+            </span>
             <!-- SPEC-2013 Phase 8: the standalone Open Project split-button was
                  retired. Open Folder / Clone from GitHub now live inside the
                  consolidated `Projects ▾` switcher (and Cmd+O opens a folder),
@@ -639,7 +643,16 @@
     <!-- SPEC-2041 Phase 23 / Issue #3291: one roleless layout root owns the
          bottom-right corner. Transient alerts and the persistent update CTA
          mount as sibling lanes so neither fixed surface can cover the other. -->
-    <div id="operator-notice-stack" class="operator-notice-stack"></div>
+    <div id="operator-notice-stack" class="operator-notice-stack">
+      <section class="update-check-detail" id="update-check-detail" aria-label="Update check details" hidden>
+        <p id="update-check-reason" hidden></p>
+        <p class="update-check-failure" id="update-check-failure" hidden></p>
+        <div class="update-check-actions">
+          <button class="arrange-button" id="update-check-retry" type="button" hidden>Retry update</button>
+          <a id="update-check-install" target="_blank" rel="noopener noreferrer" hidden>Manual install</a>
+        </div>
+      </section>
+    </div>
 
     <!-- Issue #4538: route bootstrap. `/` loads the Hub, `/p/<repo-hash>`
          loads the Project app (/app.js); nothing else runs first. -->

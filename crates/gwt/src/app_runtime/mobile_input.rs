@@ -1,6 +1,7 @@
-//! Host mobile authorization stays fenced through the native physical effect.
+//! Short Host authorization arms a revocable permit at the native write boundary.
 use super::{AppRuntime, BlockingTaskSpawner, ClientHub, ClientScope};
 use gwt::mobile_connection::{AuthorizationError, MobileInputRequest};
+use gwt::mobile_input_permit::NativeInputPermit;
 use gwt::project_runtime::{
     client::ProjectRuntimeClient,
     events::{
@@ -86,6 +87,7 @@ impl AppRuntime {
             _ => tokio::runtime::Handle::try_current()
                 .map_err(|_| AuthorizationError::Unavailable)?,
         };
+        let permit = request.native_permit()?;
         let turn = request.book_turn()?;
         let binding = clients.capture_project_binding(request.client_id());
         let target = self
@@ -109,6 +111,7 @@ impl AppRuntime {
                         .get(request.window_id())
                         .map(|session| session.session_id.clone()),
                     data_sha256: hex::encode(Sha256::digest(request.data().as_bytes())),
+                    permit: permit.reference(),
                 };
                 Some((runtime.client.clone(), identity))
             });
@@ -126,49 +129,97 @@ impl AppRuntime {
                         Err(AuthorizationError::WrongProject)
                     });
                 };
-                let ready = executor.block_on(prepare_native_input(
-                    &client,
-                    &identity,
-                    request.data().as_bytes().to_vec(),
+                // A disconnected client must also interrupt an unresponsive
+                // Prepare. Registration grants no authority while unarmed.
+                if binding
+                    .with_native_permit(request.project(), &permit, || ())
+                    .is_none()
+                {
+                    return request.dispatch(current_project, now, |_, _| {
+                        Err(AuthorizationError::WrongProject)
+                    });
+                }
+                let ready = executor.block_on(wait_authorized_native(
+                    &permit,
+                    prepare_native_input(&client, &identity, request.data().as_bytes().to_vec()),
                 ))?;
                 after_ready(&client, &ready);
-                let mut effect_started = false;
-                let mut final_outcome = None;
-                let result = request.dispatch(current_project, now, |_, _| {
-                    binding
-                        .while_current(request.project(), || {
-                            effect_started = true;
+                // The only callback under Host/client fences is local permit
+                // arming. The owner performs the final one-shot acceptance CAS
+                // with its physical writer held, without retaining these locks.
+                let authorized =
+                    request.authorize_native_with(current_project, now, |issued, expires, time| {
+                        binding
+                            .with_native_permit(request.project(), &permit, || {
+                                permit
+                                    .arm(issued, expires, time)
+                                    .map_err(|_| AuthorizationError::Unavailable)
+                            })
+                            .ok_or(AuthorizationError::WrongProject)?
+                    });
+                if let Err(error) = authorized {
+                    permit.revoke();
+                    // A definite pre-Commit rejection should release its
+                    // reservation before the next FIFO request. This bounded
+                    // cleanup is outside every Host/client fence; a stopped
+                    // owner never delays PC revoke or strands the worker.
+                    let cleaned = executor.block_on(async {
+                        tokio::time::timeout(Duration::from_secs(2), async {
                             let outcome =
-                                executor.block_on(commit_native_input(&client, &ready))?;
-                            let result = if outcome.phase == OwnerMobileInputPhase::Written {
-                                Ok(outcome.clone())
-                            } else {
-                                Err(AuthorizationError::Unavailable)
-                            };
-                            final_outcome = Some(outcome);
-                            result
+                                cancel_native_input(&client, &identity, Some(&ready)).await?;
+                            settle_native_input(&client, &outcome.ready).await;
+                            Ok::<(), AuthorizationError>(())
                         })
-                        .ok_or(AuthorizationError::WrongProject)?
-                });
-                if !effect_started {
-                    // No successful/unknown physical effect may escape its Host
-                    // fences: commit_native_input resolves those before returning.
-                    final_outcome = Some(executor.block_on(cancel_native_input(
-                        &client,
-                        &identity,
-                        Some(&ready),
-                    ))?);
+                        .await
+                    });
+                    if !matches!(cleaned, Ok(Ok(()))) {
+                        request.abandon_native();
+                    }
+                    return Err(error);
                 }
-                // The definite physical outcome ends authorization. Receipt
-                // retirement stays on this same worker/turn, outside its fences.
-                if let Some(outcome) = final_outcome {
-                    executor.block_on(settle_native_input(&client, &outcome.ready));
+                let outcome = executor.block_on(wait_authorized_native(
+                    &permit,
+                    commit_native_input(&client, &ready),
+                ))?;
+                executor.block_on(wait_authorized_native(&permit, async {
+                    settle_native_input(&client, &outcome.ready).await;
+                    Ok(())
+                }))?;
+                if outcome.phase == OwnerMobileInputPhase::Written {
+                    Ok(outcome)
+                } else {
+                    Err(AuthorizationError::Unavailable)
                 }
-                result
             })();
+            // Rejected/unresolved work loses its shared native permit even if
+            // the owner transport cannot reply. A revoked physical job keeps
+            // its resource slot until its actual completion, never a false ACK.
+            if result.is_err() {
+                permit.revoke();
+            }
+            if matches!(result, Err(AuthorizationError::AbandonedUnknown)) {
+                request.abandon_native();
+            }
             turn.finish()?;
             result
         })
+    }
+}
+
+async fn wait_authorized_native<T>(
+    permit: &NativeInputPermit,
+    operation: impl std::future::Future<Output = Result<T, AuthorizationError>>,
+) -> Result<T, AuthorizationError> {
+    tokio::select! {
+        biased;
+        _ = permit.revoked() => Err(AuthorizationError::AbandonedUnknown),
+        result = operation => {
+            if permit.is_revoked() {
+                Err(AuthorizationError::AbandonedUnknown)
+            } else {
+                result
+            }
+        }
     }
 }
 
@@ -247,7 +298,7 @@ async fn wait_native_input(
         if !reported && started.elapsed() >= Duration::from_secs(30) {
             reported = true;
             tracing::error!(operation_id = %identity.operation_id,
-                "native mobile input is unresolved; retaining its turn and any accepted Host fences");
+                "native mobile input is unresolved; retaining its turn until physical outcome or revocation");
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -274,7 +325,7 @@ async fn cancel_native_input(
                 if !reported {
                     reported = true;
                     tracing::error!(operation_id = %identity.operation_id,
-                        "native input cancellation identity mismatch; retaining Host fences");
+                        "native input cancellation identity mismatch; retaining its scheduling turn");
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
@@ -292,7 +343,7 @@ async fn cancel_native_input(
         if !reported && started.elapsed() >= Duration::from_secs(30) {
             reported = true;
             tracing::error!(operation_id = %identity.operation_id,
-                "native input cancellation is unresolved; retaining its turn and any accepted Host fences");
+                "native input cancellation is unresolved; retaining its turn until physical outcome or revocation");
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -303,6 +354,25 @@ async fn prepare_native_input(
     identity: &OwnerMobileInputIdentity,
     data: Vec<u8>,
 ) -> Result<OwnerMobileInputReady, AuthorizationError> {
+    // A live older owner rejects the new identity before dispatch. Discover
+    // that before any Prepare so its generic HTTP error cannot enter an
+    // unknown-outcome cancellation loop. This read holds no authorization lock.
+    let health = tokio::time::timeout(Duration::from_secs(2), client.command(OwnerCommand::Health))
+        .await
+        .map_err(|_| AuthorizationError::Unavailable)?
+        .map_err(|_| AuthorizationError::Unavailable)?;
+    require_native_permit_version(&health)?;
+    let observed: gwt::daemon_subscriber::ProjectOwnerIdentity =
+        serde_json::from_value(health.clone()).map_err(|_| AuthorizationError::Unavailable)?;
+    let project = health["project_key"]
+        .as_str()
+        .ok_or(AuthorizationError::Unavailable)?;
+    if client.identity() != Some(&observed)
+        || observed.host_instance_id != identity.host_instance_id
+        || !identity.id.starts_with(&format!("{project}::"))
+    {
+        return Err(AuthorizationError::Unavailable);
+    }
     let result = client
         .mobile_input_command(OwnerCommand::PrepareMobileInput {
             identity: identity.clone(),
@@ -334,6 +404,16 @@ async fn prepare_native_input(
         return Err(AuthorizationError::Unavailable);
     }
     Ok(outcome.ready)
+}
+
+fn require_native_permit_version(health: &serde_json::Value) -> Result<(), AuthorizationError> {
+    if health["mobile_input_permit_version"].as_u64()
+        == Some(gwt::project_runtime::events::MOBILE_INPUT_PERMIT_PROTOCOL_VERSION)
+    {
+        Ok(())
+    } else {
+        Err(AuthorizationError::UnsupportedNativeOwner)
+    }
 }
 
 async fn commit_native_input(
@@ -378,6 +458,67 @@ mod tests {
     };
     use tempfile::tempdir;
 
+    #[test]
+    fn native_peer_requires_the_revocable_input_protocol_before_prepare() {
+        assert!(require_native_permit_version(&serde_json::json!({})).is_err());
+        assert!(require_native_permit_version(
+            &serde_json::json!({"mobile_input_permit_version": 2})
+        )
+        .is_err());
+        assert!(require_native_permit_version(
+            &serde_json::json!({"mobile_input_permit_version": 1})
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn native_result_wait_ends_unknown_on_revoke_and_never_retries() {
+        let permit = gwt::mobile_input_permit::NativeInputPermit::new().unwrap();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let waiting = permit.clone();
+        let worker = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            finished_tx
+                .send(runtime.block_on(wait_authorized_native(&waiting, async {
+                    entered_tx.send(()).unwrap();
+                    std::future::pending::<Result<(), AuthorizationError>>().await
+                })))
+                .unwrap();
+        });
+        // test-hygiene: allow-wall-clock-deadline Channel causality proves the unresponsive RPC future started; timeout is only a hang guard.
+        entered_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        permit.revoke();
+        assert_eq!(
+            // test-hygiene: allow-wall-clock-deadline No owner response is released; only cancellation can complete this future; timeout is solely a deadlock guard.
+            finished_rx.recv_timeout(Duration::from_secs(10)).unwrap(),
+            Err(AuthorizationError::AbandonedUnknown)
+        );
+        worker.join().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result: Result<(), _> = runtime.block_on(wait_authorized_native(
+            &permit,
+            std::future::poll_fn(|_| panic!("abandoned input must not be polled or retried")),
+        ));
+        assert_eq!(result, Err(AuthorizationError::AbandonedUnknown));
+    }
+
+    fn test_now() -> u64 {
+        static NOW: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        *NOW.get_or_init(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        })
+    }
+
     fn paired_connection(
         auth: &Arc<RwLock<gwt::mobile_connection::MobileAuthorization>>,
         project: &gwt_core::repo_hash::ProjectKey,
@@ -396,13 +537,20 @@ mod tests {
         let (device, session) = {
             let mut authority = auth.write().unwrap();
             let pending = authority
-                .request_pairing("Phone", key.public_key().as_ref(), project.clone(), 1000)
+                .request_pairing(
+                    "Phone",
+                    key.public_key().as_ref(),
+                    project.clone(),
+                    test_now(),
+                )
                 .unwrap();
-            let device = authority.approve(&pending.id, 1000).unwrap();
-            let challenge = authority.challenge(device.id(), project, 1000).unwrap();
+            let device = authority.approve(&pending.id, test_now()).unwrap();
+            let challenge = authority
+                .challenge(device.id(), project, test_now())
+                .unwrap();
             let signature = key.sign(&rng, &challenge.signing_payload).unwrap();
             let session = authority
-                .authenticate(&challenge.id, signature.as_ref(), 1000)
+                .authenticate(&challenge.id, signature.as_ref(), test_now())
                 .unwrap();
             (device, session)
         };
@@ -528,7 +676,7 @@ mod tests {
                 app.mobile_input_task_with_observers(
                     input,
                     clients.clone(),
-                    || 1000,
+                    test_now,
                     move || {
                         if index == 1 {
                             waiting_tx.send(()).unwrap();
@@ -601,7 +749,7 @@ mod tests {
         let revision = probe.pty.ordinary_input_revision();
         assert_eq!(revision, Some(2));
         assert_eq!(
-            dispatch(&app, &first, 1000).unwrap_err(),
+            dispatch(&app, &first, test_now()).unwrap_err(),
             AuthorizationError::Replay
         );
         let foreign = Arc::new(MobileInputRequest::new(
@@ -613,17 +761,17 @@ mod tests {
             "must-not-write\n".into(),
         ));
         assert_eq!(
-            dispatch(&app, &foreign, 1000).unwrap_err(),
+            dispatch(&app, &foreign, test_now()).unwrap_err(),
             AuthorizationError::WrongProject
         );
         let pending = request(3, "must-not-write\n");
         assert_eq!(
-            dispatch(&app, &pending, 1300).unwrap_err(),
+            dispatch(&app, &pending, test_now() + 300).unwrap_err(),
             AuthorizationError::Expired
         );
         clients.unregister("phone");
         assert_eq!(
-            dispatch(&app, &pending, 1000).unwrap_err(),
+            dispatch(&app, &pending, test_now()).unwrap_err(),
             AuthorizationError::WrongProject
         );
         clients.register_scoped(
@@ -653,7 +801,7 @@ mod tests {
 
         // Host time is read after native Ready and both authorization fences.
         let (expiring_connection, _) = paired_connection(&auth, &project);
-        let clock = Arc::new(AtomicU64::new(1000));
+        let clock = Arc::new(AtomicU64::new(test_now()));
         let read_clock = clock.clone();
         let expiring = app
             .mobile_input_task_with_observers(
@@ -662,7 +810,7 @@ mod tests {
                 move || read_clock.load(Ordering::Acquire),
                 || {},
                 move |_, _| {
-                    clock.store(1300, Ordering::Release);
+                    clock.store(test_now() + 300, Ordering::Release);
                 },
             )
             .unwrap();
@@ -675,7 +823,7 @@ mod tests {
             .mobile_input_task_with_observers(
                 ready_request(revoking_connection),
                 clients.clone(),
-                || 1000,
+                test_now,
                 || {},
                 move |_, _| {
                     authority
@@ -695,7 +843,7 @@ mod tests {
             .mobile_input_task_with_observers(
                 ready_request(disconnecting_connection),
                 clients.clone(),
-                || 1000,
+                test_now,
                 || {},
                 move |_, _| {
                     disconnecting_clients.unregister("phone");
@@ -716,7 +864,7 @@ mod tests {
             .mobile_input_task_with_observers(
                 ready_request(rebinding_connection),
                 clients.clone(),
-                || 1000,
+                test_now,
                 || {},
                 move |_, _| {
                     rebinding_clients
@@ -737,7 +885,7 @@ mod tests {
             .mobile_input_task_with_observers(
                 ready_request(reconnected_connection),
                 clients.clone(),
-                || 1000,
+                test_now,
                 || {},
                 move |_, _| {
                     reconnected_clients
@@ -756,7 +904,7 @@ mod tests {
             .mobile_input_task_with_observers(
                 ready_request(deadline_connection),
                 clients.clone(),
-                || 1000,
+                test_now,
                 || {},
                 move |_, _| {
                     owner_fixture_block_on(
@@ -778,6 +926,7 @@ mod tests {
         // an overtaken Prepare, and a finished cancellation must reject late Commit.
         use sha2::{Digest, Sha256};
         let native = owner.client();
+        let private_permit = NativeInputPermit::new().unwrap();
         let private_identity = |data: &[u8]| OwnerMobileInputIdentity {
             operation_id: uuid::Uuid::new_v4().to_string(),
             host_instance_id: native.identity().unwrap().host_instance_id.clone(),
@@ -785,6 +934,7 @@ mod tests {
             incarnation: probe.incarnation,
             session_id: probe.session.as_ref().map(|session| session.id.clone()),
             data_sha256: hex::encode(Sha256::digest(data)),
+            permit: private_permit.reference(),
         };
         let data = b"must-not-write\n".to_vec();
         assert!(owner_fixture_block_on(native.mobile_input_command(
@@ -872,32 +1022,64 @@ mod tests {
         owner_fixture_block_on(settle_native_input(&native, &fresh_ready));
         assert_unchanged();
 
+        // A Commit delayed until after logical revocation must be refused at
+        // the real owner's final writer boundary, even with an exact Ready.
+        let delayed_permit = NativeInputPermit::new().unwrap();
+        let data = b"must-not-write\n".to_vec();
+        let mut delayed_identity = private_identity(&data);
+        delayed_identity.permit = delayed_permit.reference();
+        let delayed_ready =
+            owner_fixture_block_on(prepare_native_input(&native, &delayed_identity, data)).unwrap();
+        delayed_permit
+            .arm(test_now(), test_now() + 300, test_now())
+            .unwrap();
+        delayed_permit.revoke();
+        if let Ok(value) = owner_fixture_block_on(native.mobile_input_command(
+            OwnerCommand::CommitMobileInput {
+                ready: delayed_ready.clone(),
+            },
+        )) {
+            let outcome = input_outcome(value, &delayed_identity, Some(&delayed_ready)).unwrap();
+            assert_ne!(outcome.phase, OwnerMobileInputPhase::Written);
+        }
+        let prevented = owner_fixture_block_on(cancel_native_input(
+            &native,
+            &delayed_identity,
+            Some(&delayed_ready),
+        ))
+        .unwrap();
+        assert_eq!(prevented.phase, OwnerMobileInputPhase::Prevented);
+        owner_fixture_block_on(settle_native_input(&native, &delayed_ready));
+        assert_unchanged();
+
         let (abandoned_connection, _) = paired_connection(&auth, &project);
         let abandoned = app
             .mobile_input_task(
                 ready_request(abandoned_connection.clone()),
                 clients.clone(),
-                || 1000,
+                test_now,
             )
             .unwrap();
         drop(abandoned);
         assert_eq!(
-            app.mobile_input_task(ready_request(abandoned_connection), clients.clone(), || {
-                1000
-            },)
-                .err()
-                .unwrap(),
+            app.mobile_input_task(
+                ready_request(abandoned_connection),
+                clients.clone(),
+                test_now,
+            )
+            .err()
+            .unwrap(),
             AuthorizationError::Unavailable
         );
         assert_unchanged();
 
         // A queued native RPC must not retain authorization from this Host call.
-        app.handle_mobile_input(request(4, "late-after-revoke\n"), &clients, || 1000)
+        app.handle_mobile_input(request(4, "late-after-revoke\n"), &clients, test_now)
             .unwrap();
         auth.write().unwrap().revoke(device.id()).unwrap();
         drain_browser_owner_input(&mut app);
         assert_eq!(
-            dispatch(&app, &request(4, "revoked\n"), 1000).unwrap_err(),
+            dispatch(&app, &request(4, "revoked\n"), test_now()).unwrap_err(),
             AuthorizationError::Revoked
         );
         let after_revoke = probe.pty.ordinary_input_revision();
@@ -940,7 +1122,7 @@ mod tests {
                     "must-not-write\n".into(),
                 )),
                 agent_clients,
-                || 1000,
+                test_now,
                 || {},
                 move |_, ready| {
                     owner_fixture_block_on(replace_owner.command(OwnerCommand::Close {

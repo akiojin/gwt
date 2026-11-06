@@ -972,6 +972,11 @@ fn result_valid(doc: &ResultDocument, record: &Receipt, snapshot: &Value) -> boo
     if doc.cleanup == "NotStarted" && !doc.no_start_verified {
         return false;
     }
+    if (doc.cleanup == "Unobserved") != (doc.reason == "CleanupUnobserved")
+        || (doc.cleanup == "Unobserved" && doc.phase != "restore")
+    {
+        return false;
+    }
     if doc.cleanup == "ObservedClean" && doc.observation_started && !restored {
         return false;
     }
@@ -1412,6 +1417,40 @@ mod tests {
             &failure_snapshot
         )
         .is_ok());
+        let mut cleanup_unknown = failed_cases.clone();
+        cleanup_unknown["reason"] = json!("CleanupUnobserved");
+        assert!(
+            read_result(
+                &zip_result("result.json", &cleanup_unknown),
+                &record,
+                &failure_snapshot
+            )
+            .is_err(),
+            "unobserved cleanup cannot be accepted as observed clean"
+        );
+        cleanup_unknown["cleanup"] = json!("Unobserved");
+        cleanup_unknown["phase"] = json!("restore");
+        assert!(read_result(
+            &zip_result("result.json", &cleanup_unknown),
+            &record,
+            &failure_snapshot
+        )
+        .is_ok());
+        cleanup_unknown["reason"] = json!("WrapperTimeout");
+        assert!(read_result(
+            &zip_result("result.json", &cleanup_unknown),
+            &record,
+            &failure_snapshot
+        )
+        .is_err());
+        cleanup_unknown["reason"] = json!("CleanupUnobserved");
+        cleanup_unknown["phase"] = json!("providers");
+        assert!(read_result(
+            &zip_result("result.json", &cleanup_unknown),
+            &record,
+            &failure_snapshot
+        )
+        .is_err());
         let mut passed_cases = failed_cases.clone();
         passed_cases["reason"] = json!("Completed");
         for case in passed_cases["cases"].as_array_mut().unwrap() {

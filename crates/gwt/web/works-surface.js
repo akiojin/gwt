@@ -303,6 +303,8 @@ export function createWorksSurface({ projectKey, document, windowCatalogModel, a
   }
   function render(rehost) {
     if (disposed) return;
+    const header = selected && isPresented() ? full.querySelector(".works-full-header") : null;
+    const previousHeader = header?.textContent;
     const lines = previewLines();
     const linesChanged = element.style.getPropertyValue("--works-preview-lines") !== String(lines);
     element.style.setProperty("--works-preview-lines", String(lines));
@@ -358,7 +360,8 @@ export function createWorksSurface({ projectKey, document, windowCatalogModel, a
       }
     }
     renderedCatalog = catalog; renderedActivity = activity; renderedRoster = roster; syncPreview();
-    if (changed || rehost) onLayout();
+    // A model update can wrap the header while hidden ResizeObservers pause.
+    if (changed || rehost || (header && header.textContent !== previousHeader)) onLayout();
   }
   element.querySelector('[data-action="back"]').addEventListener("click", () => back());
   for (const [action, delta] of [["previous", -1], ["next", 1]]) element.querySelector(`[data-action="${action}"]`).addEventListener("click", () => {

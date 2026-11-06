@@ -66,6 +66,10 @@ impl RealOwnerFixture {
             .unwrap()
             .success());
         let scope = RuntimeScope::from_project_root(&repo, RuntimeTarget::Host).unwrap();
+        {
+            let _home = gwt_core::test_support::ScopedGwtHome::set(&home);
+            gwt::project_runtime::test_support::seed_actual_project_view(&repo).unwrap();
+        }
         let path = scope.endpoint_path(&home.join(".gwt"));
         let mut command = gwt_core::process::hidden_command(env!("CARGO_BIN_EXE_gwtd"));
         command

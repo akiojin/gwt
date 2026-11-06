@@ -20,7 +20,6 @@ import {
   attachContainerResizeReflow,
   attachHostResizeReflow,
   classifyProjectWindowVisibility,
-  clearTerminalOutputBeforeSnapshot,
   createTerminalFitScheduler,
   createTerminalSnapshotWriteCoordinator,
   createTerminalViewportRefreshScheduler,
@@ -165,7 +164,6 @@ function snapshotWriteHarness({
   const windowId = "wt-async-snapshot";
   const terminal = asyncTerminalStub();
   const pendingSnapshotMap = new Map();
-  const pendingOutputMap = new Map();
   const runtime = { deferredWrites: [] };
   const installedDecoders = [];
   const decodedSnapshots = [];
@@ -230,12 +228,9 @@ function snapshotWriteHarness({
   });
 
   function receiveSnapshot(snapshot) {
-    clearTerminalOutputBeforeSnapshot({
-      windowId,
-      runtime,
-      pendingOutputMap,
-      clearBatchedOutput: () => {},
-    });
+    // This harness isolates coordinator ordering; the real bounded queue's
+    // snapshot boundaries are exercised in terminal-output-buffer.test.mjs.
+    runtime.deferredWrites = [];
     pendingSnapshotMap.set(windowId, snapshot);
     return coordinator.start();
   }
@@ -310,49 +305,6 @@ test("decodeTerminalSnapshotBoundary isolates snapshot and subsequent live UTF-8
   ));
   assert.equal(partial.snapshotText, "snapshot: ", "a snapshot must retain its own incomplete UTF-8 prefix");
   assert.equal(partial.nextLiveDecoder.decode(Uint8Array.of(0x80), { stream: true }), "🦀");
-});
-
-test("clearTerminalOutputBeforeSnapshot drops only output before the latest snapshot boundary", () => {
-  const windowId = "wt-snapshot-boundary";
-  const pendingOutputMap = new Map([[windowId, ["pending-before-first"]]]);
-  const runtime = { deferredWrites: ["deferred-before-first"] };
-  const batchedOutputMap = new Map([[windowId, ["batched-before-first"]]]);
-  const clearedBatches = [];
-  const clearBoundary = () =>
-    clearTerminalOutputBeforeSnapshot({
-      windowId,
-      runtime,
-      pendingOutputMap,
-      clearBatchedOutput: (id) => {
-        clearedBatches.push(id);
-        batchedOutputMap.delete(id);
-      },
-    });
-
-  clearBoundary();
-
-  assert.deepEqual(clearedBatches, [windowId]);
-  assert.equal(pendingOutputMap.has(windowId), false);
-  assert.deepEqual(runtime.deferredWrites, []);
-  assert.equal(batchedOutputMap.has(windowId), false);
-
-  pendingOutputMap.set(windowId, ["pending-between-snapshots"]);
-  runtime.deferredWrites.push("deferred-between-snapshots");
-  batchedOutputMap.set(windowId, ["batched-between-snapshots"]);
-  clearBoundary();
-
-  assert.deepEqual(clearedBatches, [windowId, windowId]);
-  assert.equal(pendingOutputMap.has(windowId), false);
-  assert.deepEqual(runtime.deferredWrites, []);
-  assert.equal(batchedOutputMap.has(windowId), false);
-
-  pendingOutputMap.set(windowId, ["pending-after-latest"]);
-  runtime.deferredWrites.push("deferred-after-latest");
-  batchedOutputMap.set(windowId, ["batched-after-latest"]);
-
-  assert.deepEqual(pendingOutputMap.get(windowId), ["pending-after-latest"]);
-  assert.deepEqual(runtime.deferredWrites, ["deferred-after-latest"]);
-  assert.deepEqual(batchedOutputMap.get(windowId), ["batched-after-latest"]);
 });
 
 test("snapshot coordinator drains issued live writes and applies only the latest empty snapshot", () => {
@@ -627,8 +579,8 @@ test("app routes snapshot receipts and live output through the async snapshot co
   );
   assert.match(
     appSource,
-    /onSnapshotFailureSettled:\s*\(\)\s*=>\s*\{[\s\S]*?decoderMap\.set\(windowId,\s*new TextDecoder\(\)\);[\s\S]*?flushDeferredTerminalWrites\(windowId,\s*runtime\);/,
-    "failed snapshot settlement must publish a fresh live decoder before flushing deferred output",
+    /onSnapshotFailureSettled:\s*\(\)\s*=>\s*\{\s*decoderMap\.set\(windowId,\s*new TextDecoder\(\)\);\s*\}/,
+    "failed snapshot settlement must replace the decoder without releasing failed output",
   );
   assert.match(
     appSource,
@@ -637,12 +589,12 @@ test("app routes snapshot receipts and live output through the async snapshot co
   );
   assert.match(
     appSource,
-    /runtime\.isReady\s*===\s*false\s*\|\|\s*runtime\.snapshotWriteCoordinator\?\.shouldDeferOutput\(\)\s*===\s*true[\s\S]*?runtime\.deferredWrites\.push\(base64\);/,
-    "live output must stay encoded and deferred while a snapshot write is pending or in flight",
+    /canWrite:\s*\(windowId\)\s*=>\s*\{\s*const runtime = terminalMap\.get\(windowId\);\s*return runtime\?\.isReady === true\s*&& runtime\.snapshotWriteCoordinator\?\.shouldDeferOutput\(\) !== true/,
+    "the single queue must not write to missing/unfit runtimes or cross a snapshot barrier",
   );
   assert.match(
     appSource,
-    /function replaceTerminalSnapshot\(windowId,\s*base64\)\s*\{[\s\S]*?clearTerminalOutputBeforeSnapshot\(\{[\s\S]*?pendingSnapshotMap\.set\(windowId,\s*base64\);[\s\S]*?runtime\.snapshotWriteCoordinator\.start\(\);/,
+    /function replaceTerminalSnapshot\(windowId,\s*base64\)\s*\{[\s\S]*?terminalOutputBatcher\.beginSnapshot\(windowId\);[\s\S]*?pendingSnapshotMap\.set\(windowId,\s*base64\);[\s\S]*?runtime\.snapshotWriteCoordinator\.start\(\);/,
     "every snapshot receipt must clear older queues, replace the pending snapshot, and start or join the coordinator",
   );
   assert.match(
@@ -652,9 +604,14 @@ test("app routes snapshot receipts and live output through the async snapshot co
   );
   assert.match(
     appSource,
-    /onLatestSnapshotWritten:\s*\(\)\s*=>\s*\{\s*try\s*\{[\s\S]*?forceTerminalViewportRefresh\(windowId,[\s\S]*?\}\s*finally\s*\{[\s\S]*?flushDeferredTerminalWrites\(windowId,\s*runtime\);[\s\S]*?\}/,
+    /onLatestSnapshotWritten:\s*\(\)\s*=>\s*\{\s*try\s*\{\s*terminalOutputBatcher\.finishSnapshot\(windowId\);[\s\S]*?forceTerminalViewportRefresh\(windowId,[\s\S]*?\}\s*finally\s*\{\s*terminalOutputBatcher\.schedulePending\(windowId\);/,
     "final snapshot completion must flush post-boundary live output even when viewport refresh throws",
   );
+  assert.doesNotMatch(appSource, /pendingOutputMap|deferredWrites|flushDeferredTerminalWrites/,
+    "every pending RAW path must use the same bounded queue");
+  assert.match(appSource,
+    /const currentWindowIds = allProjectWindowIdSet\(\);[\s\S]*?const discardedRaw = terminalOutputBatcher\.prune\(new Set\(\[\.\.\.currentWindowIds, \.\.\.windowMap\.keys\(\)\]\)\);[\s\S]*?pendingSnapshotMap\.delete\(id\);\s*renderedTerminalPackets\.delete\(id\);\s*removePmWindowState\(id\);[\s\S]*?connectSocket\(discardedRaw\.length > 0 && socket\?\.readyState === WebSocket\.OPEN && socketProjectKey === activeProjectKey\(\)\);/,
+    "full catalog reconciliation must reclaim unmounted RAW and request a snapshot for an uncertain discarded prefix");
 });
 
 test("attachHostResizeReflow fans fitTerminal(persist=true) across visible terminals (T-184/T-187)", () => {
@@ -2858,4 +2815,33 @@ test("app.js wires attachContainerResizeReflow on the terminal container", () =>
     /attachContainerResizeReflow/,
     "app.js must import + use attachContainerResizeReflow",
   );
+});
+
+test("ready fit and refresh queues run without hidden animation frames", (t) => {
+  const tasks = [], frames = [], fitted = [], refreshed = [];
+  for (const [key, value] of Object.entries({
+    document: { hidden: true },
+    requestAnimationFrame: callback => { frames.push(callback); return frames.length; },
+    MessageChannel: class {
+      port1 = { onmessage: null, close() {} };
+      port2 = { close() {}, postMessage: () => tasks.push(() => this.port1.onmessage?.()) };
+    },
+  })) {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, key);
+    Object.defineProperty(globalThis, key, { configurable: true, value });
+    t.after(() => {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else delete globalThis[key];
+    });
+  }
+  const fits = createTerminalFitScheduler({ fitTerminal: (id, persist) => fitted.push([id, persist]) });
+  const refreshes = createTerminalViewportRefreshScheduler({ refresh: id => refreshed.push(id) });
+  fits.enqueue("ready", { persist: true }); fits.enqueue("ready");
+  refreshes.enqueue("ready"); refreshes.enqueue("ready");
+  assert.equal(tasks.length, 2, "each bounded queue gets one hidden task");
+  assert.equal(frames.length, 0, "hidden queues do not wait for suspended frames");
+  while (tasks.length) tasks.shift()();
+  assert.deepEqual(fitted, [["ready", true]]);
+  assert.deepEqual(refreshed, ["ready"]);
+  assert.equal(fits.pendingCount() + refreshes.pendingCount(), 0);
 });

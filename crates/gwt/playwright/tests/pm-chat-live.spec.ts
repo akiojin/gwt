@@ -5,8 +5,9 @@ import { createHash, randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { startExactRelaunchFixture } from './_helpers/exact-relaunch';
-import { gotoLiveGwt, readLiveHubCatalog, sendLiveGwtEvent, withLiveGwtBackendLock } from './_helpers/live-gwt';
+import { gotoLiveGwt, installLiveGwtInitScript, readLiveHubCatalog, sendLiveGwtEvent, withLiveGwtBackendLock } from './_helpers/live-gwt';
 import { startManagedBrowserSource } from './_helpers/managed-browser-source';
+import { withNativeHiddenPage } from './_helpers/native-chromium';
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? 'http://127.0.0.1:0/';
 const HOME = process.env.GWT_PLAYWRIGHT_CHECK_HOME ?? '';
@@ -163,7 +164,7 @@ test.describe('PM reports', () => {
     });
   });
 
-  test('Reports and Execution log render the same window version for every receive without focus or animation frames', async ({ page }, info) => {
+  test('Reports and Execution log render the same window version for every receive without focus or animation frames', async ({ page, playwright }, info) => {
     await withLiveGwtBackendLock(BASE, info, async () => {
       const errors: string[] = [];
       page.on('pageerror', error => errors.push(error.message));
@@ -322,6 +323,88 @@ test.describe('PM reports', () => {
       await info.attach('Per-receive window versions (controlled inbound frames)', {
         path: versionsFile, contentType: 'application/json',
       });
+      if (info.project.use.headless === false) {
+        const native = await withNativeHiddenPage(playwright.chromium, info, async nativePage => {
+          await installLiveGwtInitScript(nativePage, { enableTestBridge: true });
+          await nativePage.addInitScript(theme => localStorage.setItem('gwt:ui:theme', theme), theme);
+          await nativePage.goto(page.url());
+          await expect.poll(() => nativePage.evaluate(() => document.documentElement.dataset.theme)).toBe(theme);
+          await expect.poll(() => nativePage.evaluate(() => document.querySelectorAll('.pm-chat').length)).toBe(1);
+          await expect.poll(() => nativePage.evaluate(() => document.querySelector('#op-pm-entry')?.getAttribute('data-pm-state'))).toBe('stopped');
+          await nativePage.evaluate(() => (document.querySelector('#op-pm-entry') as HTMLElement).click());
+          await expect.poll(() => nativePage.evaluate(id => (window as any).__gwtPlaywrightMessages
+            .some((entry: any) => entry.payload.kind === 'pm_reports' && entry.payload.id === id), id)).toBe(true);
+          await expect.poll(() => nativePage.evaluate(() => document.querySelector('.pm-chat')?.textContent
+            ?.includes('Persisted before restart'))).toBe(true);
+          // Hidden windows intentionally suppress polling. Capture the normal
+          // model-issued token while visible, then deliver its response hidden.
+          await nativePage.evaluate(id => {
+            const socket = (window as any).__gwtPlaywrightSockets.find((candidate: WebSocket) =>
+              candidate.readyState === WebSocket.OPEN && new URL(candidate.url).searchParams.has('repo_hash'));
+            const send = socket.send;
+            socket.send = function (data: string) {
+              const request = JSON.parse(data);
+              if (request.kind === 'load_pm_reports' && request.id === id) (window as any).__nativeReportsRequest = request;
+              else send.call(this, data);
+            };
+            try { document.dispatchEvent(new Event('visibilitychange')); }
+            finally { socket.send = send; }
+            if (!(window as any).__nativeReportsRequest) throw new Error('Missing visible model-issued Reports token');
+          }, id);
+        }, async ({ id, marker }) => {
+          const pane = document.querySelector(`.workspace-window[data-id="${id}"]`)!;
+          const reports = pane.querySelector<HTMLElement>('.pm-chat')!;
+          const log = pane.querySelector<HTMLElement>('.pm-conversation-log')!;
+          const versions = () => [reports.dataset.stateVersion, log.dataset.stateVersion];
+          const before = versions(), hiddenBefore = document.hidden, focusedBefore = document.hasFocus();
+          const socket = (window as any).__gwtPlaywrightSockets.find((candidate: WebSocket) =>
+            candidate.readyState === WebSocket.OPEN && new URL(candidate.url).searchParams.has('repo_hash'));
+          const original = (window as any).__gwtPlaywrightMessages.map((entry: any) => entry.payload)
+            .findLast((event: any) => event.kind === 'pm_reports' && event.id === id);
+          const request = (window as any).__nativeReportsRequest;
+          let focusEvents = 0, visibilityChanges = 0;
+          const onFocus = () => { focusEvents++; }, onVisibility = () => { visibilityChanges++; };
+          window.addEventListener('focus', onFocus);
+          pane.addEventListener('focusin', onFocus);
+          document.addEventListener('visibilitychange', onVisibility);
+          try {
+            return await new Promise<any>((resolve, reject) => {
+              const startedAt = performance.now();
+              const finish = () => { observer.disconnect(); clearTimeout(timer); };
+              const observer = new MutationObserver(() => {
+                if (!reports.textContent!.includes(marker)) return;
+                const elapsedMs = performance.now() - startedAt;
+                finish();
+                resolve({ before, after: versions(), elapsedMs, hiddenBefore, focusedBefore,
+                  hiddenAfter: document.hidden, focusedAfter: document.hasFocus(), focusEvents, visibilityChanges });
+              });
+              const timer = setTimeout(() => { finish(); reject(new Error('Native hidden Reports did not render within one second')); }, 1000);
+              observer.observe(pane, { attributes: true, childList: true, characterData: true, subtree: true });
+              socket.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ ...original,
+                request_id: request.request_id, snapshot: true,
+                version: { epoch: original.version.epoch, revision: original.version.revision + 1 },
+                reports: [...original.reports, { id: 'native-shared-version-report', kind: 'progress',
+                  created_at: '2026-11-05T00:00:00Z', body: `## ${marker}`, body_html: `<h2>${marker}</h2>` }],
+              }) }));
+            });
+          } finally {
+            window.removeEventListener('focus', onFocus);
+            pane.removeEventListener('focusin', onFocus);
+            document.removeEventListener('visibilitychange', onVisibility);
+            delete (window as any).__nativeReportsRequest;
+          }
+        }, { id, marker: `Native shared version ${theme}` });
+        await info.attach('native-hidden-shared-window-versions.json', { contentType: 'application/json', body: JSON.stringify(native) });
+        expect(native.before[0]).toMatch(/^\d+$/);
+        expect(native.before[1]).toBe(native.before[0]);
+        expect(native.after).toEqual([String(Number(native.before[0]) + 1), String(Number(native.before[0]) + 1)]);
+        expect(native.elapsedMs).toBeGreaterThanOrEqual(0);
+        expect(native.elapsedMs).toBeLessThanOrEqual(1000);
+        expect([native.hiddenBefore, native.hiddenAfter]).toEqual([true, true]);
+        expect([native.focusedBefore, native.focusedAfter]).toEqual([false, false]);
+        expect(native.focusEvents).toBe(0);
+        expect(native.visibilityChanges).toBe(0);
+      }
       expect(errors).toEqual([]);
     });
   });
@@ -1249,6 +1332,153 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       if (cleanupErrors.length) {
         const failures = [...primaryErrors, ...cleanupErrors];
         throw new AggregateError(failures, 'RPT-F target cleanup failed:\n' + failures.map(String).join('\n'),
+          { cause: primaryErrors[0] });
+      }
+    }
+  });
+
+  test('T-UTASK-USER-REOPEN persists browser authority and reconciles the receipt after reconnect', async ({ page }, info) => {
+    const theme = info.project.name.includes('light') ? 'light' : 'dark';
+    const windowId = 'pm-request-task-fixture';
+    const taskId = 'synthetic-fixture-task';
+    const original = 'Keep this exact fixture request.\n再開しても原文を保存する。';
+    const fixturePm = { kind: 'pm', id: 'synthetic-fixture-pm' };
+    const draft = { id: taskId, title: 'Synthetic completed task', purpose: 'Verify the browser reopen adapter',
+      completion_conditions: ['The original fixture outcome is verified'], issue_numbers: [3431], goal_ids: [], assignee: null };
+    const pendingTask = { draft, source_id: 'synthetic-fixture-source', parent_id: null, status: 'pending',
+      condition_revision: 1, review_generation: 1, review_required: false, next_action: null, wait_reason: null, completion: null };
+    const completedTask = { ...pendingTask, status: 'completed',
+      completion: { condition_revision: 1, review_generation: 1, evidence: ['synthetic-fixture: verified outcome'] } };
+    let statePath = '';
+    let seed: any;
+    const target = await startExactRelaunchFixture(info, {
+      async beforeStart({ home, project, preferences }) {
+        const projectKey = basename(join(preferences, '..'));
+        const at = '2026-11-06T00:00:00Z';
+        const source = { id: pendingTask.source_id, project_key: projectKey, original,
+          authority: { session_id: 'synthetic-fixture-intake', turn_id: 'synthetic-fixture-turn',
+            prompt_sha256: createHash('sha256').update(original).digest('hex') } };
+        const receipt = (actor: { kind: string; id: string }, operation_id: string, expected_revision: number,
+          action: Record<string, unknown>, tasks: unknown[]) => {
+          const request = { operation_id, expected_revision, reason: 'Synthetic fixture seed only', action };
+          return { operation_id, action: action.kind, request_digest: createHash('sha256')
+            .update(JSON.stringify([actor, request])).digest('hex'), revision: expected_revision + 1,
+          actor, at, reason: request.reason, source_id: source.id, tasks };
+        };
+        // This is receipt-consistent TaskStore scaffolding, not native-intake proof.
+        seed = { schema_version: 1, project_key: projectKey, revision: 3, sources: { [source.id]: source }, pending: [],
+          tasks: { [taskId]: completedTask }, receipts: [
+            receipt({ kind: 'intake', id: 'synthetic-fixture-intake' }, 'synthetic-capture', 0,
+              { kind: 'capture', source }, []),
+            receipt(fixturePm, 'synthetic-decompose', 1,
+              { kind: 'decompose', source_id: source.id, root: draft, children: [] }, [pendingTask]),
+            receipt(fixturePm, 'synthetic-complete', 2,
+              { kind: 'complete', task_id: taskId, condition_revision: 1, review_generation: 1,
+                evidence: completedTask.completion.evidence }, [completedTask]),
+          ] };
+        const taskDirectory = join(preferences, 'request-tasks');
+        mkdirSync(taskDirectory, { recursive: true, mode: 0o700 });
+        statePath = join(taskDirectory, 'state.json');
+        writeFileSync(join(taskDirectory, 'state.initialized'), projectKey, { mode: 0o600 });
+        writeFileSync(statePath, JSON.stringify(seed), { mode: 0o600 });
+        writeFileSync(join(preferences, 'pm.json'), JSON.stringify({ settings: { auto_start: false }, registration: {
+          session_id: SESSION, agent_id: 'codex', worktree_path: project, created_at: at,
+        } }));
+        writeFileSync(join(preferences, '../workspace.json'), JSON.stringify({ viewport: { x: 0, y: 0, zoom: 1 },
+          windows: [{ id: windowId, title: 'PM', preset: 'agent', geometry: { x: 30, y: 30, width: 1050, height: 720 },
+            z_index: 1, status: 'stopped', session_id: SESSION, agent_id: 'codex', persist: true }], next_z_index: 2 }));
+        mkdirSync(join(home, '.gwt/sessions'), { recursive: true });
+        writeFileSync(join(home, '.gwt/sessions', `${SESSION}.toml`), `id = "${SESSION}"\nworktree_path = ${JSON.stringify(project)}\nbranch = "main"\nagent_id = { type = "Codex" }\nstatus = "Stopped"\ncreated_at = "${at}"\nupdated_at = "${at}"\nlast_activity_at = "${at}"\n`);
+        writeFileSync(join(home, '.gwt/config.toml'), '[pr_inventory]\ncache_ttl_secs = 3600\nchecks_refresh_secs = 3600\n');
+        writeFileSync(join(preferences, '../pr-inventory-cache.json'), JSON.stringify({ fetched_at: at, rows: [] }));
+      },
+    });
+    const errors: string[] = [];
+    const exchanges: unknown[] = [];
+    const primaryErrors: unknown[] = [];
+    const cleanupErrors: unknown[] = [];
+    page.on('pageerror', error => errors.push(error.message));
+    page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+    try {
+      await page.addInitScript(value => localStorage.setItem('gwt:ui:theme', value), theme);
+      await gotoPmReports(page, undefined, target.url);
+      await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+      let requestId = 0;
+      const exchange = async (kind: string, body: Record<string, unknown>) => {
+        await page.waitForFunction(() => (window as any).__gwtPlaywrightSockets?.some((socket: WebSocket) =>
+          socket.readyState === WebSocket.OPEN && new URL(socket.url).searchParams.has('repo_hash')));
+        const pane = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
+        await expect(pane).toHaveCount(1);
+        const id = await pane.getAttribute('data-id');
+        expect(id).toBeTruthy();
+        const event = { kind, id, request_id: ++requestId, ...body };
+        const after = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
+        await sendLiveGwtEvent(page, event);
+        const reply = await page.waitForFunction(({ after, id, requestId }) =>
+          (window as any).__gwtPlaywrightMessages?.findLast((entry: any) => entry.sequence > after
+            && entry.payload.kind === 'pm_request_task' && entry.payload.id === id
+            && entry.payload.request_id === requestId)?.payload,
+        { after, id, requestId }).then(handle => handle.jsonValue());
+        exchanges.push({ request: event, response: reply });
+        return reply.result;
+      };
+      const loaded = await exchange('load_pm_request_task', { task_id: taskId });
+      expect(loaded).toMatchObject({ state: 'ready', revision: 3, task: completedTask });
+      expect(loaded.receipt ?? null).toBeNull();
+      const request = { operation_id: `browser-reopen-${theme}`, expected_revision: 3,
+        reason: 'The original outcome needs another review.\nPlease reopen this task.', task_id: taskId };
+      const reopened = await exchange('reopen_pm_request_task', { request });
+      expect(reopened).toMatchObject({ state: 'ready', revision: 4, task: {
+        ...pendingTask, review_generation: 2, review_required: true,
+      }, receipt: { operation_id: request.operation_id, action: 'reopen', revision: 4,
+        reason: request.reason, actor: { kind: 'user' } } });
+      expect(reopened.receipt.actor.id).toMatch(/^browser:[0-9a-f-]{36}$/i);
+      expect(reopened.receipt.actor.id).not.toBe(fixturePm.id);
+      const savedBytes = readFileSync(statePath, 'utf8');
+      const saved = JSON.parse(savedBytes);
+      expect(saved.revision).toBe(4);
+      expect(saved.receipts).toEqual([...seed.receipts, reopened.receipt]);
+      expect(saved.tasks[taskId]).toEqual(reopened.task);
+      expect(saved.sources).toEqual(seed.sources);
+      expect(saved.sources[pendingTask.source_id].original).toBe(original);
+      expect(await exchange('reopen_pm_request_task', { request })).toEqual(reopened);
+      expect(readFileSync(statePath, 'utf8')).toBe(savedBytes);
+      expect(await exchange('reopen_pm_request_task', { request: { ...request,
+        operation_id: `${request.operation_id}-stale` } })).toMatchObject({ state: 'error', code: 'conflict',
+        current_revision: 4, recovery_operation: 'load_pm_request_task' });
+      expect(readFileSync(statePath, 'utf8')).toBe(savedBytes);
+
+      // Reload creates a fresh server-generated browser actor. Reconcile by read;
+      // never supply the old actor or reinterpret its operation as a new mutation.
+      await page.reload();
+      await page.waitForFunction(() => (window as any).__gwtPlaywrightTestBridgeInstalled === true);
+      await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+      expect(await exchange('reopen_pm_request_task', { request })).toMatchObject({ state: 'error',
+        code: 'operation_conflict', recovery_operation: 'load_pm_request_task' });
+      expect(await exchange('load_pm_request_task', { task_id: taskId,
+        receipt_operation_id: request.operation_id })).toEqual(reopened);
+      expect(readFileSync(statePath, 'utf8')).toBe(savedBytes);
+      expect(errors).toEqual([]);
+    } catch (error) {
+      primaryErrors.push(error);
+      throw error;
+    } finally {
+      try {
+        await info.attach(`T-UTASK-USER-REOPEN ${theme} transport and persistence`, {
+          body: JSON.stringify({ synthetic_fixture_seed: true, native_intake_proof: false,
+            production_task_ui: false, theme, seed, exchanges, console_page_errors: errors,
+            persisted: JSON.parse(readFileSync(statePath, 'utf8')) }), contentType: 'application/json',
+        });
+        const screenshot = info.outputPath(`task-reopen-transport-${theme}.png`);
+        await page.screenshot({ path: screenshot });
+        await info.attach(`T-UTASK-USER-REOPEN ${theme} browser`, { path: screenshot, contentType: 'image/png' });
+      } catch (error) { cleanupErrors.push(error); }
+      try { await page.close(); } catch (error) { cleanupErrors.push(error); }
+      try { await target.stop(); } catch (error) { cleanupErrors.push(error); }
+      try { expect(errors).toEqual([]); } catch (error) { cleanupErrors.push(error); }
+      if (cleanupErrors.length) {
+        const failures = [...primaryErrors, ...cleanupErrors];
+        throw new AggregateError(failures, 'Task reopen target evidence/cleanup failed:\n' + failures.map(String).join('\n'),
           { cause: primaryErrors[0] });
       }
     }

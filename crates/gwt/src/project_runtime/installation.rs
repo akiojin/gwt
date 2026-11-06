@@ -83,6 +83,26 @@ pub(crate) struct OwnerRestoreRefusal {
     pub retryable: bool,
 }
 
+/// Known restore admission decisions that do not describe a failed launch.
+pub fn is_expected_restore_exclusion(code: &str) -> bool {
+    matches!(
+        code,
+        "closed_work_diagnostic_retained"
+            | "completed_work_retained"
+            | "execution_blocked"
+            | "landed_worktree"
+            | "empty_landed_worktree"
+            | "settled_execution"
+            | "closed_issue"
+            | "closed_issue_bookkeeping_warning"
+            | "revoked_launch"
+            | "lost_ownership"
+            | "monitor_stopped"
+            | "launch_revoked"
+            | "unregistered_pm"
+    )
+}
+
 impl OwnerSavedSessionRestore {
     pub fn refuse(&mut self, code: &str, message: impl Into<String>, retryable: bool) -> String {
         let message = message.into();
@@ -2860,14 +2880,19 @@ pub(crate) fn prepare_owner_agent_admission(
                         {
                             return false;
                         }
+                        let (default_model, default_reasoning) =
+                            crate::launch_wizard::default_launch_tuning(
+                                config.agent_id.command(),
+                                profile.model.as_deref(),
+                            );
                         let mut builder =
                             gwt_agent::AgentLaunchBuilder::new(config.agent_id.clone())
                                 .runtime_target(profile.runtime_target)
                                 .fast_mode(profile.fast_mode);
-                        if let Some(model) = profile.model {
+                        if let Some(model) = profile.model.or(default_model) {
                             builder = builder.model(model);
                         }
-                        if let Some(reasoning) = profile.reasoning {
+                        if let Some(reasoning) = profile.reasoning.or(default_reasoning) {
                             builder = builder.reasoning_level(reasoning);
                         }
                         let expected = builder.build();
@@ -4342,6 +4367,85 @@ mod owner_admission_tests {
         );
         let reservation = fresh.env_vars.remove("GWT_AGENT_RESERVATION_ID").unwrap();
         crate::agent_names::release_project_member(&root, &sessions, &id, &reservation).unwrap();
+        // Unspecified saved tuning must match the effective values produced by
+        // the same wizard used for a fresh Monitor launch.
+        for agent_id in [gwt_agent::AgentId::Codex, gwt_agent::AgentId::ClaudeCode] {
+            let roster = crate::agent_names::mutate_project_roster(
+                &root,
+                &sessions,
+                crate::agent_names::AgentRosterAction::Add {
+                    pm_eligible: false,
+                    name: None,
+                    agent_id: Some(agent_id.command().into()),
+                },
+                None,
+            )
+            .unwrap();
+            let member_id = roster.members.last().unwrap().agent_member_id.clone();
+            let profile: crate::IssueMonitorLaunchProfile = serde_json::from_value(
+                serde_json::json!({"agent_id":agent_id.command(), "agent_member_id":member_id}),
+            )
+            .unwrap();
+            crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+                prefs.set_launch_profile_pool(vec![profile.clone()]);
+                Ok(())
+            })
+            .unwrap();
+            let context = crate::LaunchWizardContext {
+                selected_branch: crate::BranchListEntry {
+                    name: "work/issue-43".into(),
+                    scope: crate::BranchScope::Local,
+                    is_head: false,
+                    upstream: None,
+                    ahead: 0,
+                    behind: 0,
+                    last_commit_date: None,
+                    cleanup_ready: true,
+                    cleanup: Default::default(),
+                    resume: crate::BranchResumeInfo::unavailable(),
+                    start_work_eligibility: None,
+                },
+                normalized_branch_name: "work/issue-43".into(),
+                worktree_path: Some(root.clone()),
+                quick_start_root: root.clone(),
+                live_sessions: vec![],
+                docker_context: None,
+                docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
+                linked_issue_number: None,
+                linked_issue_kind: None,
+                ultracode_supported: false,
+                claude_workflows_enabled: false,
+            };
+            let mut wizard = crate::LaunchWizardState::open_with_previous_profile(
+                context,
+                vec![crate::AgentOption {
+                    id: agent_id.command().into(),
+                    name: agent_id.display_name().into(),
+                    available: true,
+                    installed_version: None,
+                    custom_agent: None,
+                }],
+                vec![],
+                Some(profile.into()),
+            );
+            wizard.use_profile_launch_preferences();
+            let mut defaults = wizard.build_launch_config().unwrap();
+            assert!(defaults.reasoning_level.is_some());
+            let mut input = make_input();
+            input.metadata.selected_agent_member_id = Some(member_id.clone());
+            let result = prepare_owner_agent_admission(input, &mut defaults);
+            assert!(
+                result.is_ok(),
+                "unchanged {agent_id:?} defaults must be admitted: {:?}",
+                result.err()
+            );
+            let reservation = defaults
+                .env_vars
+                .remove("GWT_AGENT_RESERVATION_ID")
+                .unwrap();
+            crate::agent_names::release_project_member(&root, &sessions, &member_id, &reservation)
+                .unwrap();
+        }
         let roster = crate::agent_names::mutate_project_roster(
             &root,
             &sessions,

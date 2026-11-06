@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
-import { gotoLiveGwt, withLiveGwtBackendLock } from "./_helpers/live-gwt";
+import { gotoLiveGwt, sendLiveGwtEvent, withLiveGwtBackendLock } from "./_helpers/live-gwt";
 
 test.describe("Profile environment variable grid", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
@@ -242,6 +242,166 @@ test.describe("Profile environment variable grid", () => {
     await waitForProfileIdle(profile);
     await expect(name).toHaveValue("default");
     await expect(profile.locator(".profile-status.error")).toHaveCount(0);
+  });
+
+  test("ordinary reconnect recovers Profile reads and preserves the unsaved draft", async ({ page }, info) => {
+    const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    test.skip(!base || !process.env.GWT_PLAYWRIGHT_CHECK_HOME, "requires an isolated checkout server");
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+    await gotoLiveGwt(page, base!, { enableTestBridge: true });
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    await sendLiveGwtEvent(page, { kind: "create_window", preset: "profile",
+      bounds: { x: 30, y: 30, width: 1200, height: 800 } });
+    const profile = page.locator('.workspace-window[data-preset="profile"]').last();
+    await waitForProfileIdle(profile);
+    const id = (await profile.getAttribute("data-id"))!;
+    await page.evaluate(id => {
+      const root = document.querySelector(`.workspace-window[data-id="${id}"]`)!;
+      const old = (window as any).__gwtPlaywrightSockets.findLast((socket: WebSocket) =>
+        socket.readyState === WebSocket.OPEN && new URL(socket.url).searchParams.has("repo_hash"));
+      if (!old) throw new Error("missing owning project socket");
+      const send = WebSocket.prototype.send;
+      const state = { old, root, input: null as HTMLTextAreaElement | null, held: [] as string[], recovered: [] as string[],
+        sequence: (window as any).__gwtPlaywrightMessageSequence,
+        restore() { WebSocket.prototype.send = send; } };
+      WebSocket.prototype.send = function (data) {
+        const request = typeof data === "string" ? JSON.parse(data) : null;
+        if (request?.id === id && ["load_profile", "save_profile"].includes(request.kind)) {
+          if (this === old) { state.held.push(request.kind); return; }
+          state.recovered.push(request.kind);
+        }
+        return send.call(this, data);
+      };
+      (window as any).__profileReconnect = state;
+      (root.querySelector('[data-action="refresh-profile"]') as HTMLButtonElement).click();
+      const input = state.input = root.querySelector(".profile-textarea") as HTMLTextAreaElement;
+      if (!input?.isConnected) throw new Error("missing mounted Profile editor after refresh");
+      input.focus();
+      input.value = "Unsent reconnect draft";
+      input.dispatchEvent(new Event("input"));
+      input.setSelectionRange(2, 7);
+    }, id);
+    try {
+      await expect.poll(() => page.evaluate(() => (window as any).__profileReconnect.held))
+        .toEqual(["load_profile", "save_profile"]);
+      await expect(profile.locator(".profile-status")).toContainText("Saving profile");
+      await page.evaluate(() => (window as any).__profileReconnect.old.close());
+      await expect.poll(() => page.evaluate(() => (window as any).__profileReconnect.recovered))
+        .toEqual(["load_profile"]);
+      await waitForLiveProfileReply(page, id, await page.evaluate(() => (window as any).__profileReconnect.sequence));
+      await waitForProfileIdle(profile);
+      expect(await page.evaluate(id => {
+        const state = (window as any).__profileReconnect;
+        const input = state.root.querySelector(".profile-textarea") as HTMLTextAreaElement;
+        return { sameRoot: state.root === document.querySelector(`.workspace-window[data-id="${id}"]`),
+          sameInput: state.input === input,
+          draft: input.value, selection: [input.selectionStart, input.selectionEnd],
+          recovered: state.recovered };
+      }, id)).toEqual({ sameRoot: true, sameInput: true, draft: "Unsent reconnect draft",
+        selection: [2, 7], recovered: ["load_profile"] });
+      await info.attach(`profile-reconnect-${theme}`, { body: await profile.screenshot({
+        mask: [profile.locator(".profile-env-grid")],
+      }), contentType: "image/png" });
+    } finally {
+      await page.evaluate(() => (window as any).__profileReconnect?.restore());
+    }
+  });
+
+  test("ordinary reconnect preserves edits after a lost rename reply", async ({ page }, info) => {
+    const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    test.skip(!base || !process.env.GWT_PLAYWRIGHT_CHECK_HOME, "requires an isolated checkout server");
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    await page.addInitScript(theme => {
+      localStorage.setItem("gwt:ui:theme", theme);
+      const add = WebSocket.prototype.addEventListener;
+      WebSocket.prototype.addEventListener = function (kind, listener: any, options) {
+        if (kind !== "message") return add.call(this, kind, listener, options);
+        return add.call(this, kind, (event: MessageEvent) => {
+          const state = (window as any).__profileRename;
+          const payload = JSON.parse(String(event.data));
+          if (state && this === state.old && payload.kind === "profile_snapshot"
+              && payload.id === state.id && payload.snapshot.selected_profile === state.dropName) {
+            state.lost = true; return;
+          }
+          if (state && this !== state.old && payload.kind === "workspace_state") state.reconnected = true;
+          if (typeof listener === "function") listener.call(this, event);
+          else listener?.handleEvent(event);
+        }, options);
+      };
+    }, theme);
+    await gotoLiveGwt(page, base!, { enableTestBridge: true });
+    await sendLiveGwtEvent(page, { kind: "create_window", preset: "profile",
+      bounds: { x: 30, y: 30, width: 1200, height: 800 } });
+    const profile = page.locator('.workspace-window[data-preset="profile"]').last();
+    await waitForProfileIdle(profile);
+    const id = (await profile.getAttribute("data-id"))!;
+    await sendLiveGwtEvent(page, { kind: "create_profile", id, name: "rename-before" });
+    const name = profile.locator(".profile-field input").first();
+    await expect(name).toHaveValue("rename-before");
+    await page.evaluate(id => {
+      const old = (window as any).__gwtPlaywrightSockets.findLast((socket: WebSocket) =>
+        socket.readyState === WebSocket.OPEN && new URL(socket.url).searchParams.has("repo_hash"));
+      if (!old) throw new Error("missing owning project socket");
+      const send = WebSocket.prototype.send;
+      const state = { old, id, dropName: "rename-after", lost: false, reconnected: false, recovered: [] as string[],
+        restore() { WebSocket.prototype.send = send; } };
+      WebSocket.prototype.send = function (data) {
+        const request = typeof data === "string" ? JSON.parse(data) : null;
+        if (this !== state.old && request?.id === id && ["load_profile", "save_profile"].includes(request.kind))
+          state.recovered.push(request.kind);
+        return send.call(this, data);
+      };
+      (window as any).__profileRename = state;
+    }, id);
+    try {
+      await name.fill("rename-after");
+      await name.blur();
+      await expect.poll(() => page.evaluate(() => (window as any).__profileRename.lost)).toBe(true);
+      await expect(profile.locator(".profile-row.selected .profile-row-title")).toHaveText("rename-before");
+      await page.evaluate(() => (window as any).__profileRename.old.close());
+      await expect.poll(() => page.evaluate(() => (window as any).__profileRename.reconnected)).toBe(true);
+      await expect(profile.locator(".profile-status")).toHaveText("Saving profile...");
+      expect(await page.evaluate(() => (window as any).__profileRename.recovered)).toEqual([]);
+      await profile.getByRole("button", { name: "Refresh profiles" }).click();
+      await waitForProfileIdle(profile);
+      await expect(name).toHaveValue("rename-after");
+      expect(await page.evaluate(() => (window as any).__profileRename.recovered)).toEqual(["load_profile"]);
+      await page.evaluate(() => {
+        const state = (window as any).__profileRename;
+        state.old = (window as any).__gwtPlaywrightSockets.findLast((socket: WebSocket) =>
+          socket.readyState === WebSocket.OPEN && new URL(socket.url).searchParams.has("repo_hash"));
+        state.dropName = "rename-final"; state.lost = false; state.reconnected = false; state.recovered = [];
+      });
+      await name.fill("rename-final");
+      await name.blur();
+      await expect.poll(() => page.evaluate(() => (window as any).__profileRename.lost)).toBe(true);
+      await name.fill("rename-after");
+      await profile.locator(".profile-textarea").fill("Newer rename draft");
+      await profile.locator(".profile-textarea").blur();
+      await expect(profile.locator(".profile-status.error")).toContainText(/not found/i);
+      const before = await profile.locator(".profile-status.error").textContent();
+      await page.evaluate(id => {
+        const state = (window as any).__profileRename;
+        state.root = document.querySelector(`.workspace-window[data-id="${id}"]`);
+        state.input = state.root.querySelector(".profile-textarea");
+        if (!state.input.isConnected) throw new Error("missing mounted error draft");
+        state.old.close();
+      }, id);
+      await expect.poll(() => page.evaluate(() => (window as any).__profileRename.reconnected)).toBe(true);
+      await expect(profile.locator(".profile-status.error")).toHaveText(before!);
+      await expect(profile.locator(".profile-textarea")).toHaveValue("Newer rename draft");
+      await expect(name).toHaveValue("rename-after");
+      expect(await page.evaluate(() => {
+        const state = (window as any).__profileRename;
+        return { sameInput: state.input === state.root.querySelector(".profile-textarea"), recovered: state.recovered };
+      })).toEqual({ sameInput: true, recovered: [] });
+      await info.attach(`profile-rename-reconnect-${theme}`, { body: await profile.screenshot({
+        mask: [profile.locator(".profile-env-grid")],
+      }), contentType: "image/png" });
+    } finally {
+      await page.evaluate(() => (window as any).__profileRename?.restore());
+    }
   });
 
   test("live Profile saves a marker across reload and recovers from a rename error", async ({ page }, info) => {

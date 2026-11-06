@@ -1,6 +1,147 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.151.0] - 2026-11-06
+
+### Bug Fixes
+
+- **ui:** 非表示時の受信更新を共有スケジューラで進める
+- **monitor:** Wait の制御状態を更新と終了処理で保持する
+- **actions:** Reject contradictory diagnostic cleanup receipts
+- **issue:** Kanban のドラッグ受入と拒否理由を表示する
+- **verify:** Recover measured runs from opaque windows gui jobs
+- **gui:** Qualify and resolve local agent error notifications
+- **gui:** Retain recovered issue diagnostics across page reloads
+- **gui:** Keep routine restore exclusions out of agent errors
+- **gui:** Share routine restore exclusion classification
+- **verify:** Measure headed Playwright runs across trace versions
+- **verify:** Reject nominated targets in unregistered native jobs
+- **render:** 更新チェック結果を共有state経由で反映する
+- **mobile:** Revoke native input without waiting for owner replies
+- **update:** 手動チェックの更新状態と再接続を整合させる
+- **update:** ステージ保持と失敗時の回復性を保証する
+- **monitor:** Preserve launches after completion probe timeouts
+- **monitor:** Skip impossible completion readbacks
+- **web:** 端末受信失敗後のストリームを再同期する
+- **web:** 端末バッチ失敗後にストリームを再同期する
+- **web:** Snapshot適用成功まで端末の復旧待ちを維持する
+- **web:** 端末出力の保留量を制限しsnapshotで回復する
+- **project:** Fence execution authority and reconcile close outcomes
+- **project:** Reconcile completed close notifications
+- **project:** Preserve admissions across reconciliation
+- **monitor:** Skip settlements without project admission
+- **mobile:** MacOSの拡張ACL付き資格を拒否する
+- **pm:** 候補原文の読込容量を制限し大容量の回収経路を保つ
+- **web:** 非アクティブなWorks端末の寸法を追従させる
+- **web:** Recover Board and Logs reads on reconnect
+
+### Documentation
+
+- **mobile:** Host資格pathをRustdocのコード表記にする
+
+### Features
+
+- **update:** ヘッダから手動で更新を確認する
+- **mobile:** Bind device snapshots to host identity
+- **mobile:** Bind authentication to connection peers
+- **mobile:** 登録leaseの期限と一回限りの更新を管理する
+- **pm:** 保存済み依頼タスクの継続照合をPMへ接続
+- **mobile:** Host資格台帳の検証と更新候補を追加する
+- **pm:** Preserve unverified prompt candidates before reporting
+- **mobile:** Persist host credentials under a private registry lock
+- **pm:** 未認証入力候補の一覧と原文を取得する
+- **project:** Add explicit project execution choices
+- **mobile:** Validate private host credential files
+- **pm:** 未認証入力候補の照合手順を生成ガイダンスへ接続する
+- **mobile:** Add offline host credential administration
+- **mobile:** Host資格を固定私有領域へ取り込む
+
+### Miscellaneous Tasks
+
+- **work:** Settle mobile touch scroll delivery
+- **work:** Record diagnostic cleanup delivery
+- **work:** Record issue 6735 delivery checkpoint
+- **work:** Record notification repair delivery
+- **work:** Record Playwright trace delivery
+- **work:** Issue #6744 の検証環境と再開条件を記録
+- **work:** Record verified nominated target delivery
+- **work:** 非表示端末の再描画調査を記録する
+- **work:** レビュー修正のPR配信記録を保存する
+- **work:** PM依頼タスク照合のPR関連付けを保存
+- **work:** Save request candidate PR association
+- **work:** Record mobile credential PR association
+- **work:** 入力候補取得PRの関連付けを保存する
+- **work:** PR #6791 の関連付けを記録する
+- **work:** Host資格読込PRの関連付けを保存する
+- **work:** 候補容量PRの関連付けを保存する
+- **work:** PR #6794 の関連付けを記録する
+- **work:** Issue #5082のPR参照履歴を保存する
+- **work:** 候補照合ガイダンスPRの関連付けを保存する
+
+### Refactor
+
+- **project:** Simplify stop and view conditions
+
+### Testing
+
+- **gui:** Locate status contract by helper name
+- **ui:** 非表示窓で両面の共同状態版を検証する
+- **update:** HTTP fixtureの受信バイト数を検証する
+- **web:** Snapshot復旧の埋め込み契約を整合する
+- **runtime:** 未送信回答の失敗診断を補強
+- **execution:** Host拒否テストのHOMEを隔離
+- **project:** Use a bound source for daemon browser checks
+- **project:** Align fixtures with explicit view admission
+- **runtime:** Observe provider and creator lease completion
+- **runtime:** Await native lifecycle and census observations
+- **mobile:** Isolate credential rejection reasons
+- **verify:** Windows CPU fixtureの観測値と取得エラーを記録する
+- **index:** Remove timing race from reserved search fixture
+
+## [9.150.0] - 2026-11-05
+
+### Bug Fixes
+
+- **monitor:** Retain runtime wait controls across stale writers
+- **monitor:** Converge typed waits after interrupted receipts
+- **ui:** Render cold terminals while document is hidden
+- **pm:** Keep periodic supervision moving after automatic turns
+- **ui:** Update related work without waiting for reload
+- **actions:** Mark unobserved diagnostic cleanup uncertain
+- **actions:** Satisfy Windows diagnostic publisher lint
+- **actions:** Report safe Windows self-test failure stages
+- **actions:** Preserve fixed diagnostic observation and CI contracts
+- **actions:** Preserve diagnostic cleanup and workflow identity
+- **actions:** Select one diagnostic application path
+- **actions:** Remove readonly diagnostic self-test fixtures
+
+### Features
+
+- **terminal:** モバイルの縦スワイプで端末履歴をスクロールする
+- **pm:** Add revision-pinned request task inventory
+- **actions:** Add bounded historical Windows diagnostics
+
+### Miscellaneous Tasks
+
+- **work:** PR #6686 の配信記録を確定
+- **work:** Runtime-only 待機消失の因果調査を記録
+- **work:** Runtime-only 待機保持の実装設計を確定
+- **work:** Record issue 5876 update checkpoint
+- **work:** Record cold terminal delivery scope
+- **work:** PM 巡回修正の配信記録を確定
+- **work:** 依頼一覧APIの引継ぎと配信記録を保存
+- **work:** 依頼一覧APIのPR関連付けを保存
+- **work:** Record Windows diagnostic pull request
+- **ci:** Retrigger required checks after GitHub outage
+- **work:** Record diagnostic remediation pull request
+
+### Testing
+
+- **pm:** 定期巡回fixtureのWindows HOMEを正規化
+- **pm:** Windows の実配送テストのパスを正規化
+- **pm:** 対象停止後の巡回とescalation除外を検証
+- **pm:** Expose receipt state on unconfirmed failures
+
 ## [9.149.0] - 2026-11-04
 
 ### Bug Fixes

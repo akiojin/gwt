@@ -1,6 +1,9 @@
 //! Private project-owner wire data. Never contains capability or GUI authority.
 use serde::{Deserialize, Serialize};
 
+/// Private mobile input capability advertised before sending any input frame.
+pub const MOBILE_INPUT_PERMIT_PROTOCOL_VERSION: u64 = 1;
+
 /// Read-only physical input facts; consumers cannot grant input with this snapshot.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct OwnerInputObservation {
@@ -69,6 +72,7 @@ pub struct OwnerMobileInputIdentity {
     pub incarnation: u64,
     pub session_id: Option<String>,
     pub data_sha256: String,
+    pub permit: crate::mobile_input_permit::NativeInputPermitRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,6 +159,21 @@ pub enum OwnerCommand {
         incarnation: u64,
         session_id: String,
         data: Vec<u8>,
+    },
+    InvalidateProjectObservation {
+        host_pid: u32,
+        host_started_at: u64,
+        generation: u64,
+        view_set_revision: u64,
+        last_open_receipt_id: Option<String>,
+    },
+    ProjectExecutionChoose {
+        request: gwt_core::project_execution_policy::ChoiceRequest,
+        caller_session_id: Option<String>,
+        expected_view_set_revision: Option<u64>,
+    },
+    ProjectExecutionStatus {
+        operation_id: Option<String>,
     },
     CheckLaunchPermission {
         operation_id: String,
@@ -318,6 +337,9 @@ pub struct OwnerFinalScreen {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OwnerEvent {
+    ProjectExecutionStatus {
+        status: crate::protocol::ProjectExecutionStatusView,
+    },
     LaunchProgress {
         operation_id: String,
         id: String,

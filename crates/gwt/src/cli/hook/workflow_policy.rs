@@ -920,6 +920,7 @@ pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
             | "pm.plan.status"
             | "pm.request_tasks.read"
             | "pm.status"
+            | "project.execution.status"
             | "pm.report.list"
             | "search"
     )
@@ -2372,6 +2373,7 @@ mod tests {
             ("pm.plan.apply", false),
             ("pm.request_tasks.read", true),
             ("pm.request_tasks.apply", false),
+            ("pm.request_tasks.capture", false),
         ] {
             let event = HookEvent {
                 tool_name: Some("Bash".to_string()),

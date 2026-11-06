@@ -30,6 +30,7 @@ test.describe("Works and Agents approved baseline", () => {
   let managedSource: Awaited<ReturnType<typeof startWorksManagedSource>> | undefined;
 
   test.beforeAll(async ({ browser }, info) => {
+    test.setTimeout(60_000);
     if (process.env.GWT_PLAYWRIGHT_WORKS_SOURCE === "1") {
       managedSource = await startWorksManagedSource(browser, info);
     }
@@ -560,6 +561,17 @@ test.describe("Works and Agents approved baseline", () => {
       body: JSON.stringify({ scope: "Chromium renderer metrics only; excludes native GUI CPU/RSS", updates: 20,
         observation, before, after: await cdp.send("Performance.getMetrics") }) });
     await cdp.detach();
+    await full(page).locator(".works-full-header").evaluate(target => {
+      (window as any).__gwtAttachmentUploader = async ({ file }: { file: File }) => ({
+        upload_id: "telemetry-upload", filename: file.name, mime_type: file.type, size: file.size,
+      });
+      const transfer = new DataTransfer();
+      transfer.items.add(new File(["fixture contents"], "fixture.txt", { type: "text/plain" }));
+      target.dispatchEvent(new DragEvent("dragover", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+      target.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+    });
+    await expect.poll(async () => (await sent(page)).filter(message =>
+      message.kind === "attach_files" && message.id === "agent-one")).toHaveLength(1);
     await page.evaluate(() => (window as any).__worksAgentsFixture.attachmentProgress());
     await expect(full(page).locator(".attachment-progress")).toContainText("Staging");
     await page.evaluate(() => (window as any).__worksAgentsFixture.remountInKanban());
@@ -1085,7 +1097,7 @@ async function installWorksAgentsBackend(page: Page) {
           this.emit(workspace()); this.emit(activity());
           this.emit({ kind: "terminal_snapshot", id: "agent-one", data_base64: btoa(resyncText) });
         }
-        if (echoInput && message.kind === "terminal_input" && !message.data.startsWith("\u001b")) this.emit({ kind: "terminal_output", id: message.id, data_base64: btoa(message.data) });
+        if (echoInput && message.kind === "terminal_input" && !message.data.startsWith("\u001b")) this.emit({ kind: "terminal_output", id: message.id, data_base64: btoa(message.data === "\r" ? "\r\n" : message.data) });
         if (message.kind === "create_window" && message.preset === "settings" && !windows.some(data => data.preset === "settings")) {
           windows.push(baseWindow("settings-window", { title: "Settings", preset: "settings", z_index: 101, surface_owner: message.surface_owner }));
           this.emit(workspace());
@@ -1192,8 +1204,15 @@ async function installWorksAgentsBackend(page: Page) {
       },
       workspaceTitle(title: string) { windows.find(data => data.id === "agent-one").dynamic_title = title; socket.emit(workspace()); },
       workspaceStatus(status: string) { windows.find(data => data.id === "agent-one").status = status; socket.emit(workspace()); },
-      attachmentProgress() { socket.emit({ kind: "attachment_progress", id: "agent-one",
-        operation_id: "telemetry-attachment", phase: "staging", filename: "fixture.txt", bytes_done: 8, bytes_total: 16 }); },
+      attachmentProgress() {
+        const requests = sentMessages.filter(message => message.kind === "attach_files" && message.id === "agent-one");
+        if (requests.length !== 1) throw new Error("Expected one telemetry attachment request");
+        const [request] = requests;
+        if (!request.operation_id || !request.expected_target) throw new Error("Telemetry attachment request has no captured identity");
+        socket.emit({ kind: "attachment_progress", id: request.id,
+          operation_id: request.operation_id, expected_target: request.expected_target,
+          phase: "staging", file_index: 0, file_count: 1, filename: "fixture.txt", bytes_done: 8, bytes_total: 16, message: null });
+      },
       remountInKanban() {
         windows.push(baseWindow("telemetry-kanban", { preset: "agent_kanban", title: "Telemetry Kanban" }));
         windows.find(data => data.id === "agent-one").placement = {

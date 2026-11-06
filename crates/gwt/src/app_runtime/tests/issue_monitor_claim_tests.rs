@@ -7663,6 +7663,14 @@ fn durable_issue_monitor_delivery_preserves_live_materializer_and_replays_after_
             assert!(waiting_since.elapsed() < gwt_core::deadline_budget::HANG_GUARD);
             thread::sleep(Duration::from_millis(100));
         }
+        assert_eq!(
+            gwt::project_execution_policy::observation(&repo)
+                .unwrap()
+                .unwrap()
+                .host_pid,
+            std::process::id(),
+            "the physical materializer preserves its controller's actual Project view"
+        );
         let client = owner_fixture_block_on(ProjectRuntimeClient::from_current_project(
             &repo,
             &gwt_core::paths::gwt_home(),

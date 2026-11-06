@@ -6,7 +6,7 @@
  *   (b) after a window restart and an app restart the relaunched window is
  *       rebound to that same exact session.
  */
-import { chmod, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { execFileSync, spawnSync } from "node:child_process";
 import { basename, dirname, join } from "node:path";
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
@@ -613,7 +613,27 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       await expect(previewRevision).toHaveValue(savedRevision!);
       await expect(previewRevision).toBeDisabled();
       await page.setViewportSize({ width: 400, height: 1000 });
-      expect(await preview.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+      const widthDiagnostics = await preview.evaluate(node => {
+        const fits = node.scrollWidth <= node.clientWidth + 1;
+        const rootRect = node.getBoundingClientRect();
+        const geometry = (element: Element) => {
+          const rect = element.getBoundingClientRect(), style = getComputedStyle(element);
+          return { tag: element.tagName, classes: Array.from(element.classList),
+            rect: { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height },
+            client: { width: element.clientWidth, height: element.clientHeight },
+            scroll: { width: element.scrollWidth, height: element.scrollHeight },
+            overflow: { x: style.overflowX, y: style.overflowY },
+            wrap: { whiteSpace: style.whiteSpace, overflowWrap: style.overflowWrap, wordBreak: style.wordBreak } };
+        };
+        const overflowing = Array.from(node.querySelectorAll("*")).filter(element => {
+          const rect = element.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0 && (element.scrollWidth > element.clientWidth + 1
+            || rect.right > rootRect.right + 1 || rect.left < rootRect.left - 1);
+        }).slice(0, 119);
+        return { fits, root: geometry(node), descendants: overflowing.map(geometry) };
+      });
+      await writeFile(info.outputPath("split-preview-width-diagnostics.json"), JSON.stringify(widthDiagnostics, null, 2));
+      expect(widthDiagnostics.fits).toBe(true);
       await page.getByRole("button", { name: "Close split", exact: true }).click();
       await page.setViewportSize({ width: 1280, height: 1000 });
       await expect(revisionInput).toHaveValue(savedRevision!);
@@ -1182,8 +1202,33 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
         } else if (surface === "agents") {
           await expect(main.locator(".roster-pm-identity .roster-pm-name")).toHaveText(pmName);
           await expect(main.locator(".roster-pm-identity .window-role-badge")).toHaveText("PM");
-          await expect(main.locator(".roster-list .roster-row")).toHaveCount(4);
-          await expect(main.locator(".roster-count")).toHaveText("4");
+          const expectedMembers = await Promise.all(live.map(async (window: any) => {
+            const memberId = tomlString(await sessionRecord(fixture.home, window.session_id), "agent_member_id");
+            expect(memberId).toMatch(/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i);
+            return { memberId: memberId!, isPm: window.is_pm };
+          }));
+          const expectedMemberIds = expectedMembers.map(member => member.memberId).sort();
+          expect(new Set(expectedMemberIds).size).toBe(5);
+          expect(expectedMembers.filter(member => member.isPm)).toHaveLength(1);
+          expect(expectedMembers.filter(member => !member.isPm)).toHaveLength(4);
+          const roster = await readRoster(page);
+          expect(roster.project_key).toBe(activity.project_key);
+          expect(roster.error).toBeNull();
+          expect(roster.members.map(member => member.agent_member_id).sort()).toEqual(expectedMemberIds);
+          for (const expected of expectedMembers) {
+            const member = roster.members.find(member => member.agent_member_id === expected.memberId)!;
+            expect(member).toMatchObject({ agent_id: expected.isPm ? "claude" : "codex", enabled: true });
+            if (expected.isPm) {
+              expect(member).toMatchObject({ pm_eligible: true, pm_project_key: roster.project_key });
+              await expect(main.locator(`.roster-list .roster-row[data-member-id="${expected.memberId}"] .roster-purpose`)).toHaveText("Project Manager");
+            } else expect(member).not.toHaveProperty("pm_project_key");
+            if (member.assignment) expect(member.assignment).toMatchObject({ role: expected.isPm ? "pm" : "implementation" });
+          }
+          const teamRows = main.locator(".roster-list .roster-row");
+          await expect(teamRows).toHaveCount(5);
+          expect((await teamRows.evaluateAll(nodes => nodes.map(node => (node as HTMLElement).dataset.memberId))).sort())
+            .toEqual(expectedMemberIds);
+          await expect(main.locator(".roster-count")).toHaveText("5");
         } else {
           await expect(rows).toHaveCount(5);
           await expect(rows.first().locator(".work-name")).toHaveText(pmName);
@@ -1198,13 +1243,17 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
           await page.setViewportSize({ width: 1600, height: 1500 });
         }
       }
+      await appendFile(info.outputPath("pm-four-stage-diagnostics.jsonl"), JSON.stringify({ stage: "before_contact_sheet", timeout_ms: info.timeout }) + "\n");
       const sheet = await page.context().newPage();
       try {
+        await appendFile(info.outputPath("pm-four-stage-diagnostics.jsonl"), JSON.stringify({ stage: "contact_sheet_open", timeout_ms: info.timeout }) + "\n");
         await sheet.setViewportSize({ width: 4832, height: 1540 });
         await sheet.setContent(`<main style="display:flex;gap:16px">${images.map(({ name, image }) =>
           `<figure style="margin:0"><figcaption>${name} · ${theme} · same isolated GUI</figcaption><img width="1600" height="1500" src="data:image/png;base64,${image}"></figure>`).join("")}</main>`);
         await sheet.screenshot({ path: info.outputPath("pm-identity-three-surfaces.png"), fullPage: true });
+        await appendFile(info.outputPath("pm-four-stage-diagnostics.jsonl"), JSON.stringify({ stage: "contact_sheet_captured", timeout_ms: info.timeout }) + "\n");
       } finally { await sheet.close(); }
+      await appendFile(info.outputPath("pm-four-stage-diagnostics.jsonl"), JSON.stringify({ stage: "contact_sheet_closed", timeout_ms: info.timeout }) + "\n");
       expect(errors).toEqual([]);
       const current = await windows(), sessions = new Set(current.map((window: any) => window.session_id));
       const children = [...new Map((await fixture.launches()).filter(launch => sessions.has(launch.gwt_session_id))
@@ -1214,17 +1263,28 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
       await info.attach("real-child-membership", { body: JSON.stringify({ windows: current, children }), contentType: "application/json" });
     } finally {
       try {
+        await appendFile(info.outputPath("pm-four-stage-diagnostics.jsonl"), JSON.stringify({ stage: "before_source_state", timeout_ms: info.timeout }) + "\n");
         await info.attach("works-source-state", { body: JSON.stringify({ workspace, activity, usage, activityObservations }), contentType: "application/json" });
-      } finally { await fixture.stop(); }
+      } finally {
+        try {
+          await appendFile(info.outputPath("pm-four-stage-diagnostics.jsonl"), JSON.stringify({ stage: "before_fixture_stop", timeout_ms: info.timeout }) + "\n");
+        } finally { await fixture.stop(); }
+        await appendFile(info.outputPath("pm-four-stage-diagnostics.jsonl"), JSON.stringify({ stage: "fixture_stopped", timeout_ms: info.timeout }) + "\n");
+      }
     }
   });
 
   test("window restart and app restart rebind the exact provider session", async ({ page }, testInfo) => {
-    const fixture = await startExactRelaunchFixture(testInfo);
+    const fixture = await startExactRelaunchFixture(testInfo, {
+      async prepare({ env }) {
+        env.RUST_LOG = [env.RUST_LOG, "gwt.restart.diagnostic=info", "gwt_ui_action=info"].filter(Boolean).join(",");
+      },
+    });
     const theme = testInfo.project.name.includes("light") ? "light" : "dark";
     let errors = capture(page);
     const browserContext = page.context();
     let restored: Page | undefined;
+    let restartWindowId: string | undefined, restartAfter = 0;
     const launchAt = async (count: number): Promise<ExactRelaunchInvocation> => {
       await expect.poll(async () => (await fixture.launches()).length,
         { timeout: 90_000, message: `provider launch #${count}` }).toBeGreaterThanOrEqual(count);
@@ -1249,6 +1309,7 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
       expect(first.gwt_session_id).toBeTruthy();
       const native = first.provider_session_id;
       const firstWindow = await liveCodexWindow(page, first.gwt_session_id!);
+      restartWindowId = firstWindow.id;
       const firstRecord = await syncedResumeId(first.gwt_session_id!);
       expect(tomlString(firstRecord, "agent_session_id")).toBe(native);
       const memberId = tomlString(firstRecord, "agent_member_id")!;
@@ -1363,6 +1424,7 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
       await expect(page.locator("#wizard-modal")).toBeVisible();
       await attachScreenshot(page, testInfo, `quick-start-${theme}`);
       await wizardAction(page, { kind: "cancel" });
+      restartAfter = await cursor(page);
       await sendLiveGwtEvent(page, { kind: "restart_window", id: firstWindow.id });
       const second = await launchAt(2);
       expect(second.argv.slice(second.argv.indexOf("resume"))).toContain(native);
@@ -1430,6 +1492,50 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
       expect(errors, "console/page errors after app restart").toEqual([]);
     } finally {
       try {
+        const diagnosticPath = testInfo.outputPath("exact-restart-routing-diagnostics.json");
+        const diagnostic: any = { restart_window_id: restartWindowId, restart_after: restartAfter,
+          browser_receipts: null };
+        try {
+          const logRoot = join(fixture.home, ".gwt");
+          const logDirs = ["logs", ...(await readdir(join(logRoot, "projects"), { withFileTypes: true }))
+            .filter(entry => entry.isDirectory() && /^[0-9a-f]{16}$/.test(entry.name))
+            .map(entry => join("projects", entry.name, "logs"))];
+          const logNames: string[] = [];
+          for (const directory of logDirs) {
+            let names: string[];
+            try { names = await readdir(join(logRoot, directory)); }
+            catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") continue; throw error; }
+            logNames.push(...names.filter(name => name.startsWith("gwt.log.")).map(name => join(directory, name)));
+          }
+          const records: any[] = [];
+          let invalidLines = 0;
+          for (const name of logNames) {
+            for (const line of (await readFile(join(logRoot, name), "utf8")).split("\n").filter(Boolean)) {
+              let record: any;
+              try { record = JSON.parse(line); } catch { invalidLines += 1; continue; }
+              if (record.target === "gwt.restart.diagnostic") records.push({ file: name,
+                timestamp: record.timestamp, target: record.target, fields: record.fields });
+              else if (record.target === "gwt_ui_action" && record.fields?.action === "restart_window")
+                records.push({ file: name, timestamp: record.timestamp, target: record.target,
+                  fields: { action: record.fields.action, window_id: record.fields.window_id } });
+            }
+          }
+          diagnostic.canonical_logs = { files: logNames, invalid_lines: invalidLines, records };
+          await writeFile(diagnosticPath, JSON.stringify(diagnostic));
+          diagnostic.browser_receipts = page.isClosed() ? null : await page.evaluate(({ id, after }) =>
+            ((window as any).__gwtPlaywrightMessages ?? []).filter((entry: any) => entry.sequence > after
+              && entry.payload.id === id && ["terminal_status", "window_state", "launch_progress"].includes(entry.payload.kind))
+              .map(({ sequence, payload }: any) => ({ sequence, kind: payload.kind, id: payload.id,
+                status: payload.status, state: payload.state, detail_present: !!payload.detail, message_present: !!payload.message })),
+          { id: restartWindowId, after: restartAfter });
+          await writeFile(diagnosticPath, JSON.stringify(diagnostic));
+          await testInfo.attach("exact-restart-routing-diagnostics", { contentType: "application/json", path: diagnosticPath });
+        } catch (error) {
+          Object.assign(diagnostic, { status: diagnostic.canonical_logs ? "partial" : "unknown",
+            reason: "diagnostic capture unavailable", error_name: error instanceof Error ? error.name : "unknown",
+            code: (error as NodeJS.ErrnoException)?.code });
+          await writeFile(diagnosticPath, JSON.stringify(diagnostic));
+        }
         for (const current of [page, restored]) if (current && !current.isClosed()) {
           await testInfo.attach("local-agent-observations", { body: JSON.stringify(await current.evaluate(() =>
             ((window as any).__gwtPlaywrightMessages ?? [])

@@ -57,7 +57,7 @@ const GROK_RUNNING_STATUS = {
   running_reasoning: "high",
 };
 
-function fixture({ confirmAnswer = true, mounts = 1 } = {}) {
+function fixture({ confirmAnswer = true, mounts = 1, executionModel } = {}) {
   const { document } = parseHTML(html);
   document.getElementById("pm-settings-panel")?.remove();
   const sent = [];
@@ -72,6 +72,7 @@ function fixture({ confirmAnswer = true, mounts = 1 } = {}) {
   const panel = createPmSettingsPanel({
     projectKey: "project", projectName: () => "Readable project", onOpenAgents: () => openedAgents.push(true), onOpenMember: memberId => openedMembers.push(memberId), onReloadProfile: () => reloaded.push(true),
     document,
+    executionModel, projectTitle: "Alpha",
     scheduleFrame(callback) { frames.add(callback); return () => frames.delete(callback); },
     send: (event) => sent.push(event),
     confirm: (message) => {
@@ -754,4 +755,14 @@ test("a late PM receipt after authority revocation cannot restore edits or repla
     profile_revision: 'failure-readback-token', profile: { agent_id: 'claude', model: 'submitted', reasoning: null }, message: 'Profile refused' });
   assert.equal(c.model.read().targets['pm:pm-member'].available, false, 'failed canonical readback also cannot restore authority');
   assert.equal(c.model.read().targets['pm:pm-member'].draft.model, 'reviewed draft');
+});
+
+test("PM settings shows the selected project execution separately from profile defaults", async () => {
+  const { createProjectExecutionPolicyModel } = await import('../project-execution-policy-model.js');
+  const policy = createProjectExecutionPolicyModel('alpha');
+  const { views, sent } = fixture({ executionModel: policy.model, mounts: 2 });
+  for (const view of views) assert.match(view.querySelector('[data-project-execution-status]')?.textContent || '', /Alpha.*Unknown/);
+  policy.applyStatus({ project_key: 'alpha', generation: 1, revision: 2, choice: 'continue', effective_state: 'waiting', start_reason: 'user_continue', observed_at: '2026-11-03T10:00:00Z' });
+  for (const view of views) assert.match(view.querySelector('[data-project-execution-status]').textContent, /Waiting.*Continue/);
+  assert.deepEqual(sent, []);
 });

@@ -774,7 +774,7 @@ fn reserve_new_pm_member_inner(
         ));
     }
     ensure_current_pm_identity(root, sessions)?;
-    ensure_active(None)?;
+    ensure_active_for_owner(root)?;
     let started = crate::process::host_process_start_time(std::process::id())
         .filter(|started| *started > 0)
         .ok_or_else(|| {
@@ -1545,7 +1545,7 @@ pub(crate) fn ensure_current_pm_identity(root: &Path, sessions: &Path) -> io::Re
                 && registry.pm_projects.contains_key(key.as_str())
         }));
     };
-    ensure_active(None)?;
+    ensure_active_for_owner(root)?;
     gwt_agent::with_session_path_lease(sessions, &registration.session_id, |state| {
         let session = match state {
             gwt_agent::SessionPathState::Present(session) => session,
@@ -3934,6 +3934,31 @@ mod tests {
             reserve_resume_pm_member(&root, &sessions, &source, "unknown-restore", false).is_err()
         );
         assert_eq!(fs::read(path()).unwrap(), before);
+
+        // An enrolled PM launch must not migrate unrelated projects again.
+        fs::remove_file(gwt_agent::runtime_state_path(&sessions, &source.id)).unwrap();
+        ensure_active_for_project(&root).unwrap();
+        let unrelated = gwt_core::paths::gwt_home().join("unrelated-migration-project");
+        fs::create_dir_all(&unrelated).unwrap();
+        let unrelated_prefs = crate::issue_monitor_prefs_path_for_repo_path(&unrelated);
+        fs::create_dir_all(unrelated_prefs.parent().unwrap()).unwrap();
+        fs::write(&unrelated_prefs, b"{").unwrap();
+        assert!(ensure_current_pm_identity(&root, &sessions).unwrap());
+        let registry_bytes = fs::read(path()).unwrap();
+        let refusal = reserve_new_pm_member(
+            &root,
+            &sessions,
+            &source.worktree_path,
+            "registered-pm-refusal",
+        )
+        .err()
+        .expect("an existing PM must use its saved conversation");
+        assert!(refusal
+            .to_string()
+            .contains("Resume the registered PM conversation before starting a new PM"));
+        assert_eq!(fs::read(path()).unwrap(), registry_bytes);
+        assert_eq!(fs::read(&unrelated_prefs).unwrap(), b"{");
+        assert!(!unrelated_prefs.with_extension("committed.json").exists());
     }
 
     fn source() -> (PathBuf, PathBuf, String) {

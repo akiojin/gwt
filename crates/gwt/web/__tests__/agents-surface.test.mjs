@@ -18,7 +18,7 @@ const members = [
   { member_id: "m2", name: "Two", enabled: true, provider: null, model: null, created_at: null, issue_count: null, landed_count: null, active_seconds: null, tokens: null, history: [] },
 ];
 const current = { window_id: "one", session_id: "s1", runtime_incarnation: 4, issue_number: 4777, is_pm: false };
-async function fixture({ onOpenWork = () => {}, onContinueSavedWork = () => {}, isContinuePending, schedule, switching, tuningController, pmSettingsPanel } = {}) {
+async function fixture({ onOpenWork = () => {}, onContinueSavedWork = () => {}, isContinuePending, schedule, switching, executionModel, tuningController, pmSettingsPanel } = {}) {
   const { document, window } = parseHTML("<main></main>");
   // linkedom does not track focus; keep that browser state local to this fixture.
   let activeElement = null;
@@ -36,7 +36,7 @@ async function fixture({ onOpenWork = () => {}, onContinueSavedWork = () => {}, 
   const supportedAgentsModel = createUiStateStore({ agents: [{ id: "codex", name: "Codex" }, { id: "claude", name: "Claude Code" }] }, options);
   const customAgentsModel = createUiStateStore({ catalog: { loaded: true, agents: [{ id: "custom-cli", display_name: "Custom CLI" }] } }, options);
   const opened = [], rested = [], added = [], reassigned = [], refreshed = [], switched = [], saved = [], continued = [];
-  const surface = createAgentsSurface({ document, rosterModel, tuningController, pmSettingsPanel, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel, scheduleModel, switchModel, onRenameMember: rosterController.editAgentMemberName, onRetryName: rosterController.retryAgentMemberName, isContinuePending, onContinueSavedWork: workId => { continued.push(workId); onContinueSavedWork(workId); }, onSwitch: action => { switched.push(action); switchModel.update(state => ({ ...state, pending: action })); }, onOpenSavedWork: intent => saved.push(intent), onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: (tool, name, pm_eligible) => { added.push({ tool, name, pm_eligible }); rosterModel.update(state => ({ ...state, error: null })); }, onRestMember: id => rested.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
+  const surface = createAgentsSurface({ document, executionModel, projectTitle: "Alpha", rosterModel, tuningController, pmSettingsPanel, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel, scheduleModel, switchModel, onRenameMember: rosterController.editAgentMemberName, onRetryName: rosterController.retryAgentMemberName, isContinuePending, onContinueSavedWork: workId => { continued.push(workId); onContinueSavedWork(workId); }, onSwitch: action => { switched.push(action); switchModel.update(state => ({ ...state, pending: action })); }, onOpenSavedWork: intent => saved.push(intent), onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: (tool, name, pm_eligible) => { added.push({ tool, name, pm_eligible }); rosterModel.update(state => ({ ...state, error: null })); }, onRestMember: id => rested.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
   for (const node of surface.element.querySelectorAll("select, input")) node.focus = () => { activeElement = node; };
   document.querySelector("main").append(surface.element);
   const flush = () => { for (const fn of [...frames]) { frames.delete(fn); fn(); } };
@@ -780,6 +780,25 @@ test("Agents owns a stable project operations host and readonly preview", async 
   f.surface.dispose(); assert.equal(unmount, host);
 });
 
+test("PM navigation retains its member through initial roster hydration and respects explicit selection", async () => {
+  const f = await fixture(), loaded = f.rosterModel.read();
+  f.rosterModel.update(state => ({ ...state, revision: null, members: [] })); f.flush();
+  f.surface.element.querySelector('[data-tab="past"]').click();
+  f.surface.openPmSettings("m2");
+  f.windowCatalogModel.update(state => ({ catalog: { ...state.catalog, version: 2 } })); f.flush();
+  f.rosterModel.update(() => loaded); f.flush();
+  assert.equal(f.surface.element.querySelector(".roster-team").hidden, false);
+  assert.equal(f.surface.element.querySelector('[aria-label="Display name"]').value, "Two");
+  f.rosterModel.update(state => ({ ...state, revision: null, members: [state.members[0]] })); f.flush();
+  f.surface.openPmSettings("m2");
+  assert.equal(f.surface.selectMember("m1"), true);
+  f.rosterModel.update(() => loaded); f.flush();
+  assert.equal(f.surface.element.querySelector('[aria-label="Display name"]').value, "One");
+  f.surface.openPmSettings("missing");
+  assert.equal(f.surface.element.querySelector('[aria-label="Display name"]').value, "One");
+  f.surface.dispose();
+});
+
 test("PM entries reveal Team from Past with known and unknown members", async () => {
   const f = await fixture(), sent = [];
   const gear = f.document.createElement("button"); gear.id = "op-pm-settings-button"; f.document.body.append(gear);
@@ -798,4 +817,16 @@ test("PM entries reveal Team from Past with known and unknown members", async ()
   past.click(); gear.click(); assert.equal(team.hidden, false); assert.equal(f.surface.element.querySelector('[aria-label="Display name"]').value, "Two");
   past.click(); f.document.dispatchEvent(new f.window.CustomEvent("settings:open", { detail: { target: "project-manager" } }));
   assert.equal(team.hidden, false); assert.deepEqual(sent, []); f.surface.dispose();
+});
+
+
+test("Agents labels its project execution and opens the existing shared PM editor", async () => {
+  const { createProjectExecutionPolicyModel } = await import('../project-execution-policy-model.js');
+  const policy = createProjectExecutionPolicyModel('alpha');
+  const f = await fixture({ executionModel: policy.model });
+  assert.match(f.surface.element.querySelector('[data-project-execution-status]')?.textContent || '', /Alpha.*Unknown/);
+  let request = null; f.document.addEventListener('settings:open', event => { request = event.detail; });
+  [...f.surface.element.querySelectorAll('button')].find(button => button.textContent === 'Project Manager settings').click();
+  assert.deepEqual(request, { target: 'project-manager', surface_owner: 'pm' });
+  assert.deepEqual(f.added, []); f.surface.dispose();
 });

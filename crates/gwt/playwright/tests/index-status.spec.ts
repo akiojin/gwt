@@ -1128,3 +1128,80 @@ async function installIndexStatusBackend(page, indexStatus, options = {}) {
     });
   }, { indexStatusPayload: indexStatus, optionsPayload: options });
 }
+
+test("ordinary reconnect recovers an interrupted Index search", async ({ page }, info) => {
+  const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+  test.skip(!base, "requires browser-check isolated backend");
+  const release = await acquireLiveGwtBackendLock(base!, info);
+  const errors: string[] = [];
+  const requests: any[] = [];
+  let lostReply = false;
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  page.on("pageerror", error => errors.push(String(error)));
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const theme = info.project.name.includes("light") ? "light" : "dark";
+  await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+  await page.routeWebSocket(/\/ws(?:\?|$)/, socket => {
+    const server = socket.connectToServer();
+    socket.onMessage(message => {
+      const request = typeof message === "string" ? JSON.parse(message) : null;
+      if (request?.kind === "search_project_index") {
+        requests.push(request);
+        // Exercise real read/reply transport without provisioning the semantic runtime.
+        server.send(JSON.stringify({ ...request, query: "" }));
+      } else server.send(message);
+    });
+    server.onMessage(message => {
+      const reply = typeof message === "string" ? JSON.parse(message) : null;
+      if (reply?.kind === "project_index_search_results" && reply.request_id === requests[0]?.request_id) {
+        lostReply = true;
+      } else socket.send(message);
+    });
+  });
+  try {
+    await gotoLiveGwt(page, base!, { enableTestBridge: true });
+    const { root } = await openIndexHealthPanel(page, true, true);
+    await root.locator("[data-index-tab='search']").click();
+    await root.evaluate(root => {
+      const scopes = Array.from(root.querySelectorAll<HTMLButtonElement>(".index-scope-button"), button => button.dataset.scope);
+      for (const scope of scopes) {
+        // Each click rebuilds scope controls, so resolve the current button.
+        const button = root.querySelector<HTMLButtonElement>(`[data-scope="${scope}"]`)!;
+        if ((button.getAttribute("aria-pressed") === "true") !== (scope === "memory")) button.click();
+      }
+      root.querySelector<HTMLButtonElement>("[data-match-mode='all_terms']")!.click();
+      const input = root.querySelector<HTMLInputElement>(".index-search-input")!;
+      input.value = "pending reconnect search";
+      input.dispatchEvent(new Event("input"));
+      root.querySelector<HTMLFormElement>("form")!.requestSubmit();
+      (window as any).__indexReconnectInput = input;
+    });
+    await expect.poll(() => lostReply).toBe(true);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({ query: "pending reconnect search", scopes: ["memory"], match_mode: "all_terms" });
+    await expect(root.locator(".index-search-layout")).toHaveAttribute("aria-busy", "true");
+    await page.evaluate(() => {
+      const socket = (window as any).__gwtPlaywrightSockets.findLast((socket: WebSocket) =>
+        socket.readyState === WebSocket.OPEN && new URL(socket.url).searchParams.has("repo_hash"));
+      if (!socket) throw new Error("missing owning project socket");
+      socket.close();
+    });
+    await expect.poll(() => requests.length).toBe(2);
+    expect(requests[1].request_id).toBeGreaterThan(requests[0].request_id);
+    expect({ ...requests[1], request_id: requests[0].request_id }).toEqual(requests[0]);
+    await expect(root.locator(".index-search-layout")).toHaveAttribute("aria-busy", "false");
+    await expect(root.locator(".index-search-status")).toHaveText("No indexed results");
+    await expect(root.locator(".index-search-input")).toHaveValue("pending reconnect search");
+    await expect(root.locator("[data-match-mode='all_terms']")).toHaveAttribute("aria-pressed", "true");
+    await expect(root.locator(".index-scope-button[aria-pressed='true']")).toHaveText(["Memory"]);
+    expect(await root.evaluate(root => root.querySelector(".index-search-input") === (window as any).__indexReconnectInput)).toBe(true);
+    await expect(root.locator(".index-run-button")).toBeEnabled();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    await info.attach("Index ordinary reconnect", { body: await root.screenshot(), contentType: "image/png" });
+    await info.attach("Index reconnect requests", { body: JSON.stringify(requests), contentType: "application/json" });
+    expect(requests).toHaveLength(2);
+    expect(errors).toEqual([]);
+  } finally {
+    await release();
+  }
+});

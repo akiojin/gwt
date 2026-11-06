@@ -399,6 +399,47 @@ pub(super) fn codex_reasoning_options_for_model(model: &str) -> Vec<ReasoningDis
         .collect()
 }
 
+pub(super) fn reasoning_options_for_agent_model(
+    agent_id: &str,
+    model: &str,
+    ultracode_supported: bool,
+) -> Vec<ReasoningDisplayOption> {
+    match agent_id {
+        "codex" => codex_reasoning_options_for_model(model),
+        "grok" => GROK_REASONING_OPTIONS.to_vec(),
+        "claude" if is_claude_opus_tier_model(model) => {
+            let mut options = CLAUDE_OPUS_REASONING_OPTIONS.to_vec();
+            if !ultracode_supported {
+                options.retain(|option| option.stored_value != "ultracode");
+            }
+            options
+        }
+        "claude" if model == "sonnet" => CLAUDE_SONNET_REASONING_OPTIONS.to_vec(),
+        _ => Vec::new(),
+    }
+}
+
+/// Project missing saved tuning through the same defaults as a fresh wizard.
+pub(crate) fn default_launch_tuning(
+    agent_id: &str,
+    saved_model: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let models = current_model_options(agent_id);
+    let model = saved_model.unwrap_or_else(|| models.first().copied().unwrap_or(""));
+    // Ultracode is an explicit, non-default capability; default resolution
+    // must neither select it nor infer the installed tool's capability.
+    let options = reasoning_options_for_agent_model(agent_id, model, false);
+    let reasoning = options
+        .iter()
+        .find(|option| option.is_default)
+        .or_else(|| options.first())
+        .map(|option| option.stored_value.to_string());
+    (
+        is_explicit_model_selection(model).then(|| model.to_string()),
+        reasoning,
+    )
+}
+
 pub(super) const EXECUTION_MODE_OPTIONS: [ExecutionModeOption; 3] = [
     ExecutionModeOption {
         label: "Normal",

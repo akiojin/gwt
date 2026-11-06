@@ -49,6 +49,7 @@ const ROOT_MODULES = new Set([
   // SPEC-2013 FR-012 — confirm modal shown when closing a project tab
   // while one or more agent panes are still running.
   "close-project-confirm-modal.js",
+  "project-execution-policy-model.js",
   // Issue #2704 — terminal-focus guard for modal-friendly workspace renders.
   "clone-modal-focus-guard.js",
   "custom-agent-env-editor.js",

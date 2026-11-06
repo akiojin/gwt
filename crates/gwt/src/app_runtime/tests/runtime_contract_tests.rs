@@ -1216,6 +1216,7 @@ fn terminal_agent_error_invalidates_input_even_when_pane_is_kept_for_diagnostics
         &[WindowPreset::Agent],
     );
     let mut gui = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    gui.blocking_tasks = BlockingTaskSpawner::queued().0;
     let gui_id = combined_window_id("tab-1", &gui.tabs[0].workspace.persisted().windows[0].id);
     let context = gui.test_context();
     let identity = owner.client().identity().unwrap().clone();
@@ -1333,8 +1334,9 @@ fn terminal_agent_error_invalidates_input_even_when_pane_is_kept_for_diagnostics
     assert!(gui.tracked_window_exists(&gui_id));
     assert_eq!(gui.runtimes[&gui_id].incarnation, probe.incarnation);
     assert_eq!(gui.runtimes[&gui_id].owner_pane_id, probe.id);
-    let reconnect =
+    let mut reconnect =
         gui.handle_frontend_event("diagnostic-client".into(), FrontendEvent::FrontendReady);
+    reconnect.extend(drain_owner_snapshot_completions(&mut gui));
     assert!(
         reconnect.iter().any(|event| matches!(&event.event,
         BackendEvent::TerminalSnapshot { id, .. } if id == &gui_id)),

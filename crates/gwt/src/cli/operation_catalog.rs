@@ -667,6 +667,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "pm.request_tasks.capture",
+        aliases: &[],
+    },
+    Operation {
         name: "pm.status",
         aliases: &[],
     },
@@ -764,6 +768,14 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "pr.view",
+        aliases: &[],
+    },
+    Operation {
+        name: "project.execution.choose",
+        aliases: &[],
+    },
+    Operation {
+        name: "project.execution.status",
         aliases: &[],
     },
     Operation {

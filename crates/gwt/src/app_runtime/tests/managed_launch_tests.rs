@@ -4563,7 +4563,7 @@ fn agent_clean_exit_frees_the_monitor_slot_like_an_error_does() {
             u32::from(exit_code)
         );
         let monitor = owner_fixture_block_on(async {
-            // test-hygiene: allow-wall-clock-deadline Bounds the authoritative census after exact child reap, using the existing retained-error observation barrier.
+            // test-hygiene: allow-wall-clock-deadline Bounds actual Monitor/census convergence after the confirmed exit; observed state controls progress.
             tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
                 loop {
                     owner.wait_monitor_idle().await.unwrap();
@@ -4575,7 +4575,7 @@ fn agent_clean_exit_frees_the_monitor_slot_like_an_error_does() {
                 }
             })
             .await
-            .expect("the confirmed exit must be reflected in the authoritative Monitor census")
+            .expect("the confirmed exit must release and notify its Monitor slot")
         });
         assert_eq!(
             monitor.active_count(),

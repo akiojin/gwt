@@ -364,10 +364,12 @@ test("Works distinguishes measured zero from unavailable tokens and thirty-minut
 test("Works retains native input and fixed names when runtime state and purpose change", async () => {
   const f = await fixture(); f.surface.openWork("one"); const input = f.runtimes.get("one");
   const nativeRoot = input.parentElement, removedRoots = [];
+  const layouts = f.layouts.length;
   const observer = new f.window.MutationObserver(records => { for (const record of records) removedRoots.push(...record.removedNodes); });
   observer.observe(nativeRoot.parentElement, { childList: true });
   f.windowCatalogModel.update(() => ({ catalog: { ...catalog(windows.map(w => w.id === "one" ? { ...w, dynamic_title: "New purpose" } : w), 2), runtimeStates: { one: "error" } } }));
   f.flush(); await Promise.resolve();
+  assert.equal(f.layouts.length, layouts + 1, "selected header changes request layout after model rendering");
   assert.equal(removedRoots.includes(nativeRoot), false, "metadata rendering must not detach a focused native root");
   observer.disconnect();
   assert.equal(f.surface.element.querySelector(".works-full-name").textContent, "One");
@@ -639,7 +641,7 @@ async function nativeLifetimeFixture(outputBatcher = null) {
     Terminal: NativeTerminal, FitAddon: class {}, XTERM_THEME_DARK: {}, resolveTerminalFontFamily: () => "mono", isBlinkBrowser: () => false,
     installTerminalViewportRefreshHandlers: () => noop, createTerminalSnapshotWriteCoordinator: () => ({}),
   };
-  for (const name of ["renderedTerminalPackets", "decoderMap", "windowRuntimeStateMap", "windowRuntimeStateSinceMap", "renderedWindowElementKeys", "renderedRuntimeStatusKeys", "renderedAgentKanbanBodyKeys", "renderedIssuePreviewBodyKeys", "renderedIssueWindowHeaderKeys", "pendingOutputMap", "pendingSnapshotMap", "branchListStateMap", "boardStateMap", "logStateMap"]) env[name] = new Map();
+  for (const name of ["renderedTerminalPackets", "decoderMap", "windowRuntimeStateMap", "windowRuntimeStateSinceMap", "renderedWindowElementKeys", "renderedRuntimeStatusKeys", "renderedAgentKanbanBodyKeys", "renderedIssuePreviewBodyKeys", "renderedIssueWindowHeaderKeys", "pendingSnapshotMap", "branchListStateMap", "boardStateMap", "logStateMap"]) env[name] = new Map();
   const factory = new Function(...Object.keys(env), Object.values(definitions).join("\n") + `\nreturn { adapters: {${Object.entries(adapters).map(([key,value]) => `${key}:${value}`).join(",")}}, bind(surface){worksSurface=surface;}, workspace(next){appState=next;return renderWorkspace(next.tabs[0].workspace);}, create:createTerminalRuntime, leave(){setWorksHost(null);}, enter(){setWorksHost(document.querySelector("main"));} };`);
   const api = factory(...Object.values(env));
   const surface = createWorksSurface({ document, projectKey: "project", windowCatalogModel: catalog, activityModel: activity.model,
@@ -649,26 +651,45 @@ async function nativeLifetimeFixture(outputBatcher = null) {
     dispose() { surface.dispose(); activity.model.dispose(); catalog.dispose(); } };
 }
 
+test("Works owned native preserves its input mode when another host requests the same Session", async () => {
+  const f = await nativeLifetimeFixture();
+  const root = f.runtime.terminalContainer, terminal = f.runtime.terminal;
+  try {
+    assert.ok(f.api.create("one", f.original) === f.runtime);
+    assert.ok(f.runtime.terminalContainer === root && f.runtime.terminal === terminal);
+    assert.equal(f.runtime.readOnly, false, "another host cannot downgrade the current interactive owner");
+    assert.equal(terminal.options.disableStdin, false);
+    f.activity.clearAgentActivity();
+    assert.equal(f.runtime.readOnly, true);
+    assert.ok(f.api.create("one", f.original) === f.runtime);
+    assert.ok(f.runtime.terminalContainer === root && f.runtime.terminal === terminal);
+    assert.equal(f.runtime.readOnly, true, "another host cannot enable an owner after authority loss");
+    assert.equal(terminal.options.disableStdin, true);
+  } finally { f.dispose(); }
+});
+
 test("Works actual native helpers retain an omitted owner and release it on measured removal without a later workspace", async () => {
   const f = await nativeLifetimeFixture();
   const root = f.runtime.terminalContainer;
   const gap = projectCatalog([]).appState;
   f.api.leave();
   assert.ok(f.runtime.terminalContainer === f.original, "fresh departure first returns the native normally");
-  for (const name of ["decoderMap", "pendingOutputMap", "pendingSnapshotMap", "renderedTerminalPackets"]) f.env[name].set("one", "owned old work");
+  for (const name of ["decoderMap", "pendingSnapshotMap", "renderedTerminalPackets"]) f.env[name].set("one", "owned old work");
   f.api.workspace(gap);
   assert.deepEqual(f.failures, []);
   assert.ok(f.terminalMap.get("one") === f.runtime, "temporary catalog omission retains native runtime before coherent publish");
+  assert.equal(f.events.filter(event => event === "clear:one").length, 0, "retained native keeps its bounded output queue");
   assert.equal(f.runtime.readOnly, true);
   assert.equal(f.runtime.terminal.disposed, false);
-  for (const name of ["decoderMap", "pendingOutputMap", "pendingSnapshotMap", "renderedTerminalPackets"]) assert.equal(f.env[name].get("one"), "owned old work", `${name} follows retained native lifetime`);
+  for (const name of ["decoderMap", "pendingSnapshotMap", "renderedTerminalPackets"]) assert.equal(f.env[name].get("one"), "owned old work", `${name} follows retained native lifetime`);
   f.api.enter(); f.surface.sync();
   assert.ok(f.runtime.terminalContainer === root, "stale reentry displays the same native in the original Works root");
   assert.equal(f.runtime.terminal.buffer.active.viewportY, 7);
   f.activity.applyAgentActivitySnapshot(activitySnapshot([], 1));
   assert.equal(f.terminalMap.has("one"), false, "authoritative census removal releases a shell-less native synchronously");
   assert.equal(f.runtime.terminal.disposed, true);
-  for (const name of ["decoderMap", "pendingOutputMap", "pendingSnapshotMap", "renderedTerminalPackets"]) assert.equal(f.env[name].has("one"), false, `${name} is released with the exact native`);
+  assert.equal(f.events.filter(event => event === "clear:one").length, 1, "exact native disposal clears its bounded output queue");
+  for (const name of ["decoderMap", "pendingSnapshotMap", "renderedTerminalPackets"]) assert.equal(f.env[name].has("one"), false, `${name} is released with the exact native`);
   assert.equal(f.events.filter(event => event === "dispose").length, 1);
   f.dispose(); assert.equal(f.events.filter(event => event === "dispose").length, 1);
   const unloading = await nativeLifetimeFixture();
@@ -755,13 +776,12 @@ test("Works removed shell without a native clears old queued bytes before same-i
   // Contained/unmounted shells legitimately have no native; seed that boundary
   // while exercising the actual app remove_window and createRuntime helpers.
   f.terminalMap.delete("one"); f.previous.clear(); f.runtime.terminal.dispose();
-  f.env.pendingOutputMap.set("one", ["old output"]);
   f.env.pendingSnapshotMap.set("one", "old snapshot");
   f.env.decoderMap.set("one", "old decoder");
   batcher.enqueue("one", "old batched output");
   f.api.workspace(projectCatalog([]).appState);
   assert.deepEqual(f.failures, []);
-  for (const name of ["pendingOutputMap", "pendingSnapshotMap", "decoderMap"]) {
+  for (const name of ["pendingSnapshotMap", "decoderMap"]) {
     assert.equal(f.env[name].has("one"), false, `${name} must not outlive a removed shell without a native`);
   }
   assert.equal(batcher.pendingCount("one"), 0);
@@ -769,8 +789,7 @@ test("Works removed shell without a native clears old queued bytes before same-i
   const root = f.shell.ownerDocument.createElement("div");
   const fresh = f.api.create("one", root, { nativeHost: true });
   assert.equal(fresh.nativeIdentity.session_id, "new-session");
-  assert.deepEqual(fresh.deferredWrites, []);
-  assert.equal(f.env.pendingOutputMap.has("one"), false);
+  assert.equal(batcher.pendingCount("one"), 0);
   assert.equal(f.env.pendingSnapshotMap.has("one"), false);
   batcher.flushNow();
   assert.deepEqual(writes, [], "the new Session cannot receive the old id-keyed batch");

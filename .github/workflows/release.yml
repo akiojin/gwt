@@ -124,12 +124,12 @@ jobs:
             release_name: gwt-linux-aarch64
             archive_name: gwt-linux-aarch64.tar.gz
           - platform: macos-x86_64
-            os: macos-14
+            os: macos-15
             target: x86_64-apple-darwin
             release_name: gwt-macos-x86_64
             archive_name: gwt-macos-x86_64.tar.gz
           - platform: macos-aarch64
-            os: macos-14
+            os: macos-15
             target: aarch64-apple-darwin
             release_name: gwt-macos-arm64
             archive_name: gwt-macos-arm64.tar.gz
@@ -146,8 +146,8 @@ jobs:
         run: |
           set -e
           rm -rf "$HOME/.cargo" "$HOME/.rustup" || true
-          # The macos-14 image ships a stray rustup binary outside
-          # ~/.cargo/bin, so dtolnay's `command -v rustup` keeps finding it
+          # macOS images can provide rustup outside ~/.cargo/bin via Homebrew.
+          # After the home reset, dtolnay's `command -v rustup` still finds it
           # and skips both its install and the $CARGO_HOME/bin PATH update.
           # That leaves no rustc/cargo proxy under ~/.cargo/bin and aborts
           # later steps with "rustc: command not found". Run rustup-init
@@ -332,8 +332,8 @@ jobs:
         run: |
           set -e
           rm -rf "$HOME/.cargo" "$HOME/.rustup" || true
-          # The macos-14 image ships a stray rustup binary outside
-          # ~/.cargo/bin, so dtolnay's `command -v rustup` keeps finding it
+          # macOS images can provide rustup outside ~/.cargo/bin via Homebrew.
+          # After the home reset, dtolnay's `command -v rustup` still finds it
           # and skips both its install and the $CARGO_HOME/bin PATH update.
           # That leaves no rustc/cargo proxy under ~/.cargo/bin and aborts
           # later steps with "rustc: command not found". Run rustup-init

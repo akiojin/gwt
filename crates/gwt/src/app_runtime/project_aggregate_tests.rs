@@ -614,6 +614,7 @@ fn project_owner_health_is_project_scoped_and_rejects_stale_context() {
     );
     assert!(runtime.runtimes["a::agent"].exit_confirmed);
 
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
     let gap = runtime.handle_project_owner_event(
         &a,
         2,
@@ -629,11 +630,10 @@ fn project_owner_health_is_project_scoped_and_rejects_stale_context() {
             screen_seq: 8,
         },
     );
-    assert!(gap.iter().any(|event| matches!(&event.event,
-        BackendEvent::TerminalSnapshot { data_base64, .. }
-        if base64::engine::general_purpose::STANDARD.decode(data_base64).unwrap() == b"full repaired ANSI")
-        && event.terminal_stream_seq == Some(8)),
-        "a conflated owner stream must repair from its authoritative ANSI screen");
+    assert!(!gap.iter().any(|event| matches!(event.event, BackendEvent::TerminalSnapshot { .. })),
+        "a visible-only frame cannot replace the terminal's retained history");
+    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else { unreachable!() };
+    assert_eq!(tasks.lock().unwrap().len(), 1, "request the owner's semantic snapshot");
     assert!(
         !gap.iter()
             .any(|event| matches!(event.event, BackendEvent::TerminalOutput { .. })),
@@ -678,6 +678,13 @@ fn project_owner_health_is_project_scoped_and_rejects_stale_context() {
         BackendEvent::TerminalSnapshot { data_base64, .. }
         if base64::engine::general_purpose::STANDARD.decode(data_base64).unwrap() == b"final ANSI")
         && event.terminal_stream_seq == Some(9)));
+    let restored = runtime.request_owner_snapshot("a::agent", Some("reconnected-client".into()));
+    assert!(restored.iter().any(|event| matches!(&event.event,
+        BackendEvent::TerminalSnapshot { data_base64, .. }
+        if base64::engine::general_purpose::STANDARD.decode(data_base64).unwrap() == b"final ANSI")
+        && event.terminal_stream_seq == Some(9)
+        && event.target == DispatchTarget::Client("reconnected-client".into())),
+        "closed diagnostic panes restore the final semantic snapshot without a live owner");
     assert!(runtime
         .handle_project_owner_event(&a, 2, &identity, output(7))
         .is_empty());
@@ -691,7 +698,7 @@ fn project_owner_health_is_project_scoped_and_rejects_stale_context() {
     }))
     .unwrap();
     let legacy = runtime.handle_project_owner_event(&a, 2, &identity, legacy);
-    assert!(legacy
+    assert!(!legacy
         .iter()
         .any(|event| matches!(event.event, BackendEvent::TerminalSnapshot { .. })));
     assert!(

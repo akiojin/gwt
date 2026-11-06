@@ -4,7 +4,6 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use super::window::PeerPaneCloseReply;
-use base64::Engine as _;
 
 use super::{
     combined_window_id, AppRuntime, BackendEvent, ClientId, OutboundEvent, UserEvent,
@@ -453,30 +452,15 @@ impl AppRuntime {
         }
     }
 
-    /// Immediate repair comes from the immutable owner cache; a fresh private snapshot follows.
+    /// Repair uses the owner's semantic history; the live cache is visible-only.
     pub(crate) fn client_pane_snapshot_repair_events(
-        &self,
+        &mut self,
         client_id: &str,
         pane_ids: &[String],
     ) -> Vec<OutboundEvent> {
         let mut events = Vec::new();
         for id in pane_ids {
-            if let Some(runtime) = self.runtimes.get(id) {
-                if !runtime.screen_ansi.is_empty() {
-                    events.push(
-                        OutboundEvent::reply(
-                            client_id,
-                            BackendEvent::TerminalSnapshot {
-                                id: id.clone(),
-                                data_base64: base64::engine::general_purpose::STANDARD
-                                    .encode(&runtime.screen_ansi),
-                            },
-                        )
-                        .with_terminal_stream_seq(Some(runtime.screen_seq)),
-                    );
-                }
-                events.extend(self.request_owner_snapshot(id, Some(client_id.to_string())));
-            }
+            events.extend(self.request_owner_snapshot(id, Some(client_id.to_string())));
         }
         events
     }

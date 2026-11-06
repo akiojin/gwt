@@ -959,7 +959,25 @@ type DeferredAgentFrontend = (
     crate::agent_capability::AgentFrontendRequest,
 );
 
+#[derive(Debug)]
+enum ProjectChoiceError {
+    BeforeSave(String),
+    Unconfirmed(String),
+}
+impl From<String> for ProjectChoiceError {
+    fn from(message: String) -> Self {
+        Self::BeforeSave(message)
+    }
+}
+impl From<&str> for ProjectChoiceError {
+    fn from(message: &str) -> Self {
+        Self::BeforeSave(message.into())
+    }
+}
+
 pub(crate) struct OwnerState {
+    #[cfg(test)]
+    test_continue_before_receive: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>,
     #[cfg(any(test, feature = "test-gh-guard"))]
     test_operation_clock: Option<std::time::Instant>,
     issue_client_factory: super::launch::RuntimeIssueClientFactory,
@@ -987,6 +1005,7 @@ pub(crate) struct OwnerState {
     pub(crate) root: PathBuf,
     pub(crate) project_key: String,
     pub(crate) runtimes: HashMap<String, WindowRuntime>,
+    project_stop_operation: Option<String>,
     pub(crate) clients: ClientHub,
     pub(crate) issuer: AgentCapabilityIssuer,
     pub(crate) host_instance_id: String,
@@ -1046,6 +1065,8 @@ impl OwnerState {
             })
             .unwrap_or_else(crate::persistence::empty_workspace_state);
         let state = Self {
+            #[cfg(test)]
+            test_continue_before_receive: None,
             issue_client_factory: super::launch::default_issue_client_factory(),
             #[cfg(any(test, feature = "test-gh-guard"))]
             test_dispatch_barriers: Vec::new(),
@@ -1069,6 +1090,7 @@ impl OwnerState {
             root,
             project_key,
             runtimes: HashMap::new(),
+            project_stop_operation: None,
             clients,
             issuer,
             host_instance_id,
@@ -1158,8 +1180,19 @@ impl OwnerState {
     }
 
     fn run(mut self, receiver: mpsc::Receiver<OwnerMessage>) -> Vec<oneshot::Sender<()>> {
+        let mut continue_active = false;
+        let mut next_project_policy_check = std::time::Instant::now();
         loop {
-            if !self.stopping && self.gui_presence.expired(std::time::Instant::now()) {
+            let now = std::time::Instant::now();
+            if now >= next_project_policy_check {
+                self.reconcile_project_execution_stop();
+                continue_active = self.has_unfinished_project_continue();
+                next_project_policy_check = now + std::time::Duration::from_secs(1);
+            }
+            if !self.stopping
+                && !continue_active
+                && self.gui_presence.expired(std::time::Instant::now())
+            {
                 self.begin_shutdown(None);
             }
             if self.finish_shutdown_if_drained() {
@@ -1176,15 +1209,31 @@ impl OwnerState {
                 .chain(
                     (!self.stopping)
                         .then(|| self.gui_presence.deadline())
-                        .flatten(),
+                        .flatten()
+                        .map(|deadline| {
+                            if continue_active {
+                                // Queue and execution receipts can finish without a mailbox event.
+                                next_project_policy_check
+                            } else {
+                                deadline
+                            }
+                        }),
                 )
                 .min();
+            #[cfg(test)]
+            if let Some((ready, resume)) = self.test_continue_before_receive.take() {
+                let _ = ready.send(());
+                let _ = resume.recv();
+            }
             let message = if let Some(deadline) = deadline {
                 match receiver
                     .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
                 {
                     Ok(message) => message,
-                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        next_project_policy_check = std::time::Instant::now();
+                        continue;
+                    }
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 }
             } else {
@@ -1193,6 +1242,15 @@ impl OwnerState {
                     Err(_) => break,
                 }
             };
+            // Output does not change the lifetime authorization frontier. Keep
+            // its policy I/O on the existing one-second tick; control and
+            // runtime transitions still reconcile on the very next turn.
+            if !matches!(
+                &message,
+                OwnerMessage::Pane(PaneRuntimeEvent::Output { .. })
+            ) {
+                next_project_policy_check = std::time::Instant::now();
+            }
             #[cfg(any(test, feature = "test-gh-guard"))]
             let _clock = self
                 .test_operation_clock
@@ -1910,7 +1968,7 @@ impl OwnerState {
                     if attempted && self.exact(&identity.id, identity.incarnation).is_ok() {
                         self.begin_policy_input(&identity.id, &data);
                     }
-                    self.pm_wake_permits.finish(&identity.operation_id);
+                    self.pm_wake_permits.finish_mobile(&identity, &transaction);
                     transaction.finish(attempted, result, observation);
                 }
                 OwnerMessage::PmWakeWritten {
@@ -2271,10 +2329,581 @@ impl OwnerState {
         });
     }
 
+    fn project_execution_status(
+        &self,
+        operation_id: Option<&str>,
+    ) -> crate::protocol::ProjectExecutionStatusView {
+        let mut status = crate::project_execution_policy::local_status(&self.root, operation_id);
+        if status.generation == 0 {
+            status.generation = gwt_core::project_execution_policy::load(&self.root)
+                .ok()
+                .and_then(|policy| policy.last_operation().map(|receipt| receipt.generation))
+                .unwrap_or(0);
+        }
+        let observed_continue = status.choice
+            == Some(gwt_core::project_execution_policy::Choice::Continue)
+            && status.start_reason == "runtime_observation_unavailable";
+        let mut running = false;
+        let mut runtime_unavailable = false;
+        for runtime in self.runtimes.values() {
+            match runtime.pty.try_wait() {
+                Ok(None) => running = true,
+                Ok(Some(_)) => {}
+                Err(_) => runtime_unavailable = true,
+            }
+        }
+        if runtime_unavailable {
+            status.effective_state = "unknown".into();
+            status.start_reason = "runtime_status_unavailable".into();
+            status.degraded = true;
+            status.recovery_operation = Some("project.execution.status".into());
+            return status;
+        }
+        let draining = !self.pending.is_empty()
+            || !self.closing.is_empty()
+            || !self.retirements.is_empty()
+            || self.retiring != 0;
+        if status.choice == Some(gwt_core::project_execution_policy::Choice::Stop)
+            && status.view_state != "open"
+            && status.effective_state != "unknown"
+            && draining
+        {
+            status.effective_state = "stopping".into();
+            status.start_reason = "drain_pending".into();
+            status.degraded = false;
+            status.recovery_operation = None;
+        } else if running
+            && (observed_continue
+                || (status.effective_state != "stopping"
+                    && status.effective_state != "unknown"
+                    && status.effective_state != "selection_pending"))
+        {
+            status.effective_state = "running".into();
+            if status.choice == Some(gwt_core::project_execution_policy::Choice::Continue) {
+                status.start_reason = "authorized_resume".into();
+                status.degraded = false;
+            }
+        } else if status.choice == Some(gwt_core::project_execution_policy::Choice::Continue)
+            && !running
+            && self.pending.is_empty()
+            && status.start_reason != "policy_unreadable"
+            && status.start_reason != "runtime_observation_unreadable"
+        {
+            status.effective_state = "waiting".into();
+            status.start_reason = "user_continue".into();
+            status.degraded = false;
+        }
+        status
+    }
+
+    fn choose_project_execution(
+        &mut self,
+        mut request: gwt_core::project_execution_policy::ChoiceRequest,
+        caller: Option<&str>,
+        expected_view_revision: Option<u64>,
+    ) -> Result<serde_json::Value, ProjectChoiceError> {
+        use gwt_core::project_execution_policy::{self as store, Choice, EffectState};
+        self.reconcile_project_execution_stop();
+        let corruption_digest =
+            crate::project_execution_policy::policy_corruption_digest(&self.root);
+        let policy = match store::load(&self.root) {
+            Ok(policy) => policy,
+            Err(error) if corruption_digest.is_some() => {
+                tracing::warn!(%error, "Project policy needs explicit digest-bound recovery");
+                store::Policy {
+                    schema_version: 1,
+                    project_key: self.project_key.clone(),
+                    revision: 0,
+                    choice: None,
+                    consent_source_id: None,
+                    actor: None,
+                    decided_at: None,
+                    authorized_work_lineage: Vec::new(),
+                    receipts: Vec::new(),
+                }
+            }
+            Err(error) => return Err(error.to_string().into()),
+        };
+        let mut pm_attempt = None;
+        if let Some(existing) = policy.operation(&request.operation_id) {
+            if existing.before_revision != request.expected_revision
+                || existing.generation != request.generation
+                || existing.choice != request.choice
+                || existing.actor != request.actor
+                || existing.consent_source_id != request.consent_source_id
+            {
+                return Err("operation_id is already bound to a different Project choice".into());
+            }
+            self.reconcile_project_execution_stop();
+            let status = self.project_execution_status(Some(&request.operation_id));
+            return Ok(json!({"receipt":status.operation_outcome,"status":status}));
+        }
+        if request.choice == Choice::Continue
+            && policy.choice == Some(Choice::Stop)
+            && (policy
+                .last_operation()
+                .is_none_or(|receipt| receipt.effect_state != EffectState::Confirmed)
+                || !self.pending.is_empty()
+                || !self.closing.is_empty()
+                || !self.retirements.is_empty()
+                || self.retiring != 0)
+        {
+            return Err("Project Stop is still draining or unknown; reconcile the existing operation before Continue".into());
+        }
+        if request.choice == Choice::Continue && !self.pending.is_empty() {
+            return Err(
+                "Project launches are still pending; retry Continue after they settle".into(),
+            );
+        }
+        if policy.receipts.iter().any(|receipt| {
+            receipt.choice == Choice::Stop
+                && receipt.effect_state != EffectState::Confirmed
+                && self.project_stop_operation.as_deref() != Some(receipt.operation_id.as_str())
+        }) {
+            return Err("A previous owner's Stop is unconfirmed; reconcile the original operation before choosing again".into());
+        }
+        if let Some(caller) = caller {
+            let local = crate::pm_registry::load_pm_prefs(
+                &crate::pm_registry::pm_prefs_path_for_repo_path(&self.root),
+            )
+            .ok()
+            .and_then(|prefs| prefs.registration);
+            let registered = local
+                .as_ref()
+                .is_some_and(|registration| registration.session_id == caller)
+                || crate::pm_registry::pm_repository_key(&self.root).is_some_and(|repository| {
+                    crate::pm_registry::pm_registrations_for_repository(&repository)
+                        .iter()
+                        .any(|registration| registration.registration.session_id == caller)
+                });
+            if !registered || request.actor != caller {
+                return Err("Project choice requires the currently registered PM session".into());
+            }
+            let intent = gwt_core::pm_authorization::OperationIntent {
+                operation: "project.execution.choose".into(),
+                params: json!({
+                    "operation_id": request.operation_id, "expected_revision": request.expected_revision,
+                    "expected_generation": request.generation, "choice": request.choice,
+                }),
+            };
+            pm_attempt = Some(
+                gwt_core::pm_authorization::validate_project_choice_attempt(
+                    &self.root,
+                    &intent,
+                    caller,
+                    &request.consent_source_id,
+                )
+                .map_err(|error| error.to_string())?,
+            );
+        }
+        let observation_lock = crate::project_execution_policy::lock_observation(&self.root)
+            .map_err(|error| error.to_string())?;
+        let observed = crate::project_execution_policy::observation_unlocked(&self.root)?;
+        if observed
+            .as_ref()
+            .is_some_and(crate::project_execution_policy::observation_is_revoked)
+        {
+            return Err("Project view observation is invalidated; reconcile a fresh actual view before choosing".into());
+        }
+        if let Some(attempt) = pm_attempt.as_ref() {
+            let owner_identity = json!({"pid":std::process::id(),"host_started_at":crate::process::host_process_start_time(std::process::id()),"host_instance_id":self.host_instance_id});
+            if attempt.before.get("execution_owner") != Some(&owner_identity) {
+                return Err("Project execution owner changed after PM choice authorization".into());
+            }
+            let host_observation = observed.as_ref().map(|observation| json!({"host_pid":observation.host_pid,"host_started_at":observation.host_started_at,"generation":observation.generation,"view_set_revision":observation.view_set_revision})).unwrap_or(serde_json::Value::Null);
+            if attempt.before.get("host_observation") != Some(&host_observation) {
+                return Err(
+                    "Project GUI host incarnation changed after PM choice authorization".into(),
+                );
+            }
+            if attempt
+                .before
+                .get("view_set_revision")
+                .and_then(serde_json::Value::as_u64)
+                != Some(
+                    observed
+                        .as_ref()
+                        .map_or(0, |observation| observation.view_set_revision),
+                )
+            {
+                return Err("Project view set changed after PM choice authorization".into());
+            }
+            let approved_digest = attempt
+                .before
+                .get("policy_corruption_digest")
+                .and_then(serde_json::Value::as_str);
+            if approved_digest != corruption_digest.as_deref() {
+                return Err("Project policy readset changed after PM choice authorization".into());
+            }
+        }
+        if caller.is_none() {
+            let valid = observed
+                .as_ref()
+                .and_then(|observation| observation.close_intents.get(&request.operation_id))
+                .is_some_and(|intent| {
+                    intent.request == request
+                        && Some(intent.view_set_revision) == expected_view_revision
+                        && intent.policy_corruption_digest == corruption_digest
+                });
+            if !valid {
+                return Err("Project choice has no accepted client-bound Close intent".into());
+            }
+        }
+        let current_generation = observed
+            .as_ref()
+            .map(|observed| observed.generation)
+            .or_else(|| policy.last_operation().map(|receipt| receipt.generation));
+        if current_generation != Some(request.generation) {
+            return Err("Project generation changed; reconcile project.execution.status".into());
+        }
+        if let Some(revision) = expected_view_revision {
+            if observed.as_ref().map(|observed| observed.view_set_revision) != Some(revision) {
+                return Err("Project view set changed; preview Close again".into());
+            }
+        }
+        if request.choice == Choice::Continue
+            && !observed
+                .as_ref()
+                .is_some_and(|observed| observed.last_open_receipt.is_some())
+            && policy.choice != Some(Choice::Continue)
+            && !self.runtimes.values().any(|runtime| {
+                runtime.current.load(Ordering::Acquire)
+                    && runtime.child_started_at.is_some_and(|started| {
+                        runtime.pty.process_id().is_some_and(|pid| {
+                            crate::process::host_process_start_time(pid) == Some(started)
+                        })
+                    })
+                    && matches!(runtime.pty.try_wait(), Ok(None))
+            })
+        {
+            return Err("Continue requires a previously admitted actual Project view; it cannot cold start a Project".into());
+        }
+        let mut lineage = policy.authorized_work_lineage.clone();
+        for (pane_id, runtime) in &self.runtimes {
+            lineage.push(format!("pane:{pane_id}"));
+            if let Some(agent) = runtime.agent.as_ref() {
+                lineage.push(format!("session:{}", agent.snapshot.id));
+                lineage.extend(
+                    agent
+                        .snapshot
+                        .linked_issue_number
+                        .map(|issue| format!("issue:{issue}")),
+                );
+                if crate::pm_registry::load_pm_prefs(
+                    &crate::pm_registry::pm_prefs_path_for_repo_path(&self.root),
+                )
+                .ok()
+                .and_then(|prefs| prefs.registration)
+                .is_some_and(|registration| registration.session_id == agent.snapshot.id)
+                {
+                    lineage.push("pm".into());
+                }
+            }
+        }
+        let prefs = crate::load_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&self.root),
+        )
+        .map_err(|error| error.to_string())?;
+        let monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        lineage.extend(
+            monitor
+                .local_terminal_queue_numbers()
+                .into_iter()
+                .chain(monitor.active_issue_numbers())
+                .map(|issue| format!("issue:{issue}")),
+        );
+        if let Ok(Some(works)) =
+            gwt_core::workspace_projection::load_workspace_work_items(&self.root)
+        {
+            for work in works.work_items {
+                if work
+                    .agents
+                    .iter()
+                    .any(|agent| lineage.contains(&format!("session:{}", agent.session_id)))
+                {
+                    lineage.push(format!("work:{}", work.id));
+                }
+            }
+        }
+        lineage.sort();
+        lineage.dedup();
+        request.authorized_work_lineage = lineage;
+        let receipt = match corruption_digest {
+            Some(digest) => store::choose_recovering(&self.root, &request, &digest),
+            None => store::choose(&self.root, &request),
+        }
+        .map_err(|error| {
+            if store::load(&self.root).is_ok_and(|current| {
+                current.revision == request.expected_revision
+                    && current.operation(&request.operation_id).is_none()
+            }) {
+                ProjectChoiceError::BeforeSave(error.to_string())
+            } else {
+                ProjectChoiceError::Unconfirmed(error.to_string())
+            }
+        })?;
+        drop(observation_lock);
+        // PM revoke/supersede may proceed once the exact choice is durable;
+        // physical draining and status publication must not retain these locks.
+        drop(pm_attempt);
+        if request.choice == Choice::Continue {
+            store::record_effect(
+                &self.root,
+                &receipt.operation_id,
+                EffectState::Confirmed,
+                None,
+            )
+            .map_err(|error| ProjectChoiceError::Unconfirmed(error.to_string()))?;
+        } else {
+            self.project_stop_operation = Some(receipt.operation_id.clone());
+            for operation in self.agent_operations.values() {
+                operation.current.store(false, Ordering::Release);
+            }
+            let runtimes = self.runtimes.drain().collect::<Vec<_>>();
+            for (id, runtime) in runtimes {
+                let (reply, _) = oneshot::channel();
+                self.start_close(id, runtime, CloseCause::GuiLifetime, reply);
+            }
+            self.reconcile_project_execution_stop();
+        }
+        let status = self.project_execution_status(Some(&request.operation_id));
+        let _ = self.events.send(OwnerEvent::ProjectExecutionStatus {
+            status: status.clone(),
+        });
+        Ok(json!({"receipt":status.operation_outcome,"status":status}))
+    }
+
+    fn reconcile_project_execution_stop(&mut self) {
+        use gwt_core::project_execution_policy::{self as store, Choice, EffectState};
+        let Ok(policy) = store::load(&self.root) else {
+            return;
+        };
+        if policy.choice != Some(Choice::Stop) {
+            return;
+        }
+        let Some(receipt) = policy.last_operation() else {
+            return;
+        };
+        if receipt.effect_state == EffectState::Confirmed {
+            return;
+        }
+        if self.project_stop_operation.as_deref() != Some(receipt.operation_id.as_str()) {
+            // A replacement owner has not observed its predecessor's drain.
+            if receipt.effect_state != EffectState::Unknown {
+                let _ = store::record_effect(
+                    &self.root,
+                    &receipt.operation_id,
+                    EffectState::Unknown,
+                    Some("previous owner drain is unconfirmed; inspect project.execution.status"),
+                );
+            }
+            return;
+        }
+        // A producer admitted before the Stop may finish materializing later.
+        // Drain that exact new runtime once through the existing finalizer too.
+        let admitted = self.runtimes.drain().collect::<Vec<_>>();
+        for (id, runtime) in admitted {
+            let (reply, _) = oneshot::channel();
+            self.start_close(id, runtime, CloseCause::GuiLifetime, reply);
+        }
+        if !self.retirements.is_empty() {
+            if receipt.effect_state != EffectState::Unknown {
+                let _ = store::record_effect(
+                    &self.root,
+                    &receipt.operation_id,
+                    EffectState::Unknown,
+                    Some("runtime drain requires reconciliation"),
+                );
+            }
+        } else if self.runtimes.is_empty()
+            && self.pending.is_empty()
+            && self.closing.is_empty()
+            && self.retiring == 0
+            && self.input_jobs == 0
+            && self.agent_dispatch_jobs == 0
+            && self.readiness.is_empty()
+            && self.pending_agent_self_closes.is_empty()
+            && store::record_effect(
+                &self.root,
+                &receipt.operation_id,
+                EffectState::Confirmed,
+                None,
+            )
+            .is_ok()
+        {
+            let _ = self.events.send(OwnerEvent::ProjectExecutionStatus {
+                status: self.project_execution_status(Some(&receipt.operation_id)),
+            });
+        }
+    }
+
+    fn has_unfinished_project_continue(&self) -> bool {
+        use gwt_core::project_execution_policy::{self as store, Choice};
+        let Ok(policy) = store::load(&self.root) else {
+            // Unknown policy cannot grant admission or imply consent to stop
+            // physical work and producers which were already admitted.
+            return !self.runtimes.is_empty()
+                || !self.pending.is_empty()
+                || !self.closing.is_empty()
+                || self.retiring != 0
+                || self.agent_dispatch_jobs != 0
+                || !self.retirements.is_empty();
+        };
+        if policy.choice != Some(Choice::Continue) {
+            return false;
+        }
+        if crate::project_execution_policy::has_queued_continue_work(&self.root) {
+            return true;
+        }
+        if !self.pending.is_empty() || !self.closing.is_empty() {
+            return true;
+        }
+        let pm_session = crate::pm_registry::load_pm_prefs(
+            &crate::pm_registry::pm_prefs_path_for_repo_path(&self.root),
+        )
+        .ok()
+        .and_then(|prefs| prefs.registration)
+        .map(|registration| registration.session_id);
+        self.runtimes
+            .iter()
+            .any(|(pane, runtime)| match runtime.agent.as_ref() {
+                Some(agent) => {
+                    pm_session.as_deref() != Some(agent.snapshot.id.as_str())
+                        && crate::project_execution_policy::session_work_is_unfinished(
+                            &agent.snapshot,
+                        )
+                        && crate::project_execution_policy::admission_without_actual_view(
+                            &self.root,
+                            &crate::project_execution_policy::session_lineage(
+                                &self.root,
+                                &agent.snapshot,
+                            ),
+                        )
+                        .is_ok()
+                }
+                None => policy
+                    .authorized_work_lineage
+                    .contains(&format!("pane:{pane}")),
+            })
+    }
+
     fn request(&mut self, request: OwnerRequest, reply: oneshot::Sender<OwnerReply>) {
         if request.project_key != self.project_key {
             let _ = reply.send(Err("project key mismatch".into()));
             return;
+        }
+        if let OwnerCommand::InvalidateProjectObservation {
+            host_pid,
+            host_started_at,
+            generation,
+            view_set_revision,
+            last_open_receipt_id,
+        } = request.command
+        {
+            crate::project_execution_policy::invalidate_observation(
+                &self.root,
+                crate::project_execution_policy::ObservationInvalidation {
+                    host_pid,
+                    host_started_at,
+                    generation,
+                    view_set_revision,
+                    last_open_receipt_id,
+                },
+            );
+            let _ = reply.send(Ok(json!({"invalidated":true})));
+            return;
+        }
+        if let OwnerCommand::ProjectExecutionChoose {
+            request,
+            caller_session_id,
+            expected_view_set_revision,
+        } = request.command
+        {
+            let browser_choice = caller_session_id.is_none();
+            let result = self
+                .choose_project_execution(
+                    request,
+                    caller_session_id.as_deref(),
+                    expected_view_set_revision,
+                )
+                .or_else(|error| match error {
+                    ProjectChoiceError::BeforeSave(message) if browser_choice => {
+                        Ok(json!({"choice_not_started":true,"message":message}))
+                    }
+                    ProjectChoiceError::BeforeSave(message)
+                    | ProjectChoiceError::Unconfirmed(message) => Err(message),
+                });
+            let _ = reply.send(result);
+            return;
+        }
+        if let OwnerCommand::ProjectExecutionStatus { operation_id } = request.command {
+            self.reconcile_project_execution_stop();
+            let _ = reply.send(Ok(serde_json::to_value(
+                self.project_execution_status(operation_id.as_deref()),
+            )
+            .expect("status serializes")));
+            return;
+        }
+        let cached_launch = match &request.command {
+            OwnerCommand::LaunchAgent { operation_id, .. }
+            | OwnerCommand::LaunchConfiguredShell { operation_id, .. }
+            | OwnerCommand::RestoreSavedSession { operation_id, .. } => {
+                self.agent_operations.get(operation_id)
+            }
+            _ => None,
+        }
+        .filter(|operation| operation.result.as_ref().is_some_and(Result::is_ok));
+        if let Some(operation) = cached_launch {
+            let result = if serde_json::to_value(&request.command)
+                .is_ok_and(|command| command == operation.request)
+            {
+                operation.result.clone().expect("completed launch receipt")
+            } else {
+                Err("operation identity is already bound to a different launch".into())
+            };
+            let _ = reply.send(result);
+            return;
+        }
+        if let OwnerCommand::ContinueWork {
+            client_id,
+            operation_id,
+            work_id,
+        } = &request.command
+        {
+            if self.continue_work_outcomes.contains_key(operation_id) {
+                self.continue_work(
+                    client_id.clone(),
+                    operation_id.clone(),
+                    work_id.clone(),
+                    reply,
+                );
+                return;
+            }
+        }
+        let lineage = match &request.command {
+            OwnerCommand::LaunchAgent { config, .. } => {
+                crate::project_execution_policy::agent_lineage(&self.root, config)
+            }
+            OwnerCommand::RestoreSavedSession {
+                expected_source, ..
+            } => crate::project_execution_policy::session_lineage(&self.root, expected_source),
+            OwnerCommand::ContinueWork { work_id, .. } => vec![format!("work:{work_id}")],
+            _ => Vec::new(),
+        };
+        if matches!(
+            &request.command,
+            OwnerCommand::LaunchAgent { .. }
+                | OwnerCommand::LaunchShell { .. }
+                | OwnerCommand::LaunchConfiguredShell { .. }
+                | OwnerCommand::RestoreSavedSession { .. }
+                | OwnerCommand::ContinueWork { .. }
+        ) {
+            let admission = crate::project_execution_policy::admission(&self.root, &lineage);
+            if let Err(reason) = admission {
+                let _ = reply.send(Err(reason));
+                return;
+            }
         }
         if !self.stopping {
             if matches!(request.command, OwnerCommand::Health) {
@@ -2801,7 +3430,7 @@ impl OwnerState {
                     .shared_registry_initialization
                     .as_ref()
                     .and_then(|result| result.as_ref().err());
-                let health = json!({"startup_intent":self.gui_presence.intent(),"gui_presence_count":self.gui_presence.count(),"pid":std::process::id(),"host_started_at":crate::process::host_process_start_time(std::process::id()),"host_instance_id":self.host_instance_id,"project_key":self.project_key,"panes":self.runtimes.len(),"pending_transport":self.pending_transport.len(),"draining":self.stopping,"reconciliation_required":self.retirements.values().any(Option::is_some)||self.agent_registry.is_err()||initialization_error.is_some(),"agent_registry_initialization_error":initialization_error,"reconciliation":self.retirements.iter().filter_map(|((id,incarnation),captured)| captured.as_ref().map(|_| json!({"id":id,"incarnation":incarnation}))).collect::<Vec<_>>()});
+                let health = json!({"mobile_input_permit_version":super::events::MOBILE_INPUT_PERMIT_PROTOCOL_VERSION,"startup_intent":self.gui_presence.intent(),"gui_presence_count":self.gui_presence.count(),"pid":std::process::id(),"host_started_at":crate::process::host_process_start_time(std::process::id()),"host_instance_id":self.host_instance_id,"project_key":self.project_key,"panes":self.runtimes.len(),"pending_transport":self.pending_transport.len(),"draining":self.stopping,"reconciliation_required":self.retirements.values().any(Option::is_some)||self.agent_registry.is_err()||initialization_error.is_some(),"agent_registry_initialization_error":initialization_error,"reconciliation":self.retirements.iter().filter_map(|((id,incarnation),captured)| captured.as_ref().map(|_| json!({"id":id,"incarnation":incarnation}))).collect::<Vec<_>>()});
                 #[cfg(any(test, feature = "test-gh-guard"))]
                 let health = {
                     let mut health = health;
@@ -2880,7 +3509,10 @@ impl OwnerState {
                 .map(|_| json!({"ok":true})),
             OwnerCommand::Snapshot { id, incarnation } => self.pane_snapshot(&id, incarnation),
 
-            OwnerCommand::AgentSwitch { .. }
+            OwnerCommand::InvalidateProjectObservation { .. }
+            | OwnerCommand::ProjectExecutionChoose { .. }
+            | OwnerCommand::ProjectExecutionStatus { .. }
+            | OwnerCommand::AgentSwitch { .. }
             | OwnerCommand::DriveAgentSwitch
             | OwnerCommand::DeliverAutonomousAnswer { .. }
             | OwnerCommand::RejectMonitorLaunch { .. }
@@ -2973,6 +3605,7 @@ impl OwnerState {
                                             "native prepared input is no longer current".into(),
                                         ));
                                     }
+                                    transaction.accept_native().map_err(refused)?;
                                     commit(&mut || attempted = true)
                                 })
                                 .map_err(|error| error.to_string())
@@ -3034,7 +3667,7 @@ impl OwnerState {
             let agent = runtime.agent.as_ref();
             Ok(json!({
                 "id":id, "incarnation":incarnation, "screen":pane.screen().contents(),
-                "screen_ansi":pane.screen().contents_formatted(), "screen_seq":pane.output_seq(), "seq":pane.output_seq(),
+                "screen_ansi":pane.snapshot_bytes(), "screen_seq":pane.output_seq(), "seq":pane.output_seq(),
                 "has_unsent_user_input":pane.has_unsent_user_input(),
                 "input_observation":super::events::OwnerInputObservation::capture(&runtime.pty),
                 "child_pid":runtime.pty.process_id(), "started_at_ms":runtime.started_at_ms,
@@ -5379,7 +6012,17 @@ impl OwnerState {
                 && input.pending_fresh_execution.is_none()
                 && input.pending_continue_work.is_none();
             let cancelled_cleanup = cancelled_cleanup && !unproved_manual_cleanup;
-            if let Err(error) = &result {
+            if let Some(error) = result.as_ref().err().filter(|_| {
+                restore
+                    .as_ref()
+                    .filter(|restore| {
+                        restore.origin == gwt_agent::SessionLaunchOrigin::AutomaticRestore
+                    })
+                    .and_then(|restore| restore.refusal.as_ref())
+                    .is_none_or(|refusal| {
+                        !super::installation::is_expected_restore_exclusion(&refusal.code)
+                    })
+            }) {
                 let source = restore
                     .as_ref()
                     .map(|restore| &restore.source)
@@ -6449,7 +7092,7 @@ impl OwnerState {
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 super::events::OwnerFinalScreen {
                     screen: pane.screen().contents(),
-                    screen_ansi: pane.screen().contents_formatted(),
+                    screen_ansi: pane.snapshot_bytes(),
                     screen_seq: pane.output_seq(),
                 }
             });
@@ -7804,6 +8447,9 @@ impl OwnerState {
                 },
                 running_agent_count: running_agents.len() as u32,
                 running_agents,
+                execution: Some(crate::project_execution_policy::local_status(
+                    &self.root, None,
+                )),
             },
             physical,
             generations,
@@ -8436,6 +9082,7 @@ impl OwnerState {
 
     fn handle_transport_event(&mut self, event: TransportEvent) {
         match event {
+            TransportEvent::BrowserDisconnected { .. } => {}
             TransportEvent::AgentFrontend {
                 client_id,
                 grant,
@@ -10906,6 +11553,7 @@ mod tests {
             residency: tokio::sync::watch::channel(ResidencySnapshot::default()).1,
         };
         let state = OwnerState {
+            test_continue_before_receive: None,
             issue_client_factory: super::super::launch::default_issue_client_factory(),
             test_dispatch_barriers: Vec::new(),
             #[cfg(any(test, feature = "test-gh-guard"))]
@@ -10928,6 +11576,7 @@ mod tests {
             root: root.into(),
             project_key: "0123456789abcdef".into(),
             runtimes: HashMap::new(),
+            project_stop_operation: None,
             clients: ClientHub::default(),
             issuer: AgentCapabilityIssuer::new(
                 "http://127.0.0.1/hook".into(),
@@ -11012,6 +11661,614 @@ mod tests {
             project_key: "0123456789abcdef".into(),
             command,
         }
+    }
+
+    fn issue6682_request(
+        choice: gwt_core::project_execution_policy::Choice,
+    ) -> gwt_core::project_execution_policy::ChoiceRequest {
+        gwt_core::project_execution_policy::ChoiceRequest {
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            expected_revision: 0,
+            generation: 7,
+            choice,
+            consent_source_id: uuid::Uuid::new_v4().to_string(),
+            actor: "browser:fixture".into(),
+            authorized_work_lineage: Vec::new(),
+        }
+    }
+
+    fn issue6682_accept_choice(
+        root: &Path,
+        request: &gwt_core::project_execution_policy::ChoiceRequest,
+    ) {
+        use crate::project_execution_policy::{
+            AcceptedCloseIntent, ActualViewReceipt, RuntimeObservation,
+        };
+        let receipt = ActualViewReceipt {
+            receipt_id: uuid::Uuid::new_v4().to_string(),
+            accepted_at: chrono::Utc::now(),
+            admitted_policy_revision: gwt_core::project_execution_policy::load(root)
+                .map_or(0, |policy| policy.revision),
+        };
+        crate::project_execution_policy::write_observation(
+            root,
+            &RuntimeObservation {
+                schema_version: 1,
+                project_key: gwt_core::paths::resolve_project_scope(root)
+                    .hash
+                    .to_string(),
+                project_root: root.into(),
+                generation: 7,
+                host_pid: std::process::id(),
+                host_started_at: crate::process::host_process_start_time(std::process::id())
+                    .unwrap(),
+                view_set_revision: 3,
+                views: std::collections::BTreeMap::from([("actual-view".into(), receipt.clone())]),
+                last_open_receipt: Some(receipt),
+                close_intents: std::collections::BTreeMap::from([(
+                    request.operation_id.clone(),
+                    AcceptedCloseIntent {
+                        request: request.clone(),
+                        view_set_revision: 3,
+                        policy_corruption_digest:
+                            crate::project_execution_policy::policy_corruption_digest(root),
+                    },
+                )]),
+                observed_at: chrono::Utc::now(),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn issue6682_owner_requires_exact_accepted_choice_and_current_view_revision() {
+        use gwt_core::project_execution_policy::{self as store, Choice};
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let root = temp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let (mut state, _, _) = owner_fixture(&root);
+        state.project_key = gwt_core::paths::resolve_project_scope(&root)
+            .hash
+            .to_string();
+        let request = issue6682_request(Choice::Continue);
+        assert!(state
+            .choose_project_execution(request.clone(), None, Some(3))
+            .is_err());
+        issue6682_accept_choice(&root, &request);
+        let mut foreign = request.clone();
+        foreign.actor = "browser:another-client".into();
+        assert!(state
+            .choose_project_execution(foreign, None, Some(3))
+            .is_err());
+        assert!(state
+            .choose_project_execution(request.clone(), None, Some(2))
+            .is_err());
+        assert_eq!(store::load(&root).unwrap().revision, 0);
+        state.pending.insert("accepted-launch".into(), 1);
+        assert!(state
+            .choose_project_execution(request.clone(), None, Some(3))
+            .is_err());
+        assert!(state.pending.contains_key("accepted-launch"));
+        state.pending.clear();
+        assert!(state
+            .choose_project_execution(request.clone(), None, Some(3))
+            .is_ok());
+        let policy = store::load(&root).unwrap();
+        assert_eq!(policy.revision, 1);
+        assert_eq!(policy.choice, Some(Choice::Continue));
+        state.pending.insert("accepted-after-choice".into(), 2);
+        assert!(
+            state
+                .choose_project_execution(request, None, Some(3))
+                .is_ok(),
+            "lost ACK reconciliation returns one receipt"
+        );
+        assert_eq!(store::load(&root).unwrap().revision, 1);
+        assert!(state.pending.contains_key("accepted-after-choice"));
+    }
+
+    #[test]
+    fn issue6682_stop_waits_for_admitted_producers_and_retains_unknown_cleanup() {
+        use gwt_core::project_execution_policy::{self as store, Choice, EffectState};
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let root = temp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let (mut state, _, _) = owner_fixture(&root);
+        state.project_key = gwt_core::paths::resolve_project_scope(&root)
+            .hash
+            .to_string();
+        let request = issue6682_request(Choice::Stop);
+        issue6682_accept_choice(&root, &request);
+        state.pending.insert("admitted-before-stop".into(), 1);
+        let first = state
+            .choose_project_execution(request.clone(), None, Some(3))
+            .unwrap();
+        assert_eq!(first["status"]["effective_state"], "stopping");
+        state
+            .choose_project_execution(request.clone(), None, Some(3))
+            .unwrap();
+        assert_eq!(store::load(&root).unwrap().revision, 1);
+        state.retirements.insert(("failed-cleanup".into(), 1), None);
+        state.reconcile_project_execution_stop();
+        assert_eq!(
+            store::load(&root)
+                .unwrap()
+                .last_operation()
+                .unwrap()
+                .effect_state,
+            EffectState::Unknown
+        );
+        assert_eq!(
+            state.project_execution_status(None).effective_state,
+            "unknown"
+        );
+        state.pending.clear();
+        state.retirements.clear();
+        state.reconcile_project_execution_stop();
+        assert_eq!(
+            state.project_execution_status(None).effective_state,
+            "stopped"
+        );
+        state.closing.insert(
+            "reopened-view-drain".into(),
+            ClosingRuntime {
+                incarnation: 2,
+                pm_worktree: false,
+            },
+        );
+        let status = state.project_execution_status(None);
+        assert_eq!(status.effective_state, "stopping");
+        assert_eq!(status.start_reason, "drain_pending");
+        state.closing.clear();
+        assert_eq!(
+            state.project_execution_status(None).effective_state,
+            "stopped"
+        );
+    }
+
+    #[test]
+    fn issue6682_owner_status_excludes_naturally_exited_retained_runtime() {
+        use gwt_core::project_execution_policy::Choice;
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let root = temp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let (mut state, _, _) = owner_fixture(&root);
+        let request = issue6682_request(Choice::Continue);
+        issue6682_accept_choice(&root, &request);
+        state
+            .choose_project_execution(request, None, Some(3))
+            .unwrap();
+        let (_, pane) = unbound_fixture(&root);
+        state
+            .install_pane("retained".into(), 1, pane, Arc::new(AtomicBool::new(true)))
+            .unwrap();
+        assert_eq!(
+            state.project_execution_status(None).effective_state,
+            "running"
+        );
+        let pty = state.runtimes["retained"].pty.clone();
+        pty.write_input(b"done\n").unwrap();
+        pty.wait().unwrap();
+        assert!(
+            !pty.tree_exit_confirmed(),
+            "natural exit is distinct from a tree teardown"
+        );
+        assert_eq!(state.runtimes.len(), 1, "the recovery pane is retained");
+        let status = state.project_execution_status(None);
+        assert_eq!(status.effective_state, "waiting");
+        assert_eq!(status.start_reason, "user_continue");
+    }
+
+    #[test]
+    fn issue6682_choice_failure_before_save_keeps_exact_intent_retryable() {
+        use gwt_core::project_execution_policy::{self as store, Choice};
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let root = temp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let (mut state, _, _) = owner_fixture(&root);
+        state.project_key = gwt_core::paths::resolve_project_scope(&root)
+            .hash
+            .to_string();
+        let request = issue6682_request(Choice::Stop);
+        issue6682_accept_choice(&root, &request);
+        std::fs::create_dir(store::policy_path(&root)).unwrap();
+        assert!(state
+            .choose_project_execution(request.clone(), None, Some(3))
+            .is_err());
+        assert!(crate::project_execution_policy::observation(&root)
+            .unwrap()
+            .unwrap()
+            .close_intents
+            .contains_key(&request.operation_id));
+        assert!(state.closing.is_empty());
+        std::fs::remove_dir(store::policy_path(&root)).unwrap();
+        assert!(state
+            .choose_project_execution(request, None, Some(3))
+            .is_ok());
+        assert_eq!(store::load(&root).unwrap().revision, 1);
+    }
+
+    #[test]
+    fn issue6682_restarted_owner_cannot_confirm_an_unobserved_stop() {
+        use gwt_core::project_execution_policy::{self as store, Choice, EffectState};
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let root = temp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let (mut original, _, _) = owner_fixture(&root);
+        original.project_key = gwt_core::paths::resolve_project_scope(&root)
+            .hash
+            .to_string();
+        let request = issue6682_request(Choice::Stop);
+        issue6682_accept_choice(&root, &request);
+        original.pending.insert("producer-before-crash".into(), 1);
+        original
+            .choose_project_execution(request, None, Some(3))
+            .unwrap();
+        let (mut restarted, _, _) = owner_fixture(&root);
+        restarted.reconcile_project_execution_stop();
+        assert_eq!(
+            store::load(&root)
+                .unwrap()
+                .last_operation()
+                .unwrap()
+                .effect_state,
+            EffectState::Unknown
+        );
+        assert_eq!(
+            restarted.project_execution_status(None).effective_state,
+            "unknown"
+        );
+    }
+
+    #[test]
+    fn issue6682_continue_keeps_queued_work_between_generations_and_expires_when_done() {
+        use gwt_core::project_execution_policy::Choice;
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let root = temp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let (mut state, _, _) = owner_fixture(&root);
+        state.project_key = gwt_core::paths::resolve_project_scope(&root)
+            .hash
+            .to_string();
+        let request = issue6682_request(Choice::Continue);
+        issue6682_accept_choice(&root, &request);
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        monitor.terminal_queue_push(&[100], "operator", "2026-11-03T00:00:00Z");
+        crate::save_issue_monitor_prefs(&path, &monitor.prefs()).unwrap();
+        state
+            .choose_project_execution(request, None, Some(3))
+            .unwrap();
+        assert!(
+            state.has_unfinished_project_continue(),
+            "queue intent survives a quiet gap without a PTY"
+        );
+        monitor.terminal_queue_remove(&[100], "2026-11-03T00:00:00Z");
+        crate::save_issue_monitor_prefs(&path, &monitor.prefs()).unwrap();
+        assert!(
+            !state.has_unfinished_project_continue(),
+            "Continue must not permanently promote an idle daemon"
+        );
+    }
+
+    #[test]
+    fn issue6682_detached_continue_owner_exits_after_queue_finishes_without_more_ipc() {
+        use gwt_core::project_execution_policy::Choice;
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let root = temp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let (mut state, receiver, handle) = owner_fixture(&root);
+        state.project_key = gwt_core::paths::resolve_project_scope(&root)
+            .hash
+            .to_string();
+        let request = issue6682_request(Choice::Continue);
+        issue6682_accept_choice(&root, &request);
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        monitor.terminal_queue_push(&[100], "operator", "2026-11-03T00:00:00Z");
+        crate::save_issue_monitor_prefs(&path, &monitor.prefs()).unwrap();
+        state
+            .choose_project_execution(request, None, Some(3))
+            .unwrap();
+        state.gui_presence = GuiPresence::new(
+            gwt_core::daemon::DaemonStartIntent::GuiManaged,
+            // test-hygiene: allow-wall-clock-deadline Seed an already expired GUI grace; completion is observed through actor events, not elapsed timing.
+            std::time::Instant::now() - std::time::Duration::from_secs(60),
+        );
+        let (ready, waiting) = mpsc::channel();
+        let (resume, resumed) = mpsc::channel();
+        state.test_continue_before_receive = Some((ready, resumed));
+        let (done, completed) = mpsc::channel();
+        let owner_home = temp.path().join("home");
+        let actor = std::thread::spawn(move || {
+            let _home = gwt_core::test_support::ScopedGwtHome::set(owner_home);
+            run_fixture_owner(state, receiver);
+            let _ = done.send(());
+        });
+        gwt_core::test_support::recv_event(&waiting, "owner before-receive checkpoint");
+        monitor.terminal_queue_remove(&[100], "2026-11-03T00:00:00Z");
+        crate::save_issue_monitor_prefs(&path, &monitor.prefs()).unwrap();
+        resume.send(()).unwrap();
+        // test-hygiene: allow-wall-clock-deadline Observe actual actor completion after a durable queue change without sending another owner message.
+        let exited = completed.recv_timeout(std::time::Duration::from_secs(5));
+        if exited.is_err() {
+            // Only failure cleanup may wake the actor; it cannot satisfy the assertion.
+            handle.stop();
+        }
+        actor.join().unwrap();
+        assert!(
+            exited.is_ok(),
+            "completed Continue work must release the detached owner without another IPC request"
+        );
+    }
+
+    #[tokio::test]
+    async fn issue6682_unreadable_policy_preserves_admitted_runtime_without_cold_admission() {
+        use gwt_core::project_execution_policy::{self as store, Choice};
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let root = temp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let (mut state, receiver, handle) = owner_fixture(&root);
+        state.project_key = gwt_core::paths::resolve_project_scope(&root)
+            .hash
+            .to_string();
+        let (_, pane) = unbound_fixture(&root);
+        state
+            .install_pane("pane".into(), 1, pane, Arc::new(AtomicBool::new(true)))
+            .unwrap();
+        let request = issue6682_request(Choice::Continue);
+        issue6682_accept_choice(&root, &request);
+        state
+            .choose_project_execution(request, None, Some(3))
+            .unwrap();
+        std::fs::write(store::policy_path(&root), b"broken policy").unwrap();
+        let retained = state.has_unfinished_project_continue();
+        let (empty, _, _) = owner_fixture(&root);
+        let retained_empty = empty.has_unfinished_project_continue();
+        let admission = crate::project_execution_policy::admission_without_actual_view(
+            &root,
+            &["issue:unrelated".into()],
+        );
+        let owner_home = temp.path().join("home");
+        let actor = std::thread::spawn(move || {
+            let _home = gwt_core::test_support::ScopedGwtHome::set(owner_home);
+            run_fixture_owner(state, receiver);
+        });
+        handle.shutdown().await;
+        actor.join().unwrap();
+        assert!(
+            admission.is_err(),
+            "unreadable policy cannot grant cold admission"
+        );
+        assert!(
+            !retained_empty,
+            "an empty corrupt policy cannot make an owner resident"
+        );
+        assert!(
+            retained,
+            "unreadable policy is Unknown and must preserve already admitted live work"
+        );
+    }
+
+    #[test]
+    fn issue6682_continue_cannot_override_an_unfinished_stop_but_old_receipt_replays() {
+        use gwt_core::project_execution_policy::{self as store, Choice};
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let root = temp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let (mut state, _, _) = owner_fixture(&root);
+        state.project_key = gwt_core::paths::resolve_project_scope(&root)
+            .hash
+            .to_string();
+        let original = issue6682_request(Choice::Continue);
+        issue6682_accept_choice(&root, &original);
+        state
+            .choose_project_execution(original.clone(), None, Some(3))
+            .unwrap();
+        let mut stop = issue6682_request(Choice::Stop);
+        stop.expected_revision = 1;
+        issue6682_accept_choice(&root, &stop);
+        state.pending.insert("admitted-producer".into(), 1);
+        state.choose_project_execution(stop, None, Some(3)).unwrap();
+        let replay = state
+            .choose_project_execution(original, None, Some(3))
+            .unwrap();
+        assert_eq!(replay["status"]["effective_state"], "stopping");
+        let mut fresh = issue6682_request(Choice::Continue);
+        fresh.expected_revision = 2;
+        issue6682_accept_choice(&root, &fresh);
+        assert!(state
+            .choose_project_execution(fresh.clone(), None, Some(3))
+            .is_err());
+        assert_eq!(store::load(&root).unwrap().choice, Some(Choice::Stop));
+        assert_eq!(store::load(&root).unwrap().revision, 2);
+        state.pending.clear();
+        state.reconcile_project_execution_stop();
+        issue6682_accept_choice(&root, &fresh);
+        assert!(state.choose_project_execution(fresh, None, Some(3)).is_ok());
+        assert_eq!(store::load(&root).unwrap().choice, Some(Choice::Continue));
+    }
+
+    #[test]
+    fn issue6682_corrupt_policy_recovers_only_with_an_exact_explicit_choice_readset() {
+        use gwt_core::project_execution_policy::{self as store, Choice};
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let root = temp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let (mut state, _, _) = owner_fixture(&root);
+        state.project_key = gwt_core::paths::resolve_project_scope(&root)
+            .hash
+            .to_string();
+        let path = store::policy_path(&root);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let corrupt = b"{ interrupted policy";
+        std::fs::write(&path, corrupt).unwrap();
+        assert!(crate::project_execution_policy::admission(&root, &["issue:100".into()]).is_err());
+        let request = issue6682_request(Choice::Continue);
+        assert!(state
+            .choose_project_execution(request.clone(), None, Some(3))
+            .is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), corrupt);
+        issue6682_accept_choice(&root, &request);
+        state
+            .choose_project_execution(request, None, Some(3))
+            .unwrap();
+        assert_eq!(store::load(&root).unwrap().choice, Some(Choice::Continue));
+        let digest = gwt_core::pm_authorization::digest(corrupt);
+        assert_eq!(
+            std::fs::read(
+                path.parent()
+                    .unwrap()
+                    .join(format!("project-window-policy.corrupt-{digest}.json"))
+            )
+            .unwrap(),
+            corrupt
+        );
+    }
+
+    #[tokio::test]
+    async fn issue6682_migration_continue_preserves_actual_live_work_without_granting_saved_only_cold_start(
+    ) {
+        use gwt_core::project_execution_policy::{self as store, Choice};
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let root = temp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let (mut state, receiver, handle) = owner_fixture(&root);
+        state.project_key = gwt_core::paths::resolve_project_scope(&root)
+            .hash
+            .to_string();
+        let key = state.project_key.clone();
+        let request = issue6682_request(Choice::Continue);
+        issue6682_accept_choice(&root, &request);
+        let mut observed = crate::project_execution_policy::observation(&root)
+            .unwrap()
+            .unwrap();
+        observed.views.clear();
+        observed.last_open_receipt = None;
+        crate::project_execution_policy::write_observation(&root, &observed).unwrap();
+        let (session, pane) = unbound_fixture(&root);
+        assert!(
+            state
+                .choose_project_execution(request.clone(), None, Some(3))
+                .is_err(),
+            "saved Session presence alone cannot grant Continue to a cold project"
+        );
+        assert_eq!(store::load(&root).unwrap().revision, 0);
+        state
+            .install_pane(
+                "previously-admitted-live-pane".into(),
+                1,
+                pane,
+                Arc::new(AtomicBool::new(true)),
+            )
+            .unwrap();
+        assert!(
+            state
+                .choose_project_execution(request, None, Some(3))
+                .is_ok(),
+            "explicit migration choice must preserve actually observed old live Work"
+        );
+        assert_eq!(store::load(&root).unwrap().choice, Some(Choice::Continue));
+        assert!(gwt_agent::Session::load(
+            &gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", session.id))
+        )
+        .is_ok());
+        let actor = std::thread::spawn(move || run_fixture_owner(state, receiver));
+        let health = handle
+            .request(OwnerRequest {
+                project_key: key,
+                command: OwnerCommand::Health,
+            })
+            .await
+            .unwrap();
+        assert_eq!(health["panes"], 1);
+        handle.shutdown().await;
+        actor.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn issue6682_stop_confirms_only_after_real_pty_drain_and_preserves_saved_session() {
+        use gwt_core::project_execution_policy::{self as store, Choice};
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let root = temp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let (mut state, receiver, handle) = owner_fixture(&root);
+        state.project_key = gwt_core::paths::resolve_project_scope(&root)
+            .hash
+            .to_string();
+        let key = state.project_key.clone();
+        let (session, pane) = unbound_fixture(&root);
+        let session_path = gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", session.id));
+        let saved = std::fs::read(&session_path).unwrap();
+        state
+            .install_pane("pane".into(), 1, pane, Arc::new(AtomicBool::new(true)))
+            .unwrap();
+        let request = issue6682_request(Choice::Stop);
+        issue6682_accept_choice(&root, &request);
+        let result = state
+            .choose_project_execution(request.clone(), None, Some(3))
+            .unwrap();
+        assert_eq!(result["status"]["effective_state"], "stopping");
+        assert_eq!(state.closing.len(), 1);
+        state
+            .choose_project_execution(request.clone(), None, Some(3))
+            .unwrap();
+        assert_eq!(
+            state.closing.len(),
+            1,
+            "an ACK replay never submits a second stop"
+        );
+        let owner_home = gwt_core::test_support::gwt_home_override().expect("isolated owner home");
+        let actor = std::thread::spawn(move || {
+            let _home = gwt_core::test_support::ScopedGwtHome::set(owner_home);
+            run_fixture_owner(state, receiver)
+        });
+        let mut last_status = serde_json::Value::Null;
+        // test-hygiene: allow-wall-clock-deadline Bounds observation of the real PTY tree drain, without asserting scheduling order.
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let status = handle
+                    .request(OwnerRequest {
+                        project_key: key.clone(),
+                        command: OwnerCommand::ProjectExecutionStatus {
+                            operation_id: Some(request.operation_id.clone()),
+                        },
+                    })
+                    .await
+                    .unwrap();
+                if status["effective_state"] == "stopped" {
+                    break;
+                }
+                assert_ne!(
+                    status["effective_state"], "unknown",
+                    "drain status: {status}"
+                );
+                last_status = status;
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("real PTY drain confirmation: {last_status}"));
+        assert_eq!(store::load(&root).unwrap().revision, 1);
+        assert_eq!(
+            std::fs::read(session_path).unwrap(),
+            saved,
+            "a project Stop preserves saved session/history data"
+        );
+        handle.shutdown().await;
+        actor.join().unwrap();
     }
 
     #[tokio::test]
@@ -11892,6 +13149,7 @@ mod tests {
             agent: None,
         };
         let state = OwnerState {
+            test_continue_before_receive: None,
             issue_client_factory: super::super::launch::default_issue_client_factory(),
             test_dispatch_barriers: Vec::new(),
             #[cfg(any(test, feature = "test-gh-guard"))]
@@ -11914,6 +13172,7 @@ mod tests {
             root: root.path().to_path_buf(),
             project_key: "0123456789abcdef".into(),
             runtimes: HashMap::from([("pane".into(), runtime)]),
+            project_stop_operation: None,
             clients: ClientHub::default(),
             issuer: AgentCapabilityIssuer::new(
                 "http://127.0.0.1/hook".into(),
@@ -12356,12 +13615,22 @@ mod tests {
         .map_err(|error| error.detail)
         .unwrap();
         state.refresh_registry_projection();
+        let launch_request = serde_json::to_value(OwnerCommand::LaunchAgent {
+            id: id.clone(),
+            operation_id: "completed".into(),
+            tab_id: key.clone(),
+            config: Box::new(gwt_agent::AgentLaunchBuilder::new(snapshot.agent_id.clone()).build()),
+            metadata: Box::default(),
+            cols: 80,
+            rows: 24,
+        })
+        .unwrap();
         state.agent_operations.insert(
             "completed".into(),
             AgentOperation {
                 session_id: Some(snapshot.id.clone()),
                 early_events: VecDeque::new(),
-                request: json!(null),
+                request: launch_request.clone(),
                 id: id.clone(),
                 incarnation: 1,
                 current: Arc::new(AtomicBool::new(false)),
@@ -12375,11 +13644,66 @@ mod tests {
                 result: Some(Ok(json!({"id":id}))),
             },
         );
+        state.continue_work_outcomes.insert(
+            "continued".into(),
+            super::super::continuation::CachedContinueWorkOutcome {
+                work_id: "work/fixture".into(),
+                outcome: crate::ContinueWorkOutcomeKind::FocusedExisting,
+                message: None,
+                error_code: None,
+                retryable: false,
+            },
+        );
+        gwt_core::project_execution_policy::choose(
+            &root,
+            &issue6682_request(gwt_core::project_execution_policy::Choice::Stop),
+        )
+        .unwrap();
         let owner_home = home.path().to_path_buf();
         let actor = thread::spawn(move || {
             let _home = gwt_core::test_support::ScopedGwtHome::set(owner_home);
             run_fixture_owner(state, receiver);
         });
+        let replayed = handle
+            .request(OwnerRequest {
+                project_key: key.clone(),
+                command: serde_json::from_value(launch_request.clone()).unwrap(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(replayed, json!({"id":id}));
+        let mut changed = launch_request.clone();
+        changed["rows"] = json!(25);
+        assert!(handle
+            .request(OwnerRequest {
+                project_key: key.clone(),
+                command: serde_json::from_value(changed).unwrap(),
+            })
+            .await
+            .unwrap_err()
+            .contains("different launch"));
+        let mut fresh = launch_request;
+        fresh["operation_id"] = json!("new-operation");
+        assert!(handle
+            .request(OwnerRequest {
+                project_key: key.clone(),
+                command: serde_json::from_value(fresh).unwrap(),
+            })
+            .await
+            .unwrap_err()
+            .contains("user_stop"));
+        let continued = handle
+            .request(OwnerRequest {
+                project_key: key.clone(),
+                command: OwnerCommand::ContinueWork {
+                    client_id: "client".into(),
+                    operation_id: "continued".into(),
+                    work_id: "work/fixture".into(),
+                },
+            })
+            .await
+            .unwrap();
+        assert_eq!(continued["accepted"], true);
         let result = handle
             .request(OwnerRequest {
                 project_key: key,
@@ -12775,6 +14099,7 @@ mod drop_tests {
             }
         }
         let root = home.path().join("repo");
+        super::super::test_support::seed_actual_project_view(&root).unwrap();
         let project_key = gwt_core::paths::project_scope_hash(&root).to_string();
         let id = format!("{project_key}::logical-cursor-fence");
         let (entered, observed_query) = mpsc::channel();

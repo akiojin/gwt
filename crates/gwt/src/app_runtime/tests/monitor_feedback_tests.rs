@@ -2506,6 +2506,57 @@ fn assert_issue5596_unsubmitted_answer_packet_retries(
             .clone();
         let preparation_materialized = evidence.session.is_some();
         let mut launch_worker = Some(launch_worker);
+        if !matches!(
+            checkpoint_delivery,
+            gwt::autonomous_handoff::AutonomousHandoffDeliveryState::Attempting { attempt: 1, .. }
+        ) {
+            use super::super::RemoteOwnerLaunchOutcome as Outcome;
+
+            // This checkpoint also pauses failed preparation. Observe its real
+            // result after releasing the worker, without changing the predicate.
+            let state = serde_json::to_value(&checkpoint_delivery).unwrap()["state"].clone();
+            let materialized_session = preparation_materialized;
+            let current = evidence.current.load(std::sync::atomic::Ordering::Acquire);
+            pause.release();
+            launch_worker.take().unwrap().join().unwrap();
+            let recorded = fixture.recorded_events.lock().unwrap();
+            let completion =
+                recorded
+                    .iter()
+                    .find_map(|event| match recorded_project_payload(event) {
+                        UserEvent::RemoteOwnerLaunchComplete(completion)
+                            if completion.operation_id == evidence.operation_id
+                                && completion.owner_pane_id == evidence.id =>
+                        {
+                            Some(completion)
+                        }
+                        _ => None,
+                    });
+            let (outcome, detail) = match completion.map(|completion| &completion.result) {
+                None => ("missing_completion", None),
+                Some(Err(detail)) => ("error", Some(detail.as_str())),
+                Some(Ok(Outcome::RetainedManualFailure(failure))) => {
+                    ("retained_manual_failure", Some(failure.detail.as_str()))
+                }
+                Some(Ok(Outcome::MonitorFailureClosed { detail })) => {
+                    ("monitor_failure_closed", Some(detail.as_str()))
+                }
+                Some(Ok(Outcome::CompensatedFailure(failure))) => {
+                    ("compensated_failure", Some(failure.error.as_str()))
+                }
+                Some(Ok(Outcome::Failed { failure, .. })) => {
+                    ("failed", Some(failure.detail.as_str()))
+                }
+                Some(Ok(Outcome::DiagnosticClosed { detail, .. })) => {
+                    ("diagnostic_closed", detail.as_deref())
+                }
+                Some(Ok(Outcome::NaturallyClosed { .. })) => ("naturally_closed", None),
+                Some(Ok(Outcome::Runtime(..))) => ("runtime", None),
+            };
+            let detail = detail.map(AppRuntime::sanitize_launch_log_error);
+            drop(recorded);
+            panic!("the actual owner must persist an unsubmitted write-ahead token: state={state}, materialized_session={materialized_session}, current={current}, owner_outcome={outcome}, detail={detail:?}");
+        }
         // A failed preparation also reaches this checkpoint. Let its original
         // error return before ProjectClose can replace it with cancellation.
         let unmaterialized_join = if !preparation_materialized {
@@ -2527,9 +2578,11 @@ fn assert_issue5596_unsubmitted_answer_packet_retries(
             .await
             .unwrap();
         });
-        pause.release();
         let launch_join = match launch_worker {
-            Some(worker) => worker.join(),
+            Some(worker) => {
+                pause.release();
+                worker.join()
+            }
             None => unmaterialized_join.expect("the unmaterialized worker was joined before close"),
         };
         close_worker.join().unwrap();

@@ -2048,6 +2048,313 @@ fn app_runtime_frontend_ready_replies_launch_wizard_tombstone_when_closed() {
 }
 
 #[test]
+fn manual_update_check_coalesces_and_publishes_without_staging() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let _api = ScopedEnvVar::set("GWT_UPDATE_API_BASE_URL", "http://127.0.0.1:1");
+    let cache = gwt_core::paths::gwt_update_cache_path();
+    fs::create_dir_all(cache.parent().unwrap()).unwrap();
+    fs::write(
+        &cache,
+        serde_json::to_vec(&serde_json::json!({
+            "checked_at": chrono::Utc::now(), "latest_version": "999.0.0",
+            "release_url": "https://example.invalid/cached-release"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        matches!(gwt_core::update::UpdateManager::new().check(false),
+        gwt_core::update::UpdateState::Available { latest, .. } if latest == "999.0.0")
+    );
+    let (mut runtime, queued) = sample_runtime_with_events(temp.path(), vec![], None);
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::CheckForUpdates);
+    let checking =
+        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::CheckForUpdates);
+    assert!(checking.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::UpdateCheckResult { checking: true, .. }
+    )));
+    assert!(
+        queued.lock().unwrap().is_empty(),
+        "duplicate check must not spawn work"
+    );
+    assert_eq!(tasks.lock().unwrap().len(), 1, "checks share one worker");
+    let state = gwt_core::update::UpdateState::Available {
+        current: "9.150.0".into(),
+        latest: "99.0.0".into(),
+        release_url: "https://github.com/akiojin/gwt/releases/tag/v99.0.0".into(),
+        asset_url: Some("https://example.invalid/gwt.dmg".into()),
+        checked_at: chrono::Utc::now(),
+    };
+    let failure = gwt_core::update::UpdateApplyResult {
+        outcome: gwt_core::update::UpdateApplyOutcome::Failure,
+        from_version: "9.149.0".into(),
+        to_version: "9.150.0".into(),
+        observed_version: "9.149.0".into(),
+        attempt: 1,
+        recorded_at: chrono::Utc::now().to_rfc3339(),
+        message: Some("version mismatch".into()),
+    };
+    let completed = runtime.complete_manual_update_check(state.clone(), Some(failure.clone()));
+    assert!(!runtime.update_check_in_flight);
+    assert_eq!(runtime.pending_update, Some(state.clone()));
+    assert!(completed.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::UpdateCheckResult { checking: false, offer_update: true, result: Some(result), previous_failure: Some(previous) }
+            if result == &state && previous == &failure
+    )));
+    assert!(runtime.update_download_in_flight.is_none());
+    assert!(
+        queued.lock().unwrap().is_empty(),
+        "manual discovery must wait for confirmation"
+    );
+    let mut without_asset = state.clone();
+    if let gwt_core::update::UpdateState::Available { asset_url, .. } = &mut without_asset {
+        *asset_url = None;
+    }
+    runtime.complete_manual_update_check(without_asset, None);
+    assert!(
+        runtime.pending_update.is_none(),
+        "an idle offer must not return on reconnect"
+    );
+    runtime.pending_update = Some(state.clone());
+    runtime.update_download_in_flight = Some("client-1".into());
+    let mut newer = state.clone();
+    if let gwt_core::update::UpdateState::Available { latest, .. } = &mut newer {
+        *latest = "100.0.0".into();
+    }
+    let result = runtime.complete_manual_update_check(newer, None);
+    assert_eq!(runtime.pending_update, Some(state));
+    assert!(result.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::UpdateCheckResult {
+            offer_update: false,
+            ..
+        }
+    )));
+    let task = tasks.lock().unwrap().pop().expect("queued manual check");
+    task();
+    assert!(
+        queued.lock().unwrap().iter().any(|event| matches!(
+            recorded_project_payload(event),
+            UserEvent::ManualUpdateChecked {
+                result: gwt_core::update::UpdateState::Failed { .. },
+                ..
+            }
+        )),
+        "manual worker must query the network instead of returning the fresh cache"
+    );
+    assert!(fs::read_to_string(gwt_core::update::update_log_path())
+        .unwrap()
+        .lines()
+        .any(|line| {
+            let event: serde_json::Value = serde_json::from_str(line).unwrap();
+            event["stage"] == "check_started" && event["source"] == "manual"
+        }));
+}
+
+#[test]
+fn manual_update_check_replaces_staged_release_and_releases_its_drain() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            update_drain: Some(gwt::IssueMonitorUpdateDrain {
+                version: "99.0.0".into(),
+                since: chrono::Utc::now().to_rfc3339(),
+                reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+                automatic: None,
+                blocking: Vec::new(),
+            }),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let old_dir = gwt_core::paths::gwt_updates_dir().join("v99.0.0");
+    fs::create_dir_all(&old_dir).unwrap();
+    let payload = old_dir.join("gwt");
+    fs::write(&payload, "old payload").unwrap();
+    let manifest = gwt_core::update::PendingUpdateManifest {
+        version: "99.0.0".into(),
+        asset_url: "https://example.invalid/gwt.tar.gz".into(),
+        payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
+        downloaded_at: chrono::Utc::now().to_rfc3339(),
+        origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
+        auto_apply_deferred: false,
+    };
+    gwt_core::update::persist_pending_update_manifest(&manifest).unwrap();
+    let replacement = gwt_core::update::UpdateState::Available {
+        current: "9.150.0".into(),
+        latest: "100.0.0".into(),
+        release_url: "https://example.invalid/release".into(),
+        asset_url: Some(manifest.asset_url.clone()),
+        checked_at: chrono::Utc::now(),
+    };
+    let mut old = replacement.clone();
+    if let gwt_core::update::UpdateState::Available { latest, .. } = &mut old {
+        *latest = manifest.version.clone();
+    }
+    runtime.pending_update = Some(old.clone());
+    let original_prefs = fs::read(&prefs_path).unwrap();
+    let mut without_asset = replacement.clone();
+    if let gwt_core::update::UpdateState::Available { asset_url, .. } = &mut without_asset {
+        *asset_url = None;
+    }
+    let unavailable = runtime.complete_manual_update_check(without_asset.clone(), None);
+    assert_eq!(runtime.pending_update, Some(old.clone()));
+    assert_eq!(
+        gwt_core::update::load_pending_update_manifest(),
+        Some(manifest.clone())
+    );
+    assert_eq!(fs::read(&prefs_path).unwrap(), original_prefs);
+    assert!(unavailable.iter().any(|event| matches!(
+        &event.event, BackendEvent::UpdateCheckResult { offer_update: true, result: Some(state), .. }
+            if state == &without_asset
+    )));
+
+    let timeout = runtime.issue_monitor_fallback_commit_timeout;
+    runtime.issue_monitor_fallback_commit_timeout = Duration::ZERO;
+    let failed = runtime.complete_manual_update_check(replacement.clone(), None);
+    assert_eq!(
+        gwt_core::update::load_pending_update_manifest(),
+        Some(manifest)
+    );
+    assert_eq!(runtime.pending_update, Some(old));
+    assert_eq!(fs::read(&prefs_path).unwrap(), original_prefs);
+    assert!(!runtime
+        .project_state(&runtime.test_context())
+        .unwrap()
+        .update_auto_apply
+        .is_cancelled("99.0.0"));
+    assert!(!failed
+        .iter()
+        .any(|event| matches!(&event.event, BackendEvent::UpdateAutoApply { .. })));
+    assert!(failed.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::UpdateCheckResult {
+            offer_update: false,
+            result: Some(gwt_core::update::UpdateState::Failed { .. }),
+            ..
+        }
+    )));
+    runtime.issue_monitor_fallback_commit_timeout = timeout;
+    let events = runtime.complete_manual_update_check(replacement.clone(), None);
+    assert_eq!(runtime.pending_update, Some(replacement));
+    assert!(gwt_core::update::load_pending_update_manifest().is_none());
+    assert!(!old_dir.exists());
+    assert!(gwt::load_issue_monitor_prefs(&prefs_path)
+        .unwrap()
+        .update_drain
+        .is_none());
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::UpdateAutoApply { version, phase: gwt::protocol::UpdateAutoApplyPhase::Cancelled, .. }
+            if version == "99.0.0"
+    )));
+    assert!(runtime.update_download_in_flight.is_none());
+}
+
+#[test]
+fn manual_update_check_preserves_pending_release_when_cleanup_fails() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let mut runtime = sample_runtime(temp.path(), vec![], None);
+    let payload = temp.path().join("gwt");
+    fs::write(&payload, "old payload").unwrap();
+    fs::create_dir_all(gwt_core::paths::gwt_updates_dir()).unwrap();
+    fs::write(
+        gwt_core::paths::gwt_updates_dir().join("v99.0.0"),
+        "not a directory",
+    )
+    .unwrap();
+    let manifest = gwt_core::update::PendingUpdateManifest {
+        version: "99.0.0".into(),
+        asset_url: "https://example.invalid/gwt.tar.gz".into(),
+        payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
+        downloaded_at: chrono::Utc::now().to_rfc3339(),
+        origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
+        auto_apply_deferred: false,
+    };
+    gwt_core::update::persist_pending_update_manifest(&manifest).unwrap();
+    let old = gwt_core::update::UpdateState::Available {
+        current: "9.150.0".into(),
+        latest: "99.0.0".into(),
+        release_url: "https://example.invalid/release".into(),
+        asset_url: Some(manifest.asset_url.clone()),
+        checked_at: chrono::Utc::now(),
+    };
+    runtime.pending_update = Some(old.clone());
+    let mut replacement = old.clone();
+    if let gwt_core::update::UpdateState::Available { latest, .. } = &mut replacement {
+        *latest = "100.0.0".into();
+    }
+    runtime.update_check_in_flight = true;
+    let events = runtime.complete_manual_update_check(replacement, None);
+    assert_eq!(runtime.pending_update, Some(old));
+    assert!(!runtime.update_check_in_flight);
+    assert_eq!(
+        gwt_core::update::load_pending_update_manifest(),
+        Some(manifest)
+    );
+    assert!(events.iter().any(|event| matches!(
+        &event.event, BackendEvent::UpdateAutoApply { version,
+            phase: gwt::protocol::UpdateAutoApplyPhase::Cancelled, .. }
+            if version == "99.0.0"
+    )));
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::UpdateCheckResult { checking: false, offer_update: false,
+            result: Some(gwt_core::update::UpdateState::Failed { message, .. }), .. }
+            if message.contains("Failed to remove superseded update")
+    )));
+}
+
+#[test]
+fn manual_update_check_reconnect_replays_in_flight_state_in_hub_and_project() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        temp.path().join("repo"),
+        ProjectKind::Git,
+        &[],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    for checking in [true, false] {
+        runtime.update_check_in_flight = checking;
+        let context = runtime.test_context();
+        for events in [
+            runtime.frontend_sync_events("client-1"),
+            runtime.frontend_project_sync_events("client-1", &context),
+        ] {
+            let snapshot = events
+                .iter()
+                .find(|event| matches!(event.event, BackendEvent::UpdateCheckResult { .. }))
+                .expect("every reconnect hydrates the check latch");
+            assert!(
+                matches!(&snapshot.target, DispatchTarget::Client(client) if client == "client-1")
+            );
+            assert!(matches!(&snapshot.event, BackendEvent::UpdateCheckResult {
+                checking: actual, offer_update: false, result: None, previous_failure: None
+            } if *actual == checking));
+        }
+    }
+}
+
+#[test]
 fn app_runtime_apply_update_uses_pending_available_update_state() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
@@ -2126,35 +2433,12 @@ fn app_runtime_apply_update_without_applicable_pending_update_reports_error() {
 fn app_runtime_frontend_ready_replays_terminal_snapshot_only_to_requesting_client() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let tab = sample_project_tab_with_window(
-        "tab-1",
-        "shell-1",
-        WindowPreset::Shell,
-        WindowProcessStatus::Ready,
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "shell-1");
-    let (command, args) = if cfg!(windows) {
-        (
-            "cmd".to_string(),
-            vec![
-                "/d".to_string(),
-                "/s".to_string(),
-                "/c".to_string(),
-                "ping -n 2 127.0.0.1 >nul & exit /b 0".to_string(),
-            ],
-        )
-    } else {
-        (
-            "/bin/sh".to_string(),
-            vec!["-lc".to_string(), "sleep 0.2; exit 0".to_string()],
-        )
-    };
-    insert_test_pane_runtime_with_command(&mut runtime, &window_id, command, args, 80, 24);
+    let (mut runtime, _probe, window_id) = owner_browser_input_fixture(temp.path());
     process_test_owner_output(&mut runtime, &window_id, b"hello from frontend ready\n");
 
-    let events =
+    let mut events =
         runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::FrontendReady);
+    events.extend(drain_owner_snapshot_completions(&mut runtime));
 
     assert!(events.iter().all(|event| matches!(
         &event.target,
@@ -2174,21 +2458,13 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_only_to_requesting_clien
 fn app_runtime_frontend_ready_replays_terminal_snapshot_with_sgr_attributes() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let tab = sample_project_tab_with_window(
-        "tab-1",
-        "shell-1",
-        WindowPreset::Shell,
-        WindowProcessStatus::Ready,
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "shell-1");
-    let (command, args) = long_running_test_command();
-    insert_test_pane_runtime_with_command(&mut runtime, &window_id, command, args, 80, 24);
+    let (mut runtime, _probe, window_id) = owner_browser_input_fixture(temp.path());
     // Write red foreground + bold "ALERT" then reset, then default-color text.
     process_test_owner_output(&mut runtime, &window_id, b"\x1b[31;1mALERT\x1b[0m normal\n");
 
-    let events =
+    let mut events =
         runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::FrontendReady);
+    events.extend(drain_owner_snapshot_completions(&mut runtime));
 
     let snapshot = events.iter().find_map(|event| match &event.event {
         BackendEvent::TerminalSnapshot { id, data_base64 } if id == &window_id => Some(data_base64),
@@ -2220,63 +2496,389 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_with_sgr_attributes() {
 
 #[test]
 fn app_runtime_frontend_ready_replays_terminal_snapshot_with_scrollback_history() {
+    use gwt::project_runtime::events::{OwnerCommand, OwnerEvent};
+
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let tab = sample_project_tab_with_window(
-        "tab-1",
-        "shell-1",
-        WindowPreset::Shell,
-        WindowProcessStatus::Ready,
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "shell-1");
-    let (command, args) = if cfg!(windows) {
+    let (mut runtime, probe, window_id) = owner_browser_input_fixture(temp.path());
+    let output = (1..=1_200)
+        .map(|line| format!("SCROLLBACK-LINE-{line:04}\r\n"))
+        .chain(std::iter::once("CURRENT-SCREEN".to_string()))
+        .collect::<String>();
+    probe.pane.lock().unwrap().process_bytes(output.as_bytes());
+    let context = runtime.test_context();
+    let client = runtime.runtimes[&window_id].client.clone();
+    let identity = client.identity().unwrap().clone();
+
+    // Exercise the actual owner reply and each GUI repair trigger. Ordinary
+    // output caches only the visible frame, so populating it with snapshot_bytes
+    // here would conceal the production regression.
+    for path in [
+        "owner",
+        "frontend_ready",
+        "output_gap",
+        "client_repair",
+        "stale_completion",
+    ] {
+        let (screen, screen_ansi, seq, (rows, cols)) = {
+            let pane = probe.pane.lock().unwrap();
+            (
+                pane.screen().contents(),
+                pane.screen().contents_formatted(),
+                pane.output_seq(),
+                pane.screen().size(),
+            )
+        };
+        let projection = runtime.runtimes.get_mut(&window_id).unwrap();
+        projection.screen = screen.clone();
+        projection.screen_ansi = screen_ansi.clone();
+        projection.screen_seq = seq;
+        projection.output_seq = seq.saturating_sub(1);
+        let snapshots = if path == "owner" {
+            let reply = owner_fixture_block_on(client.command(OwnerCommand::Snapshot {
+                id: probe.id.clone(),
+                incarnation: probe.incarnation,
+            }))
+            .unwrap();
+            vec![serde_json::from_value::<Vec<u8>>(reply["screen_ansi"].clone()).unwrap()]
+        } else {
+            let mut events = match path {
+                "frontend_ready" => {
+                    runtime.handle_frontend_event("client-1".into(), FrontendEvent::FrontendReady)
+                }
+                "output_gap" => runtime.handle_project_owner_event(
+                    &context,
+                    1,
+                    &identity,
+                    OwnerEvent::Output {
+                        id: probe.id.clone(),
+                        incarnation: probe.incarnation,
+                        data: b"CURRENT-SCREEN".to_vec(),
+                        seq,
+                        previous_seq: None,
+                        screen,
+                        screen_ansi,
+                        screen_seq: seq,
+                    },
+                ),
+                "stale_completion" => {
+                    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+                        unreachable!();
+                    };
+                    let tasks = Arc::clone(tasks);
+                    runtime.request_owner_snapshot(&window_id, Some("client-1".into()));
+                    for _ in 0..3 {
+                        let (seq, screen, screen_ansi) = {
+                            let mut pane = probe.pane.lock().unwrap();
+                            pane.process_bytes(b"\r\nBURST");
+                            (
+                                pane.output_seq(),
+                                pane.screen().contents(),
+                                pane.screen().contents_formatted(),
+                            )
+                        };
+                        runtime.handle_project_owner_event(
+                            &context,
+                            1,
+                            &identity,
+                            OwnerEvent::Output {
+                                id: probe.id.clone(),
+                                incarnation: probe.incarnation,
+                                data: b"\r\nBURST".to_vec(),
+                                seq,
+                                previous_seq: None,
+                                screen,
+                                screen_ansi,
+                                screen_seq: seq,
+                            },
+                        );
+                        assert_eq!(
+                            tasks.lock().unwrap().len(),
+                            1,
+                            "pending gaps must share one snapshot"
+                        );
+                    }
+                    drain_queued_blocking_tasks(&tasks);
+                    let AppEventProxy::Stub(completions) = &runtime.proxy else {
+                        unreachable!();
+                    };
+                    let completion = {
+                        let mut completions = completions.lock().unwrap();
+                        let index = completions
+                            .iter()
+                            .position(|event| matches!(event, UserEvent::ProjectOwnerSnapshot(_)))
+                            .expect("captured asynchronous owner snapshot");
+                        let UserEvent::ProjectOwnerSnapshot(completion) = completions.remove(index)
+                        else {
+                            unreachable!();
+                        };
+                        completion
+                    };
+                    // Output advances the GUI between the owner's capture and
+                    // its completion. The only hydration reply must be retried.
+                    let next_seq = {
+                        let mut pane = probe.pane.lock().unwrap();
+                        pane.process_bytes(b"\r\nAFTER-SNAPSHOT");
+                        pane.output_seq()
+                    };
+                    runtime.runtimes.get_mut(&window_id).unwrap().screen_seq = next_seq;
+                    let events = runtime.handle_project_owner_snapshot(*completion);
+                    assert_eq!(tasks.lock().unwrap().len(), 1, "stale hydration must retry");
+                    events
+                }
+                _ => runtime.client_pane_snapshot_repair_events(
+                    "client-1",
+                    std::slice::from_ref(&window_id),
+                ),
+            };
+            events.extend(drain_owner_snapshot_completions(&mut runtime));
+            events
+                .iter()
+                .filter_map(|event| match &event.event {
+                    BackendEvent::TerminalSnapshot { id, data_base64 } if id == &window_id => Some(
+                        base64::engine::general_purpose::STANDARD
+                            .decode(data_base64)
+                            .unwrap(),
+                    ),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(!snapshots.is_empty(), "{path}: owner snapshot must arrive");
+        if path == "stale_completion" {
+            let mut replay = vt100::Parser::new(rows, cols, SNAPSHOT_SCROLLBACK_REPLAY_LIMIT);
+            replay.process(snapshots.last().unwrap());
+            assert!(replay.screen().contents().contains("AFTER-SNAPSHOT"));
+        }
+        for snapshot in snapshots {
+            let mut replay = vt100::Parser::new(rows, cols, SNAPSHOT_SCROLLBACK_REPLAY_LIMIT);
+            replay.process(&snapshot);
+            assert!(
+                replay.screen().contents().contains("CURRENT-SCREEN"),
+                "{path}: current screen"
+            );
+            replay.screen_mut().set_scrollback(usize::MAX);
+            assert!(
+                replay.screen().scrollback() >= 1_000,
+                "{path}: 1,000 history rows must survive"
+            );
+            assert!(
+                replay.screen().contents().contains("SCROLLBACK-LINE-0001"),
+                "{path}: oldest output"
+            );
+        }
+    }
+}
+
+#[test]
+fn app_runtime_frontend_ready_snapshot_makes_progress_during_continuous_output() {
+    use gwt::project_runtime::events::OwnerEvent;
+
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, probe, window_id) = owner_browser_input_fixture(temp.path());
+    let context = runtime.test_context();
+    let identity = runtime.runtimes[&window_id].owner_identity.clone();
+    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+        unreachable!();
+    };
+    let tasks = Arc::clone(tasks);
+    let AppEventProxy::Stub(completions) = &runtime.proxy else {
+        unreachable!();
+    };
+    let completions = Arc::clone(completions);
+    let take_completion = || {
+        let mut completions = completions.lock().unwrap();
+        let index = completions
+            .iter()
+            .position(|event| matches!(event, UserEvent::ProjectOwnerSnapshot(_)))
+            .expect("captured owner snapshot");
+        let UserEvent::ProjectOwnerSnapshot(completion) = completions.remove(index) else {
+            unreachable!();
+        };
+        completion
+    };
+    probe.pane.lock().unwrap().process_bytes(b"HISTORY\r\n");
+    runtime.request_owner_snapshot(&window_id, Some("client-1".into()));
+    drain_owner_snapshot_completions(&mut runtime);
+
+    // The private HTTP snapshot can capture output before the independent
+    // WebSocket delivers it. Every client needs the bytes its shared cursor skips.
+    let previous_seq = runtime.runtimes[&window_id].output_seq;
+    runtime.request_owner_snapshot(&window_id, Some("client-1".into()));
+    let data = b"SNAPSHOT-AHEAD\r\n".to_vec();
+    let (seq, screen, screen_ansi) = {
+        let mut pane = probe.pane.lock().unwrap();
+        pane.process_bytes(&data);
         (
-            "cmd".to_string(),
-            vec![
-                "/d".to_string(),
-                "/s".to_string(),
-                "/c".to_string(),
-                "set /p snapshot=".to_string(),
-            ],
-        )
-    } else {
-        (
-            "/bin/sh".to_string(),
-            vec![
-                "-lc".to_string(),
-                "while IFS= read -r line; do :; done".to_string(),
-            ],
+            pane.output_seq(),
+            pane.screen().contents(),
+            pane.screen().contents_formatted(),
         )
     };
-    insert_test_pane_runtime_with_command(&mut runtime, &window_id, command, args, 80, 6);
-    for line in 1..=18 {
-        process_test_owner_output(
-            &mut runtime,
-            &window_id,
-            format!("SCROLLBACK-LINE-{line:03}\r\n").as_bytes(),
+    drain_queued_blocking_tasks(&tasks);
+    let events = runtime.handle_project_owner_snapshot(*take_completion());
+    assert!(
+        events.iter().any(|event| {
+            matches!(event.event, BackendEvent::TerminalSnapshot { .. })
+                && event.target == DispatchTarget::Project(context.project_key.clone())
+                && event.terminal_stream_seq == Some(seq)
+        }),
+        "an advancing private snapshot must deliver the skipped output to existing clients"
+    );
+    assert!(runtime
+        .handle_project_owner_event(
+            &context,
+            1,
+            &identity,
+            OwnerEvent::Output {
+                id: probe.id.clone(),
+                incarnation: probe.incarnation,
+                data,
+                seq,
+                previous_seq: Some(previous_seq),
+                screen,
+                screen_ansi,
+                screen_seq: seq,
+            },
+        )
+        .is_empty());
+    let mut displayed = Vec::new();
+
+    for cycle in 0..3 {
+        runtime.request_owner_snapshot(&window_id, Some("client-1".into()));
+        drain_queued_blocking_tasks(&tasks);
+        let mut completion = take_completion();
+        let mut captured_seq = completion.result.as_ref().unwrap().screen_seq;
+        let data = format!("OUTPUT-{cycle}\r\n").into_bytes();
+        let (seq, screen, screen_ansi) = {
+            let mut pane = probe.pane.lock().unwrap();
+            pane.process_bytes(&data);
+            (
+                pane.output_seq(),
+                pane.screen().contents(),
+                pane.screen().contents_formatted(),
+            )
+        };
+        let expected_screen = screen.clone();
+        let expected_ansi = screen_ansi.clone();
+        // The first delta is contiguous with the restored baseline. Output
+        // keeps overtaking every subsequent snapshot capture as well.
+        runtime.handle_project_owner_event(
+            &context,
+            1,
+            &identity,
+            OwnerEvent::Output {
+                id: probe.id.clone(),
+                incarnation: probe.incarnation,
+                data,
+                seq,
+                previous_seq: Some(captured_seq),
+                screen,
+                screen_ansi,
+                screen_seq: seq,
+            },
         );
+        if cycle == 2 {
+            // No new output arrives after this failure. The existing scheduler
+            // must retry without spinning and preserve both reply targets.
+            completion.result = Err("project snapshot timed out".into());
+            runtime.handle_project_owner_snapshot(*completion);
+            let deadline = runtime
+                .next_runtime_output_deadline()
+                .expect("idle snapshot retry deadline");
+            runtime.flush_runtime_output_batches(deadline - Duration::from_millis(100));
+            assert!(
+                tasks.lock().unwrap().is_empty(),
+                "failed requests must not spin"
+            );
+            runtime.flush_runtime_output_batches(deadline);
+            assert_eq!(tasks.lock().unwrap().len(), 1, "coalesced retry");
+            drain_queued_blocking_tasks(&tasks);
+            completion = take_completion();
+            captured_seq = completion.result.as_ref().unwrap().screen_seq;
+        }
+        let expected_ansi = if captured_seq == seq {
+            completion.result.as_ref().unwrap().screen_ansi.clone()
+        } else {
+            expected_ansi
+        };
+        let events = runtime.handle_project_owner_snapshot(*completion);
+        assert!(
+            events.iter().any(|event| {
+                matches!(event.event, BackendEvent::TerminalSnapshot { .. })
+                    && event.target == DispatchTarget::Project(context.project_key.clone())
+            }),
+            "existing clients receive withheld output through the snapshot"
+        );
+        displayed.extend(
+            events
+                .into_iter()
+                .filter(|event| matches!(event.event, BackendEvent::TerminalSnapshot { .. }))
+                .filter(|event| event.target == DispatchTarget::Client("client-1".into()))
+                .filter_map(|event| event.terminal_stream_seq),
+        );
+        let projection = &runtime.runtimes[&window_id];
+        assert_eq!(
+            projection.output_seq, captured_seq,
+            "pending repair holds raw output"
+        );
+        assert_eq!(projection.screen_seq, seq);
+        assert_eq!(projection.screen, expected_screen);
+        assert_eq!(projection.screen_ansi, expected_ansi);
     }
 
-    let events =
-        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::FrontendReady);
+    assert_eq!(
+        displayed.len(),
+        3,
+        "repair must progress before output goes idle"
+    );
+    assert!(displayed.windows(2).all(|pair| pair[0] < pair[1]));
 
-    let snapshot = events.iter().find_map(|event| match &event.event {
-        BackendEvent::TerminalSnapshot { id, data_base64 } if id == &window_id => Some(data_base64),
-        _ => None,
-    });
-    let decoded = base64::engine::general_purpose::STANDARD
-        .decode(snapshot.expect("terminal snapshot event"))
-        .expect("decode terminal snapshot");
-    let text = String::from_utf8_lossy(&decoded);
-    assert!(
-        text.contains("SCROLLBACK-LINE-001"),
-        "expected frontend reconnect snapshot to include old scrollback history, got: {text:?}"
+    // Catch up and resume raw output. A duplicate older snapshot completion
+    // must still never rewind the stream after that delta was forwarded.
+    drain_owner_snapshot_completions(&mut runtime);
+    let forwarded_seq = runtime.runtimes[&window_id].output_seq;
+    runtime.request_owner_snapshot(&window_id, Some("client-1".into()));
+    drain_queued_blocking_tasks(&tasks);
+    let completion = take_completion();
+    runtime.handle_project_owner_snapshot(*completion.clone());
+    let (seq, screen, screen_ansi) = {
+        let mut pane = probe.pane.lock().unwrap();
+        pane.process_bytes(b"FORWARDED\r\n");
+        (
+            pane.output_seq(),
+            pane.screen().contents(),
+            pane.screen().contents_formatted(),
+        )
+    };
+    let output = runtime.handle_project_owner_event(
+        &context,
+        1,
+        &identity,
+        OwnerEvent::Output {
+            id: probe.id.clone(),
+            incarnation: probe.incarnation,
+            data: b"FORWARDED\r\n".to_vec(),
+            seq,
+            previous_seq: Some(forwarded_seq),
+            screen: screen.clone(),
+            screen_ansi: screen_ansi.clone(),
+            screen_seq: seq,
+        },
     );
-    assert!(
-        text.contains("SCROLLBACK-LINE-018"),
-        "expected frontend reconnect snapshot to include current visible screen, got: {text:?}"
-    );
+    assert!(output
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::TerminalOutput { .. })));
+    assert!(runtime
+        .handle_project_owner_snapshot(*completion)
+        .iter()
+        .all(|event| !matches!(event.event, BackendEvent::TerminalSnapshot { .. })));
+    let projection = &runtime.runtimes[&window_id];
+    assert_eq!(projection.output_seq, seq);
+    assert_eq!(projection.screen_seq, seq);
+    assert_eq!(projection.screen, screen);
+    assert_eq!(projection.screen_ansi, screen_ansi);
 }
 
 #[test]

@@ -458,6 +458,11 @@ impl AppRuntime {
         self.pending_runtime_outputs
             .values()
             .map(|pending| pending.deadline)
+            .chain(
+                self.runtimes
+                    .values()
+                    .filter_map(|runtime| runtime.pending_snapshot.as_ref()?.retry_at),
+            )
             .min()
     }
 
@@ -471,6 +476,23 @@ impl AppRuntime {
         let mut events = Vec::new();
         for id in due {
             events.extend(self.flush_runtime_output_batch(&id));
+        }
+        let snapshot_retries: Vec<_> = self
+            .runtimes
+            .iter_mut()
+            .filter_map(|(id, runtime)| {
+                let pending = runtime.pending_snapshot.as_ref()?;
+                if pending.retry_at.is_some_and(|deadline| deadline <= now) {
+                    Some((id.clone(), runtime.pending_snapshot.take()?.targets))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for (id, targets) in snapshot_retries {
+            for target in targets {
+                events.extend(self.request_owner_snapshot(&id, target));
+            }
         }
         events
     }
