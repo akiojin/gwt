@@ -56,6 +56,8 @@ struct Receipt {
     pid: u32,
     birth: u64,
     nonce: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
 }
 
 impl Receipt {
@@ -159,7 +161,16 @@ fn recover(input: &str) -> Result<i32> {
         }
         let job = gwt_core::process_tree::WindowsJobObject::attach_running(pid)
             .map_err(|_| "attach recovery worker containment")?;
-        write_receipt(&directory.path().join("attached.json"), &receipt)?;
+        // Keep this query-only handle in the original caller for the entire
+        // run. Descendants must prove native membership and this live caller's
+        // creation time; the serialized descriptor grants nothing by itself.
+        let source = gwt::process::windows_recovery::RecoverySource::new(&job)
+            .map_err(|_| "retain native recovery source containment")?;
+        let attached = Receipt {
+            source: Some(source.descriptor()),
+            ..receipt
+        };
+        write_receipt(&directory.path().join("attached.json"), &attached)?;
         while !exited(*process.0)? {
             std::thread::sleep(POLL_INTERVAL);
         }
@@ -167,6 +178,7 @@ fn recover(input: &str) -> Result<i32> {
         // SAFETY: this exact owned process is signaled and the output is live.
         unsafe { GetExitCodeProcess(*process.0, &mut code) }
             .map_err(|_| "read recovery worker exit status")?;
+        drop(source);
         drop(job); // Reclaim any descendants before returning the result.
         Ok(code.min(255) as i32)
     })();
@@ -222,6 +234,7 @@ fn worker(ciphertext: &Path, dispatch: impl FnOnce(&str) -> i32) -> Result<i32> 
         pid: std::process::id(),
         birth: birth(current)?,
         nonce: context.nonce,
+        source: None,
     };
     write_receipt(&directory.join("ready.json"), &receipt)?;
     let deadline = Instant::now() + STARTUP_TIMEOUT;
@@ -230,7 +243,7 @@ fn worker(ciphertext: &Path, dispatch: impl FnOnce(&str) -> i32) -> Result<i32> 
             return Err("caller exited or containment startup exceeded 30s".into());
         }
         if let Some(attached) = read_receipt(&directory.join("attached.json"))? {
-            if attached != receipt {
+            if !attached.matches(receipt.pid, receipt.birth, &receipt.nonce) {
                 return Err("containment receipt identity changed".into());
             }
             let caps = gwt_core::process_tree::job_cpu::observe(receipt.pid)?;
@@ -239,6 +252,28 @@ fn worker(ciphertext: &Path, dispatch: impl FnOnce(&str) -> i32) -> Result<i32> 
                 || caps.iter().any(|cap| cap.hard_cap_percent.is_some())
             {
                 return Err("registered uncapped worker containment is not observable".into());
+            }
+            // Private startup is still single-threaded. The descriptor is
+            // inherited by verification commands but always checked against
+            // the kernel and the exact live originating process at use time.
+            std::env::set_var(
+                gwt::process::windows_recovery::SOURCE_ENV,
+                attached
+                    .source
+                    .ok_or("missing recovery source descriptor")?,
+            );
+            // Capture before dispatch: later environment removal/replacement
+            // must not erase the service worker's original source locator.
+            let source = gwt::process::windows_recovery::capture_source()
+                .ok_or("missing captured recovery source descriptor")?;
+            if !gwt::process::checked_runtime_descendant_of(
+                receipt.pid,
+                context.parent_pid,
+                Some(source),
+            )
+            .unwrap_or(false)
+            {
+                return Err("native recovery source containment is not observable".into());
             }
             break;
         }
@@ -500,6 +535,7 @@ mod tests {
             pid: 7,
             birth: 11,
             nonce: "test-nonce".into(),
+            source: None,
         };
         assert!(receipt.matches(7, 11, "test-nonce"));
         assert!(!receipt.matches(7, 12, "test-nonce"));
