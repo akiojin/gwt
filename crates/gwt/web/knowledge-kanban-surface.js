@@ -845,6 +845,7 @@ export function createKnowledgeKanbanSurface({
   openSurfaceNotice = () => false,
 }) {
       const knowledgeBridgeStateMap = new Map();
+      let knowledgeTransportOnline = false;
       const terminalPreviewText = new Map();
       const issueControlExplanations = new Map();
       const issueExplanationBindings = new WeakMap();
@@ -1872,6 +1873,7 @@ export function createKnowledgeKanbanSurface({
             queuedSearchQuery: "",
             queuedLoadRefresh: false,
             loadRecoveryTimer: null,
+            loadInterrupted: false,
             loadSlow: false,
             error: "",
             emptyMessage: "",
@@ -2126,6 +2128,7 @@ export function createKnowledgeKanbanSurface({
 
       function finishKnowledgeLoad(state, windowId, knowledgeKind) {
         clearKnowledgeLoadRecoveryTimer(state);
+        state.loadInterrupted = false;
         state.loading = false;
         state.refreshing = false;
         state.loadSlow = false;
@@ -2154,6 +2157,7 @@ export function createKnowledgeKanbanSurface({
         }
         const requestId = nextKnowledgeLoadRequestId++;
         state.loadRequestId = requestId;
+        state.loadInterrupted = false;
         state.ownedLoadRequestIds.add(requestId);
         while (state.ownedLoadRequestIds.size > 4) {
           state.ownedLoadRequestIds.delete(
@@ -2497,8 +2501,25 @@ export function createKnowledgeKanbanSurface({
 
       // SPEC #3170 AS-17.2: disconnect invalidates every retry owner;
       // reconnect restarts a degraded still-open window/query at 5 seconds.
-      function handleKnowledgeTransportChange(online) {
+      function handleKnowledgeTransportChange(online, recoverSnapshots = false) {
+        const disconnected = knowledgeTransportOnline && !online;
+        knowledgeTransportOnline = online;
         for (const [windowId, state] of knowledgeBridgeStateMap.entries()) {
+          if (disconnected && state.loading) {
+            // Only a read sent before this disconnect needs a replacement.
+            // Repeated offline notifications must not duplicate queued reads.
+            state.loadInterrupted = true;
+            clearKnowledgeLoadRecoveryTimer(state);
+          }
+          // Forced recovery already replaces every read through resyncKnowledge.
+          if (online && !recoverSnapshots && state.loadInterrupted && workspaceWindowById(windowId)) {
+            state.loadInterrupted = false;
+            if (state.loading) {
+              state.ownedLoadRequestIds.clear();
+              state.loading = false;
+              requestKnowledgeBridge(windowId, state.kind, state.refreshing || state.queuedLoadRefresh);
+            }
+          }
           if (!online && state.revisionPending) {
             state.revisionPending = false;
             state.autoRefreshDirty = true;
