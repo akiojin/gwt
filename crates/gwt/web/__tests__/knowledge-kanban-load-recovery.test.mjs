@@ -1238,16 +1238,39 @@ test("ordinary reconnect replaces an interrupted cache read without cancelling s
 
 test("offline first reads are not duplicated by repeated connection notifications", async () => {
   const mod = await importSurfaceModule();
-  await withPatchedTimersAsync(async () => {
+  await withPatchedTimersAsync(async ({ timers, fire }) => {
     const sent = [];
-    const surface = createSurface(mod, sent);
+    let online = false;
+    const surface = createSurface(mod, sent, "issue", {
+      send: message => { sent.push(message); return online ? "sent" : "queued"; },
+    });
     surface.handleKnowledgeTransportChange(false);
     surface.requestKnowledgeBridge("win-1", "issue");
+    const state = surface.knowledgeBridgeStateMap.get("win-1");
+    const requestId = state.loadRequestId;
+    assert.equal(state.loadQueued, true);
+    assert.equal(timers.filter(timer => !timer.cleared && !timer.fired).length, 0,
+      "an unsent read cannot expire before the socket replays it");
+    surface.requestKnowledgeBridge("win-1", "issue", true);
+    surface.requestKnowledgeBridge("win-1", "issue", true);
     surface.handleKnowledgeTransportChange(false);
+    online = true;
     surface.handleKnowledgeTransportChange(true);
+    const deadline = state.loadRecoveryTimer;
     surface.handleKnowledgeTransportChange(true);
+    assert.equal(state.loadRecoveryTimer, deadline, "repeated online notifications do not reset the response deadline");
     assert.equal(sent.filter(message => message.kind === "load_knowledge_bridge").length, 1,
       "the original queued read is sufficient when no online client was interrupted");
+    fire(timer => timer.delay === 5000);
+    assert.equal(state.loadSlow, true);
+    fire(timer => timer.delay === 55000);
+    assert.equal(state.error, "Timed out loading cache-backed data");
+    surface.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "win-1", knowledge_kind: "issue",
+      request_id: requestId, entries: [ROW_A], refresh_enabled: true });
+    assert.equal(state.error, "", "the original late response still recovers the window");
+    assert.equal(sent.length, 2, "queued Refresh is sent once after the actual read completes");
+    assert.equal(sent[1].refresh, true);
+    surface.clearKnowledgeBridgeState("win-1");
   });
 });
 
