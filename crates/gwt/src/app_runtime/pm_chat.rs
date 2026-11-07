@@ -13,6 +13,7 @@ pub(super) enum PmRequestTaskOperation {
     },
     Reopen(gwt::protocol::PmRequestTaskUserRequest),
     Cancel(gwt::protocol::PmRequestTaskUserRequest),
+    Update(gwt::protocol::PmRequestTaskUpdateRequest),
 }
 
 fn task_error(code: &str, message: String, current_revision: Option<u64>) -> PmRequestTaskResult {
@@ -59,7 +60,8 @@ pub(super) fn rejected_request_task_events(
     let (id, request_id) = match event {
         gwt::FrontendEvent::LoadPmRequestTask { id, request_id, .. }
         | gwt::FrontendEvent::ReopenPmRequestTask { id, request_id, .. }
-        | gwt::FrontendEvent::CancelPmRequestTask { id, request_id, .. } => (id, *request_id),
+        | gwt::FrontendEvent::CancelPmRequestTask { id, request_id, .. }
+        | gwt::FrontendEvent::UpdatePmRequestTask { id, request_id, .. } => (id, *request_id),
         _ => return None,
     };
     Some(vec![OutboundEvent::reply(
@@ -117,6 +119,43 @@ fn request_task_result(
                 task_id: request.task_id.clone(),
             };
             (request, action)
+        }
+        PmRequestTaskOperation::Update(request) => {
+            let task_id = request.task.id.clone();
+            let receipt = store.apply(
+                &Actor {
+                    kind: ActorKind::User,
+                    id: format!("browser:{client_id}"),
+                },
+                &Request {
+                    operation_id: request.operation_id,
+                    expected_revision: request.expected_revision,
+                    reason: request.reason,
+                    action: Action::Update { task: request.task },
+                },
+            )?;
+            // A legal no-op has an empty task delta. Observe current state
+            // separately; the original receipt stays immutable on replay.
+            let state = store.read().map_err(|error| TaskError::PersistenceUnconfirmed(
+                format!("Update was recorded but its current task read failed: {error}; retain the operation id and load the task and receipt"),
+            ))?;
+            let unconfirmed = || {
+                TaskError::PersistenceUnconfirmed(
+                "Update was recorded but its current task and receipt could not be reconciled; retain the operation id and load the task and receipt".into(),
+            )
+            };
+            let state = state.ok_or_else(unconfirmed)?;
+            if state.revision < receipt.revision
+                || !state.receipts.iter().any(|saved| saved == &receipt)
+            {
+                return Err(unconfirmed());
+            }
+            let task = state.tasks.get(&task_id).cloned().ok_or_else(unconfirmed)?;
+            return Ok(PmRequestTaskResult::Ready {
+                revision: state.revision,
+                task: Box::new(task),
+                receipt: Some(Box::new(receipt)),
+            });
         }
     };
     let receipt = store.apply(

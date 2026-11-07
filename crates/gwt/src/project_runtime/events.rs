@@ -104,12 +104,18 @@ impl OwnerLaunchPermissionCheck {
     }
 }
 
+pub const MONITOR_PREPARATION_EXHAUSTED: &str = "Issue Monitor launch stopped after 3 preparations without spawning or adopting an owner pane; requeue the Issue to retry";
+
 /// An observation from the first read-only facts pass, never a claim or a
 /// cleanup permit. The fixed owner revalidates every expected source field.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OwnerMonitorLaunchRejection {
     pub operation_id: String,
+    /// The GUI exhausted its bounded prepare budget. The owner must still
+    /// prove the exact unclaimed delivery and absence of live/pending work.
+    #[serde(default)]
+    pub preparation_exhausted: bool,
     pub expected_delivery: Option<Box<crate::issue_monitor::PendingIssueMonitorLaunchDelivery>>,
     pub expected_profile: Option<crate::IssueMonitorLaunchProfile>,
     /// Original saved head and pool; only a pre-command answer refusal uses this readset.

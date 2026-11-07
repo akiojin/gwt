@@ -2191,7 +2191,8 @@ export function createKnowledgeKanbanSurface({
           selected_number: state.selectedNumber ?? null,
           refresh,
         }) === "queued";
-        scheduleKnowledgeLoadRecovery(windowId, effectiveKind, requestId);
+        // An unsent read has no backend response deadline until ordinary replay.
+        if (!state.loadQueued) scheduleKnowledgeLoadRecovery(windowId, effectiveKind, requestId);
       }
 
       function resyncKnowledge(windowIds) {
@@ -2533,6 +2534,7 @@ export function createKnowledgeKanbanSurface({
           if (online && state.loadQueued && workspaceWindowById(windowId)) {
             // The current project's pending queue is flushed just after open.
             state.loadQueued = false;
+            if (!recoverSnapshots) scheduleKnowledgeLoadRecovery(windowId, state.kind, state.loadRequestId);
           }
           if (!online && state.revisionPending) {
             state.revisionPending = false;

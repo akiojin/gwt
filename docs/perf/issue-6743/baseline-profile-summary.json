@@ -1,0 +1,134 @@
+{
+  "profile": "crates\\gwt\\playwright\\test-results\\issue-5658-before-d8d4fd6cbce24b21830364db6d82a14f\\idle-cpu-live-Issue-5658-i-7f2f9-authenticated-Ready-polling-chromium-dark\\native-profile.json",
+  "samples": 437,
+  "context_failures": 0,
+  "elapsed_seconds": 30.6321373,
+  "top_leaf": [
+    [
+      "NtCreateFile",
+      91
+    ],
+    [
+      "ZwCreateUserProcess",
+      63
+    ],
+    [
+      "ZwQuerySystemInformation",
+      40
+    ],
+    [
+      "NtClose",
+      34
+    ],
+    [
+      "NtDeviceIoControlFile",
+      19
+    ],
+    [
+      "NtQueryInformationFile",
+      13
+    ],
+    [
+      "NtQueryObject",
+      8
+    ],
+    [
+      "NtOpenFile",
+      6
+    ],
+    [
+      "NtReadFile",
+      5
+    ],
+    [
+      "core::slice::memchr::memchr_aligned",
+      5
+    ]
+  ],
+  "top_product_leaf": [
+    [
+      "gwt::pm_registry::pm_worktree_path_for_repo_path",
+      194
+    ],
+    [
+      "gwt::cli::hook::health::expected_hook_bin_for_config_path::closure$0",
+      39
+    ],
+    [
+      "gwt::index_worker::poll_registered_project_index_sources",
+      35
+    ],
+    [
+      "gwt::cli::hook::health::audit_managed_git_hooks",
+      29
+    ],
+    [
+      "gwt::cli::tray::lifetime::refresh",
+      26
+    ],
+    [
+      "gwt::usage_poller::collect_sessions_with_clock::closure$1<chrono::datetime::DateTime<chrono::offset::utc::Utc> (*)()>",
+      12
+    ],
+    [
+      "gwt::usage_poller::collect_sessions_with_clock<chrono::datetime::DateTime<chrono::offset::utc::Utc> (*)()>",
+      11
+    ],
+    [
+      "gwt::runtime_health_poller::Poller::poll_once",
+      8
+    ],
+    [
+      "gwt::process::host_process_start_epoch_secs",
+      7
+    ],
+    [
+      "gwt::session_inventory::read_candidates_with_liveness<gwt::session_inventory::observe_machine_sessions_with_system_refresh::closure_env$0<gwt::session_inventory::observe_machine_sessions_with_system::closure_env$0> >",
+      6
+    ]
+  ],
+  "top_product_inclusive": [
+    [
+      "gwt::usage_poller::collect_sessions_with_clock<chrono::datetime::DateTime<chrono::offset::utc::Utc> (*)()>",
+      219
+    ],
+    [
+      "gwt::usage_poller::collect_sessions",
+      215
+    ],
+    [
+      "gwt::usage_poller::impl$0::poll_once::async_fn$0",
+      208
+    ],
+    [
+      "gwt::usage_poller::collect_sessions_with_clock::closure$2<chrono::datetime::DateTime<chrono::offset::utc::Utc> (*)()>",
+      206
+    ],
+    [
+      "gwt::usage_poller::collect_sessions_with_clock::closure$1<chrono::datetime::DateTime<chrono::offset::utc::Utc> (*)()>",
+      206
+    ],
+    [
+      "gwt::pm_registry::pm_worktree_path_for_repo_path",
+      194
+    ],
+    [
+      "gwt::usage_poller::impl$0::poll_in_background::async_fn$0::closure$0",
+      106
+    ],
+    [
+      "gwt::app_runtime::workspace_views::attach_managed_hook_health_to_active_works",
+      80
+    ],
+    [
+      "gwt::cli::hook::health::ManagedHookFailureSnapshot::read_health",
+      80
+    ],
+    [
+      "gwt::app_runtime::workspace_views::managed_hook_health_view_for_worktree",
+      80
+    ]
+  ],
+  "preserved_profile_sha256": "ad24df0a0220f1c614adfe131055da7d3ff19fe53a8f1fc22594f8a09952a453",
+  "preserved_profile_format": "LF-normalized JSON for Git; original capture bytes remain in the named source artifact"
+}

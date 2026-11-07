@@ -296,19 +296,63 @@ pub fn host_process_start_epoch_secs(pid: u32) -> Option<u64> {
     if let Some(epoch) = test_clock::start_epoch_secs(pid) {
         return epoch;
     }
-    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+    #[cfg(windows)]
+    {
+        use windows::{
+            core::Owned,
+            Win32::{
+                Foundation::{FILETIME, WAIT_TIMEOUT},
+                System::Threading::{
+                    GetProcessTimes, OpenProcess, WaitForSingleObject,
+                    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+                },
+            },
+        };
 
-    let mut system = System::new().ok()?;
-    let pid = sysinfo::Pid::from_u32(pid);
-    system.refresh_processes_specifics(
-        ProcessesToUpdate::Some(&[pid]),
-        true,
-        ProcessRefreshKind::nothing(),
-    );
-    system
-        .process(pid)
-        .map(sysinfo::Process::start_time)
-        .filter(|started_at| *started_at > 0)
+        // SAFETY: request a new, non-inherited handle with only query/wait
+        // access. Owned closes it on every return path.
+        let handle = unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+                false,
+                pid,
+            )
+            .map(|handle| Owned::new(handle))
+        }
+        .ok()?;
+        let mut creation = FILETIME::default();
+        let mut exit = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        // SAFETY: all output pointers are valid, and the owned handle pins
+        // this process incarnation through the query and zero-timeout wait.
+        unsafe {
+            GetProcessTimes(*handle, &mut creation, &mut exit, &mut kernel, &mut user).ok()?;
+            if WaitForSingleObject(*handle, 0) != WAIT_TIMEOUT {
+                return None;
+            }
+        }
+        let ticks = (u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime);
+        (ticks / 10_000_000)
+            .checked_sub(11_644_473_600)
+            .filter(|started_at| *started_at > 0)
+    }
+    #[cfg(not(windows))]
+    {
+        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+
+        let mut system = System::new().ok()?;
+        let pid = sysinfo::Pid::from_u32(pid);
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+        system
+            .process(pid)
+            .map(sysinfo::Process::start_time)
+            .filter(|started_at| *started_at > 0)
+    }
 }
 
 /// Inject Linux observations on any test host without changing its OS clock.
@@ -580,6 +624,8 @@ mod tests {
         // Keep its handle alive: the terminated process object still exists,
         // and its exit code equals STILL_ACTIVE, but it is no longer running.
         assert!(!is_host_process_alive(child.id()));
+        assert_eq!(host_process_start_epoch_secs(child.id()), None);
+        assert_eq!(host_process_start_time(child.id()), None);
     }
 
     #[cfg(windows)]
@@ -628,9 +674,10 @@ mod tests {
         let before = thread_cpu();
         for _ in 0..1000 {
             assert!(is_host_process_alive(std::process::id()));
+            assert!(host_process_start_time(std::process::id()).is_some());
         }
         let cpu = thread_cpu() - before;
-        eprintln!("1000 Windows PID probes consumed {cpu:?} of thread CPU");
+        eprintln!("1000 Windows liveness/start-identity probes consumed {cpu:?} of thread CPU");
         assert!(
             cpu < std::time::Duration::from_millis(500),
             "PID probe CPU budget exceeded: {cpu:?}"

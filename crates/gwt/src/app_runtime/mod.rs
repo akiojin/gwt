@@ -2075,6 +2075,7 @@ pub struct AppRuntime {
     /// transient daemon disconnect.
     pub(crate) issue_monitor_launch_deliveries: HashMap<String, IssueMonitorLaunchDeliveryState>,
     pub(crate) issue_monitor_launch_preparations: HashSet<wizard::IssueMonitorLaunchPreparationKey>,
+    pub(crate) issue_monitor_launch_attempts: HashMap<wizard::IssueMonitorLaunchPreparationKey, u8>,
     pub(crate) issue_monitor_launch_queue: Vec<wizard::PendingIssueMonitorLaunch>,
     pub(crate) issue_monitor_materializer_id: String,
     /// Issue #3878: budget for one local fallback commit of the Issue Monitor
@@ -5155,6 +5156,7 @@ impl AppRuntime {
             pending_launch_completions: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
             issue_monitor_launch_preparations: HashSet::new(),
+            issue_monitor_launch_attempts: HashMap::new(),
             issue_monitor_launch_queue: Vec::new(),
             issue_monitor_materializer_id: uuid::Uuid::new_v4().to_string(),
             issue_monitor_fallback_commit_timeout: ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
@@ -11328,6 +11330,7 @@ impl AppRuntime {
             | FrontendEvent::LoadPmRequestTask { id, .. }
             | FrontendEvent::ReopenPmRequestTask { id, .. }
             | FrontendEvent::CancelPmRequestTask { id, .. }
+            | FrontendEvent::UpdatePmRequestTask { id, .. }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
             | FrontendEvent::AttachmentUploadFailed { id, .. }
@@ -11707,6 +11710,7 @@ impl AppRuntime {
             | FrontendEvent::LoadPmRequestTask { id, .. }
             | FrontendEvent::ReopenPmRequestTask { id, .. }
             | FrontendEvent::CancelPmRequestTask { id, .. }
+            | FrontendEvent::UpdatePmRequestTask { id, .. }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
             | FrontendEvent::AttachmentUploadFailed { id, .. }
@@ -12087,6 +12091,17 @@ impl AppRuntime {
                 &id,
                 request_id,
                 pm_chat::PmRequestTaskOperation::Cancel(request),
+            ),
+            FrontendEvent::UpdatePmRequestTask {
+                id,
+                request_id,
+                request,
+            } => self.pm_request_task_events(
+                context,
+                client_id,
+                &id,
+                request_id,
+                pm_chat::PmRequestTaskOperation::Update(request),
             ),
             FrontendEvent::PaneName { .. } => Vec::new(),
             FrontendEvent::PaneSendInput { session_id, text } => {

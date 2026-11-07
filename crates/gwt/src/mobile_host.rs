@@ -1,8 +1,9 @@
 //! Host registration lease bookkeeping (Issue #6476).
 //!
 //! This foundation opens no transport and grants no device authorization. A
-//! trusted caller must authenticate coordinator replies, own this value under
-//! the Host authorization fence, and check it at the final read/input effect.
+//! trusted caller must authenticate coordinator replies. MobileAuthorization's
+//! registered mode owns this value under its Host authorization fence and checks
+//! final read/input effects, including the native permit acceptance deadline.
 //! Network failure/EOF must invalidate it and disable the Host with a new epoch.
 //! Renewal scheduling (every ten seconds) and that runtime wiring are separate.
 //! The credential module provides strict reads and explicit immutable private
@@ -161,10 +162,21 @@ impl RegistrationLease {
 
     /// Check at the synchronous effect while holding the Host authority fence.
     pub fn check(&mut self, now: Instant, wall: u64) -> Result<(), LeaseError> {
+        self.checked_deadline(now, wall).map(|_| ())
+    }
+
+    /// The absolute request-start deadline, for the final native permit cap.
+    pub(crate) fn checked_deadline(
+        &mut self,
+        now: Instant,
+        wall: u64,
+    ) -> Result<Instant, LeaseError> {
         self.observe(now, wall)?;
+        self.active_until.ok_or(LeaseError::NotRegistered)
+    }
+
+    pub(crate) fn active_deadline(&self) -> Option<Instant> {
         self.active_until
-            .ok_or(LeaseError::NotRegistered)
-            .map(|_| ())
     }
 
     pub fn invalidate(&mut self) {

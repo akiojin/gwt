@@ -1,0 +1,65 @@
+{
+  "git_head": "bcf777ed432df9fd96dc5dd9c13d01ec859d7ea2",
+  "build_profile": "release",
+  "measurement_scope": "steady idle",
+  "gui_pid": 39592,
+  "gui_started_at": "2026-11-04T16:06:23.9419061Z",
+  "daemon_pid": 41776,
+  "agent_count": 5,
+  "ready_requests_per_minute": 27.5,
+  "sessions_fixture": {
+    "sha256": "eb11ceef7c828dc6a590fe4adce02bfbe3dd5927002115ff5548fafeaead83dc",
+    "copied": true,
+    "bytes": 37508132,
+    "files": 7428
+  },
+  "sha256": {
+    "scripts/diagnostics/issue-5658-browser-check.ps1": "cff3ace3fbda443b7ff17e05a1c2477683be554519ffc7ce4df57f8e518d967b",
+    "crates/gwt/src/main.rs": "7acce28ba1591a5bc25fdd18a5db42da75a327444b0c80bc49cf535ca0d63aa3",
+    "crates/gwt/src/project_runtime/transport.rs": "e1b1b1cb3bd1e45b1a66fee1b9e41bb501ce6788c973333e33cb1f067ac3353a",
+    "crates/gwt-terminal/src/test_util.rs": "5d1b38f537eb5ac30725c6cb613d4a712a167e3bc24ad7ba0533f4b727ea4d08",
+    "scripts/diagnostics/issue-5658-cpu.ps1": "e90047315468e44f6bd471ff50a30363e9501ac2a053af0691ff8684ad2f7313",
+    "crates/gwt/src/app_runtime/mod.rs": "e9beae677c3febc3d54954a2e470819db2fe4cf04d590a1d57735ae4c8cf6510",
+    "crates/gwt/src/runtime_health_poller.rs": "18da24ad4d79d69f740e1c6c58996344005d0083670a7431eaf4065c7df99a2c",
+    "crates/gwt/playwright/tests/idle-cpu-live.spec.ts": "dd7eaf65bf79ddaf9d167322d49d108d9b4fbf592049c1c6b0cb3b61d17b5e5a",
+    "crates/gwt/src/session_inventory.rs": "01d1fb1a14904822fe914494a6a92489f5a11bd6b3ac634469c4d1d93aa0cc4b",
+    "crates/gwt-terminal/src/pane.rs": "47743f88bb0824e5cda783febdd60009c7d8d4e3ed35ab50a0c94a9c197d6cfd",
+    "crates/gwt/src/index_worker.rs": "f287ebc2d9da13fbc877b5ca047bff0eddef6fdfd8f7b3711a5229647c42ac56",
+    "target/issue-6743-baseline/release/gwtd.exe": "d3827c40a6c493ea5966c13bdefe1661c44049bc56474e56921f03a7146dae23",
+    "crates/gwt/src/project_runtime/events.rs": "2f90813737f47143472581ef6c6b9ed4c63631f1c5b17e8796155b4dceb05c94",
+    "crates/gwt/src/agent_capacity.rs": "c4db4abd4babe5455cb5fa69d60828fe23b4f8029849c890259af6c50057fc41",
+    "target/issue-6743-baseline/release/gwt.exe": "88ae08ccf5877f60bafbe74a13f59be52eab5d9950e8d676b1a184d44a7dd7ae",
+    "crates/gwt/src/project_runtime/owner.rs": "874c75a9f4e8bbb2fe8ffa43ea7eb33af36cb6ccf6f60cc5173156fc2d4ba224"
+  },
+  "managed_browser_preflight": {
+    "after": {
+      "context": "current",
+      "convergence": "converged",
+      "diagnostics": [],
+      "normal_completion": "normal",
+      "reasons": [],
+      "result": "proceed",
+      "schema_version": 1
+    },
+    "before": {
+      "context": "current",
+      "convergence": "converged",
+      "diagnostics": [],
+      "normal_completion": "normal",
+      "reasons": [],
+      "result": "proceed",
+      "schema_version": 1
+    }
+  },
+  "issue_monitor_enabled": false,
+  "pm_auto_start": false,
+  "background_index": "normal",
+  "user_verification_result": "n/a (autonomous)",
+  "cleanup": {
+    "daemon_exited": true,
+    "daemon_pid": 41776,
+    "cleaned_at": "2026-11-04T16:20:12.6848768Z",
+    "gui_exited": true,
+    "gui_pid": 39592
+  }
+}
