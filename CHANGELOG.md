@@ -1,6 +1,81 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.153.0] - 2026-11-07
+
+### Bug Fixes
+
+- **web:** Settings の通常再接続で読込を回復する
+- **runtime:** 起動の生存期間とPM登録の表示同期を補正する
+- **runtime:** Retain gui residency and pm identity on restore
+- **mobile:** 到達不能なリポジトリmarkerを拒否する
+- **web:** 再接続の一覧応答から編集中の環境変数を保護する
+- **monitor:** 停止済み runtime の再利用 PID を履歴として扱う
+- **verify:** Windows 復旧 worker の source authority を検証する
+- **web:** 通常再接続で Knowledge の中断読込を回復する
+- **web:** Retain queued Knowledge reads through socket closing
+- **runtime:** Worktree をまたぐ監督接続を復旧する
+- **ci:** Preserve home guard compatibility with older pr heads
+- **mobile:** Guard終了時に共有FDのlockを解放する
+- **issue-monitor:** Restore manual admission and auto controls
+- **issue-monitor:** Preserve terminal authority exhaustion
+
+### Features
+
+- **mobile:** 固定私有設定からHost資格を選択する
+- **pm:** ブラウザから依頼タスクを取り消す
+- **mobile:** PC Host資格の取込と点検を追加する
+
+### Miscellaneous Tasks
+
+- **work:** ロック競合テスト移行の配信検証を記録
+- **work:** Settings 再接続 PR の関連記録を保存する
+- **work:** Issue #5876 の配送記録を精算する
+- **work:** Issue #6476の配送継続記録を保存する
+- **work:** Issue #4740の配送継続記録を保存する
+- **work:** Settings の編集保護に関する引継ぎを記録する
+- **work:** 編集保護の PR 関連記録を保存する
+- **work:** 依頼タスク取消の PR 関連付けを保存する
+- **work:** Issue #5876 の配送記録を照合する
+- **work:** 起動障害修正の PR 関連付けを保存する
+- **work:** Record PR 6829 delivery association
+- **work:** Knowledge 再接続 PR の関連記録を保存する
+- **work:** Record the Knowledge queued-read recovery PR
+- **work:** Record issue 6809 delivery audit
+- **work:** Settle issue 6809 work event
+- **work:** Record issue 6809 pull request
+- **work:** Record issue 6732 verification blocker
+- **work:** Record issue 6732 active recovery wait
+- **work:** Preserve issue 6732 recovery handoff
+- **work:** Record issue 6732 delivery scope
+- **work:** Record issue 6732 delivery verification
+- **work:** Record issue 6732 recovered delivery slice
+- **work:** Record issue 6732 verified delivery scope
+- **work:** Issue #6732 の最終配送範囲を記録
+- **work:** Record issue 6732 delivery continuation
+
+### Performance
+
+- **paths:** Avoid stale project identity scans and guard test homes
+
+### Testing
+
+- **core:** ロック競合通知を論理期限で検証する
+- **windows:** Shell snapshot の観測サイズを実行時に合わせる
+- **core:** ロック期限検証の無関係な速度上限を除く
+- **fleet:** Multicall cat の起動名を指定する
+- **fleet:** 孤立プロセス fixture を Rust で構築する
+- **verify:** Recover poisoned native test environment locks
+- **web:** Align reconnect contract assertions with recovery mode
+- **paths:** Audit browser hooks from the managed caller
+- **issue-monitor:** Select issues before checking auto recovery
+- **issue-monitor:** Target the active issues surface
+- **runtime:** 対照終了後の Monitor 更新を待つ
+- **runtime:** Await quota fixture launch acknowledgement
+- **fleet:** Select cat applet in renamed orphan fixture
+- **fleet:** Use shell builtins for orphan fixture echo
+- **runtime:** Publish owner fixture endpoints atomically
+
 ## [9.152.0] - 2026-11-06
 
 ### Bug Fixes

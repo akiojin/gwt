@@ -11440,6 +11440,9 @@ impl IssueMonitorState {
     pub(crate) fn max_active_agents_policy(
         &self,
     ) -> (Option<usize>, Option<IssueMonitorMaxActiveChange>) {
+        if let Some(policy) = &self.roster_machine_policy {
+            return (policy.manual_limit, policy.last_change.clone());
+        }
         (
             self.max_active_agents_override(),
             self.max_active_last_change.clone(),
@@ -15264,8 +15267,8 @@ impl IssueMonitorState {
             other_terminal_queue_count,
             active_count: self.active_count(),
             max_active_agents: self.effective_max_active_agents(),
-            max_active_agents_override: self.max_active_agents_override(),
-            max_active_last_change: self.max_active_last_change.clone(),
+            max_active_agents_override: self.max_active_agents_policy().0,
+            max_active_last_change: self.max_active_agents_policy().1,
             agent_capacity: self.agent_capacity.clone(),
             total_candidates: self.inbox.len(),
             active_issue_number: self.active_issue_number(),
@@ -15560,8 +15563,8 @@ impl IssueMonitorState {
             pending_claim_issues: Some(self.pending_claim_issue_numbers().into_iter().collect()),
             active_launches_incomplete: false,
             max_active: self.effective_max_active_agents(),
-            max_active_agents_override: self.max_active_agents_override(),
-            max_active_last_change: self.max_active_last_change.clone(),
+            max_active_agents_override: status.max_active_agents_override,
+            max_active_last_change: status.max_active_last_change.clone(),
             agent_capacity: self.agent_capacity.clone(),
             enabled: self.config.enabled,
             gui_status: Some(status.clone()),

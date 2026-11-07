@@ -591,6 +591,21 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 ids: optional_string_vec(params, "ids")?,
             })
         }
+        "workspace.project_scan" => {
+            reject_unknown_params(params, &[], "workspace.project_scan")?;
+            CliCommand::Workspace(WorkspaceCommand::ProjectScan)
+        }
+        "workspace.project_prune" => {
+            reject_unknown_params(
+                params,
+                &["dry_run", "manifest_hash"],
+                "workspace.project_prune",
+            )?;
+            CliCommand::Workspace(WorkspaceCommand::ProjectPrune {
+                dry_run: optional_bool(params, "dry_run")?.unwrap_or(true),
+                manifest_hash: optional_string(params, "manifest_hash")?,
+            })
+        }
         "workspace.work_repair" => {
             reject_unknown_params(params, &["work_id", "dry_run"], "workspace.work_repair")?;
             CliCommand::Workspace(WorkspaceCommand::WorkRepair {
@@ -5304,6 +5319,26 @@ mod tests {
             ok("workspace.projection-prune", json!({})),
             CliCommand::Workspace(WorkspaceCommand::ProjectionPrune { .. })
         ));
+    }
+
+    #[test]
+    fn project_store_maintenance_json_defaults_to_dry_run_and_rejects_unknown_scope() {
+        assert!(matches!(
+            ok("workspace.project_prune", json!({})),
+            CliCommand::Workspace(WorkspaceCommand::ProjectPrune {
+                dry_run: true,
+                manifest_hash: None
+            })
+        ));
+        assert!(matches!(
+            ok("workspace.project_scan", json!({})),
+            CliCommand::Workspace(WorkspaceCommand::ProjectScan)
+        ));
+        assert!(
+            err("workspace.project_prune", json!({"ids": ["unexpected"]}))
+                .to_string()
+                .contains("ids")
+        );
     }
 
     /// Issue #4465 AC-8: `workspace.work_prune` mutates durable Work state, so

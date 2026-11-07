@@ -1,4 +1,8 @@
 //! Exact owner-local Session/PTY installation and publication.
+#[path = "project_catalog.rs"]
+mod project_catalog;
+pub(crate) use project_catalog::owner_host_project_catalog;
+
 use super::workspace::{save_resumed_workspace_projection, save_start_work_workspace_projection};
 use super::{launch_finalization::*, launch_payload::*, ActiveLaunchHandshakeCleanup};
 use crate::launch_runtime::same_worktree_path;
@@ -3327,41 +3331,48 @@ pub(crate) fn owner_host_project_roots(project_root: &Path) -> Result<Vec<PathBu
             .map(|tab| tab.project_root)
             .collect::<Vec<_>>();
     roots.push(project_root.into());
-    let projects = match std::fs::read_dir(gwt_core::paths::gwt_projects_dir()) {
-        Ok(projects) => Some(projects),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error.to_string()),
-    };
-    if let Some(projects) = projects {
-        for project in projects {
-            let project = project.map_err(|error| error.to_string())?;
-            let descriptors = match std::fs::read_dir(project.path().join("runtime/daemon")) {
-                Ok(descriptors) => descriptors,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error.to_string()),
-            };
-            for descriptor in descriptors {
-                let descriptor = descriptor.map_err(|error| error.to_string())?;
-                if descriptor
-                    .path()
-                    .extension()
-                    .is_none_or(|extension| extension != "json")
-                {
-                    continue;
-                }
-                if let Some(endpoint) = std::fs::read(descriptor.path()).ok().and_then(|bytes| {
-                    serde_json::from_slice::<gwt_core::daemon::DaemonEndpoint>(&bytes).ok()
-                }) {
-                    if endpoint.scope.target == gwt_core::daemon::RuntimeTarget::Host {
-                        roots.push(endpoint.scope.project_root);
-                    }
-                }
-            }
-        }
-    }
+    let (catalog_roots, metrics) =
+        owner_host_project_catalog().map_err(|error| error.to_string())?;
+    tracing::debug!(target: "gwt::project_catalog", ?metrics, "host project catalog observed");
+    roots.extend(catalog_roots);
     roots.sort();
     roots.dedup();
     Ok(roots)
+}
+
+#[cfg(test)]
+mod project_catalog_tests {
+    use super::owner_host_project_roots;
+    use gwt_core::daemon::{persist_endpoint, DaemonEndpoint, RuntimeScope, RuntimeTarget};
+
+    #[test]
+    fn owner_host_project_roots_excludes_missing_roots_and_dead_hosts() {
+        let arena = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(arena.path());
+        let current = arena.path().join("current");
+        let live = arena.path().join("live");
+        let dead = arena.path().join("dead");
+        let missing = arena.path().join("removed-test-root");
+        for root in [&current, &live, &dead] {
+            std::fs::create_dir(root).unwrap();
+        }
+        for (name, root, pid) in [
+            ("live", &live, std::process::id()),
+            ("dead", &dead, 0),
+            ("missing", &missing, std::process::id()),
+        ] {
+            let scope = RuntimeScope::new(name, "host", root.clone(), RuntimeTarget::Host).unwrap();
+            let path = scope.endpoint_path(&gwt_core::paths::gwt_home());
+            persist_endpoint(
+                &path,
+                &DaemonEndpoint::new(scope, pid, "test".into(), "test".into(), "test".into()),
+            )
+            .unwrap();
+        }
+        let mut expected = vec![current.clone(), dunce::canonicalize(live).unwrap()];
+        expected.sort();
+        assert_eq!(owner_host_project_roots(&current).unwrap(), expected);
+    }
 }
 
 /// Facts read from the exact Worktree's execution diagnosis.

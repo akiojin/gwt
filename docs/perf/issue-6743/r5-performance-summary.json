@@ -1,0 +1,423 @@
+{
+  "schema_version": 1,
+  "issue": 6743,
+  "generation": "R5",
+  "run_id": "f6c58752d6e643ca8cb288e56f724ec9",
+  "evidence_status": {
+    "direct_dark_600_cpu_thresholds": "PASS",
+    "direct_light_30_cpu_thresholds": "PASS (short diagnostic only; not ten-minute acceptance)",
+    "direct_harness_status": "passed",
+    "canonical_uncapped_verification": "unresolved environment incompatibility from the latest preserved R2 record",
+    "overall_acceptance_complete": false,
+    "ready_pr_and_develop_delivery_complete": false
+  },
+  "units": {
+    "cpu_fraction": "Kernel+user process CPU seconds divided by measured wall seconds; fraction 1.0 is one logical core.",
+    "cpu_percent": "CPU fraction multiplied by 100; not machine-normalized.",
+    "strict_thresholds": {
+      "gui_cpu_fraction": 0.05,
+      "monitor_off_daemon_cpu_fraction": 0.01
+    }
+  },
+  "provenance": {
+    "profile": "shipping release defaults",
+    "source_generation": {
+      "raw": {
+        "path": "target/issue-6743-r5/source-generation.json",
+        "sha256": "64c1d02297337c86793fb214493fc0a5cfeaf0656711bef2a72f98c69c05425c",
+        "bytes": 1865
+      },
+      "preserved": {
+        "path": "docs/perf/issue-6743/r5-source-generation.json",
+        "sha256": "d54d07ab62b660398a821b04339593b143b1408199dee8cd67073576317f5f14",
+        "bytes": 1836
+      },
+      "transform": "UTF-8 text with CRLF/CR normalized to LF only; no JSON reformatting",
+      "raw_crlf_count": 29,
+      "raw_lone_cr_count": 0,
+      "bytes_changed": true,
+      "semantic_equivalence": true
+    },
+    "source_generation_compiled_working_tree": true,
+    "source_generation_base_git_head": "8d2087d43d989904ae94f38cdd4395c3c1e7c69f",
+    "recorded_source_file_count": 7,
+    "release_artifact_hashes": {
+      "gwt.pdb": "c3d6f1e1b334b476388c88685d7faaeedaea7cb82174f31efc1ff1d5b380f192",
+      "gwtd.pdb": "3b42f33a2ee2d3a32da0de25d841142943e242504d5b4442e7d3389919b0b372",
+      "gwt.exe": "a6ef5d41be23add7248873d779737478ace39718123b0e204b6dc2af0f3b6057",
+      "gwtd.exe": "ecba6862549735c3ee637675d4c6ace9b9351483b5f0ee3432818ec2c314bef5"
+    },
+    "captured_source_file_hashes_match_generation_manifest": true,
+    "launch": {
+      "path": "crates/gwt/playwright/test-results/issue-5658-after-f6c58752d6e643ca8cb288e56f724ec9/launch.json",
+      "sha256": "ee33a655390e13cc2e2a417350d6bc4abc8e4463a0cb5f9058a73ef39f2854de",
+      "bytes": 5719
+    },
+    "capture_manifest_scope": "working tree at evidence capture; immutable comparison binaries identified separately by their SHA256",
+    "capture_working_tree_is_clean": false,
+    "fixture_clone_sha": "8d2087d43d989904ae94f38cdd4395c3c1e7c69f",
+    "fixture_clone_is_not_the_compiled_source_generation": true,
+    "sessions_fixture": {
+      "sha256": "eb11ceef7c828dc6a590fe4adce02bfbe3dd5927002115ff5548fafeaead83dc",
+      "bytes": 37508132,
+      "copied": true,
+      "files": 7428
+    },
+    "issue_monitor_enabled": false,
+    "pm_auto_start": false,
+    "background_index": "normal",
+    "agent_count": 5
+  },
+  "dark_600": {
+    "gui": {
+      "raw": {
+        "path": "crates/gwt/playwright/test-results/issue-5658-after-f6c58752d6e643ca8cb288e56f724ec9/idle-cpu-live-Issue-5658-i-7f2f9-authenticated-Ready-polling-chromium-dark/after-dark-idle-cpu.json",
+        "sha256": "eafa1419a83a65c9c5bdb08e2ab39c59eeb3c7f89c042f5084daf41f974739e6",
+        "bytes": 144152
+      },
+      "process_id": 33424,
+      "process_started_at": "2026-11-04T21:15:51.4587286Z",
+      "binary": "E:\\gwt\\work\\issue-6743\\target\\issue-6743-r5\\release\\gwt.exe",
+      "binary_sha256": "a6ef5d41be23add7248873d779737478ace39718123b0e204b6dc2af0f3b6057",
+      "start_utc": "2026-11-04T21:20:27.6208291Z",
+      "end_utc": "2026-11-04T21:30:27.7095070Z",
+      "requested_sample_ms": 600000,
+      "wall_seconds": 600.0889017,
+      "process_cpu_seconds": 28.578125,
+      "cpu_fraction": 0.04762315203470793,
+      "cpu_percent_one_logical_core": 4.762315203470793,
+      "strict_threshold_cpu_fraction": 0.05,
+      "comparison": "<",
+      "observed_threshold_result": "PASS",
+      "used_for_ten_minute_direct_cpu_result": true,
+      "canonical_uncapped_proof": false,
+      "preservation": {
+        "raw": {
+          "path": "crates/gwt/playwright/test-results/issue-5658-after-f6c58752d6e643ca8cb288e56f724ec9/idle-cpu-live-Issue-5658-i-7f2f9-authenticated-Ready-polling-chromium-dark/after-dark-idle-cpu.json",
+          "sha256": "eafa1419a83a65c9c5bdb08e2ab39c59eeb3c7f89c042f5084daf41f974739e6",
+          "bytes": 144152
+        },
+        "preserved": {
+          "path": "docs/perf/issue-6743/steady-r5-idle-cpu.json",
+          "sha256": "eafa1419a83a65c9c5bdb08e2ab39c59eeb3c7f89c042f5084daf41f974739e6",
+          "bytes": 144152
+        },
+        "transform": "UTF-8 text with CRLF/CR normalized to LF only; no JSON reformatting",
+        "raw_crlf_count": 0,
+        "raw_lone_cr_count": 0,
+        "bytes_changed": false,
+        "semantic_equivalence": true
+      }
+    },
+    "monitor_off_daemon": {
+      "raw": {
+        "path": "crates/gwt/playwright/test-results/issue-5658-after-f6c58752d6e643ca8cb288e56f724ec9/idle-cpu-live-Issue-5658-i-7f2f9-authenticated-Ready-polling-chromium-dark/after-dark-daemon-cpu.json",
+        "sha256": "972097b79136b74fc19d4cd009ff7a16eb0c41046537eadf57d445f2fd5012f0",
+        "bytes": 9648
+      },
+      "process_id": 34764,
+      "process_started_at": "2026-11-04T21:15:50.3215155Z",
+      "binary": "E:\\gwt\\work\\issue-6743\\target\\issue-6743-r5\\release\\gwtd.exe",
+      "binary_sha256": "ecba6862549735c3ee637675d4c6ace9b9351483b5f0ee3432818ec2c314bef5",
+      "start_utc": "2026-11-04T21:20:27.5882088Z",
+      "end_utc": "2026-11-04T21:30:27.6702210Z",
+      "requested_sample_ms": 600000,
+      "wall_seconds": 600.0822326,
+      "process_cpu_seconds": 3.03125,
+      "cpu_fraction": 0.005051391018304914,
+      "cpu_percent_one_logical_core": 0.5051391018304914,
+      "strict_threshold_cpu_fraction": 0.01,
+      "comparison": "<",
+      "observed_threshold_result": "PASS",
+      "used_for_ten_minute_direct_cpu_result": true,
+      "canonical_uncapped_proof": false,
+      "preservation": {
+        "raw": {
+          "path": "crates/gwt/playwright/test-results/issue-5658-after-f6c58752d6e643ca8cb288e56f724ec9/idle-cpu-live-Issue-5658-i-7f2f9-authenticated-Ready-polling-chromium-dark/after-dark-daemon-cpu.json",
+          "sha256": "972097b79136b74fc19d4cd009ff7a16eb0c41046537eadf57d445f2fd5012f0",
+          "bytes": 9648
+        },
+        "preserved": {
+          "path": "docs/perf/issue-6743/steady-r5-daemon-cpu.json",
+          "sha256": "972097b79136b74fc19d4cd009ff7a16eb0c41046537eadf57d445f2fd5012f0",
+          "bytes": 9648
+        },
+        "transform": "UTF-8 text with CRLF/CR normalized to LF only; no JSON reformatting",
+        "raw_crlf_count": 0,
+        "raw_lone_cr_count": 0,
+        "bytes_changed": false,
+        "semantic_equivalence": true
+      }
+    },
+    "readiness": {
+      "raw": {
+        "path": "crates/gwt/playwright/test-results/issue-5658-after-f6c58752d6e643ca8cb288e56f724ec9/idle-cpu-live-Issue-5658-i-7f2f9-authenticated-Ready-polling-chromium-dark/after-dark-work-projection-readiness.json",
+        "sha256": "49ec8aa9983ea3f78be960c093e9d350313b6026632c3f2636b8093fd912d33d",
+        "bytes": 2074
+      },
+      "ready": true,
+      "source": "full active_work_projection after hook-health aggregation",
+      "source_captured_at": "2026-11-04T21:17:27.780Z",
+      "received_at": "2026-11-04T21:20:24.586Z",
+      "frontier_required": true,
+      "expected_work_id_count": 1752,
+      "observed_work_id_count": 1752,
+      "missing_work_id_count": 0,
+      "active_work_rows": 897,
+      "expected_session_count": 5,
+      "matched_session_count": 5,
+      "hook_health_status_counts": {
+        "needs_attention": 5
+      },
+      "health_interpretation": "Non-null health shows audit completion. needs_attention is not a healthy result.",
+      "preservation": {
+        "raw": {
+          "path": "crates/gwt/playwright/test-results/issue-5658-after-f6c58752d6e643ca8cb288e56f724ec9/idle-cpu-live-Issue-5658-i-7f2f9-authenticated-Ready-polling-chromium-dark/after-dark-work-projection-readiness.json",
+          "sha256": "49ec8aa9983ea3f78be960c093e9d350313b6026632c3f2636b8093fd912d33d",
+          "bytes": 2074
+        },
+        "preserved": {
+          "path": "docs/perf/issue-6743/steady-r5-work-projection-readiness.json",
+          "sha256": "49ec8aa9983ea3f78be960c093e9d350313b6026632c3f2636b8093fd912d33d",
+          "bytes": 2074
+        },
+        "transform": "UTF-8 text with CRLF/CR normalized to LF only; no JSON reformatting",
+        "raw_crlf_count": 0,
+        "raw_lone_cr_count": 0,
+        "bytes_changed": false,
+        "semantic_equivalence": true
+      }
+    },
+    "interaction_checks": {
+      "browser_errors_raw": {
+        "path": "crates/gwt/playwright/test-results/issue-5658-after-f6c58752d6e643ca8cb288e56f724ec9/idle-cpu-live-Issue-5658-i-7f2f9-authenticated-Ready-polling-chromium-dark/after-dark-errors.json",
+        "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "bytes": 2
+      },
+      "console_and_page_errors": 0,
+      "input_probes": {
+        "before": 5,
+        "after": 5,
+        "all_visible_latency_measured": true,
+        "max_visible_latency_ms": 126.90409999999974,
+        "all_probe_timestamps_outside_cpu_window": true
+      },
+      "idle_input_bytes": 0,
+      "raw_output": {
+        "panes": 5,
+        "raw_bytes": 0,
+        "raw_chunks": 0
+      },
+      "ipc_receipts_raw": {
+        "path": "crates/gwt/playwright/test-results/issue-5658-after-f6c58752d6e643ca8cb288e56f724ec9/idle-cpu-live-Issue-5658-i-7f2f9-authenticated-Ready-polling-chromium-dark/after-dark-agent-ipc-receipts.json",
+        "sha256": "359d7681431cee955e8e3c5faea8dd29ecd7208d65407f49f4828e1c5aaa674d",
+        "bytes": 128223
+      },
+      "measurement_ipc_attempts": 275,
+      "measurement_ipc_successes": 275,
+      "failed_read_records_in_final_receipts": 0,
+      "reads_started_in_cpu_window_and_successfully_completed_after_window": [],
+      "ipc_interpretation": "The measurement-end success count can trail attempts when a read completes after the CPU window. Final receipt failure records are counted separately.",
+      "workload": {
+        "kind": "regularly launched custom command Agent PTYs",
+        "panes": 5,
+        "history_lines_per_pane": 600,
+        "padding_bytes_per_line": 80,
+        "ansi_color": true,
+        "idle_input_bytes": 0,
+        "fixture_clone_sha": "8d2087d43d989904ae94f38cdd4395c3c1e7c69f",
+        "provider_sha256": "4e7bec43acebd0b555ff5da5ab711637c2bf3a0150e900859b2cd0a9703acae9",
+        "ready_requests_per_minute": 27.499999999999996,
+        "reused_across_themes": false
+      },
+      "agent_visual_check_recorded": "pass",
+      "user_verification_result_recorded": "n/a (autonomous)"
+    }
+  },
+  "light_30_non_ac": {
+    "gui": {
+      "raw": {
+        "path": "crates/gwt/playwright/test-results/issue-5658-after-f6c58752d6e643ca8cb288e56f724ec9/idle-cpu-live-Issue-5658-i-7f2f9-authenticated-Ready-polling-chromium-light/after-light-idle-cpu.json",
+        "sha256": "170a56e62be2f2468a7de2aeaf9ab8341d57de38d9ae3037d320658840202324",
+        "bytes": 54567
+      },
+      "process_id": 33424,
+      "process_started_at": "2026-11-04T21:15:51.4587286Z",
+      "binary": "E:\\gwt\\work\\issue-6743\\target\\issue-6743-r5\\release\\gwt.exe",
+      "binary_sha256": "a6ef5d41be23add7248873d779737478ace39718123b0e204b6dc2af0f3b6057",
+      "start_utc": "2026-11-04T21:32:09.3658081Z",
+      "end_utc": "2026-11-04T21:32:39.4270808Z",
+      "requested_sample_ms": 30000,
+      "wall_seconds": 30.0614369,
+      "process_cpu_seconds": 1.0625,
+      "cpu_fraction": 0.035344285222773233,
+      "cpu_percent_one_logical_core": 3.5344285222773233,
+      "strict_threshold_cpu_fraction": 0.05,
+      "comparison": "<",
+      "observed_threshold_result": "PASS",
+      "used_for_ten_minute_direct_cpu_result": false,
+      "canonical_uncapped_proof": false
+    },
+    "monitor_off_daemon": {
+      "raw": {
+        "path": "crates/gwt/playwright/test-results/issue-5658-after-f6c58752d6e643ca8cb288e56f724ec9/idle-cpu-live-Issue-5658-i-7f2f9-authenticated-Ready-polling-chromium-light/after-light-daemon-cpu.json",
+        "sha256": "2f3c4fef5a108656da46441fd310be1a1fd22d3bfe07a410d65d94c86288be5c",
+        "bytes": 9660
+      },
+      "process_id": 34764,
+      "process_started_at": "2026-11-04T21:15:50.3215155Z",
+      "binary": "E:\\gwt\\work\\issue-6743\\target\\issue-6743-r5\\release\\gwtd.exe",
+      "binary_sha256": "ecba6862549735c3ee637675d4c6ace9b9351483b5f0ee3432818ec2c314bef5",
+      "start_utc": "2026-11-04T21:32:09.8151488Z",
+      "end_utc": "2026-11-04T21:32:39.8666254Z",
+      "requested_sample_ms": 30000,
+      "wall_seconds": 30.0516355,
+      "process_cpu_seconds": 0.125,
+      "cpu_fraction": 0.004159507391868905,
+      "cpu_percent_one_logical_core": 0.4159507391868905,
+      "strict_threshold_cpu_fraction": 0.01,
+      "comparison": "<",
+      "observed_threshold_result": "PASS",
+      "used_for_ten_minute_direct_cpu_result": false,
+      "canonical_uncapped_proof": false
+    },
+    "readiness": {
+      "raw": {
+        "path": "crates/gwt/playwright/test-results/issue-5658-after-f6c58752d6e643ca8cb288e56f724ec9/idle-cpu-live-Issue-5658-i-7f2f9-authenticated-Ready-polling-chromium-light/after-light-work-projection-readiness.json",
+        "sha256": "01eb1890e7e1cef1d254f51340a68eeef03adc9feb57e39ca04477e07111852a",
+        "bytes": 2079
+      },
+      "ready": true,
+      "source": "full active_work_projection after hook-health aggregation",
+      "source_captured_at": "2026-11-04T21:31:59.662Z",
+      "received_at": "2026-11-04T21:32:04.988Z",
+      "frontier_required": true,
+      "expected_work_id_count": 1757,
+      "observed_work_id_count": 1757,
+      "missing_work_id_count": 0,
+      "active_work_rows": 902,
+      "expected_session_count": 5,
+      "matched_session_count": 5,
+      "hook_health_status_counts": {
+        "needs_attention": 5
+      },
+      "health_interpretation": "Non-null health shows audit completion. needs_attention is not a healthy result."
+    },
+    "interaction_checks": {
+      "browser_errors_raw": {
+        "path": "crates/gwt/playwright/test-results/issue-5658-after-f6c58752d6e643ca8cb288e56f724ec9/idle-cpu-live-Issue-5658-i-7f2f9-authenticated-Ready-polling-chromium-light/after-light-errors.json",
+        "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "bytes": 2
+      },
+      "console_and_page_errors": 0,
+      "input_probes": {
+        "before": 5,
+        "after": 5,
+        "all_visible_latency_measured": true,
+        "max_visible_latency_ms": 124.58079999999609,
+        "all_probe_timestamps_outside_cpu_window": true
+      },
+      "idle_input_bytes": 0,
+      "raw_output": {
+        "panes": 5,
+        "raw_bytes": 0,
+        "raw_chunks": 0
+      },
+      "ipc_receipts_raw": {
+        "path": "crates/gwt/playwright/test-results/issue-5658-after-f6c58752d6e643ca8cb288e56f724ec9/idle-cpu-live-Issue-5658-i-7f2f9-authenticated-Ready-polling-chromium-light/after-light-agent-ipc-receipts.json",
+        "sha256": "54f75146bc02f94f458584309310000a14d6d1f2fa514fdbecb6a71d6e84f364",
+        "bytes": 15450
+      },
+      "measurement_ipc_attempts": 14,
+      "measurement_ipc_successes": 13,
+      "failed_read_records_in_final_receipts": 0,
+      "reads_started_in_cpu_window_and_successfully_completed_after_window": [
+        {
+          "agent_index": 2,
+          "started_at": "2026-11-04T21:32:38.379Z",
+          "completed_at": "2026-11-04T21:32:39.613Z",
+          "ok": true,
+          "exit_code": 0
+        }
+      ],
+      "ipc_interpretation": "The measurement-end success count can trail attempts when a read completes after the CPU window. Final receipt failure records are counted separately.",
+      "workload": {
+        "kind": "regularly launched custom command Agent PTYs",
+        "panes": 5,
+        "history_lines_per_pane": 600,
+        "padding_bytes_per_line": 80,
+        "ansi_color": true,
+        "idle_input_bytes": 0,
+        "fixture_clone_sha": "8d2087d43d989904ae94f38cdd4395c3c1e7c69f",
+        "provider_sha256": "4e7bec43acebd0b555ff5da5ab711637c2bf3a0150e900859b2cd0a9703acae9",
+        "ready_requests_per_minute": 27.499999999999996,
+        "reused_across_themes": false
+      },
+      "agent_visual_check_recorded": "pass",
+      "user_verification_result_recorded": "n/a (autonomous)"
+    },
+    "session_ids_disjoint_from_dark": true
+  },
+  "final_completion": {
+    "last_run_raw": {
+      "path": "crates/gwt/playwright/test-results/issue-5658-after-f6c58752d6e643ca8cb288e56f724ec9/.last-run.json",
+      "sha256": "91d1c43004802cd49950d78eb11c8fa7d05da8ffffe219a8b13b2f561bc00903",
+      "bytes": 45
+    },
+    "last_run_recorded": {
+      "status": "passed",
+      "failedTests": []
+    },
+    "owned_pid_cleanup_raw": {
+      "path": "crates/gwt/playwright/test-results/issue-5658-after-f6c58752d6e643ca8cb288e56f724ec9/owned-pid-cleanup.json",
+      "sha256": "c2dc7907221c11cf287dcf596719170ce1e46adf821126db4f3d3fa8614840af",
+      "bytes": 148
+    },
+    "owned_pid_cleanup_recorded": {
+      "cleaned_at": "2026-11-04T21:32:52.7206239Z",
+      "gui_exited": true,
+      "daemon_exited": true,
+      "daemon_pid": 34764,
+      "gui_pid": 33424
+    }
+  },
+  "delivery_trace": {
+    "raw": {
+      "path": "crates/gwt/playwright/test-results/issue-5658-after-f6c58752d6e643ca8cb288e56f724ec9/terminal-delivery-summary.json",
+      "sha256": "965d0613aedcfc1636abb69c23d2d15a2fb7ffb11bfd4c7d0eaaf3f49602baad",
+      "bytes": 1433
+    },
+    "scope": "Whole direct run; trace counts are not assigned to the CPU-only window.",
+    "status": "observed",
+    "observed_events": 55,
+    "observed_gap_events": 26,
+    "gap_causes": {
+      "gui_inbox_coalescing": 26,
+      "predecessor_unavailable": 0,
+      "unattributed": 0
+    },
+    "read_errors": [],
+    "limitation": "Observed trace counts only; buffered logs may be lost on forced exit. Global seq distance is not a dropped-chunk count. Correlate predecessor gaps with coalescing, broadcast lag, queue gauges and connection events; absence without capture evidence is unknown."
+  },
+  "canonical_gate": {
+    "preserved_record": {
+      "path": "docs/perf/issue-6743/r2-verification-summary.json",
+      "sha256": "8ad4c280f712b55c5d3353716bed452b6db1964d834fa64780d87896547cd565",
+      "bytes": 4520
+    },
+    "generation_of_record": "R2",
+    "all_passed": false,
+    "measurement_status": "environment_incompatible",
+    "reason": "PID 46296 has unregistered ancestor gwt PID 54020; restart that GUI with the updated runtime before measuring",
+    "existing_blocker_issue": 6735,
+    "unresolved_for_this_R5_evidence": true,
+    "direct_measurement_is_canonical_uncapped_proof": false
+  },
+  "limitations": [
+    "Dark600 is the direct shipping-profile CPU-threshold result; Light30 is a separate short observation.",
+    "The direct run does not establish the required canonical uncapped verification or complete the Issue/PR/develop delivery.",
+    "R5 was compiled from a working tree over the recorded base git_head. The fixture clone SHA and capture-time source manifest are not substituted for compiled-source provenance.",
+    "The source-generation preservation changes CRLF to LF, so both raw and preserved SHA256 values are recorded. The three Dark measurement/readiness copies are byte-identical to their raw files.",
+    "needs_attention in the readiness record proves an audit result exists, not that hook health passed."
+  ]
+}

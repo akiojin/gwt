@@ -489,6 +489,39 @@ mod windows_job {
             Ok(contained.as_bool())
         }
 
+        /// Retain read-only observation of this exact Job with a private handle.
+        /// The duplicate cannot assign, terminate, or change the Job's limits.
+        pub fn duplicate_query_handle(&self) -> std::io::Result<std::os::windows::io::OwnedHandle> {
+            use std::os::windows::io::{FromRawHandle, OwnedHandle};
+
+            use windows::Win32::{
+                Foundation::{DuplicateHandle, DUPLICATE_HANDLE_OPTIONS},
+                System::Threading::GetCurrentProcess,
+            };
+
+            const JOB_OBJECT_QUERY: u32 = 0x0004;
+            let job = self.handle.ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "Windows Job handle is closed")
+            })?;
+            let mut query = HANDLE::default();
+            // SAFETY: the owned source Job stays live; the duplicate is private,
+            // non-inheritable, and requests only native Job query permission.
+            unsafe {
+                DuplicateHandle(
+                    GetCurrentProcess(),
+                    job,
+                    GetCurrentProcess(),
+                    &mut query,
+                    JOB_OBJECT_QUERY,
+                    false,
+                    DUPLICATE_HANDLE_OPTIONS(0),
+                )
+            }
+            .map_err(std::io::Error::other)?;
+            // SAFETY: successful duplication returned a new owned handle.
+            Ok(unsafe { OwnedHandle::from_raw_handle(query.0) })
+        }
+
         /// Whether `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` is currently armed.
         pub fn kill_on_close_enabled(&self) -> Result<bool, WindowsJobError> {
             let job = self.handle.expect("live Windows Job handle");
@@ -922,6 +955,35 @@ mod tests {
         assert!(
             release.find("CloseHandle(job)").unwrap() < release.find("self.handle = None").unwrap()
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_query_handle_cannot_change_job_limits() {
+        use std::os::windows::io::AsRawHandle;
+
+        use windows::Win32::{
+            Foundation::HANDLE,
+            System::JobObjects::{
+                JobObjectExtendedLimitInformation, SetInformationJobObject,
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            },
+        };
+
+        let job = WindowsJobObject::new().unwrap();
+        let query = job.duplicate_query_handle().unwrap();
+        let info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        // SAFETY: the query-only handle and exact immutable buffer stay live.
+        assert!(unsafe {
+            SetInformationJobObject(
+                HANDLE(query.as_raw_handle()),
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as _,
+                std::mem::size_of_val(&info) as u32,
+            )
+        }
+        .is_err());
+        assert!(job.kill_on_close_enabled().unwrap());
     }
 
     #[cfg(windows)]

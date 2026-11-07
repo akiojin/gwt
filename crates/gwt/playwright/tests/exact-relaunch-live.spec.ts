@@ -1110,8 +1110,9 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
         if (location.protocol === "http:" || location.protocol === "https:") localStorage.setItem("gwt:ui:theme", theme);
       }, theme);
       await gotoLiveGwt(page, fixture.url, { enableTestBridge: true, suppressProjectSurfaces: true });
-      await expect.poll(() => page.evaluate(() => (window as any).__gwtPlaywrightMessages?.findLast((entry: any) =>
-        entry.payload.kind === "project_execution_status")?.payload.status.view_state)).toBe("open");
+      await expect.poll(() => page.evaluate(() => (window as any).__gwtPlaywrightMessages
+        ?.filter((entry: any) => entry.payload.kind === "project_execution_status")
+        .at(-1)?.payload.status.view_state)).toBe("open");
       await sendLiveGwtEvent(page, { kind: "open_pm_agent" });
       await expect.poll(async () => (await windows()).filter((window: any) => window.is_pm).length, { timeout: 90_000 }).toBe(1);
       for (let i = 1; i <= 4; i += 1) {
@@ -1170,6 +1171,7 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
       await expect(main.locator(".works-active")).toHaveText("Active 5");
       await assertAggregates();
       const coldOwner = await readLatestOwnActivity(page);
+      // Prevent the old document from reconnecting before the fresh navigation.
       await page.goto("about:blank");
       const restarted = await fixture.restart({ coldOwner }); workspace = null; usage = null; activity = null;
       await gotoLiveGwt(page, restarted, { enableTestBridge: true, suppressProjectSurfaces: true });

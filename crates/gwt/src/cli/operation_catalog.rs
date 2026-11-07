@@ -899,6 +899,14 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "workspace.project_prune",
+        aliases: &[],
+    },
+    Operation {
+        name: "workspace.project_scan",
+        aliases: &[],
+    },
+    Operation {
         name: "workspace.projection_list",
         aliases: &["workspace.projection-list"],
     },

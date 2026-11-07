@@ -476,6 +476,21 @@ impl AppRuntime {
             return Vec::new();
         }
         self.sync_pm_session_cache(&project_root, prefs.registration.as_ref());
+        // Cold restore may be accepted before the GUI first reads the PM prefs.
+        // Preserve any newer request's existing projection authority.
+        if !self
+            .project_state_for_root(&project_root)
+            .is_some_and(|state| {
+                state
+                    .pending_pm_launches
+                    .values()
+                    .any(|root| root == &project_root)
+            })
+        {
+            if let Some(registration) = prefs.registration.as_ref() {
+                self.mark_pm_resume_launches(tab_id, &HashSet::new(), &registration.session_id);
+            }
+        }
         if trigger == PmEnsureTrigger::Automatic && !prefs.settings.auto_start {
             tracing::info!(
                 project_root = %project_root.display(),
@@ -2162,6 +2177,11 @@ impl AppRuntime {
                 .project_state(context)
                 .and_then(|state| state.project_owner_identity.as_ref())
                 .is_some_and(|accepted| accepted != owner)
+            || self.project_state(context).is_some_and(|state| {
+                state.pending_pm_launches.iter().any(|(pending, root)| {
+                    root == &context.project_root && pending.as_str() != window_id
+                })
+            })
         {
             return false;
         }
@@ -2262,6 +2282,10 @@ impl AppRuntime {
             .unwrap_or_default();
         if let Some(state) = self.project_state_for_root_mut(project_root) {
             for combined in new_ids {
+                // Only the latest accepted PM request may update this root's cache.
+                state
+                    .pending_pm_launches
+                    .retain(|_, root| root != project_root);
                 state
                     .pending_pm_launches
                     .insert(combined, project_root.to_path_buf());
@@ -2298,6 +2322,9 @@ impl AppRuntime {
             .collect();
         if let Some(state) = self.project_state_mut(&context) {
             for window in accepted {
+                state
+                    .pending_pm_launches
+                    .retain(|_, root| root != &context.project_root);
                 state
                     .pending_pm_launches
                     .insert(window, context.project_root.clone());

@@ -1,0 +1,194 @@
+{
+  "issue": 6743,
+  "kind": "Exact pushed source canonical verification remains incomplete",
+  "source_head": "5811e37b989f28908586832af678fe62d432fb55",
+  "record_id": "vrr-ea6904466bca4308bb92d13b222fcdeb",
+  "record_content_hash": "781abd2042c64b2cdfdfef6ff24055023bf1f98f397452987be565dd927a0623",
+  "record_bytes_sha256": "f2ba960d0c05b6ecceaafdf7b47abb6571bf12a946ff46be1723cadea9a2fc67",
+  "trusted_copy_compared_equal_to_mirror": true,
+  "started_at": "2026-11-04T21:53:18.645281100Z",
+  "created_at": "2026-11-04T22:03:22.777251200Z",
+  "all_passed": false,
+  "plan_covered": true,
+  "plan_derived": true,
+  "planned_command_count": 20,
+  "recorded_command_count": 18,
+  "passed_commands": 17,
+  "product_failed_commands": 0,
+  "environment_incompatible_commands": 1,
+  "interrupted_commands": 0,
+  "skipped_after_failure": [
+    "cargo build --release -p gwt --bin gwt --bin gwtd",
+    "pwsh -NoProfile -File scripts/diagnostics/issue-5658-browser-check.ps1 -Label after -BuildProfile release -PaneCount 5 -SampleMilliseconds 600000 -AssertCpuBudget -MaxCpuCores 0.05 -MaxDaemonCpuCores 0.01 -SessionsFixture target/issue-6743-sessions-fixture",
+    "cargo build -p gwt --bin gwtd"
+  ],
+  "commands": [
+    {
+      "command": "rustc --version",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo fmt --all -- --check",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo test -p gwt --lib monitor_duplicate_runtime",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo test -p gwt --lib session_inventory",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo test -p gwt --bin gwt -- review_dispatch_launch_completion_keeps_the_implementation_binding issue_monitor_launch_succeeded_ack_is_non_scanning_and_persists usage_poller::tests::collect_sessions_",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo test -p gwt --lib process::tests",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo test -p gwt --lib cli::tray::lifetime::tests",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo test -p gwt --lib disabled_empty_monitor_skips_periodic_scans_but_keeps_explicit_scan_now",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo test -p gwt --lib periodic_scan_guard_keeps_late_cleanup_and_unknown_disk_state",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo test -p gwt --lib issue_5644_poll_admits_without_scan_now_while_maintenance_is_blocked",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo test -p gwt-core --lib builtin_path_batch_skips_canonicalizing_ordinary_denied_files",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo test -p gwt-core --test index_path_policy",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo test -p gwt-core --test test_hygiene_test",
+      "exit_code": 0
+    },
+    {
+      "command": "pwsh -NoProfile -File scripts/diagnostics/issue-5658-browser-check.test.ps1",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo build -p gwt --bin gwt --bin gwtd",
+      "exit_code": 0
+    },
+    {
+      "command": "pwsh -NoProfile -File scripts/diagnostics/issue-5658-browser-check.ps1 -Label after -PaneCount 5 -SampleMilliseconds 15000 -FunctionalOnly -SessionsFixture target/issue-6743-sessions-fixture",
+      "exit_code": 125,
+      "headed_e2e": {
+        "chromium_dark_passed": 0,
+        "chromium_light_passed": 0,
+        "failed": 0,
+        "status": "missing"
+      },
+      "measurement": {
+        "admission_wait_ms": 17,
+        "cap_relief_wait_ms": 128,
+        "raw_exit_code": null,
+        "reason": "PID 13100 has unregistered ancestor gwt PID 54020; restart that GUI with the updated runtime before measuring",
+        "status": "environment_incompatible",
+        "targets": [
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 0,
+            "initial_cpu_time_ms": 140484,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-c2009341-6f27-4db5-84ef-4239f13b775b",
+                "owner_pid": 32292
+              },
+              {
+                "hard_cap_percent": null,
+                "job_name": "native immediate Job (ancestry requires registry)",
+                "owner_pid": 0
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 13100,
+            "required_uncapped": true,
+            "sample_count": 1,
+            "start_time_seconds": 1793829189
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 0,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-c2009341-6f27-4db5-84ef-4239f13b775b",
+                "owner_pid": 32292
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 48248,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793829195
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 0,
+            "initial_cpu_time_ms": 31,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-c2009341-6f27-4db5-84ef-4239f13b775b",
+                "owner_pid": 32292
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 52800,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793829195
+          }
+        ]
+      }
+    },
+    {
+      "command": "cargo build -p gwt --bin gwtd --target-dir 'E:\\gwt\\work\\issue-6743\\target'",
+      "exit_code": 0
+    }
+  ],
+  "driver": {
+    "fixed_path": "E:\\gwt\\work\\issue-6743\\.gwt\\skill-state\\verification-cli-6743-5811\\gwtd.exe",
+    "original_path": "E:\\gwt\\work\\issue-6743\\.gwt\\skill-state\\verification-cli-6743-5811\\gwtd.exe",
+    "sha256": "b57b5cc7ca0aecb36e88bc7a00188b5fe12c8a1a61e4e1459956998e41b3d116",
+    "source_head": "5811e37b989f28908586832af678fe62d432fb55"
+  },
+  "user_verification_result": "n/a (autonomous)",
+  "agent_visual_check": "fail(canonical headed evidence missing; direct R5 evidence is separate)",
+  "ready_pr_created": false,
+  "owner_closed": false,
+  "origin_develop_delivery_proven": false,
+  "remaining_dependency": {
+    "issue": 6735,
+    "symptom": "PID 13100 has unregistered ancestor gwt PID 54020; restart that GUI with the updated runtime before measuring",
+    "existing_fix_source": "892ef9cfb in the other owner worktree; not delivered or usable as a foreign driver for5811",
+    "constraint": "The public recovery restarts current_exe; driver embedded source HEAD must equal verification target HEAD. No external driver/proxy operation exists."
+  },
+  "security_note": "Selected verification fields only; execution_binding and authority material omitted. Raw trusted record remains machine local."
+}

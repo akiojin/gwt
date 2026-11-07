@@ -471,11 +471,9 @@ impl ProjectOwnerHarness {
             std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
         if !with_monitor {
-            std::fs::write(
-                &fixture.endpoint_path,
-                serde_json::to_vec(&fixture.endpoint).map_err(|error| error.to_string())?,
-            )
-            .map_err(|error| error.to_string())?;
+            // Startup persistence also discovers this endpoint concurrently.
+            gwt_core::daemon::persist_endpoint(&fixture.endpoint_path, &fixture.endpoint)
+                .map_err(|error| error.to_string())?;
         }
         Ok(fixture)
     }

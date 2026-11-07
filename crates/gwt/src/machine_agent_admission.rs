@@ -227,6 +227,50 @@ mod tests {
     }
 
     #[test]
+    fn issue_6822_stopped_dead_host_with_unreadable_recycled_child_allows_manual_launch() {
+        use std::collections::BTreeMap;
+
+        use gwt_agent::{AgentId, AgentStatus, Session, SessionRuntimeState};
+
+        let _env = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        manual(1);
+        let sessions = home.path().join("sessions");
+        let session = Session::new(home.path(), "issue-6822", AgentId::Codex);
+        session.save(&sessions).unwrap();
+        let path = gwt_agent::runtime_state_path_for_pid(&sessions, 100, &session.id);
+        let mut runtime = SessionRuntimeState::new(AgentStatus::Stopped);
+        runtime.host_started_at = Some(10);
+        runtime.child_pid = Some(201);
+        for child_started_at in [Some(20), None] {
+            runtime.child_started_at = child_started_at;
+            runtime.save(&path).unwrap();
+            let observed = crate::session_inventory::observe_with_processes(
+                home.path(),
+                &sessions,
+                &BTreeMap::from([(201, 0)]),
+                |_| false,
+            );
+            assert!(observed.sessions.is_empty());
+            let result = with_inventory(
+                || MachineSessionInventory {
+                    uncertainties: observed.uncertainties,
+                    ..Default::default()
+                },
+                || {
+                    assert_admission_locked();
+                    Ok("launched")
+                },
+            );
+            assert_eq!(result, Ok("launched"));
+        }
+        assert!(path.exists(), "observation must not delete the runtime");
+    }
+
+    #[test]
     fn uncertain_manual_observation_refuses_but_auto_preserves_existing_admission() {
         let _env = crate::env_test_lock()
             .lock()
@@ -260,5 +304,47 @@ mod tests {
             .unwrap(),
             "allowed"
         );
+    }
+
+    #[test]
+    fn manual_admits_with_childless_sessions_on_a_live_host_but_counts_live_workers() {
+        let _env = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let sessions = home.path().join("sessions");
+        let pid = std::process::id();
+        let started = crate::process::host_process_start_time(pid).unwrap();
+        let mut session =
+            gwt_agent::Session::new(home.path(), "childless", gwt_agent::AgentId::Codex);
+        session.project_state_root = Some(home.path().to_path_buf());
+        session.save(&sessions).unwrap();
+        let path = gwt_agent::runtime_state_path_for_pid(&sessions, pid, &session.id);
+        let mut runtime = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Stopped);
+        runtime.host_started_at = Some(started);
+        runtime.save(&path).unwrap();
+
+        assert!(
+            !crate::session_inventory::observe_session(&session, &sessions)
+                .uncertainties
+                .is_empty(),
+            "a live preparation Host must still fence Session recovery"
+        );
+        manual(8);
+        assert_eq!(
+            with_admission(&sessions, || Ok("launched")).unwrap(),
+            "launched"
+        );
+
+        runtime.child_pid = Some(pid);
+        runtime.child_started_at = Some(started);
+        runtime.save(&path).unwrap();
+        manual(1);
+        let refusal = with_admission(&sessions, || -> Result<(), String> {
+            panic!("the live worker already occupies the Manual slot")
+        })
+        .unwrap_err();
+        assert!(refusal.contains("1/1"), "{refusal}");
     }
 }

@@ -51,6 +51,39 @@ try { Resolve-CheckoutBuildDirectory $fixtureCheckout '../gwt-build-checkout-oth
 if (!$outside) { throw 'Build target escaped the current checkout.' }
 Write-Output 'Checkout target: default and local scratch accepted; sibling refused.'
 
+$sourceAudit = $ast.Find({ param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-SourceHookAudit'
+}, $true)
+if (!$sourceAudit) { throw 'Source hook audit rendezvous is missing.' }
+. ([scriptblock]::Create($sourceAudit.Extent.Text))
+$SourceAuditDirectory = Join-Path ([IO.Path]::GetTempPath()) ('gwt-source-audit-test-' + [Guid]::NewGuid().ToString('N'))
+$null = New-Item -ItemType Directory -Path $SourceAuditDirectory
+$broker = Start-Job -ArgumentList $SourceAuditDirectory -ScriptBlock {
+    param($directory)
+    for ($index = 0; $index -lt 2; $index++) {
+        do {
+            $request = Get-ChildItem -LiteralPath $directory -Filter '*.request.json' |
+                Where-Object { !(Test-Path -LiteralPath ($_.FullName -replace '\.request\.json$', '.response.json')) } | Select-Object -First 1
+            if (!$request) { Start-Sleep -Milliseconds 100 }
+        } while (!$request)
+        $message = Get-Content -LiteralPath $request.FullName -Raw | ConvertFrom-Json
+        $valid = $message.operation -eq 'hook.doctor' -and $message.params.purpose -eq 'managed_browser'
+        $responsePath = $request.FullName -replace '\.request\.json$', '.response.json'
+        @{ok=($valid -and $index -eq 0);output=if ($index -eq 0) { 'source caller accepted' } else { 'source audit refused' }} |
+            ConvertTo-Json | Set-Content -LiteralPath "$responsePath.tmp" -Encoding utf8NoBOM
+        [IO.File]::Move("$responsePath.tmp", $responsePath)
+    }
+}
+try {
+    if ((Invoke-SourceHookAudit @{purpose='managed_browser'}).output -ne 'source caller accepted') { throw 'Source audit response was lost.' }
+    $refused = $false
+    try { Invoke-SourceHookAudit @{purpose='managed_browser'} | Out-Null } catch { $refused = $_.Exception.Message -like '*source audit refused*' }
+    if (!$refused) { throw 'Source audit refusal was not propagated.' }
+    $null = Wait-Job $broker
+    Receive-Job $broker -ErrorAction Stop | Out-Null
+} finally { Stop-Job $broker; Remove-Job $broker -Force }
+Write-Output 'Source hook audit: request/response preserved; refusal propagated.'
+
 if ($IsWindows) {
     $snapshots = @(& pwsh -NoProfile -File (Join-Path $PSScriptRoot 'issue-5658-cpu.ps1') -TargetProcessId $PID -SampleMilliseconds 1000 |
         ForEach-Object { $_ | ConvertFrom-Json })

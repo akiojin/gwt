@@ -1,0 +1,141 @@
+{
+  "user_verification_result": "n/a (autonomous)",
+  "plan_covered": true,
+  "all_passed": false,
+  "source_state": "R2 uncommitted source; diagnostic run, not final delivery verification",
+  "commands": [
+    {
+      "command": "rustc --version",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo fmt --all -- --check",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo test -p gwt --lib monitor_duplicate_runtime",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo test -p gwt --lib session_inventory",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo test -p gwt --bin gwt usage_poller::tests::collect_sessions_",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo test -p gwt --lib process::tests",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo test -p gwt-core --lib builtin_path_batch_skips_canonicalizing_ordinary_denied_files",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo test -p gwt-core --test index_path_policy",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo test -p gwt-core --test test_hygiene_test",
+      "exit_code": 0
+    },
+    {
+      "command": "pwsh -NoProfile -File scripts/diagnostics/issue-5658-browser-check.test.ps1",
+      "exit_code": 0
+    },
+    {
+      "headed_e2e": {
+        "chromium_dark_passed": 0,
+        "chromium_light_passed": 0,
+        "failed": 0,
+        "status": "missing"
+      },
+      "measurement": {
+        "admission_wait_ms": 18,
+        "cap_relief_wait_ms": 135,
+        "raw_exit_code": null,
+        "reason": "PID 46296 has unregistered ancestor gwt PID 54020; restart that GUI with the updated runtime before measuring",
+        "status": "environment_incompatible",
+        "targets": [
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 0,
+            "initial_cpu_time_ms": 192281,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-c2009341-6f27-4db5-84ef-4239f13b775b",
+                "owner_pid": 32292
+              },
+              {
+                "hard_cap_percent": null,
+                "job_name": "native immediate Job (ancestry requires registry)",
+                "owner_pid": 0
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 46296,
+            "required_uncapped": true,
+            "sample_count": 1,
+            "start_time_seconds": 1793815525
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 0,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-c2009341-6f27-4db5-84ef-4239f13b775b",
+                "owner_pid": 32292
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 54056,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793815536
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 0,
+            "initial_cpu_time_ms": 15,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-c2009341-6f27-4db5-84ef-4239f13b775b",
+                "owner_pid": 32292
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 18576,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793815536
+          }
+        ]
+      },
+      "command": "pwsh -NoProfile -File scripts/diagnostics/issue-5658-browser-check.ps1 -Label after -PaneCount 5 -SampleMilliseconds 15000 -FunctionalOnly -SessionsFixture target/issue-6743-sessions-fixture",
+      "exit_code": 125
+    },
+    {
+      "command": "cargo build -p gwt --bin gwtd --target-dir 'E:\\gwt\\work\\issue-6743\\target'",
+      "exit_code": 0
+    }
+  ],
+  "started_at": "2026-11-04T18:05:39.292963800Z",
+  "worktree_fingerprint": "bd9b12a09b6fe107daae6f65d9c4900858eb58d0341b861806b37a5fa9e7afa1",
+  "record_id": "vrr-848e8d1c341645898dbcba996fe932b5",
+  "verified_head": "bcf777ed432df9fd96dc5dd9c13d01ec859d7ea2"
+}
