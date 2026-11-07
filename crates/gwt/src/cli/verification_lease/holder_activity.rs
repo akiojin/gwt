@@ -1093,7 +1093,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn issue_3809_owned_windows_child_reports_silent_cpu_progress() {
-        use std::io::Write;
+        use std::io::{BufRead, BufReader, Write};
         use std::os::windows::io::AsRawHandle;
         use std::process::{Child, Stdio};
         use windows::Win32::{
@@ -1166,15 +1166,25 @@ mod tests {
                     "-NoProfile",
                     "-NonInteractive",
                     "-Command",
-                    "$value = 0; while ($true) { $value = ($value + 1) % 1000000 }",
+                    "$value = 0; $value = ($value + 1) % 1000000; [Console]::Out.WriteLine('ready'); [Console]::Out.Flush(); while ($true) { $value = ($value + 1) % 1000000 }",
                 ])
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
+                .stdout(Stdio::piped())
                 .stderr(Stdio::null())
                 .spawn()
                 .expect("spawn an owned silent CPU child"),
         );
         let child_pid = child.0.id();
+        let mut ready = String::new();
+        BufReader::new(child.0.stdout.take().expect("owned child stdout"))
+            .read_line(&mut ready)
+            .expect("read owned child ready receipt");
+        assert_eq!(ready.trim_end(), "ready");
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "owned_child_ready pid={child_pid} receipt={:?}",
+            ready.trim_end()
+        );
         let first = read_processes();
         let taken_at = Instant::now();
         log_child("first", &mut child.0, first.as_deref());
