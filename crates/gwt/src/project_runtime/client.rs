@@ -83,16 +83,26 @@ impl ProjectRuntimeClient {
     }
 
     /// Used from the GUI's existing background tasks. The established
-    /// supervisor remains the only child/ensure registry.
+    /// supervisor remains the only child/ensure registry. Keep the returned
+    /// event stream alive throughout the operation to retain GUI residency.
     pub async fn connect_for_gui(
         project_root: std::path::PathBuf,
         supervisor: std::sync::Arc<crate::daemon_supervisor::DaemonSupervisor>,
-    ) -> Result<Self, String> {
+    ) -> Result<
+        (
+            Self,
+            impl futures_util::Stream<Item = Result<super::events::OwnerEvent, String>>,
+        ),
+        String,
+    > {
         let gwt_home = gwt_core::paths::gwt_home();
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
         loop {
             let error = match Self::from_current_project(&project_root, &gwt_home).await {
-                Ok(client) => return Ok(client),
+                Ok(client) => match client.gui_events().await {
+                    Ok(presence) => return Ok((client, presence)),
+                    Err(error) => error,
+                },
                 Err(error) => error,
             };
             if tokio::time::Instant::now() >= deadline {

@@ -1024,8 +1024,22 @@ source ID、`{"selector":{"kind":"tasks","limit":50}}` は完了・取消を含�
 `pm.request_tasks.apply` へ送ります。未初期化・読取不能・途中までの取得は degraded
 として保持し、依頼が残っていない根拠にはしません。一時復旧や Monitor の空キューで
 元の依頼を完了扱いにしません。この手順の対象は保存済みの追跡と選択した native 入力の
-受付です。自動受付・過去の依頼の取込み・ユーザー操作・Tasks UI は別の作業として
+受付です。自動受付・過去の依頼の取込み・他のユーザー操作・Tasks UI は別の作業として
 残ります。追跡自体は Issue の起動や配信ゲートの変更を行いません。
+
+project に紐づくブラウザ protocol の `load_pm_request_task` は、1 件の `task_id` と
+任意の `receipt_operation_id` を読み取ります。`reopen_pm_request_task` は
+`request` 内の `operation_id`・`expected_revision`・`reason`・`task_id` で Task を
+未完了＋再評価待ちへ戻します。応答は `pm_request_task` で要求の `request_id` を返し、
+変更者はサーバーがブラウザ接続から確定します。PM 停止中も保存済みの Task を扱えます。
+`cancel_pm_request_task` は同じ `request` 項目で依頼を取り消し、完了とは別の取消状態と
+ユーザーの監査記録を保存します。対象と祖先の過去の完了根拠は無効になります。
+応答を失ったら、現在の Task と元の receipt を読み直してください。新しい接続は別の
+actor になるため、旧 operation の再実行は競合になります。現在の Task と receipt 内の
+過去状態は、それぞれの revision を保持します。欠測・読取不能は診断と回復用の参照を
+返します。receipt の参照は記録済みの結果の観測であり、新たな永続書込の成功確認では
+ありません。この transport adapter は利用できますが、Tasks 画面と checkbox 操作は
+引き続き未提供です。
 
 選択した native 入力を受け付けるには、登録済み PM が `pm.request_tasks.read` の
 `selector:{kind:"native_turns"}` を読みます。現在の `provider`・`conversation_id` と、

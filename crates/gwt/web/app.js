@@ -1345,12 +1345,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         // operations it still shows as running.
         if (recoverSnapshots === true) resyncSocketSurfaces();
         else if (socketProjectKey) {
-          send({ kind: "get_system_settings" });
-          resyncHookDoctor();
+          resyncSettings();
           // frontend_ready omits these snapshots; release reads lost with the old client.
           const ids = (activeWorkspace()?.windows || []).map(entry => entry.id);
           resyncBoardLogs(ids);
           resyncProfile(ids);
+          resyncProjectIndexSearch(ids);
         }
         syncRunningBranchCleanups();
         requestVisiblePmReports(true);
