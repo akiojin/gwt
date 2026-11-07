@@ -6434,7 +6434,7 @@ fn app_runtime_monitor_quota_hold_clear_resumes_the_same_conversation() {
         let unfinished = source.worktree_path.join("unfinished.txt");
         fs::write(&unfinished, "uncommitted work").unwrap();
         owner_fixture_block_on(async {
-            // test-hygiene: allow-wall-clock-deadline Bounds actual provider startup; its rendered Ready marker is the input barrier.
+            // test-hygiene: allow-wall-clock-deadline Bounds actual provider readiness and durable launch ACK before release input.
             tokio::time::timeout(Duration::from_secs(15), async {
                 loop {
                     let snapshot = owner
@@ -6449,13 +6449,24 @@ fn app_runtime_monitor_quota_hold_clear_resumes_the_same_conversation() {
                         .unwrap_or_default()
                         .contains("quota-fixture-ready")
                     {
-                        break;
+                        let acknowledged = owner
+                            .command(OwnerCommand::AcknowledgeMonitorLaunch {
+                                id: id.clone(),
+                                incarnation: pane.incarnation,
+                                issue_number: 3165,
+                                delivery_id: None,
+                            })
+                            .await
+                            .unwrap();
+                        if acknowledged["acknowledged"] == true {
+                            break;
+                        }
                     }
                     tokio::task::yield_now().await;
                 }
             })
             .await
-            .expect("actual quota provider must be ready before release input");
+            .expect("actual quota provider must be ready and ACKed before release input");
         });
         let mut close_events = owner.subscribe();
         owner_fixture_block_on(

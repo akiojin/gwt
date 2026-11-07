@@ -196,6 +196,9 @@ jobs:
       # is why a stalled mirror had all 59.2 MB to stall on. The second
       # fallback reaches the shared namespace; only xvfb and dbus are then
       # missing from it.
+      - name: Snapshot real HOME project stores
+        id: home-guard
+        run: python scripts/ci_home_guard.py snapshot "${{ runner.temp }}/ci-home-projects-before.json"
       - name: Cache Linux GTK dependency packages
         uses: actions/cache@v6
         with:
@@ -300,6 +303,9 @@ jobs:
             target/nextest/ci/junit.xml
           if-no-files-found: error
           retention-days: 7
+      - name: Check tests left real HOME project stores unchanged
+        if: ${{ !cancelled() && steps.home-guard.outcome == 'success' }}
+        run: python scripts/ci_home_guard.py check "${{ runner.temp }}/ci-home-projects-before.json"
 
   # Issue #4821: infrastructure regressions run beside the workspace suite.
   test-linux-infrastructure:
@@ -313,6 +319,9 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
+      - name: Snapshot real HOME project stores
+        id: home-guard
+        run: python scripts/ci_home_guard.py snapshot "${{ runner.temp }}/ci-home-projects-before.json"
       - uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -355,6 +364,9 @@ jobs:
       - name: Run managed asset lock concurrency regression
         run: python3 scripts/test-managed-assets-lock-stress.py
         timeout-minutes: 10
+      - name: Check tests left real HOME project stores unchanged
+        if: ${{ !cancelled() && steps.home-guard.outcome == 'success' }}
+        run: python scripts/ci_home_guard.py check "${{ runner.temp }}/ci-home-projects-before.json"
 
   # Keep the existing protected check while both workloads run in parallel.
   # always() makes failure, cancellation and skipped dependencies fail closed.
@@ -412,6 +424,9 @@ jobs:
         with:
           fetch-depth: 0
           filter: blob:none
+      - name: Snapshot real HOME project stores
+        id: home-guard
+        run: python scripts/ci_home_guard.py snapshot "${{ runner.temp }}/ci-home-projects-before.json"
       - name: Identify the exact runner image for offline packages
         id: apt-image
         run: |
@@ -463,6 +478,9 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
         timeout-minutes: 5
+      - name: Check tests left real HOME project stores unchanged
+        if: ${{ !cancelled() && steps.home-guard.outcome == 'success' }}
+        run: python scripts/ci_home_guard.py check "${{ runner.temp }}/ci-home-projects-before.json"
 
   test-python-runner:
     name: Test (Python runner)
@@ -501,6 +519,9 @@ jobs:
     if: ${{ github.event.pull_request.draft == false }}
     steps:
       - uses: actions/checkout@v7
+      - name: Snapshot real HOME project stores
+        id: home-guard
+        run: python scripts/ci_home_guard.py snapshot "${{ runner.temp }}/ci-home-projects-before.json"
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
         with:
@@ -533,6 +554,9 @@ jobs:
         run: cargo test -p gwt-core --test index_runner_spawn -- --ignored
         timeout-minutes: 30
         continue-on-error: true
+      - name: Check tests left real HOME project stores unchanged
+        if: ${{ !cancelled() && steps.home-guard.outcome == 'success' }}
+        run: python scripts/ci_home_guard.py check "${{ runner.temp }}/ci-home-projects-before.json"
 
   # Issue #5565: compile one core feature set, then share the same harnesses.
   test-windows-core-build:
@@ -546,6 +570,9 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+      - name: Snapshot real HOME project stores
+        id: home-guard
+        run: python scripts/ci_home_guard.py snapshot "${{ runner.temp }}/ci-home-projects-before.json"
       - uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -581,6 +608,9 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
         timeout-minutes: 5
+      - name: Check tests left real HOME project stores unchanged
+        if: ${{ !cancelled() && steps.home-guard.outcome == 'success' }}
+        run: python scripts/ci_home_guard.py check "${{ runner.temp }}/ci-home-projects-before.json"
 
   # Five independent, native default-parallel runs of the same compiled suite.
   test-windows-core-stability:
@@ -599,6 +629,9 @@ jobs:
         run: [1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@v7
+      - name: Snapshot real HOME project stores
+        id: home-guard
+        run: python scripts/ci_home_guard.py snapshot "${{ runner.temp }}/ci-home-projects-before.json"
       - uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -618,6 +651,9 @@ jobs:
           node scripts/ci-windows-tests.mjs run-core
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         timeout-minutes: 30
+      - name: Check tests left real HOME project stores unchanged
+        if: ${{ !cancelled() && steps.home-guard.outcome == 'success' }}
+        run: python scripts/ci_home_guard.py check "${{ runner.temp }}/ci-home-projects-before.json"
 
   # Issue #5030: keep twenty consecutive runs on one native host, independent
   # of the five full-suite passes so neither delays the other after compilation.
@@ -632,6 +668,9 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+      - name: Snapshot real HOME project stores
+        id: home-guard
+        run: python scripts/ci_home_guard.py snapshot "${{ runner.temp }}/ci-home-projects-before.json"
       - uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -655,6 +694,9 @@ jobs:
           Write-Host "index coordinator: $failures failures out of 20 runs"
           if ($failures -ne 0) { exit 1 }
         timeout-minutes: 15
+      - name: Check tests left real HOME project stores unchanged
+        if: ${{ !cancelled() && steps.home-guard.outcome == 'success' }}
+        run: python scripts/ci_home_guard.py check "${{ runner.temp }}/ci-home-projects-before.json"
 
   # Issue #5565: keep each default test harness on one host while compiling
   # library harnesses beside runtime/integration harnesses. Both keep the
@@ -672,6 +714,10 @@ jobs:
         with:
           # T453 receipts must describe the pushed head, not a synthetic merge.
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Snapshot real HOME project stores
+        if: ${{ hashFiles('scripts/ci_home_guard.py') != '' }}
+        id: home-guard
+        run: python scripts/ci_home_guard.py snapshot "${{ runner.temp }}/ci-home-projects-before.json"
       - uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -803,6 +849,9 @@ jobs:
       - name: Check startup update Git-spawn budget
         run: node scripts/ci-windows-tests.mjs run-runtime gwt bin gwt app_runtime::tests::workspace_resume_tests::startup_restore_update_marker_1500_sessions_bounds_git_spawns -- --exact --test-threads=1
         timeout-minutes: 15
+      - name: Check tests left real HOME project stores unchanged
+        if: ${{ !cancelled() && steps.home-guard.outcome == 'success' }}
+        run: python scripts/ci_home_guard.py check "${{ runner.temp }}/ci-home-projects-before.json"
 
   test-windows-rust-lib:
     name: Test (Windows library regressions)
@@ -817,6 +866,10 @@ jobs:
         with:
           # T453 receipts must describe the pushed head, not a synthetic merge.
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Snapshot real HOME project stores
+        if: ${{ hashFiles('scripts/ci_home_guard.py') != '' }}
+        id: home-guard
+        run: python scripts/ci_home_guard.py snapshot "${{ runner.temp }}/ci-home-projects-before.json"
       - uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -929,6 +982,9 @@ jobs:
           node scripts/ci-windows-tests.mjs run-lib gwt lib gwt issue_monitor::tests::wait_declaration_ -- --test-threads=1
           node scripts/ci-windows-tests.mjs run-lib gwt lib gwt issue_monitor::tests::agent_status_projects_the_wait_declaration -- --exact --test-threads=1
         timeout-minutes: 15
+      - name: Check tests left real HOME project stores unchanged
+        if: ${{ !cancelled() && steps.home-guard.outcome == 'success' }}
+        run: python scripts/ci_home_guard.py check "${{ runner.temp }}/ci-home-projects-before.json"
 
   test-windows-warm:
     name: Windows warm prompt latency
@@ -940,6 +996,9 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Snapshot real HOME project stores
+        id: home-guard
+        run: python scripts/ci_home_guard.py snapshot "${{ runner.temp }}/ci-home-projects-before.json"
       - uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -959,6 +1018,9 @@ jobs:
       - name: Measure warm prompt latency in isolation
         run: node scripts/ci-windows-tests.mjs run-warm gwt lib gwt cli::hook::event_dispatcher::tests::warm_four_megabyte_history_user_prompt_submit_p95_stays_within_budget -- --exact --test-threads=1
         timeout-minutes: 15
+      - name: Check tests left real HOME project stores unchanged
+        if: ${{ !cancelled() && steps.home-guard.outcome == 'success' }}
+        run: python scripts/ci_home_guard.py check "${{ runner.temp }}/ci-home-projects-before.json"
 
   # Issue #4821: core stability and both default slices start together; the
   # protected check requires every slice and warm latency to succeed.
@@ -997,6 +1059,9 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Snapshot real HOME project stores
+        id: home-guard
+        run: python scripts/ci_home_guard.py snapshot "${{ runner.temp }}/ci-home-projects-before.json"
       - uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -1053,6 +1118,9 @@ jobs:
           done
           exit "$status"
         timeout-minutes: 60
+      - name: Check tests left real HOME project stores unchanged
+        if: ${{ !cancelled() && steps.home-guard.outcome == 'success' }}
+        run: python scripts/ci_home_guard.py check "${{ runner.temp }}/ci-home-projects-before.json"
 
   test-frontend:
     name: Test (Frontend + WebView E2E)

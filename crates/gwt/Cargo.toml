@@ -23,6 +23,10 @@ path = "src/bin/gwtd.rs"
 name = "gwt-mobile-coordinator"
 path = "src/bin/gwt-mobile-coordinator.rs"
 
+[[bin]]
+name = "gwt-mobile-host"
+path = "src/bin/gwt-mobile-host.rs"
+
 [[test]]
 name = "ci_contracts"
 path = "tests/suites/ci_contracts_test.rs"

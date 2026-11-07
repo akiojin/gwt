@@ -1132,6 +1132,22 @@ test("AC-M1: approved header reads status, actions, then one filter row", async 
   assert.equal(limit.value,"6","an unchanged final draft cannot mask later confirmed updates");
 });
 
+test("Issue #6732: Agent limit can return to Auto while the roster owns project slots", async (t) => {
+  const { body, surface, sent } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  surface.applyIssueMonitorStatus({agent_roster_capacity:2,max_active_agents:2,max_active_agents_override:8});
+  const auto = body.querySelector('[data-action="monitor-limit-auto"]');
+  assert.ok(auto, "Agent limit exposes an Auto action");
+  assert.ok(auto.classList.contains("wizard-button") && auto.classList.contains("is-compact"));
+  assert.equal(auto.getAttribute("aria-label"), "Set Agent limit to Auto");
+  assert.equal(auto.disabled,false,"roster-managed slots do not prevent returning to Auto");
+  auto.click();
+  assert.deepEqual(sent.at(-1),{kind:"set_issue_monitor_max_active_agents",max_active_agents:null});
+  assert.equal(auto.disabled,false,"the action waits for server confirmation");
+  surface.applyIssueMonitorStatus({agent_roster_capacity:2,max_active_agents:2,max_active_agents_override:null});
+  assert.equal(auto.disabled,true,"the confirmed automatic limit is already selected");
+});
+
 test("AC-M2: column rules, five-item Backlog and explicit card provenance match the mock", async (t) => {
   const { body, surface, load } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));

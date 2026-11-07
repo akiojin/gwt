@@ -1410,6 +1410,11 @@ export function createKnowledgeKanbanSurface({
           }
           limit.title = limit.disabled ? "Automatic or roster-managed limit. Configure in Issues settings." : "Machine-wide agent limit; existing agents continue.";
         }
+        const autoLimit = bar.querySelector('[data-action="monitor-limit-auto"]');
+        if (autoLimit) {
+          autoLimit.disabled = status.max_active_agents_override == null;
+          autoLimit.title = autoLimit.disabled ? "Automatic machine-wide agent limit is active." : "Use the automatic machine-wide agent limit; existing agents continue.";
+        }
         // Issue #4366 AC-6b: the saved settings and the held fallback stay two
         // separate lines, now of the ⚙ tooltip.
         const settings = bar.querySelector('[data-action="monitor-settings"]');
@@ -1663,6 +1668,9 @@ export function createKnowledgeKanbanSurface({
             send({kind:"set_issue_monitor_max_active_agents",max_active_agents:value});
           }
           input.value = String(status.agent_roster_capacity ?? status.max_active_agents_override ?? status.max_active_agents ?? 1);
+        });
+        bar.querySelector('[data-action="monitor-limit-auto"]')?.addEventListener("click", () => {
+          send({kind:"set_issue_monitor_max_active_agents",max_active_agents:null});
         });
         bar
           .querySelector('[data-action="monitor-toggle"]')
@@ -5400,6 +5408,7 @@ export function createKnowledgeKanbanSurface({
                       <span class="knowledge-monitor-switch__state">Off</span>
                     </button>
                     <label class="issue-monitor-limit">Agent limit <input type="number" min="1" step="1" data-action="monitor-limit" aria-label="Agent limit" value="1" disabled /></label>
+                    <button type="button" class="wizard-button is-compact" data-action="monitor-limit-auto" aria-label="Set Agent limit to Auto" disabled>Auto</button>
                     <button type="button" class="wizard-button is-compact" data-action="monitor-settings" aria-label="Issues settings">⚙ Issues settings</button>
                     <button type="button" class="wizard-button is-compact primary" data-action="monitor-toggle">Start</button>
                     <button type="button" class="wizard-button is-compact" data-action="monitor-diagnostics" aria-haspopup="dialog" hidden>Monitor details</button>

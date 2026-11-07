@@ -1,0 +1,103 @@
+{
+  "build_profile": "debug",
+  "performance_acceptance": false,
+  "method": "AMD64 running-thread snapshot + SuspendThread/GetThreadContext/StackWalk64; symbol resolution after capture",
+  "limitation": "Running-state snapshot races and profiler overhead; sample counts are not CPU seconds. Excluded from ten-minute CPU acceptance.",
+  "binary_sha256": "ab4a722a9b7571c465b17d927b02473ea496ff28061b272aeceeb878f9a5fa86",
+  "raw_profile_sha256": "08242795f58a32580bb340ff873123681164050d070c83c6f12539da2a0b68f6",
+  "samples": 291,
+  "context_failures": 0,
+  "elapsed_seconds": 30.6853225,
+  "top_product_leaf": [
+    [
+      "gwt::cli::hook::health::expected_hook_bin_for_config_path::closure$0",
+      68
+    ],
+    [
+      "gwt::index_worker::poll_registered_project_index_sources",
+      42
+    ],
+    [
+      "gwt::cli::tray::lifetime::refresh",
+      39
+    ],
+    [
+      "gwt::cli::hook::health::audit_managed_git_hooks",
+      30
+    ],
+    [
+      "gwt::process::host_process_start_epoch_secs",
+      12
+    ],
+    [
+      "gwt::usage_poller::collect_sessions_with_clock::closure$1<chrono::datetime::DateTime<chrono::offset::utc::Utc> (*)()>",
+      11
+    ],
+    [
+      "gwt::runtime_health_poller::Poller::poll_once",
+      8
+    ],
+    [
+      "gwt::cli::hook::health::file_stamp",
+      8
+    ],
+    [
+      "gwt::usage_poller::collect_sessions_with_clock<chrono::datetime::DateTime<chrono::offset::utc::Utc> (*)()>",
+      8
+    ],
+    [
+      "gwt::session_inventory::read_candidates_with_liveness<gwt::session_inventory::observe_machine_sessions_with_system_refresh::closure_env$0<gwt::session_inventory::observe_machine_sessions_with_system::closure_env$0> >",
+      6
+    ]
+  ],
+  "pm_path_product_samples": 0,
+  "top_product_inclusive": [
+    [
+      "gwt::cli::hook::health::ManagedHookFailureSnapshot::read_health",
+      121
+    ],
+    [
+      "gwt::cli::hook::health::read_managed_hook_health_with",
+      121
+    ],
+    [
+      "gwt::app_runtime::workspace_views::managed_hook_health_view_for_worktree",
+      121
+    ],
+    [
+      "gwt::app_runtime::workspace_views::attach_managed_hook_health_to_active_works",
+      121
+    ],
+    [
+      "gwt::cli::hook::health::cached_surface_audit",
+      120
+    ]
+  ],
+  "smoke_observations": [
+    {
+      "theme": "dark",
+      "elapsed_seconds": 30.077325199999997,
+      "process_cpu_seconds": 9.796875,
+      "average_cores": 0.32572294693279447,
+      "idle_output_bytes": 0,
+      "agent_visual_check": "pass",
+      "ipc_successes": 13
+    },
+    {
+      "theme": "light",
+      "elapsed_seconds": 30.0669486,
+      "process_cpu_seconds": 11.765625,
+      "average_cores": 0.39131423532616144,
+      "idle_output_bytes": 0,
+      "agent_visual_check": "pass",
+      "ipc_successes": 13
+    }
+  ],
+  "cleanup": {
+    "daemon_pid": 23356,
+    "cleaned_at": "2026-11-04T16:43:49.9396312Z",
+    "gui_exited": true,
+    "daemon_exited": true,
+    "gui_pid": 15144
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "R4",
+  "profile": "shipping release defaults",
+  "compilation_started_before_commit": true,
+  "source_committed_as": "8d2087d43d989904ae94f38cdd4395c3c1e7c69f",
+  "source_files": {
+    "crates/gwt/src/cli/tray/lifetime.rs": "e660c0522bda9bb919b6a5b576a6a56f528db663491a27f8c396f14fe877d15f",
+    "crates/gwt/src/monitor_duplicate_runtime.rs": "97e852f58b6559f170b396cb91b2a889e626cb867bfd00c232ac86c7ef7ff80b",
+    "crates/gwt/src/process.rs": "32eecee3f2db15da2ec72aa0cf6c482c0da774319f1333e6901282433d3d1861",
+    "crates/gwt/src/usage_poller.rs": "2724f33169955815d7aa730a1337f5ae09f8d3a62d03b447ac07a9830ddef4a2",
+    "crates/gwt/src/session_inventory.rs": "01d1fb1a14904822fe914494a6a92489f5a11bd6b3ac634469c4d1d93aa0cc4b",
+    "crates/gwt-core/src/index/path_policy.rs": "cce878463b91533f088c3593797590767d63c737d7f25c74cfb40e8ed01541a5"
+  }
+}

@@ -82,6 +82,13 @@ struct LockedDirectory {
     lock: File,
 }
 
+impl Drop for LockedDirectory {
+    fn drop(&mut self) {
+        // A fork/dup may retain the open-file description after our File closes.
+        let _ = fs2::FileExt::unlock(&self.lock);
+    }
+}
+
 impl LockedDirectory {
     fn acquire(path: &Path) -> Result<Self, StoreError> {
         let directory = open_directory(path)?;
@@ -664,8 +671,15 @@ mod tests {
             CoordinatorStore::open(dir.path(), 100),
             Err(StoreError::Busy)
         ));
+        // Model a fork's shared open-file description without a timing race.
+        let inherited_lock = store.guard.lock.try_clone().unwrap();
         drop(store);
         let reopened = CoordinatorStore::open(dir.path(), 100).unwrap();
+        drop(inherited_lock);
+        assert!(matches!(
+            CoordinatorStore::open(dir.path(), 100),
+            Err(StoreError::Busy)
+        ));
         drop(reopened);
         assert_eq!(lock_inode, std::fs::metadata(&lock).unwrap().ino());
         assert!(CoordinatorStore::initialize(dir.path(), 100).is_err());
@@ -686,10 +700,12 @@ mod tests {
         std::fs::set_permissions(&registry, std::fs::Permissions::from_mode(0o600)).unwrap();
         let alias = dir.path().join("alias");
         std::fs::hard_link(&registry, &alias).unwrap();
-        assert!(matches!(
-            CoordinatorStore::open(dir.path(), 100),
-            Err(StoreError::UnsafeStorage)
-        ));
+        let hard_link_result = CoordinatorStore::open(dir.path(), 100);
+        assert!(
+            matches!(&hard_link_result, Err(StoreError::UnsafeStorage)),
+            "expected a private hard-link refusal, got {:?}",
+            hard_link_result.as_ref().err()
+        );
         std::fs::remove_file(&alias).unwrap();
         std::fs::rename(&registry, &alias).unwrap();
         symlink(&alias, &registry).unwrap();
