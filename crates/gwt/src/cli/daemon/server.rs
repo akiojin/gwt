@@ -3362,8 +3362,7 @@ fn try_apply_issue_monitor_control(
         } => {
             // The decoder already verified the resident PM's authority to
             // enable monitoring. Rejecting ON again here closes the whole lane.
-            if (max_active_auto && monitor.prefs().agent_roster.is_some())
-                || max_active_agents == Some(0)
+            if max_active_agents == Some(0)
                 || (allowed_labels.is_none()
                     && enabled.is_none()
                     && autonomous_mode.is_none()
@@ -4436,6 +4435,15 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                 rejected = Some(IssueMonitorControlCommit::WaitNotLaunched);
                 return Ok(());
             }
+            if applied == Some(None)
+                && matches!(&accepted.control, IssueMonitorControl::ConfigSet { .. })
+                && !issue_monitor_control_is_authorizing(&accepted.control)
+            {
+                // An unapplied routine setting is a rejected request, not
+                // ambiguous effect authority. Keep the control lane usable.
+                rejected = Some(IssueMonitorControlCommit::Rejected);
+                return Ok(());
+            }
             if (typed_failure || fenced_agent_failure || refused_launch_binding)
                 && applied == Some(Some(false))
             {
@@ -4757,6 +4765,122 @@ mod profiles_patch_contract_tests {
                 visible
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod max_active_mode_contract_tests {
+    use super::*;
+
+    #[test]
+    fn typed_failure_authority_exhaustion_is_terminal_and_unreceipted() {
+        let _prefs_budget = pin_prefs_hang_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("issue-monitor.json");
+        let prefs = crate::IssueMonitorPrefs {
+            effect_authority_epoch: u64::MAX,
+            launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                issue_number: 6732,
+                window_id: "tab-1::agent".to_string(),
+            }],
+            ..Default::default()
+        };
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        let before = fs::read(&path).unwrap();
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let before_monitor = monitor.clone();
+        let outcome = try_apply_accepted_issue_monitor_control_with_disk_migration(
+            &path,
+            &mut monitor,
+            AcceptedIssueMonitorControl::new(IssueMonitorControl::AgentFailed {
+                issue_number: Some(6732),
+                window_id: "tab-1::agent".to_string(),
+                message: "active writer".to_string(),
+                failure: Some(crate::IssueMonitorFailure::ResumeWriterConflict {
+                    holder_window_id: None,
+                }),
+                source: None,
+            }),
+        );
+        assert_eq!(outcome, IssueMonitorControlCommit::TerminalFailure);
+        assert_eq!(monitor, before_monitor);
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn roster_config_set_returns_from_manual_to_auto_without_blocking_control_lane() {
+        let _prefs_budget = pin_prefs_hang_guard();
+        let _env = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let path =
+            gwt_core::paths::gwt_projects_dir().join("test/project-state/issue-monitor.json");
+        let roster = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "revision": 1,
+            "members": [{
+                "agent_member_id": "00000000-0000-4000-8000-000000000001",
+                "name": "Ada", "enabled": true, "agent_id": "codex",
+                "created_at": "2026-11-04T00:00:00Z"
+            }]
+        }))
+        .unwrap();
+        let prefs = crate::IssueMonitorPrefs {
+            agent_roster: Some(roster),
+            ..Default::default()
+        };
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        for config in [
+            serde_json::json!({"max_active_agents": 1}),
+            serde_json::json!({"max_active_mode": "auto"}),
+        ] {
+            let control =
+                decode_issue_monitor_control(crate::runtime_daemon_events::issue_monitor_payload(
+                    "control",
+                    serde_json::json!({"config_set": config}),
+                    u32::MAX,
+                ))
+                .unwrap();
+            assert!(matches!(
+                try_apply_accepted_issue_monitor_control_with_disk_migration(
+                    &path,
+                    &mut monitor,
+                    AcceptedIssueMonitorControl::new(control),
+                ),
+                IssueMonitorControlCommit::Committed { .. }
+            ));
+            assert!(monitor.status_view().last_error.is_none());
+        }
+        let policy = crate::machine_agent_settings::load().unwrap().unwrap();
+        assert_eq!(
+            policy.mode,
+            crate::issue_monitor::IssueMonitorMaxActiveMode::Auto
+        );
+        assert_eq!(policy.manual_limit, None);
+        assert_eq!(monitor.status_view().max_active_agents_override, None);
+        assert_eq!(monitor.agent_status().max_active_agents_override, None);
+        assert_eq!(monitor.max_active_agents_policy().0, None);
+
+        let before = fs::read(&path).unwrap();
+        let invalid =
+            decode_issue_monitor_control(crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({"config_set": {"launch_agent": "missing-profile"}}),
+                u32::MAX,
+            ))
+            .unwrap();
+        assert!(matches!(
+            try_apply_accepted_issue_monitor_control_with_disk_migration(
+                &path,
+                &mut monitor,
+                AcceptedIssueMonitorControl::new(invalid),
+            ),
+            IssueMonitorControlCommit::Rejected
+        ));
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(monitor.status_view().last_error.is_none());
     }
 }
 
