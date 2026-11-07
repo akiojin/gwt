@@ -1189,6 +1189,68 @@ test("an OPEN-to-closed send race never falls back to generic pending send", asy
   });
 });
 
+test("ordinary reconnect replaces an interrupted cache read without cancelling semantic retry", async () => {
+  const mod = await importSurfaceModule();
+  await withPatchedTimersAsync(async ({ timers, fire }) => {
+    const sent = [];
+    const surface = createSurface(mod, sent);
+    surface.handleKnowledgeTransportChange(true);
+    const state = seedListAndAuthoritativeA(surface, "issue");
+    const searchId = startSearch(surface, sent, { fire });
+    surface.applyKnowledgeReceiveEvent(searchResultsEvent(searchId, { semantic_retry: TRANSIENT_RETRY }));
+    state.selectedNumber = ROW_A.number;
+    state.selectionGeneration = 3;
+    surface.requestKnowledgeBridge("win-1", "issue");
+    const oldRead = sent.at(-1);
+    surface.requestKnowledgeBridge("win-1", "issue", true);
+    const oldDeadline = timers[state.loadRecoveryTimer - 1];
+
+    surface.handleKnowledgeTransportChange(false);
+    surface.handleKnowledgeTransportChange(false); // connectSocket also reports offline
+    surface.handleKnowledgeTransportChange(true);
+
+    const reads = sent.filter(message => message.kind === "load_knowledge_bridge");
+    assert.equal(reads.length, 2, "replace the read lost with the previous client");
+    assert.equal(oldDeadline.cleared, true, "the disconnected client no longer owns a deadline");
+    const replacement = reads.at(-1);
+    assert.ok(replacement.request_id > oldRead.request_id);
+    assert.equal(replacement.refresh, true, "consume the queued explicit refresh in the replacement");
+    assert.equal(replacement.selected_number, ROW_A.number);
+    assert.equal(state.queuedLoadRefresh, false);
+    surface.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "win-1", knowledge_kind: "issue",
+      request_id: oldRead.request_id, entries: [], selected_number: null, refresh_enabled: true });
+    assert.equal(state.loading, true, "a superseded reply cannot settle the replacement");
+    surface.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "win-1", knowledge_kind: "issue",
+      request_id: replacement.request_id, entries: [ROW_A, ROW_B], selected_number: null, refresh_enabled: true });
+    assert.equal(state.loading, false);
+    assert.equal(state.query, "alpha");
+    assert.equal(state.selectedNumber, ROW_A.number);
+    assert.equal(state.selectionGeneration, 3);
+    assert.equal(state.semanticRetryActive, true);
+    assert.equal(timers[state.semanticRetryTimer - 1].delay, 5000);
+    assert.equal(state.pendingSearchTimer, null, "the cache reply preserves the five-second retry owner");
+    fire(timer => timer === timers[state.semanticRetryTimer - 1]);
+    assert.equal(sent.at(-1).kind, "search_knowledge_bridge");
+    assert.equal(sent.at(-1).query, "alpha");
+    assert.ok(sent.every(message => ["load_knowledge_bridge", "search_knowledge_bridge"].includes(message.kind)), "recovery sends reads only");
+  });
+});
+
+test("offline first reads are not duplicated by repeated connection notifications", async () => {
+  const mod = await importSurfaceModule();
+  await withPatchedTimersAsync(async () => {
+    const sent = [];
+    const surface = createSurface(mod, sent);
+    surface.handleKnowledgeTransportChange(false);
+    surface.requestKnowledgeBridge("win-1", "issue");
+    surface.handleKnowledgeTransportChange(false);
+    surface.handleKnowledgeTransportChange(true);
+    surface.handleKnowledgeTransportChange(true);
+    assert.equal(sent.filter(message => message.kind === "load_knowledge_bridge").length, 1,
+      "the original queued read is sufficient when no online client was interrupted");
+  });
+});
+
 test("offline retries never enter the generic pending queue; reconnect restarts at 5s (T-952)", async () => {
   const mod = await importSurfaceModule();
   await withPatchedTimersAsync(async ({ timers, fire }) => {

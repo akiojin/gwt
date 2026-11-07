@@ -18,6 +18,9 @@ const { createProfileWindowSurface } = await import(`data:text/javascript;base64
 const indexSource = readFileSync(new URL("../project-index-search-surface.js", import.meta.url), "utf8")
   .replace(/from "\/([^"]+)"/g, (_, path) => `from "${new URL(`../${path}`, import.meta.url).href}"`);
 const { createProjectIndexSearchSurface } = await import(`data:text/javascript;base64,${Buffer.from(indexSource).toString("base64")}`);
+const knowledgeSource = readFileSync(new URL("../knowledge-kanban-surface.js", import.meta.url), "utf8")
+  .replace(/from "([/.][^"]+)"/g, (_, path) => `from "${new URL(path.replace(/^\//, ""), new URL("../", import.meta.url)).href}"`);
+const { createKnowledgeKanbanSurface } = await import(`data:text/javascript;base64,${Buffer.from(knowledgeSource).toString("base64")}`);
 function functionSource(name) {
   const start = source.indexOf(`      function ${name}(`);
   assert.notEqual(start, -1);
@@ -346,6 +349,55 @@ test("route-bound Project tab reconnects to the same Project only", t => {
   assert.equal(board.loading, false);
   assert.equal(logs.loading, false);
   assert.equal(context.attentionReportCount, 2);
+});
+
+test("ordinary socket reconnect recovers only Knowledge reads sent before disconnect", t => {
+  const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
+  const windows = [{ id: "knowledge", preset: "issue" }, { id: "offline", preset: "issue" }];
+  context.activeWorkspace = () => ({ windows });
+  const knowledge = createKnowledgeKanbanSurface({
+    send: event => context.send(event), windowMap: new Map(),
+    workspaceWindowById: id => windows.find(window => window.id === id),
+    getWorkspaceWindows: () => windows, scheduleFrame: run => { run(); return () => {}; },
+  });
+  t.after(() => { for (const id of ["knowledge", "offline", "foreign"]) knowledge.clearKnowledgeBridgeState(id); });
+  Object.assign(context, {
+    handleKnowledgeTransportChange: knowledge.handleKnowledgeTransportChange,
+    resyncKnowledge: knowledge.resyncKnowledge,
+    clearAgentActivity() {}, clearAgentSchedule() {}, clearAgentSwitch() {}, clearAgentRosterRename() {},
+    handleLaunchWizardTransportChange() {}, branchListStateMap: new Map(),
+  });
+  context.connectionOverlay.setConnected = () => {};
+  context.document.getElementById = () => null;
+  vm.runInContext(functionSource("setConnectionState"), context);
+  context.connectSocket();
+  sockets[1].open();
+  knowledge.requestKnowledgeBridge("knowledge", "issue");
+  const oldRead = sockets[1].sent.find(message => message.kind === "load_knowledge_bridge");
+  const foreign = knowledge.ensureKnowledgeBridgeState("foreign", "issue");
+  foreign.loading = true;
+  sockets[1].close();
+  knowledge.requestKnowledgeBridge("offline", "issue");
+  const queuedRead = context.pendingMessages.find(entry => entry.message.kind === "load_knowledge_bridge").message;
+  context.reconnectCallbacks.at(-1)(); // reports offline for a second time
+  sockets.at(-1).open();
+  const reads = sockets.at(-1).sent.filter(message => message.kind === "load_knowledge_bridge");
+  assert.equal(reads.filter(message => message.id === "knowledge").length, 1,
+    "normal close/timer/open replaces the interrupted read");
+  assert.ok(reads.find(message => message.id === "knowledge").request_id > oldRead.request_id);
+  assert.deepEqual(reads.filter(message => message.id === "offline"), [queuedRead],
+    "offline first read is flushed once, without a replacement");
+  assert.equal(reads.some(message => message.id === "foreign"), false);
+  assert.equal(foreign.loading, true);
+  for (const read of reads) knowledge.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: read.id,
+    request_id: read.request_id, knowledge_kind: "issue", entries: [], refresh_enabled: true });
+  assert.equal(knowledge.knowledgeBridgeStateMap.get("knowledge").loading, false);
+  assert.equal(knowledge.knowledgeBridgeStateMap.get("offline").loading, false);
+  knowledge.requestKnowledgeBridge("knowledge", "issue");
+  context.connectSocket(true);
+  sockets.at(-1).open();
+  assert.equal(sockets.at(-1).sent.filter(message => message.kind === "load_knowledge_bridge" && message.id === "knowledge").length, 1,
+    "forced recovery leaves replacement ownership with the existing full resync");
 });
 
 test("receive recovery requests pane and open surface snapshots only on the owning socket", () => {

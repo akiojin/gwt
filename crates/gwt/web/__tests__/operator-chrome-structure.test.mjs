@@ -1125,7 +1125,7 @@ test("Branches loading state becomes recoverable when the WebSocket disconnects"
   );
   assert.match(
     appSource,
-    /function\s+setConnectionState\(connected\)[\s\S]+failLoadingBranchesOnConnectionLoss\(windowId,\s*state\)[\s\S]+renderBranches\(windowId\)/,
+    /function\s+setConnectionState\(connected,\s*recoverSnapshots\s*=\s*false\)[\s\S]+failLoadingBranchesOnConnectionLoss\(windowId,\s*state\)[\s\S]+renderBranches\(windowId\)/,
     "expected socket disconnect to re-render Branches after clearing stale loading",
   );
   // SPEC-2009 FR-064: reconnect self-heal re-requests interrupted Branches
