@@ -10,6 +10,7 @@
 //! Configuration selects an explicit imported identity from fixed private
 //! storage; loading it likewise grants no registration or device authority.
 
+pub mod admin;
 pub mod credential;
 
 mod config;

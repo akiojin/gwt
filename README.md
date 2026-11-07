@@ -324,8 +324,7 @@ fields and operations are rejected. Paths, secrets, and clock overrides are not
 request fields. Successful issuance returns only the public identity and private
 credential file path; the bearer stays in that file. Keep it out of Git, logs,
 URLs, and shell arguments. These credentials authorize future Host registration,
-not device approval or terminal input. Host import and online registration are
-not available yet.
+not device approval or terminal input. Online registration is not available yet.
 
 Administration holds a separate registry lock. For `busy`, stop the coordinator
 or other administrator and retry. For `commit_uncertain`, run `status` to inspect
@@ -333,6 +332,51 @@ current records before deciding what to do; do not automatically repeat issuance
 For private-storage or clock errors, repair the reported prerequisite and retry
 without deleting the registry or its revocation records. `--help` lists the
 supported request fields and storage requirements.
+
+#### Offline PC credential import and inspection (Unix, from source)
+
+Build `cargo build -p gwt --bin gwt-mobile-host` on the PC. Provision the
+user-owned `0700` directories `$HOME/.gwt`, `$HOME/.gwt/mobile`, and
+`$HOME/.gwt/mobile/host` outside repositories, without symlinks or macOS extended
+ACL entries. Keep their ancestors trusted and non-replaceable. The issued source
+file must be private (`0600`, single-link regular file, private parent) and outside
+repositories too. The command does not create directories or repair permissions.
+
+Provide the expected Host/origin/Project independently of the source file:
+
+```sh
+printf '%s\n' '{"schema_version":1,"command":{"operation":"import","source":"/private/issued/host-credential.json","binding":{"host_id":"11111111-1111-4111-8111-111111111111","coordinator_origin":"https://coordinator.example"},"project":"0123456789abcdef"}}' |
+  target/debug/gwt-mobile-host
+```
+
+Replace the example public identifiers, origin and source path with your own.
+Use stdin for the request (maximum 16 KiB); secrets, clock overrides, destination
+paths and activation fields are not accepted. Success returns only the public
+identity and the immutable private copy's path. Import never replaces a copy or
+changes the selected credential, registration, enable state or device approvals.
+
+To explicitly select and inspect a copy, create the private `0600` file
+`$HOME/.gwt/mobile/host/config.json` using the coordinator issuance receipt's
+public identity, not values inferred from an untrusted credential:
+
+```json
+{"schema_version":1,"binding":{"host_id":"11111111-1111-4111-8111-111111111111","coordinator_origin":"https://coordinator.example"},"project":"0123456789abcdef","identity":{"host_id":"11111111-1111-4111-8111-111111111111","credential_id":"22222222-2222-4222-8222-222222222222","generation":"33333333-3333-4333-8333-333333333333"}}
+```
+
+```sh
+printf '%s\n' '{"schema_version":1,"command":{"operation":"inspect","binding":{"host_id":"11111111-1111-4111-8111-111111111111","coordinator_origin":"https://coordinator.example"},"project":"0123456789abcdef"}}' |
+  target/debug/gwt-mobile-host
+```
+
+Inspection returns only public identity, binding, project and expiry. It rejects
+scope/identity mismatches, expired credentials and unsafe storage. For
+`already_exists` or `commit_uncertain`, explicitly configure the expected
+issuance identity and run `inspect` before deciding recovery; do not automatically
+retry, delete the copy or reissue credentials. Correct an invalid configuration,
+private-storage prerequisite or clock explicitly, then inspect again. Neither
+operation opens a network connection or proves current registry issuance,
+revocation status or successful registration. Windows private storage remains
+unsupported. `--help` describes the request and storage requirements.
 
 ### `gwt serve` removal
 
