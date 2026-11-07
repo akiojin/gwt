@@ -192,8 +192,18 @@ impl AppRuntime {
             return Vec::new();
         };
         runtime.input_in_flight = None;
+        let in_flight_reply = runtime.input_in_flight_reply.take();
         let pending = std::mem::take(&mut runtime.pending_input_commands);
         let mut events = Vec::new();
+        if let Some(client_id) = in_flight_reply {
+            events.extend(self.remote_command_refusal(
+                id,
+                &super::RemoteRuntimeCommandKind::Input {
+                    reply_client: Some(client_id),
+                },
+                "Input delivery is uncertain. Check the pane before retrying.".into(),
+            ));
+        }
         let mut raw_reported = false;
         for (_, kind) in pending {
             if matches!(
@@ -304,6 +314,9 @@ impl AppRuntime {
             }
             let token = uuid::Uuid::new_v4();
             runtime.input_in_flight = Some((connection_id, token));
+            if let super::RemoteRuntimeCommandKind::Input { reply_client } = &kind {
+                runtime.input_in_flight_reply = reply_client.clone();
+            }
             Some(token)
         } else {
             None
@@ -356,6 +369,10 @@ impl AppRuntime {
                 error.to_string(),
             ));
             if is_input {
+                // No worker started; this command's refusal above is final.
+                if let Some(runtime) = self.runtimes.get_mut(&failure_id) {
+                    runtime.input_in_flight_reply = None;
+                }
                 events.extend(self.discard_pending_remote_input(
                     &failure_id,
                     "Queued input was discarded because input dispatch failed. Retype it.",
@@ -392,9 +409,24 @@ impl AppRuntime {
             input_command_id,
             result,
         } = completion;
+        // A discarded lane has already reported its outcome. Ignore its late
+        // completion even when the owner/runtime fence no longer matches.
+        if input_command_id.is_some_and(|token| {
+            self.runtimes
+                .get(&id)
+                .is_none_or(|runtime| runtime.input_in_flight != Some((connection_id, token)))
+        }) {
+            return Vec::new();
+        }
         if !self.project_owner_event_is_current(&context, connection_id, &identity)
             || !self.remote_runtime_is_current(&context, &identity, &id, incarnation)
         {
+            if input_command_id.is_some() {
+                return self.discard_pending_remote_input(
+                    &id,
+                    "Queued input was discarded because the pane owner changed. Retype it.",
+                );
+            }
             return Vec::new();
         }
         if let Some(token) = input_command_id {
@@ -403,6 +435,7 @@ impl AppRuntime {
                 return Vec::new();
             }
             runtime.input_in_flight = None;
+            runtime.input_in_flight_reply = None;
         }
         let observation = match result {
             Err(error) => {
@@ -422,17 +455,18 @@ impl AppRuntime {
         };
         if let Some(observation) = observation {
             let runtime = self.runtimes.get_mut(&id).expect("fenced remote input");
-            if runtime
+            runtime.observe_input(Some(observation));
+        }
+        if observation.is_some() || input_command_id.is_some() {
+            let runtime = self.runtimes.get_mut(&id).expect("fenced input completion");
+            let busy = runtime
                 .input_observation
-                .is_none_or(|old| old.revision <= observation.revision)
-            {
-                runtime.has_unsent_user_input.store(
-                    observation.has_unsent_user_input || runtime.input_delivery_pending(),
-                    std::sync::atomic::Ordering::Release,
-                );
-                runtime.observe_input(Some(observation));
-            }
-            if !observation.has_unsent_user_input && !self.runtimes[&id].input_delivery_pending() {
+                .is_none_or(|retained| retained.has_unsent_user_input)
+                || runtime.input_delivery_pending();
+            runtime
+                .has_unsent_user_input
+                .store(busy, std::sync::atomic::Ordering::Release);
+            if !busy {
                 self.flush_pending_pm_wake(&id);
             }
         }
@@ -606,6 +640,13 @@ impl AppRuntime {
         peer_reply: Option<PeerPaneCloseReply>,
     ) {
         let _ = initialize_process_window_close_finalizer();
+        let discarded_input = self.discard_pending_remote_input(
+            window_id,
+            "Queued input was discarded because the pane closed. Retype it.",
+        );
+        if !discarded_input.is_empty() {
+            self.proxy.send(UserEvent::Dispatch(discarded_input));
+        }
         let runtime = self.runtimes.remove(window_id);
         let pending = self.pending_launch_completions.remove(window_id);
         if let Some(pending) = &pending {

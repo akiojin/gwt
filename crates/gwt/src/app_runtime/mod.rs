@@ -691,6 +691,7 @@ pub struct WindowRuntime {
     pub(crate) input_observation: Option<gwt::project_runtime::events::OwnerInputObservation>,
     pub(crate) last_human_input_at: Option<Instant>,
     pub(crate) input_in_flight: Option<(u64, uuid::Uuid)>,
+    input_in_flight_reply: Option<ClientId>,
     pub(crate) pending_input_commands: std::collections::VecDeque<(
         gwt::project_runtime::events::OwnerCommand,
         RemoteRuntimeCommandKind,
@@ -734,6 +735,7 @@ impl WindowRuntime {
             input_observation: None,
             last_human_input_at: None,
             input_in_flight: None,
+            input_in_flight_reply: None,
             pending_input_commands: Default::default(),
             output_seq: 0,
             status_revision: 0,
@@ -16353,6 +16355,10 @@ impl AppRuntime {
         let Some(address) = self.window_lookup.get(window_id).cloned() else {
             return events;
         };
+        events.extend(self.discard_pending_remote_input(
+            window_id,
+            "Queued input was discarded because the pane runtime changed. Retype it.",
+        ));
         self.runtimes.remove(window_id);
         self.active_agent_sessions.remove(window_id);
         if let Some(tab) = self.tab_mut(&address.tab_id) {
@@ -16523,8 +16529,13 @@ impl AppRuntime {
                     runtime.input_observation,
                     runtime.last_human_input_at,
                     preserve_input
-                        .then(|| runtime.input_in_flight.take())
-                        .flatten(),
+                        .then(|| {
+                            (
+                                runtime.input_in_flight.take(),
+                                runtime.input_in_flight_reply.take(),
+                            )
+                        })
+                        .unwrap_or_default(),
                     if preserve_input {
                         std::mem::take(&mut runtime.pending_input_commands)
                     } else {
@@ -16545,7 +16556,7 @@ impl AppRuntime {
             runtime.has_unsent_user_input = hint;
             runtime.input_observation = observation;
             runtime.last_human_input_at = last_human_input_at;
-            runtime.input_in_flight = input_in_flight;
+            (runtime.input_in_flight, runtime.input_in_flight_reply) = input_in_flight;
             runtime.pending_input_commands = pending;
         }
         runtime.status_revision = status_revision;
