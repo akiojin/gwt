@@ -10,6 +10,7 @@ import { startExactRelaunchFixture, writeFixtureNodeCommand, type ExactRelaunchS
 
 /** Real monitor, claims, materialization and PTY; GitHub and provider are local recorders. */
 export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
+  page?: ExactRelaunchSetup["page"];
   targetIssueNumber?: 44; switching?: boolean; positive?: boolean; terminalConvergence?: boolean; autonomousMode?: boolean;
   prepare?: ExactRelaunchSetup["prepare"];
 } = {}) {
@@ -144,6 +145,7 @@ export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
   let fixture;
   try {
     fixture = await startExactRelaunchFixture(info, {
+      page: options.page,
       terminalConvergence: options.terminalConvergence,
       freshNativeIds: !!options.switching || !!options.terminalConvergence,
       switching: options.switching ? { sourceIssueNumber: issue.number,

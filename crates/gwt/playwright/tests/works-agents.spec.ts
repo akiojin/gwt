@@ -968,7 +968,12 @@ test.describe("Works and Agents approved baseline", () => {
     let writes = (await sent(page)).filter(message => message.kind === "agent_roster" && message.action.kind === "set_tuning");
     expect(writes).toHaveLength(1); expect(writes[0].action.member_id).toBe("m-idle");
     expect(writes[0].action).not.toHaveProperty("agent_id"); expect(writes[0]).not.toHaveProperty("expected_revision");
+    await page.evaluate(() => (window as any).__worksAgentsFixture.deferEligibility());
     await detail.locator('[data-action="pm-eligible"]').check();
+    await expect(detail.locator('[data-action="select-pm"]')).toBeDisabled();
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    await expect(detail.locator('[data-action="pm-eligible"]')).toBeChecked();
+    await page.evaluate(() => (window as any).__worksAgentsFixture.releaseEligibility());
     await expect(detail.locator('[data-action="select-pm"]')).toBeEnabled();
     await detail.locator('[data-action="select-pm"]').click();
     await expect(detail.locator('[data-action="select-pm"]')).toHaveText("Configured Project Manager");
@@ -1046,6 +1051,7 @@ async function installWorksAgentsBackend(page: Page) {
     const rejectedScheduleRevisions: any[] = [];
     let queueRevision = "queue-v1:fixture-1", scheduleRevision = 7, deferredSchedule = false;
     let pendingSchedule: any = null, pendingRename: any = null, deferredRename = false, firstRenameReceipt: any = null;
+    let deferredEligibility = false, pendingEligibilityReceipt: string | null = null;
     const planned = [
       { agent_member_id: "m-one", issues: [{ issue_number: 5002, reason: "same_spec_continuation" }, { issue_number: 5003, reason: "queue_order" }] },
       { agent_member_id: "m-two", issues: [{ issue_number: 5004, reason: "queue_order" }] },
@@ -1086,6 +1092,7 @@ async function installWorksAgentsBackend(page: Page) {
     class FixtureWebSocket extends EventTarget {
       static CONNECTING = 0; static OPEN = 1; static CLOSING = 2; static CLOSED = 3;
       readyState = FixtureWebSocket.CONNECTING;
+      inbound: string[] = [];
       constructor(public readonly url: string) {
         super(); socket = this; sockets.push(this);
         setTimeout(() => { if (online) this.open(); }, 0);
@@ -1141,6 +1148,9 @@ async function installWorksAgentsBackend(page: Page) {
           if (message.action.kind === "add") { members.push({ agent_member_id: "m-added", agent_id: message.action.agent_id, name: message.action.name, pm_eligible: message.action.pm_eligible === true, enabled: true, created_at: "2026-10-25T00:00:00Z", last_issue_number: null, last_spec_number: null, assignment: null, provider: null, model: null, history: [], issue_count: 0, landed_count: 0, active_seconds: 0, tokens: 0 }); revision++; }
           if (message.action.kind === "rest") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member) { member.enabled = false; revision++; } }
           if (message.action.kind !== "read") sessionStorage.setItem("fixture:works-roster", JSON.stringify({ members, revision }));
+          if (message.action.kind === "set_pm_eligibility" && deferredEligibility) {
+            pendingEligibilityReceipt = JSON.stringify({ ...rosterSnapshot(), request_id: message.request_id }); return;
+          }
           this.emit({ ...rosterSnapshot(), request_id: message.request_id });
           if (message.action.kind === "read" && pmMemberId) this.emit(pmStatus());
         }
@@ -1150,7 +1160,18 @@ async function installWorksAgentsBackend(page: Page) {
           else applySchedule(message.action);
         }
       }
-      emit(payload: unknown) { const serialized = JSON.stringify(payload); setTimeout(() => this.dispatchEvent(new MessageEvent("message", { data: serialized })), 0); }
+      emit(payload: unknown) {
+        // Keep one ordered WebSocket stream across Playwright clock ticks.
+        this.inbound.push(JSON.stringify(payload));
+        if (this.inbound.length !== 1) return;
+        const deliver = () => {
+          this.dispatchEvent(new MessageEvent("message", { data: this.inbound[0] }));
+          // Reentrant emit must see this packet until dispatch finishes.
+          this.inbound.shift();
+          if (this.inbound.length) setTimeout(deliver, 0);
+        };
+        setTimeout(deliver, 0);
+      }
       close() { this.readyState = FixtureWebSocket.CLOSED; this.dispatchEvent(new CloseEvent("close")); }
     }
     Object.defineProperty(window, "WebSocket", { configurable: true, value: FixtureWebSocket });
@@ -1180,6 +1201,12 @@ async function installWorksAgentsBackend(page: Page) {
         } else socket.emit(phase === "catalog" ? workspace() : activity());
       },
       pmUnknown() { socket.emit({ ...pmStatus(), profile_revision: null, configured_agent_id: null }); },
+      deferEligibility() { deferredEligibility = true; },
+      releaseEligibility() {
+        if (!pendingEligibilityReceipt) throw new Error("No pending eligibility receipt");
+        const receipt = pendingEligibilityReceipt; pendingEligibilityReceipt = null; deferredEligibility = false;
+        socket.emit(JSON.parse(receipt));
+      },
       deferRename() { deferredRename = true; },
       releaseRename() { const message = pendingRename; pendingRename = null; if (message) applyRename(message); },
       replayRename() { if (firstRenameReceipt) socket.emit(firstRenameReceipt); },

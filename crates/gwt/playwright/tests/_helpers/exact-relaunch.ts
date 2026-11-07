@@ -1,11 +1,32 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createWriteStream } from "node:fs";
-import { access, copyFile, mkdir, mkdtemp, readFile, realpath, symlink, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, mkdtemp, readdir, readFile, realpath, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Page, TestInfo } from "@playwright/test";
+
+export async function readProcessState(pid: number): Promise<{ birth: number; parent: number } | null> {
+  if (process.platform === "linux") {
+    let raw: string;
+    try { raw = await readFile(`/proc/${pid}/stat`, "utf8"); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
+    const end = raw.lastIndexOf(")");
+    if (end < 0) throw new Error(`Cannot parse PID ${pid} stat`);
+    const fields = raw.slice(end + 1).trim().split(/\s+/);
+    const parent = Number(fields[1]), birth = Number(fields[19]);
+    if (!Number.isSafeInteger(parent) || !Number.isSafeInteger(birth) || birth <= 0) throw new Error(`Unknown PID ${pid} identity`);
+    return { parent, birth };
+  }
+  const result = spawnSync("ps", ["-p", String(pid), "-o", "lstart=", "-o", "ppid="], { encoding: "utf8", timeout: 5_000 });
+  if (result.error) throw result.error;
+  if (result.status === 1 && !result.stdout.trim() && !result.stderr.trim()) return null;
+  const match = result.status === 0 ? result.stdout.trim().match(/^(.*?)\s+(\d+)$/) : null;
+  const birth = match ? Math.floor(Date.parse(match[1]) / 1000) : NaN, parent = match ? Number(match[2]) : NaN;
+  if (!Number.isSafeInteger(birth) || birth <= 0 || !Number.isSafeInteger(parent)) throw new Error(`Unknown PID ${pid} identity`);
+  return { birth, parent };
+}
 
 // Unknown activity is significant: only a definitely foreign project may be skipped.
 export function selectLatestOwnActivity(candidates: any[], projectKey: string): any | null {
@@ -88,6 +109,7 @@ export type ExactRelaunchInvocation = {
  * Each invocation owns a fresh HOME, retained as evidence after cleanup.
  */
 export type ExactRelaunchSetup = {
+  page?: Page;
   freshNativeIds?: boolean;
   terminalConvergence?: boolean;
   switching?: { sourceIssueNumber: number; positive: boolean };
@@ -378,7 +400,7 @@ try {
       {input, stdio:['pipe','ignore','inherit'], timeout:60000, windowsHide:true, windowsVerbatimArguments:windows});
     if (result.error || result.status !== 0) throw new Error('SessionStart hook failed: ' + (result.error?.message || result.status));
   }
-} catch (error) { console.error('GWT_FAKE_PROVIDER_HOOK_ERROR ' + error.message); }
+} catch (error) { console.error('GWT_FAKE_PROVIDER_HOOK_ERROR ' + error.message); process.exit(1); }
 ${switchActor}
 ${terminalActor}
 console.log('GWT_FAKE_PROVIDER_READY ' + native);
@@ -469,68 +491,183 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     if (result.status !== 0 && (windows || result.status !== 1)) throw new Error(`Cannot inspect owned fixture PID ${pid}: ${result.stderr}`);
     return result.stdout.trim();
   }
+  const processCwd = async (pid: number) => {
+    if (process.platform === "linux") return realpath(`/proc/${pid}/cwd`);
+    const result = spawnSync("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], { encoding: "utf8", timeout: 5_000 });
+    if (result.error) throw result.error;
+    const paths = result.stdout.split("\n").filter(line => line.startsWith("n")).map(line => line.slice(1));
+    if (result.status !== 0 || paths.length !== 1 || !paths[0]) throw new Error(`Unknown PID ${pid} cwd`);
+    return realpath(paths[0]);
+  };
   async function stop() {
+    let browserError: Error | undefined;
+    if (setup.page && url) {
+      try {
+        const origin = new URL(url).origin;
+        const pages = setup.page.context().pages().filter(page => !page.isClosed() && new URL(page.url()).origin === origin);
+        const unloaded = await Promise.allSettled(pages.map(page => page.goto("about:blank")));
+        if (unloaded.some(result => result.status === "rejected")) throw new Error("Fixture browser unload failed");
+      } catch {
+        browserError = new Error("Fixture browser unload failed");
+      }
+    }
     const ownedPid = child?.pid;
-    if (!protectGuiOwner && child?.pid && child.exitCode === null && child.signalCode === null) {
-      const current = child;
-      current.kill("SIGTERM");
-      const deadline = Date.now() + 8_000;
-      while (current.exitCode === null && current.signalCode === null && Date.now() < deadline) await delay(100);
-      if (current.exitCode === null && current.signalCode === null) {
-        current.kill("SIGKILL");
-        const forcedDeadline = Date.now() + 8_000;
-        while (current.exitCode === null && current.signalCode === null && Date.now() < forcedDeadline) await delay(100);
-      }
-    }
-    // PTYs can create their own process groups; clean only recorded fixture
-    // providers still carrying our unique argv-recorder path in their command.
+    const ownerObservationSupported = process.platform === "darwin" || process.platform === "linux";
     const providerPaths = [join(bin, windows ? "codex.cjs" : "codex"), join(bin, windows ? "claude.cjs" : "claude")];
-    const providerPids: number[] = [];
-    const providerPreFallback: unknown[] = [];
-    for (const launch of coldCleanupFailed ? [] : await launches()) {
-      const command = processCommand(launch.pid);
-      const privatePathMatch = providerPaths.some(path => command.includes(path));
-      // Diagnostic only: inspection failure is UNKNOWN and never changes the
-      // existing exact-provider fallback or its cleanup authority.
-      if (!windows) {
+    let owner: { pid: number; birth: number; instance: string; startup_intent: "gui_managed" | "standalone"; natural: boolean | null } | null = null;
+    let ownerCaptureFailed = false;
+    let ownerError: Error | undefined;
+    if (ownedPid && ownerObservationSupported && !coldCleanupFailed && !protectGuiOwner) {
+      try {
+        const descriptorDirectory = join(state, "projects", hash, "runtime", "daemon");
+        const projectRoot = await realpath(project);
+        let descriptorFiles: string[] = [];
         try {
-          const result = spawnSync("ps", ["-p", String(launch.pid), "-o", "lstart=", "-o", "ppid="], { encoding: "utf8" });
-          const match = result.status === 0 && !result.error ? result.stdout.trim().match(/^(.*?)\s+(\d+)$/) : null;
-          providerPreFallback.push({ at: new Date().toISOString(), pid: launch.pid, session_id: launch.gwt_session_id,
-            private_path_match: privatePathMatch, birth: match?.[1] ?? null, parent_pid: match ? Number(match[2]) : null,
-            state: match ? "observed" : result.status === 1 && !result.error && !result.stdout.trim() && !result.stderr.trim() ? "absent" : "unknown" });
-        } catch { providerPreFallback.push({ at: new Date().toISOString(), pid: launch.pid, state: "unknown" }); }
-      } else providerPreFallback.push({ at: new Date().toISOString(), pid: launch.pid, state: "unknown_unsupported" });
-      if (privatePathMatch) {
-        providerPids.push(launch.pid);
-        try { process.kill(launch.pid, "SIGTERM"); } catch { /* exited */ }
+          descriptorFiles = await readdir(descriptorDirectory);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+        let descriptor, descriptorFile: string | undefined;
+        for (const file of descriptorFiles.filter(file => file.endsWith(".json"))) {
+          const candidate = JSON.parse(await readFile(join(descriptorDirectory, file), "utf8"));
+          if (typeof candidate?.scope?.project_root !== "string") throw new Error("Fixture owner descriptor scope unavailable");
+          if (await realpath(candidate.scope.project_root) !== projectRoot) continue;
+          if (descriptor !== undefined) throw new Error("Fixture owner descriptor is ambiguous");
+          descriptor = candidate;
+          descriptorFile = file;
+        }
+        if (descriptor === undefined
+          && (await launches()).some(launch => providerPaths.some(path => processCommand(launch.pid).includes(path))))
+          throw new Error("Fixture owner descriptor unavailable while owned recorder remains");
+        if (descriptor !== undefined) {
+          if (!Number.isSafeInteger(descriptor.pid) || descriptor.pid <= 0
+            || !["gui_managed", "standalone"].includes(descriptor.startup_intent) || descriptor.scope?.repo_hash !== hash
+            || typeof descriptor.scope.worktree_hash !== "string"
+            || descriptorFile !== `${descriptor.scope.worktree_hash}.json` || descriptor.scope.target !== "host")
+            throw new Error("Fixture owner descriptor identity mismatch");
+          if (descriptor.pid === ownedPid) {
+            protectGuiOwner = true;
+            throw new Error("Fixture owner identity overlaps GUI");
+          }
+          const observed = await readProcessState(descriptor.pid);
+          if (observed) {
+            const executable = process.platform === "linux"
+              ? await realpath(`/proc/${descriptor.pid}/exe`)
+              : spawnSync("ps", ["-p", String(descriptor.pid), "-o", "comm="], { encoding: "utf8", timeout: 5_000 });
+            const executablePath = typeof executable === "string" ? executable
+              : !executable.error && executable.status === 0 ? await realpath(executable.stdout.trim()) : null;
+            if (executablePath !== await realpath(gwtd) || await processCwd(descriptor.pid) !== await realpath(project))
+              throw new Error("Fixture owner executable or cwd mismatch");
+            const transport = new URL(descriptor.project_transport_url);
+            if (transport.protocol !== "http:" || !["127.0.0.1", "[::1]"].includes(transport.hostname)
+              || transport.username || transport.password || transport.pathname !== "/" || transport.search || transport.hash
+              || typeof descriptor.auth_token !== "string" || !descriptor.auth_token)
+              throw new Error("Fixture owner private transport unavailable");
+            const response = await fetch(new URL("/private/project/command", transport), {
+              method: "POST", redirect: "error", signal: AbortSignal.timeout(5_000),
+              headers: { Authorization: `Bearer ${descriptor.auth_token}`, "Content-Type": "application/json" },
+              body: JSON.stringify({ project_key: hash, command: { type: "health" } }),
+            });
+            if (!response.ok) throw new Error("Fixture owner health unavailable");
+            const health = await response.json();
+            if (health.pid !== descriptor.pid || health.project_key !== hash || !["gui_managed", "standalone"].includes(health.startup_intent)
+              || health.host_started_at !== observed.birth || typeof health.host_instance_id !== "string" || !health.host_instance_id
+              || (await readProcessState(descriptor.pid))?.birth !== observed.birth)
+              throw new Error("Fixture owner physical identity changed");
+            owner = { pid: descriptor.pid, birth: observed.birth, instance: health.host_instance_id,
+              startup_intent: health.startup_intent, natural: health.startup_intent === "gui_managed" ? false : null };
+          }
+        }
+      } catch {
+        // Never include descriptor or HTTP error content: it can contain the private bearer.
+        ownerCaptureFailed = true;
+        ownerError = new Error("Fixture owner capture failed");
       }
     }
-    await Promise.all(providerPids.map(async pid => {
-      const deadline = Date.now() + 5_000;
-      while (Date.now() < deadline) {
-        const command = processCommand(pid);
-        if (!providerPaths.some(path => command.includes(path))) return;
-        await delay(100);
+    try {
+      if (!protectGuiOwner && child?.pid && child.exitCode === null && child.signalCode === null) {
+        const current = child;
+        current.kill("SIGTERM");
+        const deadline = Date.now() + 8_000;
+        while (current.exitCode === null && current.signalCode === null && Date.now() < deadline) await delay(100);
+        if (current.exitCode === null && current.signalCode === null) {
+          current.kill("SIGKILL");
+          const forcedDeadline = Date.now() + 8_000;
+          while (current.exitCode === null && current.signalCode === null && Date.now() < forcedDeadline) await delay(100);
+        }
       }
-      throw new Error(`Fixture provider ${pid} remained after shutdown`);
-    }));
-    // Cleanup only descendants recorded by this actor and carrying its unique HOME.
-    const actorEvents = (await readFile(join(home, "switch-actor.jsonl"), "utf8").catch(() => ""))
-      .split("\n").filter(Boolean).map(line => JSON.parse(line));
-    for (const event of actorEvents) {
-      if (!event.tree_child_pid) continue;
-      const command = spawnSync("ps", ["-p", String(event.tree_child_pid), "-o", "command="], { encoding: "utf8" });
-      if (command.stdout.includes("GWT_SWITCH_TREE_CHILD") && command.stdout.includes(home)) {
-        try { process.kill(event.tree_child_pid, "SIGTERM"); } catch { /* exited */ }
+      if (owner?.startup_intent === "gui_managed") {
+        try {
+          const deadline = performance.now() + 30_000;
+          while (performance.now() < deadline) {
+            const current = await readProcessState(owner.pid);
+            if (performance.now() >= deadline) break;
+            if (!current || current.birth !== owner.birth) { owner.natural = true; break; }
+            await delay(100);
+          }
+          if (!owner.natural) throw new Error("Fixture owner natural reap not observed before deadline");
+        } catch {
+          ownerError = new Error("Fixture owner natural reap not observed before deadline");
+        }
       }
+      // PTYs can create their own process groups; clean only recorded fixture
+      // providers still carrying our unique argv-recorder path in their command.
+      const providerPids: number[] = [];
+      const providerPreFallback: unknown[] = [];
+      for (const launch of coldCleanupFailed ? [] : await launches()) {
+        const command = processCommand(launch.pid);
+        const privatePathMatch = providerPaths.some(path => command.includes(path));
+        // Diagnostic only: inspection failure is UNKNOWN and never changes the
+        // existing exact-provider fallback or its cleanup authority.
+        if (!windows) {
+          try {
+            const result = spawnSync("ps", ["-p", String(launch.pid), "-o", "lstart=", "-o", "ppid="], { encoding: "utf8" });
+            const match = result.status === 0 && !result.error ? result.stdout.trim().match(/^(.*?)\s+(\d+)$/) : null;
+            providerPreFallback.push({ at: new Date().toISOString(), pid: launch.pid, session_id: launch.gwt_session_id,
+              private_path_match: privatePathMatch, birth: match?.[1] ?? null, parent_pid: match ? Number(match[2]) : null,
+              state: match ? "observed" : result.status === 1 && !result.error && !result.stdout.trim() && !result.stderr.trim() ? "absent" : "unknown" });
+          } catch { providerPreFallback.push({ at: new Date().toISOString(), pid: launch.pid, state: "unknown" }); }
+        } else providerPreFallback.push({ at: new Date().toISOString(), pid: launch.pid, state: "unknown_unsupported" });
+        if (privatePathMatch) {
+          providerPids.push(launch.pid);
+          try { process.kill(launch.pid, "SIGTERM"); } catch { /* exited */ }
+        }
+      }
+      await Promise.all(providerPids.map(async pid => {
+        const deadline = Date.now() + 5_000;
+        while (Date.now() < deadline) {
+          const command = processCommand(pid);
+          if (!providerPaths.some(path => command.includes(path))) return;
+          await delay(100);
+        }
+        throw new Error(`Fixture provider ${pid} remained after shutdown`);
+      }));
+      // Cleanup only descendants recorded by this actor and carrying its unique HOME.
+      const actorEvents = (await readFile(join(home, "switch-actor.jsonl"), "utf8").catch(() => ""))
+        .split("\n").filter(Boolean).map(line => JSON.parse(line));
+      for (const event of actorEvents) {
+        if (!event.tree_child_pid) continue;
+        const command = spawnSync("ps", ["-p", String(event.tree_child_pid), "-o", "command="], { encoding: "utf8" });
+        if (command.stdout.includes("GWT_SWITCH_TREE_CHILD") && command.stdout.includes(home)) {
+          try { process.kill(event.tree_child_pid, "SIGTERM"); } catch { /* exited */ }
+        }
+      }
+      if (ownedPid) {
+        const remaining = processCommand(ownedPid);
+        await testInfo.attach("fixture-process-cleanup", { body: JSON.stringify({ pid: ownedPid, exited: !remaining,
+          owner, ...(ownerObservationSupported ? {} : { owner_observation: { status: "unsupported_platform", platform: process.platform, natural: null } }),
+          ...(ownerCaptureFailed ? { owner_capture_failed: true } : {}), provider_pre_fallback: providerPreFallback }), contentType: "application/json" });
+        if (remaining) throw new Error(`Fixture gwt process ${ownedPid} remained after shutdown`);
+      }
+      child = undefined;
+    } catch (error) {
+      const errors = [browserError, ownerError].filter((failure): failure is Error => failure !== undefined);
+      if (!errors.length) throw error;
+      throw new AggregateError([...errors, new Error("Fixture physical cleanup failed")], "Fixture cleanup failed");
     }
-    if (ownedPid) {
-      const remaining = processCommand(ownedPid);
-      await testInfo.attach("fixture-process-cleanup", { body: JSON.stringify({ pid: ownedPid, exited: !remaining, provider_pre_fallback: providerPreFallback }), contentType: "application/json" });
-      if (remaining) throw new Error(`Fixture gwt process ${ownedPid} remained after shutdown`);
-    }
-    child = undefined;
+    if (browserError && ownerError) throw new AggregateError([browserError, ownerError], "Fixture browser and owner cleanup failed");
+    if (browserError) throw browserError;
+    if (ownerError) throw ownerError;
   }
   type ColdCensus = { project_key: string; host_id: string; observed_at: string;
     agents: { window_id: string; session_id: string; runtime_incarnation: number }[] };
@@ -540,36 +677,8 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     const errors: unknown[] = [], witnesses: ColdWitness[] = [];
     const ownedPid = child?.pid;
     const providerPaths = [join(bin, "codex"), join(bin, "claude")];
-    const state = async (pid: number): Promise<{ birth: number; parent: number } | null> => {
-      if (process.platform === "linux") {
-        let raw: string;
-        try { raw = await readFile(`/proc/${pid}/stat`, "utf8"); }
-        catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
-        const end = raw.lastIndexOf(")");
-        if (end < 0) throw new Error(`Cannot parse PID ${pid} stat`);
-        const fields = raw.slice(end + 1).trim().split(/\s+/);
-        const parent = Number(fields[1]), birth = Number(fields[19]);
-        if (!Number.isSafeInteger(parent) || !Number.isSafeInteger(birth) || birth <= 0) throw new Error(`Unknown PID ${pid} identity`);
-        return { parent, birth };
-      }
-      const result = spawnSync("ps", ["-p", String(pid), "-o", "lstart=", "-o", "ppid="], { encoding: "utf8", timeout: 5_000 });
-      if (result.error) throw result.error;
-      if (result.status === 1 && !result.stdout.trim() && !result.stderr.trim()) return null;
-      const match = result.status === 0 ? result.stdout.trim().match(/^(.*?)\s+(\d+)$/) : null;
-      const birth = match ? Math.floor(Date.parse(match[1]) / 1000) : NaN, parent = match ? Number(match[2]) : NaN;
-      if (!Number.isSafeInteger(birth) || birth <= 0 || !Number.isSafeInteger(parent)) throw new Error(`Unknown PID ${pid} identity`);
-      return { birth, parent };
-    };
-    const processCwd = async (pid: number) => {
-      if (process.platform === "linux") return realpath(`/proc/${pid}/cwd`);
-      const result = spawnSync("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], { encoding: "utf8", timeout: 5_000 });
-      if (result.error) throw result.error;
-      const paths = result.stdout.split("\n").filter(line => line.startsWith("n")).map(line => line.slice(1));
-      if (result.status !== 0 || paths.length !== 1 || !paths[0]) throw new Error(`Unknown PID ${pid} cwd`);
-      return realpath(paths[0]);
-    };
     const privateChild = async (witness: ColdWitness) => {
-      const current = await state(witness.childPid);
+      const current = await readProcessState(witness.childPid);
       if (!current || current.birth !== witness.childBirth) return false;
       if (!processCommand(witness.childPid).includes(witness.providerPath))
         throw new Error(`Owned recorder ${witness.childPid} path changed`);
@@ -589,11 +698,11 @@ readline.createInterface({input:process.stdin}).on('line', line => {
         protectGuiOwner = true;
         throw new Error("Cold owner identity overlaps GUI; refusing to signal it");
       }
-      const actualHost = await state(hostPid);
+      const actualHost = await readProcessState(hostPid);
       if (!actualHost || actualHost.birth !== hostBirth) throw new Error("Cold owner birth changed");
       for (const launch of await launches()) {
         const matches = census.agents.filter(agent => agent.session_id === launch.gwt_session_id);
-        const actualChild = await state(launch.pid);
+        const actualChild = await readProcessState(launch.pid);
         if (!actualChild) {
           if (matches.length) throw new Error("Current census recorder child is absent or unknown");
           continue;
@@ -652,7 +761,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
       try {
         const deadline = performance.now() + 30_000;
         while (performance.now() < deadline) {
-          const observations = await Promise.all(witnesses.map(async witness => ({ host: await state(witness.hostPid), child: await state(witness.childPid), witness })));
+          const observations = await Promise.all(witnesses.map(async witness => ({ host: await readProcessState(witness.hostPid), child: await readProcessState(witness.childPid), witness })));
           if (performance.now() >= deadline) throw new Error("Cold owner natural reap not observed before deadline");
           if (observations.every(({ host, child, witness }) => (!host || host.birth !== witness.hostBirth)
             && (!child || child.birth !== witness.childBirth))) { natural = true; break; }
@@ -664,7 +773,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     const providerPreFallback: unknown[] = [];
     for (const witness of witnesses) {
       try {
-        const current = await state(witness.childPid);
+        const current = await readProcessState(witness.childPid);
         const same = current?.birth === witness.childBirth;
         providerPreFallback.push({ at: new Date().toISOString(), pid: witness.childPid, session_id: witness.session,
           state: !current ? "absent" : same ? "observed" : "replaced", birth: current?.birth ?? null,

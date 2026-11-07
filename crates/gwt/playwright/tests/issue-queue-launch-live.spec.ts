@@ -34,7 +34,7 @@ test.describe("Issue queue real backend launch", () => {
   test.use({ viewport: { width: 1600, height: 1100 } });
 
   test("roster Manual same-value save updates machine policy before autonomous queue launch", async ({ page }, info) => {
-    const fixture = await startIssueQueueLaunchFixture(info, { autonomousMode: true });
+    const fixture = await startIssueQueueLaunchFixture(info, { page, autonomousMode: true });
     const errors: string[] = [];
     page.on("pageerror", error => errors.push(error.message));
     page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
@@ -112,17 +112,26 @@ test.describe("Issue queue real backend launch", () => {
       expect(launch.gwt_session_id).toBeTruthy();
       const window = () => page.evaluate(sessionId => {
         const state = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) => entry.payload.kind === "workspace_state");
-        return (state?.payload.workspace.tabs ?? []).flatMap((tab: any) => tab.workspace.windows)
-          .find((window: any) => window.session_id === sessionId);
+        const matches = (state?.payload.workspace.tabs ?? []).flatMap((tab: any) => tab.workspace.windows)
+          .filter((window: any) => window.session_id === sessionId);
+        return matches.length === 1 ? matches[0] : undefined;
       }, launch.gwt_session_id);
       await expect.poll(async () => ["running", "idle"].includes((await window())?.status), { timeout: 60_000 }).toBe(true);
       const actualWindow = await window();
-      await expect.poll(async () => (await prefs()).launch_confirmations?.[fixture.issueNumber]?.window_id,
-        { timeout: 60_000 }).toBe(actualWindow.id);
+      expect(actualWindow.session_id).toBe(launch.gwt_session_id);
+      // GUI layout aliases and native owner pane IDs share the exact Session.
+      // The canonical status reader validates the native pane's Issue binding.
+      await expect.poll(async () => {
+        const id = (await prefs()).launch_confirmations?.[fixture.issueNumber]?.window_id;
+        if (typeof id !== "string" || !id) return false;
+        const matches = operation("issue.monitor.status").output.active_launch_details
+          .filter((detail: any) => detail.issue_number === fixture.issueNumber && detail.session_id === launch.gwt_session_id);
+        return matches.length === 1 && matches[0].window_id === id;
+      }, { timeout: 60_000 }).toBe(true);
       const confirmed = (await prefs()).launch_confirmations[fixture.issueNumber];
       expect(confirmed.claim_id).toBeTruthy();
       expect(confirmed.delivery_id).toBeTruthy();
-      expect((await prefs()).launch_bindings[actualWindow.id]).toBe(fixture.issueNumber);
+      expect((await prefs()).launch_bindings[confirmed.window_id]).toBe(fixture.issueNumber);
       expect(fixture.comments.some(comment => comment.body.includes("gwt-auto-improve-claim")
         && comment.body.includes(confirmed.claim_id))).toBe(true);
       const record = () => readFile(join(fixture.home, ".gwt/sessions", `${launch.gwt_session_id}.toml`), "utf8");
@@ -131,7 +140,7 @@ test.describe("Issue queue real backend launch", () => {
       expect(await record()).toContain(`linked_issue_number = ${fixture.issueNumber}`);
       const running = operation("issue.monitor.status").output;
       expect(running.active_launch_details).toContainEqual(expect.objectContaining({ issue_number: fixture.issueNumber,
-        session_id: launch.gwt_session_id, window_id: actualWindow.id }));
+        session_id: launch.gwt_session_id, window_id: confirmed.window_id }));
       expect(running.occupied_slot_count).toBeLessThanOrEqual(running.max_active);
       await info.attach("machine-manual-native-launch", { body: JSON.stringify({ before: before.output, saved, running,
         machine: await machine(), launch, confirmation: confirmed,
@@ -146,7 +155,7 @@ test.describe("Issue queue real backend launch", () => {
 
   test("T20b pending switch preserves current and cancels without replay after restart", async ({ page }, info) => {
     test.skip(process.platform === "win32", "switch actor fixture requires POSIX executables");
-    const fixture = await startIssueQueueLaunchFixture(info, { targetIssueNumber: 44, switching: true });
+    const fixture = await startIssueQueueLaunchFixture(info, { page, targetIssueNumber: 44, switching: true });
     const errors: string[] = [];
     const theme = info.project.name.includes("light") ? "light" : "dark";
     let current = page;
@@ -263,6 +272,7 @@ test.describe("Issue queue real backend launch", () => {
     test.skip(process.platform !== "linux" || process.env.GWT_PLAYWRIGHT_SWITCH_POSITIVE !== "1",
       "positive proof requires the isolated Linux root process namespace");
     const fixture = await startIssueQueueLaunchFixture(info, {
+      page,
       targetIssueNumber: 44, switching: true, positive: true, autonomousMode: true,
     });
     const errors: string[] = [];
@@ -382,7 +392,7 @@ test.describe("Issue queue real backend launch", () => {
     // Setup, GUI restart and two bounded launches reached proof collection at
     // 242s on Windows. Budget their aggregate plus cleanup; retain phase limits.
     test.setTimeout(420_000);
-    const fixture = await startIssueQueueLaunchFixture(info);
+    const fixture = await startIssueQueueLaunchFixture(info, { page });
     const errors: string[] = [];
     const theme = info.project.name.includes("light") ? "light" : "dark";
     const context = page.context();
@@ -674,7 +684,7 @@ test.describe("Issue queue real backend launch", () => {
   });
 
   test("AC34 actual provider exit removes the local Active agent without closing its Issue", async ({ page }, info) => {
-    const fixture = await startIssueQueueLaunchFixture(info);
+    const fixture = await startIssueQueueLaunchFixture(info, { page });
     const errors: string[] = [];
     page.on("pageerror", error => errors.push(error.message));
     page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
@@ -749,7 +759,7 @@ test.describe("Issue queue real backend launch", () => {
   });
 
   test("Backlog drag launches once and Blocked generation stays stopped after app restart", async ({ page }, info) => {
-    const fixture = await startIssueQueueLaunchFixture(info);
+    const fixture = await startIssueQueueLaunchFixture(info, { page });
     const errors: string[] = [];
     page.on("pageerror", error => errors.push(error.message));
     page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
@@ -855,7 +865,7 @@ test.describe("Issue queue real backend launch", () => {
   });
 
   test("authenticated fresh launch repairs an Active orphan and retains staged work", async ({ page }, info) => {
-    const fixture = await startIssueQueueLaunchFixture(info);
+    const fixture = await startIssueQueueLaunchFixture(info, { page });
     const errors: string[] = [];
     const capture = (target: typeof page) => {
       target.on("pageerror", error => errors.push(error.message));

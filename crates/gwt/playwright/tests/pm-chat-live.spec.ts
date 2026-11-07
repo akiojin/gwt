@@ -1042,6 +1042,7 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
     let ownedState = '';
     let targetEnv: NodeJS.ProcessEnv = {};
     const target = await startExactRelaunchFixture(info, {
+      page,
       async beforeStart({ home, project, env, preferences }) {
         ownedState = preferences;
         targetEnv = { ...env };
@@ -1352,6 +1353,7 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
     let statePath = '';
     let seed: any;
     const target = await startExactRelaunchFixture(info, {
+      page,
       async beforeStart({ home, project, preferences }) {
         const projectKey = basename(join(preferences, '..'));
         const at = '2026-11-06T00:00:00Z';

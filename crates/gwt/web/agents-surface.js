@@ -374,7 +374,10 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
     field.status.hidden = !field.status.textContent;
     field.retry.hidden = !edit?.blocked;
     field.retry.disabled = edit?.composing || edit?.status === "invalid" || !!rosterModel.read().pending_name;
-    const eligible = field.head.querySelector('[data-action="pm-eligible"]'); eligible.checked = member.pm_eligible === true; eligible.disabled = !rosterReady(rosterModel.read()) || holdsPmRole(member);
+    const pending = rosterModel.read().pending_roster?.action;
+    const eligible = field.head.querySelector('[data-action="pm-eligible"]');
+    eligible.checked = pending?.kind === "set_pm_eligibility" && pending.member_id === member.member_id ? pending.eligible === true : member.pm_eligible === true;
+    eligible.disabled = !rosterReady(rosterModel.read()) || holdsPmRole(member);
     const selectPm = field.head.querySelector('[data-action="select-pm"]');
     const foreign = member.pm_project_key && member.pm_project_key !== rosterModel.read().project_key;
     selectPm.textContent = foreign ? `Open Project Manager project ${member.pm_project_key}` : configuredPm(member) ? "Configured Project Manager" : holdsPmRole(member) ? "Project Manager assignment retained" : "Select as Project Manager";

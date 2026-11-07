@@ -554,6 +554,7 @@ test("owned actual Codex PM retains genuine history and composer across Works re
   const cleanupErrors: unknown[] = [];
   try {
     fixture = await startExactRelaunchFixture(info, {
+      page,
       async prepare(context) {
         home = context.home;
         // Probes are argument-shaped: the Session environment may already

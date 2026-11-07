@@ -29,6 +29,9 @@ use crate::discussion_resume::load_pending_resume;
 use crate::window_state::window_state_for_hook_event;
 
 const HOOK_SESSION_METADATA_LEASE_WAIT: Duration = Duration::from_millis(25);
+// Native startup identity is a mandatory durable commit, so use the normal
+// Session transaction's bounded wait rather than fail-open bookkeeping's budget.
+const SESSION_START_METADATA_LEASE_WAIT: Duration = Duration::from_secs(2);
 
 /// A read-only snapshot, never an execution grant. Completion and doctor compare
 /// this existing Session/process identity again before publishing evidence.
@@ -641,6 +644,11 @@ pub(crate) fn handle_with_input_prepared(
             event == "SessionStart"
                 || agent_session_id_needs_sync(session.as_ref(), agent_session_id)
         });
+        let lease_wait = if event == "SessionStart" && agent_session_id_to_sync.is_some() {
+            SESSION_START_METADATA_LEASE_WAIT
+        } else {
+            HOOK_SESSION_METADATA_LEASE_WAIT
+        };
         let persisted = timed_substage(event, "runtime-state/session-metadata", || {
             persist_session_hook_metadata_with_wait(
                 &sessions_dir,
@@ -648,7 +656,7 @@ pub(crate) fn handle_with_input_prepared(
                 event,
                 agent_session_id_to_sync.map(HookSessionId::as_str),
                 legacy_project_state_root.as_deref(),
-                HOOK_SESSION_METADATA_LEASE_WAIT,
+                lease_wait,
             )
         });
         match persisted {
@@ -1408,11 +1416,27 @@ mod tests {
             runtime_path.as_os_str().to_os_string(),
         );
 
-        handle_with_input(
+        // A concurrent Session transaction can hold this same lease
+        // while a restored provider reports its native conversation.
+        let lease = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(sessions_dir.join(format!(".{session_id}.lock")))
+            .unwrap();
+        lease.lock_exclusive().unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            lease.unlock().unwrap();
+        });
+
+        let result = handle_with_input(
             "SessionStart",
             r#"{"session_id":"pm-conversation-3966","cwd":"pm-worktree"}"#,
-        )
-        .expect("SessionStart must persist the provider conversation id");
+        );
+        release.join().unwrap();
+        result.expect("SessionStart must persist the provider conversation id after contention");
 
         let loaded = Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
         assert_eq!(

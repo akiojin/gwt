@@ -38,6 +38,7 @@ test.describe("retired automatic restore sources", () => {
     }, theme);
     let logDirectories: string[] = [];
     const fixture = await startExactRelaunchFixture(info, {
+      page,
       async beforeStart({ home, project, env, preferences }) {
         env.RUST_LOG = "info,gwt.restore.admission=debug";
         execFileSync("git", ["update-ref", "refs/remotes/origin/develop", "HEAD"], { cwd: project, env });
