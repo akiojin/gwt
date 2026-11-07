@@ -850,6 +850,38 @@ impl MobileAuthorization {
         }
     }
 
+    /// Poll from the trusted Host actor, including while awaiting its first
+    /// authenticated reply. Send any returned request outside this writer.
+    /// This does not create a timer or authenticate a reply. Terminal lease
+    /// errors invalidate the epoch and native permits under the same fence.
+    /// An invalidated lease keeps its closed epoch; legacy authority is unchanged.
+    pub fn poll_registration(
+        &mut self,
+        now: Instant,
+        wall: u64,
+    ) -> Result<Option<RegistrationRenewal>, AuthorizationError> {
+        let runtime = self
+            .runtime
+            .get_mut()
+            .map_err(|_| AuthorizationError::Unavailable)?;
+        if matches!(runtime.registration, RegistrationMode::Legacy) {
+            return Err(AuthorizationError::Registration(LeaseError::NotRegistered));
+        }
+        match runtime
+            .lease_mut()
+            .and_then(|lease| lease.poll_renewal(now, wall))
+        {
+            Ok(request) => Ok(request),
+            Err(error) => {
+                if error != LeaseError::Disabled {
+                    runtime.disable();
+                    self.revoke_native_connections(None);
+                }
+                Err(AuthorizationError::Registration(error))
+            }
+        }
+    }
+
     /// Consume only an authenticated response for the current one-shot request.
     /// A stale reply cannot disable a valid newer request or revive a closed one.
     pub fn accept_registration(
@@ -2822,6 +2854,84 @@ mod tests {
         auth.enable();
         let peer = PeerBinding::new(binding, Uuid::new_v4(), [1; 32], [2; 32]).unwrap();
         (dir, auth, peer, credential)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn registration_poll_checks_pending_and_revokes_idle_native_input() {
+        use std::time::Duration;
+        let (_dir, mut auth, peer, credential) = registered_fixture();
+        let key = key();
+        let device = paired(&mut auth, &key);
+        let started = Instant::now();
+        let request = auth
+            .enable_registered(&credential, Uuid::new_v4(), started, NOW)
+            .unwrap();
+        assert_eq!(auth.poll_registration(started, NOW), Ok(None));
+        assert_eq!(
+            auth.challenge_peer_bound(&device.id, &project(), &peer, NOW)
+                .unwrap_err(),
+            AuthorizationError::Disabled
+        );
+        auth.accept_registration(
+            request.generation(),
+            request.nonce(),
+            30,
+            Instant::now(),
+            NOW,
+        )
+        .unwrap();
+        let session = peer_session(&mut auth, &peer, &device, &key);
+        let auth = Arc::new(RwLock::new(auth));
+        let connection = Arc::new(MobileConnection::new(auth.clone(), session));
+        let input = MobileInputRequest::new(
+            connection.clone(),
+            "client".into(),
+            project(),
+            0,
+            "pane".into(),
+            "text".into(),
+        );
+        let permit = input.native_permit().unwrap();
+        input
+            .authorize_native(&permit, || Some(project()), || NOW)
+            .unwrap();
+        let old_epoch = auth.read().unwrap().runtime.lock().unwrap().host_epoch;
+        assert_eq!(
+            auth.write()
+                .unwrap()
+                .poll_registration(started + Duration::from_secs(30), NOW + 30),
+            Err(AuthorizationError::Registration(LeaseError::LeaseExpired))
+        );
+        assert!(permit.is_revoked());
+        let closed_epoch = auth.read().unwrap().runtime.lock().unwrap().host_epoch;
+        assert_ne!(closed_epoch, old_epoch);
+        assert_eq!(
+            auth.write()
+                .unwrap()
+                .poll_registration(started + Duration::from_secs(31), NOW + 31),
+            Err(AuthorizationError::Registration(LeaseError::Disabled))
+        );
+        assert_eq!(
+            auth.read().unwrap().runtime.lock().unwrap().host_epoch,
+            closed_epoch
+        );
+        let next = auth
+            .write()
+            .unwrap()
+            .enable_registered(&credential, Uuid::new_v4(), Instant::now(), NOW)
+            .unwrap();
+        auth.write()
+            .unwrap()
+            .accept_registration(next.generation(), next.nonce(), 30, Instant::now(), NOW)
+            .unwrap();
+        assert_eq!(
+            connection.dispatch(&project(), 1, || NOW, || ()),
+            Err(AuthorizationError::StaleSession)
+        );
+        let session = peer_session(&mut auth.write().unwrap(), &peer, &device, &key);
+        let fresh = MobileConnection::new(auth, session);
+        assert_eq!(fresh.dispatch(&project(), 0, || NOW, || 7), Ok(7));
     }
 
     #[test]
