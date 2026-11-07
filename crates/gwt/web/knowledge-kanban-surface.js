@@ -1874,6 +1874,7 @@ export function createKnowledgeKanbanSurface({
             queuedLoadRefresh: false,
             loadRecoveryTimer: null,
             loadInterrupted: false,
+            loadQueued: false,
             loadSlow: false,
             error: "",
             emptyMessage: "",
@@ -2129,6 +2130,7 @@ export function createKnowledgeKanbanSurface({
       function finishKnowledgeLoad(state, windowId, knowledgeKind) {
         clearKnowledgeLoadRecoveryTimer(state);
         state.loadInterrupted = false;
+        state.loadQueued = false;
         state.loading = false;
         state.refreshing = false;
         state.loadSlow = false;
@@ -2173,14 +2175,14 @@ export function createKnowledgeKanbanSurface({
         state.queuedLoadRefresh = false;
         state.error = "";
         const effectiveKind = knowledgeKind || state.kind;
-        send({
+        state.loadQueued = send({
           kind: "load_knowledge_bridge",
           id: windowId,
           knowledge_kind: effectiveKind,
           request_id: requestId,
           selected_number: state.selectedNumber ?? null,
           refresh,
-        });
+        }) === "queued";
         scheduleKnowledgeLoadRecovery(windowId, effectiveKind, requestId);
       }
 
@@ -2505,7 +2507,7 @@ export function createKnowledgeKanbanSurface({
         const disconnected = knowledgeTransportOnline && !online;
         knowledgeTransportOnline = online;
         for (const [windowId, state] of knowledgeBridgeStateMap.entries()) {
-          if (disconnected && state.loading) {
+          if (disconnected && state.loading && !state.loadQueued) {
             // Only a read sent before this disconnect needs a replacement.
             // Repeated offline notifications must not duplicate queued reads.
             state.loadInterrupted = true;
@@ -2519,6 +2521,10 @@ export function createKnowledgeKanbanSurface({
               state.loading = false;
               requestKnowledgeBridge(windowId, state.kind, state.refreshing || state.queuedLoadRefresh);
             }
+          }
+          if (online && state.loadQueued && workspaceWindowById(windowId)) {
+            // The current project's pending queue is flushed just after open.
+            state.loadQueued = false;
           }
           if (!online && state.revisionPending) {
             state.revisionPending = false;
