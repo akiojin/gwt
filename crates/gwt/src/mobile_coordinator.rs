@@ -5,6 +5,7 @@
 //! private files first, atomically persists the registry second, and reloads
 //! before reporting success. Preparing a candidate is not successful issuance.
 
+pub mod invite;
 pub mod storage;
 
 pub mod admin;
