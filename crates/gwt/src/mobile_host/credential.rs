@@ -199,7 +199,7 @@ fn import_with_sync(
     clock: impl FnOnce() -> Result<u64, CredentialImportError>,
     sync_directory: impl FnOnce(&std::fs::File) -> std::io::Result<()>,
 ) -> Result<ImportedHostCredential, CredentialImportError> {
-    use crate::mobile_coordinator::storage::{open_directory, same_file};
+    use crate::mobile_coordinator::storage::{has_repository_marker, open_directory, same_file};
     use std::{io::Write, path::Component};
 
     if [home, source].iter().any(|path| {
@@ -213,7 +213,7 @@ fn import_with_sync(
     let loaded = decode_host_credential(&bytes, expected_binding, expected_project, now)?;
     let source_parent = source.parent().ok_or(CredentialImportError::InvalidPath)?;
     let source_parent = source_parent.canonicalize().map_err(StoreError::Io)?;
-    if gwt_git::Repository::discover(&source_parent).is_ok() {
+    if has_repository_marker(&source_parent)? {
         return Err(CredentialImportError::RepositoryStorage);
     }
     let paths = [
@@ -226,7 +226,7 @@ fn import_with_sync(
         .map(|p| open_directory(p))
         .collect::<Result<Vec<_>, _>>()?;
     let directory = paths[2].canonicalize().map_err(StoreError::Io)?;
-    if gwt_git::Repository::discover(&directory).is_ok() {
+    if has_repository_marker(&directory)? {
         return Err(CredentialImportError::RepositoryStorage);
     }
     let recheck = || -> Result<(), StoreError> {
@@ -465,6 +465,13 @@ mod tests {
             source.path().join(".git"),
         ] {
             std::fs::write(&marker, "gitdir: unused-test-marker").unwrap();
+            assert!(matches!(
+                import_host_credential(home.path(), &path, &binding, &project(), || Ok(100)),
+                Err(CredentialImportError::RepositoryStorage)
+            ));
+            assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+            std::fs::remove_file(&marker).unwrap();
+            symlink("missing-git-directory", &marker).unwrap();
             assert!(matches!(
                 import_host_credential(home.path(), &path, &binding, &project(), || Ok(100)),
                 Err(CredentialImportError::RepositoryStorage)
