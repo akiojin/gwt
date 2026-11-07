@@ -787,7 +787,7 @@ fn legacy_process_observations(
 }
 
 #[cfg(test)]
-fn observe_with_processes(
+pub(crate) fn observe_with_processes(
     project_root: &Path,
     sessions_dir: &Path,
     processes: &BTreeMap<u32, u64>,
@@ -874,7 +874,11 @@ fn historical_runtime(
                 .child_started_at
                 .filter(|expected| *expected > 0)
                 .is_some_and(|expected| expected != *started),
-            Some(_) => false,
+            Some(_) => {
+                runtime.status == gwt_agent::AgentStatus::Stopped
+                    && !processes.contains_key(&host_pid)
+                    && !group_alive(pid)
+            }
         };
     }
     !exact_direct_child && !exact_host_identity(runtime, processes.get(&host_pid).copied())
@@ -1147,6 +1151,23 @@ fn observe_candidates(
         runtime,
     } in candidates
     {
+        // A dead Host's stopped sidecar may name a recycled protected PID.
+        // Use the same historical check even without a saved child identity.
+        if runtime
+            .child_pid
+            .is_some_and(|pid| processes.get(&pid) == Some(&0))
+            && historical_runtime(
+                &runtime,
+                host_pid,
+                processes,
+                &group_alive,
+                legacy_processes.iter().any(|process| {
+                    process.parent_pid == host_pid && process.session_id == session.id
+                }),
+            )
+        {
+            continue;
+        }
         let child = runtime
             .child_pid
             .zip(runtime.child_started_at)
@@ -1809,6 +1830,35 @@ mod tests {
             |_| false,
             false
         ));
+        assert!(historical_runtime(
+            &runtime,
+            100,
+            &BTreeMap::from([(201, 0)]),
+            |_| false,
+            false
+        ));
+        assert!(!historical_runtime(
+            &runtime,
+            100,
+            &BTreeMap::from([(100, 10), (201, 0)]),
+            |_| false,
+            false
+        ));
+        assert!(!historical_runtime(
+            &runtime,
+            100,
+            &BTreeMap::from([(201, 0)]),
+            |_| true,
+            false
+        ));
+        assert!(!historical_runtime(
+            &runtime,
+            100,
+            &BTreeMap::from([(201, 0)]),
+            |_| false,
+            true
+        ));
+        runtime.status = AgentStatus::Running;
         assert!(!historical_runtime(
             &runtime,
             100,
@@ -1816,6 +1866,7 @@ mod tests {
             |_| false,
             false
         ));
+        runtime.status = AgentStatus::Stopped;
         assert!(!historical_runtime(
             &runtime,
             100,
