@@ -1183,6 +1183,14 @@ and `task_id` inside `request`. Replies use `pm_request_task` and the caller's
 returns the task to pending reassessment, including when the PM is stopped.
 Cancellation records the same user audit and marks the task cancelled rather
 than completed, invalidating its and its ancestors' previous completion evidence.
+`update_pm_request_task` corrects the saved draft with `operation_id`,
+`expected_revision`, `reason` and `task: TaskDraft` inside `request`; `task.id`
+is the only target ID. The server assigns the browser user actor. Update returns
+the current task and revision observed after applying the operation, alongside
+the receipt at its original applied revision. An unchanged draft is also valid
+and records a receipt with an empty task delta. Replaying an Update preserves
+that receipt while the current task may reflect later changes. Reopen and Cancel
+continue to return their receipt's applied task state.
 After a connection loss, read the current task and original receipt: a new
 connection has a new actor, so replaying the old operation there is a conflict.
 The current task and the receipt's historical task state retain their own

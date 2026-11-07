@@ -1337,7 +1337,7 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
     }
   });
 
-  test('T-UTASK-USER-REOPEN and T-UTASK-USER-CANCEL persist browser authority and reconcile receipts after reconnect', async ({ page }, info) => {
+  test('T-UTASK-USER-REOPEN, T-UTASK-USER-CANCEL and T-UTASK-USER-UPDATE persist browser authority and reconcile receipts after reconnect', async ({ page }, info) => {
     const theme = info.project.name.includes('light') ? 'light' : 'dark';
     const windowId = 'pm-request-task-fixture';
     const taskId = 'synthetic-fixture-task';
@@ -1487,20 +1487,67 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
         receipt_operation_id: request.operation_id });
       expect(historical).toEqual({ ...cancelled, receipt: reopened.receipt });
       expect(readFileSync(statePath, 'utf8')).toBe(cancelledBytes);
+
+      const noopRequest = { operation_id: `browser-update-noop-${theme}`, expected_revision: 5,
+        reason: 'Confirm this saved task without changing its draft.', task: draft };
+      const noop = await exchange('update_pm_request_task', { request: noopRequest });
+      expect(noop).toMatchObject({ state: 'ready', revision: 6, task: cancelled.task,
+        receipt: { operation_id: noopRequest.operation_id, action: 'update', revision: 6,
+          reason: noopRequest.reason, actor: { kind: 'user' }, tasks: [] } });
+      expect(noop.receipt.actor.id).toMatch(/^browser:[0-9a-f-]{36}$/i);
+      expect(noop.receipt.actor.id).not.toBe(cancelled.receipt.actor.id);
+      const noopBytes = readFileSync(statePath, 'utf8');
+      const noopState = JSON.parse(noopBytes);
+      expect(noopState.revision).toBe(6);
+      expect(noopState.receipts).toEqual([...cancelledState.receipts, noop.receipt]);
+      expect(noopState.tasks[taskId]).toEqual(cancelled.task);
+      expect(noopState.sources).toEqual(seed.sources);
+      expect(await exchange('update_pm_request_task', { request: noopRequest })).toEqual(noop);
+      expect(readFileSync(statePath, 'utf8')).toBe(noopBytes);
+
+      const correctedDraft = { ...draft, purpose: 'Verify the corrected original fixture outcome',
+        completion_conditions: ['Verify the corrected outcome before claiming completion'] };
+      const updateRequest = { operation_id: `browser-update-${theme}`, expected_revision: 6,
+        reason: 'Correct the purpose and completion conditions while retaining the original request.', task: correctedDraft };
+      const updated = await exchange('update_pm_request_task', { request: updateRequest });
+      expect(updated).toMatchObject({ state: 'ready', revision: 7, task: { ...cancelled.task,
+        draft: correctedDraft, condition_revision: 2, review_generation: 4, review_required: true,
+      }, receipt: { operation_id: updateRequest.operation_id, action: 'update', revision: 7,
+        reason: updateRequest.reason, actor: noop.receipt.actor } });
+      expect(updated.receipt.tasks).toEqual([updated.task]);
+      const updatedBytes = readFileSync(statePath, 'utf8');
+      const updatedState = JSON.parse(updatedBytes);
+      expect(updatedState.revision).toBe(7);
+      expect(updatedState.receipts).toEqual([...noopState.receipts, updated.receipt]);
+      expect(updatedState.tasks[taskId]).toEqual(updated.task);
+      expect(updatedState.sources).toEqual(seed.sources);
+      expect(updatedState.sources[pendingTask.source_id].original).toBe(original);
+      expect(await exchange('update_pm_request_task', { request: noopRequest }))
+        .toEqual({ ...updated, receipt: noop.receipt });
+      expect(readFileSync(statePath, 'utf8')).toBe(updatedBytes);
+
+      await page.reload();
+      await page.waitForFunction(() => (window as any).__gwtPlaywrightTestBridgeInstalled === true);
+      await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+      expect(await exchange('update_pm_request_task', { request: noopRequest })).toMatchObject({ state: 'error',
+        code: 'operation_conflict', recovery_operation: 'load_pm_request_task' });
+      expect(await exchange('load_pm_request_task', { task_id: taskId,
+        receipt_operation_id: noopRequest.operation_id })).toEqual({ ...updated, receipt: noop.receipt });
+      expect(readFileSync(statePath, 'utf8')).toBe(updatedBytes);
       expect(errors).toEqual([]);
     } catch (error) {
       primaryErrors.push(error);
       throw error;
     } finally {
       try {
-        await info.attach(`T-UTASK-USER-REOPEN ${theme} transport and persistence`, {
+        await info.attach(`T-UTASK-USER-REOPEN/CANCEL/UPDATE ${theme} transport and persistence`, {
           body: JSON.stringify({ synthetic_fixture_seed: true, native_intake_proof: false,
             production_task_ui: false, theme, seed, exchanges, console_page_errors: errors,
             persisted: JSON.parse(readFileSync(statePath, 'utf8')) }), contentType: 'application/json',
         });
         const screenshot = info.outputPath(`task-reopen-transport-${theme}.png`);
         await page.screenshot({ path: screenshot });
-        await info.attach(`T-UTASK-USER-REOPEN ${theme} browser`, { path: screenshot, contentType: 'image/png' });
+        await info.attach(`T-UTASK-USER-REOPEN/CANCEL/UPDATE ${theme} browser`, { path: screenshot, contentType: 'image/png' });
       } catch (error) { cleanupErrors.push(error); }
       try { await page.close(); } catch (error) { cleanupErrors.push(error); }
       try { await target.stop(); } catch (error) { cleanupErrors.push(error); }
