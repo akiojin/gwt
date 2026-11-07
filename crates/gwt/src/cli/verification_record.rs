@@ -9481,6 +9481,8 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _target = ScopedEnvVar::unset("CARGO_TARGET_DIR");
         let dir = tempfile::tempdir().unwrap();
+        // Cargo metadata resolves the temporary-root symlink, unlike absolute overrides.
+        let expected_root = dunce::canonicalize(dir.path()).unwrap();
         let commands = ["cargo nextest run -p gwt --lib".to_string()];
         fs::write(
             dir.path().join("Cargo.toml"),
@@ -9520,7 +9522,7 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
-        assert_eq!(targets(&commands), vec![dir.path().join("target")]);
+        assert_eq!(targets(&commands), vec![expected_root.join("target")]);
         let ambient = dir.path().join("ambient target");
         let _ambient = ScopedEnvVar::set("CARGO_TARGET_DIR", &ambient);
         assert_eq!(targets(&[
@@ -9528,7 +9530,7 @@ mod tests {
             r#"RUSTFLAGS="-D warnings" cargo nextest run -p gwt --lib"#.to_string(),
             r#"CARGO_TARGET_DIR=ignored cargo test -p gwt --lib --target-dir "explicit target's""#.to_string(),
             "CARGO_TARGET_DIR='inline target' cargo test -p gwt --lib".to_string(),
-        ]), vec![ambient, dir.path().join("explicit target's"), dir.path().join("inline target")]);
+        ]), vec![ambient, expected_root.join("explicit target's"), expected_root.join("inline target")]);
         assert!(targets(&["cargo nextest list".to_string()]).is_empty());
         assert!(gwtd_artifact_restoration(
             dir.path(),
@@ -9657,6 +9659,7 @@ fn default_integration_test_builds_a_guarded_binary() {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
+        let expected_root = dunce::canonicalize(dir.path()).unwrap();
         let _target = ScopedEnvVar::unset("CARGO_TARGET_DIR");
         let package = dir.path().join("crates/gwt");
         fs::create_dir_all(package.join("src")).unwrap();
@@ -9691,7 +9694,7 @@ fn default_integration_test_builds_a_guarded_binary() {
                 true
             )
             .unwrap(),
-            Some(dir.path().join("target"))
+            Some(expected_root.join("target"))
         );
         assert_ne!(record.commands[1].exit_code, 0, "{transcript}");
         assert!(!record.all_passed, "{transcript}");
@@ -9722,6 +9725,7 @@ fn default_integration_test_builds_a_guarded_binary() {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
+        let expected_root = dunce::canonicalize(dir.path()).unwrap();
         let _target = ScopedEnvVar::unset("CARGO_TARGET_DIR");
         let candidate = dir
             .path()
@@ -9776,7 +9780,7 @@ fn default_integration_test_builds_a_guarded_binary() {
                     true
                 )
                 .unwrap(),
-                Some(dir.path().join(target))
+                Some(expected_root.join(target))
             );
             assert_eq!(result.exit_code, 0, "{transcript}");
         }
