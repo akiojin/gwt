@@ -1,0 +1,554 @@
+{
+  "schema_version": 1,
+  "issue": 6743,
+  "generation": "R4",
+  "purpose": "Shipping CPU acceptance and optimized function attribution are separate evidence streams.",
+  "counting_rules": {
+    "cpu_fraction": "process kernel+user CPU seconds divided by measured wall seconds; 1 logical core is fraction 1.0 or 100%.",
+    "leaf": "First frame of each raw sample; repeated addresses within a stack do not add samples.",
+    "first_product": "First frame whose resolved symbol begins with gwt; generic symbols containing a product type name later in the string are excluded by this rule.",
+    "inclusive_product": "Count each distinct gwt-prefixed symbol once per sample. Nested functions overlap, so rows are not additive.",
+    "ownership_inclusive": "Match a documented substring anywhere in a resolved frame, including generic environment type names; count a sample at most once for each ownership row.",
+    "top_five_with_ties": "Sort by descending count then symbol name; include every symbol tied with the fifth row.",
+    "samples_are_not_cpu_seconds_or_cpu_percent": true
+  },
+  "shipping_cpu_acceptance": {
+    "run_id": "b01cf9b2dee04eb5ac2d908e3754edfb",
+    "profile": "shipping release defaults",
+    "launch": {
+      "path": "crates/gwt/playwright/test-results/issue-5658-after-b01cf9b2dee04eb5ac2d908e3754edfb/launch.json",
+      "sha256": "889917fc8a85fe832eb4dc9fbd9c3ef57dba02a2ac0a6792cb9fc90c98bf3a32",
+      "bytes": 4634
+    },
+    "source_generation": {
+      "raw": {
+        "path": "target/issue-6743-r4/source-generation.json",
+        "sha256": "57f6f1e7d09cd6a2ed8e3609a4f7be77d88c7ca513b799d537b110ccf27c66de",
+        "bytes": 877
+      },
+      "preserved": {
+        "path": "docs/perf/issue-6743/r4-source-generation.json",
+        "sha256": "016052e17e6a1d07ee88d52186c26005becd2cabd223c5d5330f9381a99d19e4",
+        "bytes": 863
+      },
+      "semantic_copy_equal": true
+    },
+    "work_projection_readiness": {
+      "raw": {
+        "path": "crates/gwt/playwright/test-results/issue-5658-after-b01cf9b2dee04eb5ac2d908e3754edfb/idle-cpu-live-Issue-5658-i-7f2f9-authenticated-Ready-polling-chromium-dark/after-dark-work-projection-readiness.json",
+        "sha256": "0691fbfe3885c066cc71f0510e2c288b80d45c5c9de5e106499cac7aa0dde6a9",
+        "bytes": 2074
+      },
+      "preserved": {
+        "path": "docs/perf/issue-6743/steady-r4-work-projection-readiness.json",
+        "sha256": "0691fbfe3885c066cc71f0510e2c288b80d45c5c9de5e106499cac7aa0dde6a9",
+        "bytes": 2074
+      },
+      "ready": true,
+      "source": "full active_work_projection after hook-health aggregation",
+      "received_at": "2026-11-04T19:50:45.801Z",
+      "expected_work_id_count": 1752,
+      "observed_work_id_count": 1752,
+      "missing_work_id_count": 0,
+      "active_work_rows": 897,
+      "expected_session_count": 5,
+      "matched_session_count": 5
+    },
+    "gui": {
+      "raw": {
+        "path": "crates/gwt/playwright/test-results/issue-5658-after-b01cf9b2dee04eb5ac2d908e3754edfb/idle-cpu-live-Issue-5658-i-7f2f9-authenticated-Ready-polling-chromium-dark/after-dark-idle-cpu.json",
+        "sha256": "4c470eb6c0be7ec3033eb03687e60ea332ec0fa48041f84a4894847dad24b578",
+        "bytes": 141276
+      },
+      "preserved": {
+        "path": "docs/perf/issue-6743/steady-r4-idle-cpu.json",
+        "sha256": "4c470eb6c0be7ec3033eb03687e60ea332ec0fa48041f84a4894847dad24b578",
+        "bytes": 141276
+      },
+      "preserved_bytes_equal_raw": true,
+      "requested_sample_ms": 600000,
+      "process_id": 4248,
+      "process_started_at": "2026-11-04T19:46:32.5652160Z",
+      "binary": "E:\\gwt\\work\\issue-6743\\target\\issue-6743-r4\\release\\gwt.exe",
+      "binary_sha256": "9da10f5bc3fbdf550865e80a1cd719a0c1cbb9547ff321ce4181f4cf3f21346d",
+      "start_utc": "2026-11-04T19:50:47.8239229Z",
+      "end_utc": "2026-11-04T20:00:47.9123668Z",
+      "process_cpu_seconds": 33.609375,
+      "wall_seconds": 600.0886088000001,
+      "cpu_fraction": 0.056007353759320345,
+      "cpu_percent_one_logical_core": 5.600735375932034,
+      "required_cpu_fraction_strictly_below": 0.05,
+      "result": "RED"
+    },
+    "monitor_off_daemon": {
+      "raw": {
+        "path": "crates/gwt/playwright/test-results/issue-5658-after-b01cf9b2dee04eb5ac2d908e3754edfb/idle-cpu-live-Issue-5658-i-7f2f9-authenticated-Ready-polling-chromium-dark/after-dark-daemon-cpu.json",
+        "sha256": "af3b3049efd521d4584cc136dcaeff9a110bce5f3465c94a13c2433063722446",
+        "bytes": 10099
+      },
+      "preserved": {
+        "path": "docs/perf/issue-6743/steady-r4-daemon-cpu.json",
+        "sha256": "af3b3049efd521d4584cc136dcaeff9a110bce5f3465c94a13c2433063722446",
+        "bytes": 10099
+      },
+      "preserved_bytes_equal_raw": true,
+      "requested_sample_ms": 600000,
+      "process_id": 47748,
+      "process_started_at": "2026-11-04T19:46:31.5270231Z",
+      "binary": "E:\\gwt\\work\\issue-6743\\target\\issue-6743-r4\\release\\gwtd.exe",
+      "binary_sha256": "42e4b23fe2cf6370750bba738dad9041a70f9404f25026fd1be33cfd9de723ed",
+      "start_utc": "2026-11-04T19:50:47.8075114Z",
+      "end_utc": "2026-11-04T20:00:47.8963654Z",
+      "process_cpu_seconds": 8.703125,
+      "wall_seconds": 600.0890807999999,
+      "cpu_fraction": 0.014503055093749677,
+      "cpu_percent_one_logical_core": 1.4503055093749677,
+      "required_cpu_fraction_strictly_below": 0.01,
+      "result": "RED"
+    },
+    "result": "RED: both strict CPU thresholds exceeded"
+  },
+  "optimized_diagnostic": {
+    "run_id": "c7c07b025c264aabaf5eb07138f2ff96",
+    "used_for_shipping_cpu_acceptance": false,
+    "configured_profile": "bench",
+    "debug": "line-tables-only",
+    "strip": "none",
+    "target_profile_directory": "release",
+    "harness_build_profile_label": "release",
+    "launch": {
+      "path": "crates/gwt/playwright/test-results/issue-5658-after-c7c07b025c264aabaf5eb07138f2ff96/launch.json",
+      "sha256": "d6fb435285fe92e4b982bfd4365e52cfc08f503ac47ca1aa139b9aa249a580d9",
+      "bytes": 4651
+    },
+    "source_generation": {
+      "raw": {
+        "path": "target/issue-6743-symbolized/source-generation.json",
+        "sha256": "06e75d681a8900e68da80e20c5bc57502a7c8814643a800f02ec4f37dc5c63bb",
+        "bytes": 1188
+      },
+      "recorded_contents": {
+        "use": "Function attribution only; not shipping CPU acceptance",
+        "name": "R4 optimized diagnostic",
+        "compilation_started_before_commit": true,
+        "target_profile_directory": "release",
+        "configured_profile": "bench",
+        "command": "CARGO_PROFILE_BENCH_DEBUG=line-tables-only CARGO_PROFILE_BENCH_STRIP=none cargo build --profile bench -p gwt --bin gwt --bin gwtd --target-dir target/issue-6743-symbolized",
+        "source_files": {
+          "crates/gwt/src/session_inventory.rs": "01d1fb1a14904822fe914494a6a92489f5a11bd6b3ac634469c4d1d93aa0cc4b",
+          "crates/gwt-core/src/index/path_policy.rs": "cce878463b91533f088c3593797590767d63c737d7f25c74cfb40e8ed01541a5",
+          "crates/gwt/src/process.rs": "32eecee3f2db15da2ec72aa0cf6c482c0da774319f1333e6901282433d3d1861",
+          "crates/gwt/src/monitor_duplicate_runtime.rs": "97e852f58b6559f170b396cb91b2a889e626cb867bfd00c232ac86c7ef7ff80b",
+          "crates/gwt/src/cli/tray/lifetime.rs": "e660c0522bda9bb919b6a5b576a6a56f528db663491a27f8c396f14fe877d15f",
+          "crates/gwt/src/usage_poller.rs": "2724f33169955815d7aa730a1337f5ae09f8d3a62d03b447ac07a9830ddef4a2"
+        },
+        "source_committed_as": "8d2087d43d989904ae94f38cdd4395c3c1e7c69f"
+      }
+    },
+    "recorded_six_source_file_hashes_equal_shipping": true,
+    "gui": {
+      "raw": {
+        "path": "crates/gwt/playwright/test-results/issue-5658-after-c7c07b025c264aabaf5eb07138f2ff96/idle-cpu-live-Issue-5658-i-7f2f9-authenticated-Ready-polling-chromium-dark/native-profile.json",
+        "sha256": "5737eb8f87b863ac700773f32ea8977e5c7490e5d2b975f5677646914245968b",
+        "bytes": 161222
+      },
+      "process_id": 42356,
+      "process_started_at": "2026-11-04T19:52:30.9863887Z",
+      "binary": "E:\\gwt\\work\\issue-6743\\target\\issue-6743-symbolized\\release\\gwt.exe",
+      "binary_sha256": "c6cd2d1e26305f674d59a632b5910e393d657b6a690556a3965adff7b2b98566",
+      "captured_at": "2026-11-04T19:58:40.5276509Z",
+      "requested_seconds": 120,
+      "elapsed_seconds": 120.3281053,
+      "samples": 225,
+      "symbols": 305,
+      "context_failures": 0,
+      "top_five_leaf_with_ties": [
+        {
+          "function": "NtCreateFile",
+          "samples": 46
+        },
+        {
+          "function": "ZwQuerySystemInformation",
+          "samples": 32
+        },
+        {
+          "function": "NtDeviceIoControlFile",
+          "samples": 20
+        },
+        {
+          "function": "NtQueryInformationFile",
+          "samples": 15
+        },
+        {
+          "function": "NtClose",
+          "samples": 14
+        },
+        {
+          "function": "_lread",
+          "samples": 14
+        }
+      ],
+      "top_five_first_product_with_ties": [
+        {
+          "function": "gwt::agent_capacity::RuntimeProbe::refresh_projects_with_scan<enum2$<core::result::Result<enum2$<core::option::Option<u64> >,core::io::error::Error> > (*)(ref_mut$<gwt::agent_capacity::TargetWalk>,ref_mut$<usize>,std::time::Instant)>",
+          "samples": 31
+        },
+        {
+          "function": "gwt::usage_poller::collect_sessions_with_clock::closure$1<chrono::datetime::DateTime<chrono::offset::utc::Utc> (*)()>",
+          "samples": 25
+        },
+        {
+          "function": "gwt::session_inventory::capture_process_resources_with_system",
+          "samples": 22
+        },
+        {
+          "function": "gwt::runtime_health_poller::run::async_fn$0",
+          "samples": 20
+        },
+        {
+          "function": "gwt::usage_poller::impl$0::poll_once::async_fn$0",
+          "samples": 15
+        }
+      ],
+      "samples_without_gwt_prefixed_frame": 35,
+      "top_five_inclusive_product_with_ties": [
+        {
+          "function": "gwt::agent_capacity::RuntimeProbe::refresh_projects_with_scan<enum2$<core::result::Result<enum2$<core::option::Option<u64> >,core::io::error::Error> > (*)(ref_mut$<gwt::agent_capacity::TargetWalk>,ref_mut$<usize>,std::time::Instant)>",
+          "samples": 76
+        },
+        {
+          "function": "gwt::usage_poller::impl$0::poll_once::async_fn$0",
+          "samples": 46
+        },
+        {
+          "function": "gwt::runtime_health_poller::run::async_fn$0",
+          "samples": 32
+        },
+        {
+          "function": "gwt::usage_poller::collect_sessions_with_clock::closure$1<chrono::datetime::DateTime<chrono::offset::utc::Utc> (*)()>",
+          "samples": 28
+        },
+        {
+          "function": "gwt::session_inventory::capture_process_resources_with_system",
+          "samples": 22
+        }
+      ],
+      "representative_stacks": [
+        {
+          "label": "multi-owner identity canonicalization",
+          "raw_sample_index_zero_based": 32,
+          "thread_id": 47164,
+          "frames_leaf_to_caller": [
+            "NtQueryInformationFile",
+            "NtQueryInformationFile",
+            "GetFinalPathNameByHandleW",
+            "std::sys::fs::canonicalize",
+            "dunce::canonicalize_win",
+            "gwt::usage_poller::collect_sessions_with_clock::closure$1<chrono::datetime::DateTime<chrono::offset::utc::Utc> (*)()>",
+            "gwt::usage_poller::impl$0::poll_once::async_fn$0",
+            "tokio::runtime::task::raw::poll<tokio::runtime::blocking::task::BlockingTask<gwt::usage_poller::impl$0::poll_in_background::async_fn$0::closure_env$0>,tokio::runtime::blocking::schedule::BlockingSchedule>",
+            "std::sys::backtrace::__rust_begin_short_backtrace<tokio::runtime::blocking::pool::impl$7::spawn_thread::closure_env$0,tuple$<> >",
+            "core::ops::function::FnOnce::call_once<std::thread::lifecycle::spawn_unchecked::closure_env$1<tokio::runtime::blocking::pool::impl$7::spawn_thread::closure_env$0,tuple$<> >,tuple$<> >",
+            "std::sys::thread::windows::impl$0::new::thread_start",
+            "BaseThreadInitThunk",
+            "RtlUserThreadStart"
+          ]
+        },
+        {
+          "label": "capacity resource census",
+          "raw_sample_index_zero_based": 13,
+          "thread_id": 31672,
+          "frames_leaf_to_caller": [
+            "ZwQuerySystemInformation",
+            "ZwQuerySystemInformation",
+            "SetXStateFeaturesMask",
+            "CreateToolhelp32Snapshot",
+            "sysinfo::common::system::System::refresh_processes_specifics",
+            "gwt::session_inventory::capture_process_resources_with_system",
+            "gwt::agent_capacity::RuntimeProbe::refresh_projects_with_scan<enum2$<core::result::Result<enum2$<core::option::Option<u64> >,core::io::error::Error> > (*)(ref_mut$<gwt::agent_capacity::TargetWalk>,ref_mut$<usize>,std::time::Instant)>",
+            "std::sys::backtrace::__rust_begin_short_backtrace<gwt::main::closure_env$12,tuple$<> >",
+            "core::ops::function::FnOnce::call_once<std::thread::lifecycle::spawn_unchecked::closure_env$1<gwt::main::closure_env$12,tuple$<> >,tuple$<> >",
+            "std::sys::thread::windows::impl$0::new::thread_start",
+            "BaseThreadInitThunk",
+            "RtlUserThreadStart"
+          ]
+        },
+        {
+          "label": "index canonicalization with inlined generic owner",
+          "raw_sample_index_zero_based": 3,
+          "thread_id": 4388,
+          "frames_leaf_to_caller": [
+            "NtDeviceIoControlFile",
+            "NtDeviceIoControlFile",
+            "DeviceIoControl",
+            "CreateFile2",
+            "GetFinalPathNameByHandleW",
+            "std::sys::fs::canonicalize",
+            "dunce::canonicalize_win",
+            "alloc::vec::impl$1::retain::closure$0<std::path::PathBuf,alloc::alloc::Global,gwt_core::index::path_policy::impl$1::filter_builtin_denied_paths::closure_env$2>",
+            "std::sys::backtrace::__rust_begin_short_backtrace<gwt::project_index_bootstrap::ensure_refresh_broker_drain::closure$0::closure_env$0,tuple$<> >",
+            "core::ops::function::FnOnce::call_once<std::thread::lifecycle::spawn_unchecked::closure_env$1<gwt::project_index_bootstrap::ensure_refresh_broker_drain::closure$0::closure_env$0,tuple$<> >,tuple$<> >",
+            "std::sys::thread::windows::impl$0::new::thread_start",
+            "BaseThreadInitThunk",
+            "RtlUserThreadStart"
+          ]
+        },
+        {
+          "label": "runtime-health CPU refresh",
+          "raw_sample_index_zero_based": 10,
+          "thread_id": 49620,
+          "frames_leaf_to_caller": [
+            "ZwQuerySystemInformation",
+            "ZwQuerySystemInformation",
+            "GetSystemTimes",
+            "sysinfo::windows::process::ProcessInner::update",
+            "sysinfo::common::system::System::refresh_processes_specifics",
+            "gwt::runtime_health_poller::run::async_fn$0",
+            "tokio::runtime::task::raw::poll<enum2$<gwt::runtime_health_poller::run::async_fn_env$0>,alloc::sync::Arc<tokio::runtime::scheduler::multi_thread::handle::Handle,alloc::alloc::Global> >",
+            "tokio::runtime::scheduler::multi_thread::worker::Context::run_task",
+            "tokio::runtime::task::raw::poll<tokio::runtime::blocking::task::BlockingTask<tokio::runtime::scheduler::multi_thread::worker::impl$0::launch::closure_env$0>,tokio::runtime::blocking::schedule::BlockingSchedule>",
+            "std::sys::backtrace::__rust_begin_short_backtrace<tokio::runtime::blocking::pool::impl$7::spawn_thread::closure_env$0,tuple$<> >",
+            "core::ops::function::FnOnce::call_once<std::thread::lifecycle::spawn_unchecked::closure_env$1<tokio::runtime::blocking::pool::impl$7::spawn_thread::closure_env$0,tuple$<> >,tuple$<> >",
+            "std::sys::thread::windows::impl$0::new::thread_start",
+            "BaseThreadInitThunk",
+            "RtlUserThreadStart"
+          ]
+        }
+      ],
+      "ownership_inclusive": [
+        {
+          "owner": "capacity refresh",
+          "frame_substring": "agent_capacity::RuntimeProbe::refresh_projects_with_scan",
+          "samples": 76
+        },
+        {
+          "owner": "usage poll",
+          "frame_substring": "usage_poller::impl$0::poll_once",
+          "samples": 46
+        },
+        {
+          "owner": "index drain (includes generic environment type names)",
+          "frame_substring": "gwt::project_index_bootstrap::ensure_refresh_broker_drain",
+          "samples": 45
+        },
+        {
+          "owner": "runtime health",
+          "frame_substring": "runtime_health_poller::run",
+          "samples": 32
+        }
+      ],
+      "usage_residual": {
+        "poll_samples": 46,
+        "poll_samples_with_canonicalize": 43,
+        "confirmed_identity_closure_samples": 28,
+        "confirmed_identity_closure_samples_with_canonicalize": 28,
+        "r4_source": {
+          "commit": "8d2087d43d989904ae94f38cdd4395c3c1e7c69f",
+          "path": "crates/gwt/src/usage_poller.rs",
+          "line": 572
+        },
+        "reference_loop_source": {
+          "commit": "8d2087d43d989904ae94f38cdd4395c3c1e7c69f",
+          "path": "crates/gwt/src/usage_poller.rs",
+          "line": 600
+        },
+        "interpretation": "R4 skips singleton identity checks; the captured multi-owner group decision is still recomputed for each reference. This is a source-supported residual path, not a CPU-percentage estimate."
+      },
+      "index_residual": {
+        "filter_samples_including_generic_type_names": 29,
+        "filter_samples_with_canonicalize": 19,
+        "source": {
+          "commit": "8d2087d43d989904ae94f38cdd4395c3c1e7c69f",
+          "path": "crates/gwt/src/index_worker.rs",
+          "line": 2393
+        },
+        "interpretation": "Optimized inlining places product names inside generic retain/environment symbols; a starts-with-gwt first-product rule misses 29 index-thread samples."
+      }
+    },
+    "monitor_off_daemon": {
+      "raw": {
+        "path": "crates/gwt/playwright/test-results/issue-5658-after-c7c07b025c264aabaf5eb07138f2ff96/idle-cpu-live-Issue-5658-i-7f2f9-authenticated-Ready-polling-chromium-dark/native-daemon-profile.json",
+        "sha256": "48413e17257eedb589312b7f3e95202c3b3151260cde466f864e2681168996ea",
+        "bytes": 52837
+      },
+      "process_id": 50068,
+      "process_started_at": "2026-11-04T19:52:29.7324237Z",
+      "binary": "E:\\gwt\\work\\issue-6743\\target\\issue-6743-symbolized\\release\\gwtd.exe",
+      "binary_sha256": "b64708fbc3457ba67f8c9a311aac7d319b56ca071261d8bd68c9e792b498777e",
+      "captured_at": "2026-11-04T20:00:42.4591290Z",
+      "requested_seconds": 120,
+      "elapsed_seconds": 120.2466389,
+      "samples": 52,
+      "symbols": 146,
+      "context_failures": 0,
+      "top_five_leaf_with_ties": [
+        {
+          "function": "ZwCreateUserProcess",
+          "samples": 17
+        },
+        {
+          "function": "NtCreateFile",
+          "samples": 10
+        },
+        {
+          "function": "NtClose",
+          "samples": 4
+        },
+        {
+          "function": "NtWaitForAlertByThreadId",
+          "samples": 4
+        },
+        {
+          "function": "NtReadFile",
+          "samples": 3
+        }
+      ],
+      "top_five_first_product_with_ties": [
+        {
+          "function": "gwt_core::process_console::spawn::spawn_logged_inner::async_fn$0<std::ffi::os_str::OsString,std::ffi::os_str::OsString>",
+          "samples": 18
+        },
+        {
+          "function": "gwt_core::process::windows_resolver::resolve_windows_candidate",
+          "samples": 5
+        },
+        {
+          "function": "gwt_agent::session::Session::load",
+          "samples": 4
+        },
+        {
+          "function": "gwt::agent_capacity::project_capacity_at::closure$1",
+          "samples": 2
+        },
+        {
+          "function": "gwt::issue_monitor::save_issue_monitor_prefs_unlocked",
+          "samples": 2
+        },
+        {
+          "function": "gwt::project_runtime::owner::OwnerState::run",
+          "samples": 2
+        },
+        {
+          "function": "gwt_agent::runtime_gc::sidecar_is_disposable<enum2$<core::option::Option<bool> > (*)(u32)>",
+          "samples": 2
+        },
+        {
+          "function": "gwt_agent::session::SessionRuntimeState::load",
+          "samples": 2
+        },
+        {
+          "function": "gwt_agent::session::inspect_session_path",
+          "samples": 2
+        },
+        {
+          "function": "gwt_core::operation_deadline::NamedFileLock::record",
+          "samples": 2
+        },
+        {
+          "function": "gwt_core::process_console::spawn::block_on_spawn<enum2$<gwt_core::process_console::spawn::spawn_logged_with_deadline::async_fn_env$0<std::ffi::os_str::OsString,std::ffi::os_str::OsString> > >",
+          "samples": 2
+        }
+      ],
+      "samples_without_gwt_prefixed_frame": 3,
+      "top_five_inclusive_product_with_ties": [
+        {
+          "function": "gwt_core::process_console::spawn::block_on_spawn::closure$0<enum2$<gwt_core::process_console::spawn::spawn_logged_with_deadline::async_fn_env$0<std::ffi::os_str::OsString,std::ffi::os_str::OsString> > >",
+          "samples": 24
+        },
+        {
+          "function": "gwt_core::process_console::spawn::spawn_logged_inner::async_fn$0<std::ffi::os_str::OsString,std::ffi::os_str::OsString>",
+          "samples": 24
+        },
+        {
+          "function": "gwt_agent::session::inspect_session_path",
+          "samples": 6
+        },
+        {
+          "function": "gwt_core::process::resolved_tokio_command",
+          "samples": 6
+        },
+        {
+          "function": "gwt_core::process::windows_resolver::resolve_process_plan_for_platform",
+          "samples": 6
+        },
+        {
+          "function": "gwt_core::process::windows_resolver::resolve_windows_candidate",
+          "samples": 6
+        },
+        {
+          "function": "gwt_core::process::windows_resolver::resolve_windows_target",
+          "samples": 6
+        }
+      ],
+      "representative_stacks": [
+        {
+          "label": "spawn thread at process creation",
+          "raw_sample_index_zero_based": 14,
+          "thread_id": 15072,
+          "frames_leaf_to_caller": [
+            "ZwCreateUserProcess",
+            "ZwCreateUserProcess",
+            "CreateProcessInternalW",
+            "CreateProcessW",
+            "CreateProcessW",
+            "std::sys::process::windows::Command::spawn_with_attributes",
+            "gwt_core::process_console::spawn::spawn_logged_inner::async_fn$0<std::ffi::os_str::OsString,std::ffi::os_str::OsString>",
+            "gwt_core::process_console::spawn::block_on_spawn::closure$0<enum2$<gwt_core::process_console::spawn::spawn_logged_with_deadline::async_fn_env$0<std::ffi::os_str::OsString,std::ffi::os_str::OsString> > >",
+            "std::sys::backtrace::__rust_begin_short_backtrace<gwt_core::process_console::spawn::block_on_spawn::closure$1::closure_env$0<enum2$<gwt_core::process_console::spawn::spawn_logged_with_deadline::async_fn_env$0<std::ffi::os_str::OsString,std::ffi::os_str::OsString> > >,enum2$<core::result::Result<gwt_core::process_console::spawn::SpawnOutput,core::io::error::Error> > >",
+            "core::ops::function::FnOnce::call_once<std::thread::lifecycle::spawn_unchecked::closure_env$1<gwt_core::process_console::spawn::block_on_spawn::closure$1::closure_env$0<enum2$<gwt_core::process_console::spawn::spawn_logged_with_deadline::async_fn_env$0<std::ffi::os_str::OsString,std::ffi::os_str::OsString> > >,enum2$<core::result::Result<gwt_core::process_console::spawn::SpawnOutput,core::io::error::Error> > >,tuple$<> >",
+            "std::sys::thread::windows::impl$0::new::thread_start",
+            "BaseThreadInitThunk",
+            "RtlUserThreadStart"
+          ]
+        },
+        {
+          "label": "Git origin resolver caller waiting for spawn",
+          "raw_sample_index_zero_based": 6,
+          "thread_id": 18732,
+          "frames_leaf_to_caller": [
+            "NtWaitForSingleObject",
+            "NtWaitForSingleObject",
+            "WaitForSingleObjectEx",
+            "std::sys::thread::windows::Thread::join",
+            "gwt_core::process_console::spawn::block_on_spawn<enum2$<gwt_core::process_console::spawn::spawn_logged_with_deadline::async_fn_env$0<std::ffi::os_str::OsString,std::ffi::os_str::OsString> > >",
+            "gwt_core::process_console::spawn::spawn_logged_blocking_with_deadline<ref$<str$>,ref$<str$> >",
+            "gwt_core::process_console::spawn::spawn_logged_blocking<ref$<str$>,ref$<str$> >",
+            "gwt::issue_monitor_worker::github_remote_owner_and_repo",
+            "gwt::cli::daemon::server::scan_issue_monitor_once_blocking",
+            "tokio::runtime::task::raw::poll<tokio::runtime::blocking::task::BlockingTask<gwt::cli::daemon::server::spawn_issue_monitor_scan_with_deadline::closure_env$0>,tokio::runtime::blocking::schedule::BlockingSchedule>",
+            "std::sys::backtrace::__rust_begin_short_backtrace<tokio::runtime::blocking::pool::impl$7::spawn_thread::closure_env$0,tuple$<> >",
+            "core::ops::function::FnOnce::call_once<std::thread::lifecycle::spawn_unchecked::closure_env$1<tokio::runtime::blocking::pool::impl$7::spawn_thread::closure_env$0,tuple$<> >,tuple$<> >",
+            "std::sys::thread::windows::impl$0::new::thread_start",
+            "BaseThreadInitThunk",
+            "RtlUserThreadStart"
+          ]
+        }
+      ],
+      "spawn_residual": {
+        "spawn_logged_inner_inclusive_samples": 24,
+        "leaf_ZwCreateUserProcess_samples": 17,
+        "explicit_github_remote_owner_and_repo_caller_samples": 2,
+        "remote_command": [
+          "git",
+          "remote",
+          "get-url",
+          "origin"
+        ],
+        "command_source": {
+          "commit": "8d2087d43d989904ae94f38cdd4395c3c1e7c69f",
+          "path": "crates/gwt/src/issue_monitor_worker.rs",
+          "line": 3768
+        },
+        "interpretation": "The caller stack explicitly shows github_remote_owner_and_repo waiting for the spawn helper. The R4 source identifies that command. The asynchronous spawning-thread samples do not carry command arguments or a parent-to-child correlation, so all 17 process-creation samples are not assigned to this command."
+      }
+    }
+  },
+  "limitations": [
+    "No CPU percentage is derived from sampled stacks.",
+    "The diagnostic bench profile is not the shipping Release profile, even though its output directory and harness label say release.",
+    "The two source-generation manifests record the same six source-file hashes and commit association; capture-time working-tree hashes are not substituted for build-source provenance.",
+    "The 35 GUI samples without a gwt-prefixed symbol include 29 with index ownership embedded in generic type names.",
+    "The raw profiles remain at their recorded local paths; this summary preserves hashes and representative stacks rather than copying the entire raw profiles.",
+    "Stripped shipping nearest-public-symbol names are not used for Rust function attribution or product-count comparison."
+  ]
+}

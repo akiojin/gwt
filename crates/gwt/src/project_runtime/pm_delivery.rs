@@ -14,6 +14,10 @@ use std::{
 use crate::pm_registry::{self, PmLaunchProfile, PmRegistration};
 use crate::{BackendEvent, PmAgentOption};
 
+/// Outcome fixtures may pin this budget; production still gets two seconds.
+pub const PM_WAKE_DELIVERY_BUDGET: gwt_core::deadline_budget::DeadlineBudget =
+    gwt_core::deadline_budget::DeadlineBudget::new("PM_WAKE_DELIVERY", Duration::from_secs(2));
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PmWakeInput {
     pub operation_id: String,
@@ -734,7 +738,7 @@ pub(crate) fn deliver_pm_wake(
         PM_DELIVERY_TERMINAL_MARGIN, PM_DELIVERY_UNCONFIRMED_REASON,
     };
     let (sessions_dir, target_session, incarnation, pane, output_seq) = runtime;
-    let operation_deadline = Instant::now() + Duration::from_secs(2);
+    let operation_deadline = Instant::now() + PM_WAKE_DELIVERY_BUDGET.resolve();
     let _operation_budget = (!delivery.idle)
         .then(|| gwt_core::operation_deadline::ScopedOperationDeadline::enter(operation_deadline));
     let deadline = operation_deadline - PM_DELIVERY_TERMINAL_MARGIN;

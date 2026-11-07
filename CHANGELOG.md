@@ -1,6 +1,50 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.154.0] - 2026-11-07
+
+### Bug Fixes
+
+- **perf:** Avoid idle process scans and redundant path lookups
+- **perf:** Reuse conversation decisions and skip empty disabled scans
+- **perf:** Project status の重複読み取りを省く
+- **test:** PM wake の結果検証を既定期限から独立させる
+- **logging:** Tolerate concurrent history cleanup
+- **web:** Knowledge未送信readの期限開始を再送時に揃える
+- **test:** PM wake の復旧fixtureを実ACKへ移行する
+- **launch:** Prevent monitor preparation loops on unconnected panes
+- **monitor:** Honor explicit member launch profiles
+
+### Documentation
+
+- **perf:** Record issue 6743 delivery recovery
+
+### Features
+
+- **mobile:** Add bounded one-shot invitation registry
+- **mobile:** Gate invitations on authenticated host registrations
+- **pm:** ブラウザから依頼タスクを訂正できるようにする
+- **mobile:** Enforce registration leases at authorization fences
+
+### Miscellaneous Tasks
+
+- **work:** 依頼タスク取消の配送監査を記録する
+- **work:** 配送監査 PR の関連付けを保存する
+- **work:** Preserve canonical verification blocker evidence
+- **work:** Record issue 6743 delivery continuation
+- **work:** Record issue 6743 verified delivery scope
+- **work:** Record issue 6743 delivery verification scope
+- **work:** Record issue 6743 final verification plan
+- **work:** Knowledge queued readのPR関連付けを記録
+- **work:** PR #6825 の着地記録を同期する
+- **work:** Record issue 5876 reliability verification
+- **work:** Record issue 5876 reliability snapshot delivery
+
+### Testing
+
+- **perf:** Preserve source hook audits during recovered measurement
+- **perf:** Honor requested cpu acceptance window in both themes
+
 ## [9.153.0] - 2026-11-07
 
 ### Bug Fixes

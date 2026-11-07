@@ -352,6 +352,7 @@ test("route-bound Project tab reconnects to the same Project only", t => {
 });
 
 test("ordinary socket reconnect recovers only Knowledge reads sent before disconnect", t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
   const windows = [{ id: "knowledge", preset: "issue" }, { id: "offline", preset: "issue" }, { id: "closing", preset: "issue" }];
   context.activeWorkspace = () => ({ windows });
@@ -383,6 +384,15 @@ test("ordinary socket reconnect recovers only Knowledge reads sent before discon
   sockets[1].close();
   knowledge.requestKnowledgeBridge("offline", "issue");
   const queuedRead = context.pendingMessages.find(entry => entry.message.id === "offline").message;
+  t.mock.timers.tick(5000);
+  t.mock.timers.tick(56000);
+  assert.equal(knowledge.knowledgeBridgeStateMap.get("offline").loading, true,
+    "an offline unsent read retains its owner beyond the response timeout");
+  assert.equal(knowledge.knowledgeBridgeStateMap.get("closing").loading, true,
+    "a CLOSING unsent read also retains its owner until replay");
+  knowledge.requestKnowledgeBridge("offline", "issue", true);
+  knowledge.requestKnowledgeBridge("closing", "issue", true);
+  assert.equal(context.pendingMessages.length, 2, "Refresh is coalesced into each existing unsent owner");
   context.reconnectCallbacks.at(-1)(); // reports offline for a second time
   sockets.at(-1).open();
   const reads = sockets.at(-1).sent.filter(message => message.kind === "load_knowledge_bridge");
@@ -398,6 +408,10 @@ test("ordinary socket reconnect recovers only Knowledge reads sent before discon
   assert.equal(foreign.loadQueued, true, "another project's queue has not been flushed");
   for (const read of reads.filter(message => message.id !== "closing")) knowledge.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: read.id,
     request_id: read.request_id, knowledge_kind: "issue", entries: [], refresh_enabled: true });
+  const refresh = sockets.at(-1).sent.filter(message => message.kind === "load_knowledge_bridge" && message.id === "offline" && message.refresh);
+  assert.equal(refresh.length, 1, "coalesced Refresh starts once after the queued read completes");
+  knowledge.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "offline", request_id: refresh[0].request_id,
+    knowledge_kind: "issue", entries: [], refresh_enabled: true });
   assert.equal(knowledge.knowledgeBridgeStateMap.get("knowledge").loading, false);
   assert.equal(knowledge.knowledgeBridgeStateMap.get("offline").loading, false);
   sockets.at(-1).close();

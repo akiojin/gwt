@@ -1514,8 +1514,8 @@ impl IssueMonitorPrefs {
         self.launch_profile.clone().into_iter().collect()
     }
 
-    /// Resolve only selected people with the primary's fixed tool. Exact queue
-    /// and delivery pins wait when unavailable instead of changing their owner.
+    /// Automatic reservations keep the primary's fixed tool. Explicit choices
+    /// and exact deliveries use their selected member's own registered tool.
     pub fn registered_launch_profiles_for_issue(
         &self,
         issue_number: u64,
@@ -1527,20 +1527,33 @@ impl IssueMonitorPrefs {
         else {
             return pool;
         };
-        let tool = normalize_issue_monitor_provider(&primary.agent_id);
         let host = crate::process::current_hostname();
-        let scheduled = self
+        let delivery_member = self
             .pending_launch_deliveries
             .iter()
             .find(|delivery| delivery.issue_number == issue_number)
-            .and_then(|delivery| delivery.agent_member_id.as_deref())
-            .or_else(|| {
-                self.agent_issue_schedule
-                    .reservations
-                    .iter()
-                    .find(|entry| entry.issue_number == issue_number && entry.host_id == host)
-                    .map(|entry| entry.agent_member_id.as_str())
-            });
+            .and_then(|delivery| delivery.agent_member_id.as_deref());
+        let reservation = self
+            .agent_issue_schedule
+            .reservations
+            .iter()
+            .find(|entry| entry.issue_number == issue_number && entry.host_id == host);
+        let scheduled =
+            delivery_member.or_else(|| reservation.map(|entry| entry.agent_member_id.as_str()));
+        let explicit_member = delivery_member.or_else(|| {
+            reservation
+                .filter(|entry| entry.reason == AgentScheduleReason::AssignedByYou)
+                .map(|entry| entry.agent_member_id.as_str())
+        });
+        let tool = normalize_issue_monitor_provider(
+            &explicit_member
+                .and_then(|id| {
+                    pool.iter()
+                        .find(|profile| profile.agent_member_id.as_deref() == Some(id))
+                })
+                .unwrap_or(primary)
+                .agent_id,
+        );
         pool.iter()
             .filter(|profile| {
                 normalize_issue_monitor_provider(&profile.agent_id) == tool
@@ -9846,6 +9859,20 @@ impl IssueMonitorState {
             {
                 return false;
             }
+        } else if self
+            .launch_profiles
+            .first()
+            .is_some_and(|profile| profile.agent_member_id.is_some())
+        {
+            let pool = self
+                .prefs()
+                .registered_launch_profiles_for_issue(issue_number);
+            if select_launch_profile(&pool, &self.provider_quota_holds, &[], None, now)
+                .selected
+                .is_none()
+            {
+                return false;
+            }
         }
         let held_provider = self
             .autonomous_records
@@ -12495,11 +12522,13 @@ impl IssueMonitorState {
         } else {
             None
         };
+        let registered = self
+            .prefs()
+            .registered_launch_profiles_for_issue(issue_number);
         let profile = if self.launch_auto {
             &automatic.as_ref()?.profile
         } else {
-            self.launch_profiles
-                .get(select(&self.launch_profiles).selected?)?
+            registered.get(select(&registered).selected?)?
         };
         let agent_id = gwt_agent::resolve_agent_id(&profile.agent_id)?;
         let custom_agent = match &agent_id {
