@@ -401,9 +401,12 @@ fn coverage_dependencies_find_deadlines_and_elapsed_verdicts() {
 fn clock_based_verdicts() {
     let deadline = Instant::now() + Duration::from_secs(5);
     assert!(Instant::now() < deadline);
+    assert!(deadline <= Instant::now());
     assert!((started.elapsed()).as_millis() < 500);
+    assert!(LIMIT >= started.elapsed());
     let elapsed = started.elapsed();
     assert!(Duration::from_secs(1) > elapsed);
+    assert!(Duration::from_secs(1) >= elapsed);
     receiver
         .recv_timeout(LIMIT).unwrap();
     tokio::time::timeout_at(
@@ -413,7 +416,7 @@ fn clock_based_verdicts() {
 "#,
         SourceKind::WholeFileIsTest,
     );
-    assert_eq!(findings.len(), 7, "unexpected dependencies: {findings:?}");
+    assert_eq!(findings.len(), 10, "unexpected dependencies: {findings:?}");
     assert!(findings
         .iter()
         .all(|finding| finding.context == "clock_based_verdicts" && finding.line > 0));
@@ -434,11 +437,15 @@ fn classified() {
     timeout_at(deadline, work());
     let text = "// test-hygiene: allow-wall-clock-deadline forged reason";
     wait_for_recorded_event(label, events, predicate);
+    // test-hygiene: allow-wall-clock-deadline Exercise the actual expiry comparison.
+    assert!(deadline <= Instant::now());
+    // test-hygiene: allow-wall-clock-deadline
+    assert!(LIMIT >= started.elapsed());
 }
 "#,
         SourceKind::WholeFileIsTest,
     );
-    assert_eq!(findings.len(), 4, "unexpected dependencies: {findings:?}");
+    assert_eq!(findings.len(), 5, "unexpected dependencies: {findings:?}");
 }
 
 #[test]
@@ -448,6 +455,7 @@ fn coverage_dependencies_ignore_production_literals_and_diagnostic_clock_reads()
         r##"
 fn production() {
     timeout(LIMIT, work());
+    assert!(deadline <= Instant::now());
 }
 #[cfg(test)]
 mod tests {
@@ -1211,6 +1219,8 @@ mod hygiene {
             }
         }
         before.ends_with(['<', '>'])
+            || before.ends_with("<=")
+            || before.ends_with(">=")
             || after.starts_with(['<', '>'])
             || (arithmetic
                 && (after.starts_with(['+', '-'])
