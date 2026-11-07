@@ -4082,46 +4082,41 @@ mod tests {
         );
         let heavy = holder.acquire_heavy(Duration::from_secs(5)).unwrap();
 
-        // An interactive claimant queues for the heavy lease in a thread.
-        let root = coordinator.root().to_path_buf();
-        let interactive = std::thread::spawn(move || {
-            let coordinator = open(&root);
-            let guard = own(
-                &coordinator,
-                &TargetKey::repo_shared("repo-b", "files"),
-                JobPriority::InteractiveSearch,
-            );
-            let heavy = guard
-                .acquire_heavy(Duration::from_secs(10))
-                .expect("interactive eventually acquires");
-            drop(heavy);
-            guard.complete(JobOutcome::Completed).unwrap();
-        });
-
-        // The pending interactive registration becomes visible (FR-383).
-        // Generous deadline: the claimant thread competes with the whole
-        // parallel test suite for CPU and disk.
-        let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            if coordinator
-                .pending_higher_priority(JobPriority::Background)
-                .unwrap()
-            {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "interactive claimant must be visible as pending"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        // Own the live pending claimant before observing its priority (FR-383).
+        let key = TargetKey::repo_shared("repo-b", "files");
+        let interactive = own(&coordinator, &key, JobPriority::InteractiveSearch);
+        let pending_dir = coordinator.heavy_pending_dir();
+        let target = key.file_stem();
+        enroll_in_heavy_queue(&pending_dir, &target, JobPriority::InteractiveSearch).unwrap();
+        let registration =
+            heavy_queue_entry(&pending_dir, &target, JobPriority::InteractiveSearch).unwrap();
+        let pending_path = pending_dir.join(format!("{}.json", uuid::Uuid::new_v4()));
+        let pending_file = publish_live_registration(&pending_path, &registration).unwrap();
+        assert!(coordinator
+            .heavy_lease_status()
+            .unwrap()
+            .queue
+            .iter()
+            .any(|entry| entry.target.as_deref() == Some(target.as_str())
+                && entry.priority == JobPriority::InteractiveSearch
+                && entry.resident));
+        assert!(coordinator
+            .pending_higher_priority(JobPriority::Background)
+            .unwrap());
         assert!(!coordinator
             .pending_higher_priority(JobPriority::InteractiveSearch)
             .unwrap());
 
         drop(heavy);
         holder.complete(JobOutcome::Completed).unwrap();
-        interactive.join().unwrap();
+        interactive
+            .acquire_heavy(Duration::ZERO)
+            .expect("interactive acquires after the holder releases")
+            .release()
+            .unwrap();
+        drop(pending_file);
+        fs::remove_file(pending_path).unwrap();
+        interactive.complete(JobOutcome::Completed).unwrap();
     }
 
     #[test]

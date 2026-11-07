@@ -179,7 +179,12 @@ pub(crate) fn reject_preflight_launch(
             gwt_agent::LaunchRuntimeTarget::Host,
         )?
         .into_parts();
-        let detail = if let Some(handoff) = request.expected_handoff.as_deref() {
+        let detail = if request.preparation_exhausted {
+            if expected.is_none() || request.expected_handoff.is_some() || source.is_some() {
+                return Err("prepare exhaustion requires an exact producing delivery".into());
+            }
+            super::events::MONITOR_PREPARATION_EXHAUSTED.to_string()
+        } else if let Some(handoff) = request.expected_handoff.as_deref() {
             let source = source.ok_or("answered rejection has no exact source Session")?;
             if prefs
                 .autonomous_handoffs
