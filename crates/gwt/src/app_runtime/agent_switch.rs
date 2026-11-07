@@ -61,7 +61,7 @@ impl AppRuntime {
         let failed_project = context.project_key.clone();
         if let Err(message) = self.blocking_tasks.try_spawn(move || {
             let result = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|error| error.to_string()).and_then(|executor| executor.block_on(async {
-                let client = gwt::project_runtime::client::ProjectRuntimeClient::connect_for_gui(context.project_root.clone(), supervisor).await?;
+                let (client, _gui_presence) = gwt::project_runtime::client::ProjectRuntimeClient::connect_for_gui(context.project_root.clone(), supervisor).await?;
                 let command = match action {
                     Some(action) => gwt::project_runtime::events::OwnerCommand::AgentSwitch { action: Box::new(action) },
                     None => gwt::project_runtime::events::OwnerCommand::DriveAgentSwitch,
