@@ -446,6 +446,7 @@ defaultArgs = ["$providerToml", "$receiptsToml"]
     foreach ($path in @($gwtRelative, $gwtdRelative, 'crates/gwt/src/main.rs',
         'crates/gwt/src/usage_poller.rs', 'crates/gwt/src/monitor_duplicate_runtime.rs', 'crates/gwt/src/cli/daemon/server.rs',
         'crates/gwt/src/process.rs', 'crates/gwt-core/src/index/path_policy.rs',
+        'crates/gwt/src/project_execution_policy.rs',
         'crates/gwt/src/cli/tray/lifetime.rs',
         'crates/gwt/src/session_inventory.rs', 'crates/gwt/src/index_worker.rs', 'crates/gwt/src/runtime_health_poller.rs', 'crates/gwt/src/agent_capacity.rs',
         'crates/gwt-terminal/src/pane.rs', 'crates/gwt-terminal/src/test_util.rs',

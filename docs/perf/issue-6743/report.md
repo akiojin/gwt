@@ -457,3 +457,28 @@ GUI/daemon基準も満たした。ただしPR #6836のLinux coverageはテスト
 上記の旧記録と数値は旧HEADの証拠として保持する。取り込み後のHEADについて
 新しい全canonical matrix・実headed両テーマ・Release各600秒を完走し、必須CIと
 fetched develop包含を確認するまで配信完了とは扱わない。
+
+## 2026-11-07 base 統合後の daemon 性能調査
+
+`cf0211c2b` の full-warm Release600秒は、GUIがDark4.194816877%・
+Light4.273040413%で基準内だった。daemonはDark.963410007%に対して
+Light1.036337019%となり、元の1%未満を満たさなかった。
+[区間・binary・失敗記録](cf0-performance-summary.json)を保全し、閾値や
+要求rateを変えた通過狙いの再実行は行わない。
+
+同じsource・7428 filesの入力・全1855 Work/current5の準備後に、Debugの
+native daemon samplingを60.457秒行った。31stacks、context失敗0。
+[原データ](cf0-daemon-profile.json)と[集計](cf0-daemon-profile-summary.json)を
+保存する。binary pathだけrepo-relativeにし、元rawと保存rawのhashを区別した。
+これは関数帰属の診断で、標本数をCPU割合やReleaseの合格値とは扱わない。
+
+policy関連は5stack、local_statusは3stackで、その中にactual_openからの
+observation再読・デコードが1stackあった。コードでも、一度読んだpolicyと
+observationをstatus構築中に再読し、正常policyのcorruption確認とproject key解決も
+繰り返すことを確認した。GC10・serialization9の標本もあるが今回変更しない。
+
+修正はlocal_status一回のfresh投影内での再利用と、既存actual-open判定の小さな
+pure helperへの共通化に限定する。public actual_openは毎回のfresh I/Oとrevocation・
+Stop revision条件を維持し、認可・Stop/Continue・lifetime・周期・永続cacheには触れない。
+変更前後の既存policy13件を確認し、元の600秒FAILをREDとして新HEADの全canonical・
+両テーマ600秒・必須CI・develop包含で最終受け入れを判定する。
