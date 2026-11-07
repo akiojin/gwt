@@ -538,27 +538,40 @@ mod tests {
         session.id = "orphan-session".into();
         session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
         let executable = worktree.join("codex");
-        std::fs::copy("/bin/sh", &executable).unwrap();
-        #[cfg(target_os = "macos")]
-        {
-            // Relocated system binaries retain a platform signature that can
-            // make macOS kill the fixture before the cleanup under test.
-            let signed = resolved_command(ProcessPlanRequest::new("/usr/bin/codesign"))
-                .unwrap()
-                .args(["--force", "--sign", "-"])
-                .arg(&executable)
-                .output()
-                .unwrap();
-            assert!(signed.status.success(), "{signed:?}");
-        }
+        // Renamed system tools can dispatch by their kernel executable path.
+        // Compile the required handshake instead of depending on that behavior.
+        let source = worktree.join("orphan_fixture.rs");
+        std::fs::write(
+            &source,
+            r#"use std::io::{self, Read, Write};
+fn main() {
+    let mut input = io::stdin().lock();
+    let mut output = io::stdout().lock();
+    let mut ready = [0; 6];
+    input.read_exact(&mut ready).unwrap();
+    output.write_all(&ready).unwrap();
+    output.flush().unwrap();
+    io::copy(&mut input, &mut io::sink()).unwrap();
+}
+"#,
+        )
+        .unwrap();
+        let compiled = resolved_command(ProcessPlanRequest::new("rustc"))
+            .unwrap()
+            .current_dir(worktree)
+            .arg("--edition=2021")
+            .arg(&source)
+            .arg("-o")
+            .arg(&executable)
+            .output()
+            .unwrap();
+        assert!(
+            compiled.status.success(),
+            "compile orphan fixture: {compiled:?}"
+        );
         let mut child = OwnedChild(
             resolved_command(ProcessPlanRequest::new(&executable))
                 .unwrap()
-                // A builtin echo loop keeps this executable alive as codex.
-                .args([
-                    "-c",
-                    r#"while IFS= read -r line; do printf '%s\n' "$line"; done"#,
-                ])
                 .current_dir(worktree)
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())

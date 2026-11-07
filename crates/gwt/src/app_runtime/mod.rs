@@ -684,6 +684,9 @@ pub struct WindowRuntime {
     pub(crate) screen: String,
     pub(crate) screen_ansi: Vec<u8>,
     pub(crate) screen_seq: u64,
+    // Only a final owner ACK makes the cached frame a reusable history snapshot.
+    pub(crate) has_final_snapshot: bool,
+    pending_snapshot: Option<PendingOwnerSnapshot>,
     pub(crate) has_unsent_user_input: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) input_observation: Option<gwt::project_runtime::events::OwnerInputObservation>,
     pub(crate) last_human_input_at: Option<Instant>,
@@ -695,6 +698,12 @@ pub struct WindowRuntime {
     pub(crate) child_pid: Option<u32>,
     pub(crate) exit_confirmed: bool,
     pub(crate) exit_code: Option<u32>,
+}
+
+struct PendingOwnerSnapshot {
+    connection_id: u64,
+    targets: Vec<Option<ClientId>>,
+    retry_at: Option<Instant>,
 }
 
 impl WindowRuntime {
@@ -714,6 +723,8 @@ impl WindowRuntime {
             screen: String::new(),
             screen_ansi: Vec::new(),
             screen_seq: 0,
+            has_final_snapshot: false,
+            pending_snapshot: None,
             has_unsent_user_input: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             input_observation: None,
             last_human_input_at: None,
@@ -975,6 +986,8 @@ pub(crate) struct RemoteRuntimeSnapshot {
     pub(crate) exit_code: Option<u32>,
     #[serde(default)]
     pub(crate) session_id: Option<String>,
+    #[serde(skip)]
+    pub(crate) pm_registration: Option<Box<gwt::pm_registry::PmRegistration>>,
     #[serde(default)]
     pub(crate) agent_id: Option<String>,
     #[serde(default)]
@@ -1022,6 +1035,7 @@ pub(crate) mod persist_dispatcher;
 pub(crate) mod pm;
 mod pm_chat;
 mod profile;
+pub(crate) mod project_execution_policy;
 mod project_notifications;
 mod project_route;
 mod project_tabs;
@@ -1638,8 +1652,10 @@ pub(crate) struct ProjectRuntimeState {
     pub(crate) project_owner_health: Option<gwt::protocol::ProjectOwnerHealthView>,
     pub(crate) project_owner_connection_id: u64,
     pub(crate) project_owner_identity: Option<gwt::daemon_subscriber::ProjectOwnerIdentity>,
+    pub(crate) project_owner_execution_status: Option<gwt::protocol::ProjectExecutionStatusView>,
     /// Latest close preview nonce for each requesting connection; never persisted.
     pub(crate) close_project_nonces: HashMap<ClientId, String>,
+    pub(crate) project_views: project_execution_policy::ProjectViewState,
     /// Single-use launch requests keyed by the exact wizard that produced
     /// them. The visible modal may be replaced before the queued event runs;
     /// materialization ownership must not move with that global UI slot.
@@ -1688,8 +1704,8 @@ pub(crate) struct ProjectRuntimeState {
 
     /// SPEC-3431 FR-001: window ids of in-flight PM launches, mapped to the
     /// project root whose `pm.json` must record the resulting session. The
-    /// entry is consumed by `handle_launch_complete`, which writes the PM
-    /// registration once the session id exists.
+    /// entry is consumed by native launch completion to project the owner's
+    /// durable PM registration into the GUI's read-only cache.
     pub(crate) pending_pm_launches: HashMap<String, PathBuf>,
     /// Repositories whose explicit PM-capable pane close has been accepted but
     /// whose durable deregistration is still running. Automatic ensure must
@@ -1752,7 +1768,9 @@ pub(crate) fn initial_project_states(
                     project_owner_health: None,
                     project_owner_connection_id: 0,
                     project_owner_identity: None,
+                    project_owner_execution_status: None,
                     close_project_nonces: HashMap::new(),
+                    project_views: Default::default(),
                     pending_pm_launches: Default::default(),
                     pending_pm_closes: Default::default(),
                     pm_sessions: Default::default(),
@@ -2322,6 +2340,7 @@ pub struct AppRuntime {
     pub(crate) issue_client_factory: RuntimeIssueClientFactory,
     /// Cached update state so late-connecting WebView clients get the toast.
     pub(crate) pending_update: Option<gwt_core::update::UpdateState>,
+    pub(crate) update_check_in_flight: bool,
     /// Initiator of the shared download, or None when its worker is idle.
     pub(crate) update_download_in_flight: Option<ClientId>,
     /// Newest discovery to retry if the active download fails.
@@ -2839,12 +2858,27 @@ fn begin_local_issue_monitor_effect_attempt(
     prefs_path: &Path,
     monitor: &mut gwt::IssueMonitorState,
     renewals_only: bool,
+    project_root: Option<&Path>,
 ) -> std::io::Result<Option<gwt::PendingIssueMonitorEffect>> {
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let eligible = |effect: &gwt::PendingIssueMonitorEffect| match effect.payload {
         gwt::IssueMonitorEffectPayload::RenewClaim { .. } => true,
-        gwt::IssueMonitorEffectPayload::AcquireClaim { .. }
-        | gwt::IssueMonitorEffectPayload::ReleaseClaim { .. } => !renewals_only,
+        gwt::IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } => {
+            !renewals_only
+                && (effect.state == gwt::IssueMonitorEffectState::Attempting
+                    || match project_root {
+                        Some(root) => gwt::project_execution_policy::admission(
+                            root,
+                            &[format!("issue:{issue_number}")],
+                        )
+                        .is_ok(),
+                        #[cfg(test)]
+                        None => true, // Custom-executor units have no physical Project.
+                        #[cfg(not(test))]
+                        None => false,
+                    })
+        }
+        gwt::IssueMonitorEffectPayload::ReleaseClaim { .. } => !renewals_only,
         _ => false,
     };
     try_rebase_mutate_and_persist_issue_monitor_state_without_authority_fence(
@@ -3072,6 +3106,114 @@ fn commit_local_issue_monitor_effect_result(
 #[cfg(test)]
 mod claim_renewal_tests {
     use super::*;
+
+    #[test]
+    fn local_project_claim_admission_keeps_cold_proposals_prepared_and_attempts_read_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let _budget = ScopedLocalIssueMonitorPrefsTimeout::set(std::time::Duration::from_secs(10));
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let grant = gwt::PendingIssueMonitorEffect::prepared(
+            "claim:42",
+            7,
+            gwt::IssueMonitorEffectPayload::AcquireClaim {
+                issue_number: 42,
+                claim_id: "claim-42".into(),
+                owner: "host/session".into(),
+                heartbeat_at: "2026-11-05T00:00:00Z".into(),
+                expires_at: "2026-11-05T00:30:00Z".into(),
+                launched_work_id: None,
+            },
+        );
+        let mut prefs = gwt::IssueMonitorPrefs {
+            enabled: true,
+            effect_authority_epoch: 7,
+            pending_effects: vec![grant],
+            terminal_queues: std::collections::BTreeMap::from([(
+                gwt::process::current_hostname(),
+                gwt::issue_monitor::IssueMonitorTerminalQueue {
+                    entries: vec![gwt::issue_monitor::IssueMonitorTerminalQueueEntry {
+                        number: 42,
+                        queued_at: chrono::Utc::now().to_rfc3339(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+        let remote = Arc::new(gwt_github::FakeIssueClient::new());
+        remote.seed(gwt_github::IssueSnapshot {
+            author_login: None,
+            number: gwt_github::IssueNumber(42),
+            title: "fixture".into(),
+            body: String::new(),
+            labels: Vec::new(),
+            state: gwt_github::IssueState::Open,
+            updated_at: gwt_github::UpdatedAt::new("2026-11-05T00:00:00Z"),
+            comments: Vec::new(),
+        });
+        let factory: RuntimeIssueClientFactory = Arc::new({
+            let remote = remote.clone();
+            move |_, _| Ok(remote.clone())
+        });
+        gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        let mut monitor = test_monitor_with_prefs(Default::default(), prefs.clone());
+        execute_local_issue_monitor_claim_effects(
+            &prefs_path,
+            temp.path(),
+            "owner",
+            "repo",
+            &mut monitor,
+            &factory,
+            false,
+        )
+        .unwrap();
+        assert!(remote.call_log().is_empty());
+        assert_eq!(
+            monitor.pending_effects()[0].state,
+            gwt::IssueMonitorEffectState::Prepared
+        );
+        prefs.pending_effects[0].state = gwt::IssueMonitorEffectState::Attempting;
+        prefs.pending_effects[0].attempt = 1;
+        gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        monitor = test_monitor_with_prefs(Default::default(), prefs);
+        execute_local_issue_monitor_claim_effects(
+            &prefs_path,
+            temp.path(),
+            "owner",
+            "repo",
+            &mut monitor,
+            &factory,
+            false,
+        )
+        .unwrap();
+        assert_eq!(remote.call_log(), vec!["fetch:#42"]);
+        assert_eq!(
+            monitor.pending_effects()[0].state,
+            gwt::IssueMonitorEffectState::Attempting
+        );
+        assert!(monitor.prefs().pending_launch_deliveries.is_empty());
+        gwt::project_runtime::test_support::seed_actual_project_view(temp.path()).unwrap();
+        let mut admitted = monitor.prefs();
+        admitted.claim_diagnostics.clear();
+        gwt::save_issue_monitor_prefs(&prefs_path, &admitted).unwrap();
+        monitor = test_monitor_with_prefs(Default::default(), admitted);
+        execute_local_issue_monitor_claim_effects(
+            &prefs_path,
+            temp.path(),
+            "owner",
+            "repo",
+            &mut monitor,
+            &factory,
+            false,
+        )
+        .unwrap();
+        assert!(remote
+            .call_log()
+            .iter()
+            .any(|call| call.starts_with("create_comment:")));
+    }
 
     #[test]
     fn local_renewal_result_never_creates_launch_delivery() {
@@ -3360,6 +3502,7 @@ mod claim_renewal_tests {
     }
 }
 
+#[cfg(test)]
 fn drive_local_issue_monitor_claim_effects_with(
     prefs_path: &Path,
     monitor: &mut gwt::IssueMonitorState,
@@ -3370,13 +3513,20 @@ fn drive_local_issue_monitor_claim_effects_with(
         &str,
     ) -> Result<LocalIssueMonitorEffectOutcome, String>,
 ) -> Result<(), String> {
-    drive_local_issue_monitor_claim_effects_matching_with(prefs_path, monitor, false, &mut execute)
+    drive_local_issue_monitor_claim_effects_matching_with(
+        prefs_path,
+        monitor,
+        false,
+        None,
+        &mut execute,
+    )
 }
 
 fn drive_local_issue_monitor_claim_effects_matching_with(
     prefs_path: &Path,
     monitor: &mut gwt::IssueMonitorState,
     renewals_only: bool,
+    project_root: Option<&Path>,
     mut execute: impl FnMut(
         &gwt::PendingIssueMonitorEffect,
         bool,
@@ -3398,9 +3548,13 @@ fn drive_local_issue_monitor_claim_effects_matching_with(
     let _local_deadline = local_deadline;
     let initial_count = monitor.pending_effects().len();
     for _ in 0..initial_count.max(1) {
-        let Some(effect) =
-            begin_local_issue_monitor_effect_attempt(prefs_path, monitor, renewals_only)
-                .map_err(|error| error.to_string())?
+        let Some(effect) = begin_local_issue_monitor_effect_attempt(
+            prefs_path,
+            monitor,
+            renewals_only,
+            project_root,
+        )
+        .map_err(|error| error.to_string())?
         else {
             break;
         };
@@ -3482,7 +3636,8 @@ fn execute_local_issue_monitor_claim_effects(
     renewals_only: bool,
 ) -> Result<(), String> {
     use gwt_github::issue_auto_claim::{
-        acquire_claim_mutation, release_claim_mutation, ClaimComment, ClaimStatus,
+        acquire_claim_mutation, observe_claim_acquisition, release_claim_mutation, ClaimComment,
+        ClaimStatus,
     };
     monitor.set_source_repository(Some((owner, repo)));
 
@@ -3543,22 +3698,39 @@ fn execute_local_issue_monitor_claim_effects(
                     .and_then(|(start, end)| (end - start).num_seconds().try_into().ok())
                     .filter(|ttl: &u64| *ttl > 0)
                     .unwrap_or(gwt::IssueMonitorConfig::default().claim_ttl_secs);
-                LocalIssueMonitorEffectOutcome::Claim(acquire_claim_mutation(
-                    client.as_ref(),
-                    gwt_github::IssueNumber(*issue_number),
-                    ClaimComment {
-                        comment_id: None,
-                        claim_id: claim_id.clone(),
-                        owner: owner.clone(),
-                        issue_number: *issue_number,
-                        status: ClaimStatus::Active,
-                        heartbeat_at: now_text.to_string(),
-                        expires_at: (*now + chrono::Duration::seconds(ttl as i64))
-                            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-                        launched_work_id: launched_work_id.clone(),
+                let claim = ClaimComment {
+                    comment_id: None,
+                    claim_id: claim_id.clone(),
+                    owner: owner.clone(),
+                    issue_number: *issue_number,
+                    status: ClaimStatus::Active,
+                    heartbeat_at: now_text.to_string(),
+                    expires_at: (*now + chrono::Duration::seconds(ttl as i64))
+                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    launched_work_id: launched_work_id.clone(),
+                };
+                LocalIssueMonitorEffectOutcome::Claim(
+                    if gwt::project_execution_policy::admission(
+                        project_root,
+                        &[format!("issue:{issue_number}")],
+                    )
+                    .is_ok()
+                    {
+                        acquire_claim_mutation(
+                            client.as_ref(),
+                            gwt_github::IssueNumber(*issue_number),
+                            claim,
+                            now_text,
+                        )
+                    } else {
+                        observe_claim_acquisition(
+                            client.as_ref(),
+                            gwt_github::IssueNumber(*issue_number),
+                            &claim,
+                            now_text,
+                        )
                     },
-                    now_text,
-                ))
+                )
             }
             gwt::IssueMonitorEffectPayload::AcquireClaim {
                 issue_number,
@@ -3584,16 +3756,13 @@ fn execute_local_issue_monitor_claim_effects(
             _ => return Err("unsupported local Issue Monitor effect".to_string()),
         })
     };
-    if renewals_only {
-        drive_local_issue_monitor_claim_effects_matching_with(
-            prefs_path,
-            monitor,
-            true,
-            &mut execute,
-        )
-    } else {
-        drive_local_issue_monitor_claim_effects_with(prefs_path, monitor, &mut execute)
-    }
+    drive_local_issue_monitor_claim_effects_matching_with(
+        prefs_path,
+        monitor,
+        renewals_only,
+        Some(project_root),
+        &mut execute,
+    )
 }
 
 fn run_local_issue_monitor_claim_renewals(
@@ -3734,15 +3903,21 @@ enum IssueMonitorScanEnqueueError {
 fn claim_candidate_completion_observations<E>(
     available: usize,
     candidates: Vec<u64>,
-    mut completed_probe: impl FnMut(u64) -> Result<bool, E>,
+    mut completed_probe: impl FnMut(u64) -> Result<gwt::issue_monitor::ClaimProbeOutcome, E>,
 ) -> Result<std::collections::BTreeMap<u64, bool>, E> {
+    use gwt::issue_monitor::ClaimProbeOutcome;
+
     let mut observations = std::collections::BTreeMap::new();
     let mut remaining = available;
     for issue_number in candidates {
         if remaining == 0 {
             break;
         }
-        let completed = completed_probe(issue_number)?;
+        let completed = match completed_probe(issue_number)? {
+            ClaimProbeOutcome::Completed => true,
+            ClaimProbeOutcome::Claimable => false,
+            ClaimProbeOutcome::Deferred => continue,
+        };
         observations.insert(issue_number, completed);
         if !completed {
             remaining -= 1;
@@ -3819,6 +3994,8 @@ fn observe_local_claim_candidates(
     owner: &str,
     repo: &str,
 ) -> Result<Option<LocalClaimObservation>, gwt::issue_monitor_worker::IssueMonitorScanFailure> {
+    use gwt::issue_monitor::ClaimProbeOutcome;
+
     if !loaded.authorizes_remote_effects() {
         return Ok(None);
     }
@@ -3843,10 +4020,10 @@ fn observe_local_claim_candidates(
     let batch = local_probe_batch(
         owner,
         repo,
-        loaded
-            .issues
+        queued
             .iter()
-            .filter(|issue| queued.contains(&issue.number) || dependencies.contains(&issue.number)),
+            .chain(&dependencies)
+            .filter_map(|number| loaded.issues.iter().find(|issue| issue.number == *number)),
         &loaded.linked_prs,
     );
     let mut dependency_observations = std::collections::BTreeMap::new();
@@ -3857,7 +4034,11 @@ fn observe_local_claim_candidates(
             .find(|issue| issue.number == issue_number)
         {
             Some(issue) => {
-                let completed = observe_local_issue_completion(owner, repo, issue, &batch)?;
+                let completed = match observe_local_issue_completion(owner, repo, issue, &batch)? {
+                    Some(ClaimProbeOutcome::Completed) => Some(true),
+                    Some(ClaimProbeOutcome::Claimable) => Some(false),
+                    Some(ClaimProbeOutcome::Deferred) | None => None,
+                };
                 Some(gwt::issue_monitor::IssueMonitorDependencyObservation::new(
                     issue, completed,
                 ))
@@ -3878,14 +4059,17 @@ fn observe_local_claim_candidates(
                 .iter()
                 .find(|issue| issue.number == issue_number)
             else {
-                return Ok(false);
+                return Ok(ClaimProbeOutcome::Claimable);
             };
             observe_local_issue_completion(owner, repo, issue, &batch)
-                .map(|completed| completed.unwrap_or(false))
+                .map(|completed| completed.unwrap_or(ClaimProbeOutcome::Claimable))
         });
     let observations = observations.inspect_err(|failure| {
         tracing::warn!(error = %failure, "issue monitor completion probe expired");
     })?;
+    gwt::issue_monitor_worker::ensure_scan_deadline(
+        gwt::issue_monitor_worker::IssueMonitorScanStage::ClaimCompletionReadback,
+    )?;
     Ok(Some((
         gwt::process::current_claim_owner(),
         observations,
@@ -3897,20 +4081,33 @@ fn observe_local_claim_candidates(
 /// completion probe. An ordinary readback error returned while the observation
 /// deadline is still valid keeps #3165's fail-open compatibility as an explicit
 /// inconclusive outcome. Candidates treat it as negative; dependencies disable
-/// that edge for this scan. An expired deadline discards the whole proposal.
+/// that edge for this scan. A per-readback timeout defers its candidate without
+/// spending a claim slot. An expired scan deadline discards the whole proposal.
 fn observe_local_issue_completion(
     owner: &str,
     repo: &str,
     issue: &gwt::IssueMonitorIssue,
     batch: &gwt::issue_monitor_worker::LinkedPrProbeBatch,
-) -> Result<Option<bool>, gwt::issue_monitor_worker::IssueMonitorScanFailure> {
+) -> Result<
+    Option<gwt::issue_monitor::ClaimProbeOutcome>,
+    gwt::issue_monitor_worker::IssueMonitorScanFailure,
+> {
+    use gwt::issue_monitor::ClaimProbeOutcome;
     use gwt::issue_monitor_worker::IssueMonitorCompletionProbeFailure;
 
     match local_completion_probe(owner, repo, issue, Some(batch)) {
-        Ok(completed) => Ok(Some(completed)),
+        Ok(completed) => Ok(Some(ClaimProbeOutcome::from_completed(completed))),
         Err(IssueMonitorCompletionProbeFailure::Deadline(failure)) => Err(failure),
         Err(IssueMonitorCompletionProbeFailure::Operation(failure)) => {
             gwt::issue_monitor_worker::ensure_scan_deadline(failure.stage)?;
+            if gwt::issue_monitor_worker::completion_probe_should_defer(&failure) {
+                tracing::debug!(
+                    issue = issue.number,
+                    error = %failure,
+                    "issue monitor completion probe deferred within scan budget"
+                );
+                return Ok(Some(ClaimProbeOutcome::Deferred));
+            }
             tracing::debug!(
                 issue = issue.number,
                 error = %failure,
@@ -4604,7 +4801,9 @@ impl AppRuntime {
                     project_owner_health: None,
                     project_owner_connection_id: 0,
                     project_owner_identity: None,
+                    project_owner_execution_status: None,
                     close_project_nonces: HashMap::new(),
+                    project_views: Default::default(),
                     pending_pm_launches: Default::default(),
                     pending_pm_closes: Default::default(),
                     pm_sessions: Default::default(),
@@ -5027,6 +5226,7 @@ impl AppRuntime {
             knowledge_monitor_snapshot: Default::default(),
             issue_client_factory: default_issue_client_factory(),
             pending_update: None,
+            update_check_in_flight: false,
             update_download_in_flight: None,
             deferred_update_discovery: None,
             attachment_uploads,
@@ -5038,6 +5238,11 @@ impl AppRuntime {
             agent_backend_latest_probe_generations: HashMap::new(),
         };
         app.rebuild_window_lookup();
+        for context in app.project_contexts() {
+            if let Err(error) = app.persist_actual_project_views(&context) {
+                tracing::warn!(%error, "Restored Project observation could not be published");
+            }
+        }
         app.seed_window_pty_statuses();
         app.seed_restored_window_details();
         app.start_agent_auto_update();
@@ -10555,7 +10760,17 @@ impl AppRuntime {
             return Vec::new();
         };
         if drain.automatic.unwrap_or(prefs.autonomous_mode) && !self.automatic_updates_enabled() {
-            return self.release_update_auto_apply_for_project(context, &drain.version);
+            return self
+                .release_update_auto_apply_for_project(context, &drain.version)
+                .unwrap_or_else(|error| {
+                    self.issue_monitor_control_error_events(
+                        Some(&context.project_root),
+                        None,
+                        error,
+                        "update-drain",
+                        None,
+                    )
+                });
         }
         let outcome = gwt::update_drain::update_quiescence(&observation.snapshot);
         let wait_reason = match &outcome {
@@ -10800,13 +11015,35 @@ impl AppRuntime {
         version: &str,
         release: UpdateAutoApplyRelease,
     ) -> Vec<OutboundEvent> {
+        self.try_release_update_auto_apply_events(version, release)
+            .unwrap_or_else(|(_, events)| events)
+    }
+
+    fn try_release_update_auto_apply_events(
+        &mut self,
+        version: &str,
+        release: UpdateAutoApplyRelease,
+    ) -> Result<Vec<OutboundEvent>, (String, Vec<OutboundEvent>)> {
         let mut events = Vec::new();
         for context in self.project_contexts() {
             if self
                 .project_auto_update_drain(&context)
                 .is_some_and(|(_, drain)| drain.version == version)
             {
-                events.extend(self.release_update_auto_apply_for_project(&context, version));
+                match self.release_update_auto_apply_for_project(&context, version) {
+                    Ok(released) => events.extend(released),
+                    Err(error) => {
+                        let message = error.to_string();
+                        events.extend(self.issue_monitor_control_error_events(
+                            Some(&context.project_root),
+                            None,
+                            error,
+                            "update-drain",
+                            None,
+                        ));
+                        return Err((message, events));
+                    }
+                }
             }
         }
         let (level, message) = match release {
@@ -10824,7 +11061,7 @@ impl AppRuntime {
             ),
             UpdateAutoApplyRelease::Superseded => (
                 "info",
-                format!("Update v{version} was replaced by a newer release; its automatic apply was cancelled."),
+                format!("Update v{version} automatic apply was cancelled because a newer release is available."),
             ),
             UpdateAutoApplyRelease::RequiresElevation => (
                 "warn",
@@ -10832,7 +11069,13 @@ impl AppRuntime {
             ),
             UpdateAutoApplyRelease::PreviousFailure => (
                 "warn",
-                format!("Update v{version} was not applied automatically because its previous apply failed; the update stays staged for manual retry."),
+                if gwt_core::update::load_pending_update_manifest()
+                    .is_some_and(|manifest| manifest.version == version)
+                {
+                    format!("Update v{version} was not applied automatically because its previous apply failed; the update stays staged for manual retry.")
+                } else {
+                    format!("Update v{version} failed; its staged payload was discarded and the drain released.")
+                },
             ),
         };
         self.record_update_apply_observation(
@@ -10856,50 +11099,37 @@ impl AppRuntime {
             },
             grace_secs: None,
         }));
-        Self::deduplicate_update_host_events(events)
+        Ok(Self::deduplicate_update_host_events(events))
     }
 
     fn release_update_auto_apply_for_project(
         &mut self,
         context: &ProjectContext,
         version: &str,
-    ) -> Vec<OutboundEvent> {
-        let Some(state) = self.project_state_mut(context) else {
-            return Vec::new();
-        };
-        state.update_auto_apply.cancel(version);
+    ) -> Result<Vec<OutboundEvent>, gwt::runtime_daemon_events::IssueMonitorControlPublishError>
+    {
+        if self.project_state(context).is_none() {
+            return Ok(Vec::new());
+        }
         let publication = self.publish_project_issue_monitor_control(
             context,
             serde_json::json!({ "config_set": { "update_drain": false } }),
         );
-        match publication {
+        let events = match publication {
             Ok(()) => Vec::new(),
             Err(error) if error.allows_local_fallback() => {
-                match self.commit_local_issue_monitor_control(context, |monitor| {
-                    monitor.clear_update_drain()
-                }) {
-                    Ok((monitor, ())) => self.issue_monitor_snapshot_events_for(
-                        None,
-                        Some(&context.project_root),
-                        monitor,
-                    ),
-                    Err(local_error) => self.issue_monitor_control_error_events(
-                        Some(&context.project_root),
-                        None,
-                        local_error,
-                        "update-drain",
-                        None,
-                    ),
-                }
+                let (monitor, ()) = self
+                    .commit_local_issue_monitor_control(context, |monitor| {
+                        monitor.clear_update_drain()
+                    })?;
+                self.issue_monitor_snapshot_events_for(None, Some(&context.project_root), monitor)
             }
-            Err(error) => self.issue_monitor_control_error_events(
-                Some(&context.project_root),
-                None,
-                error,
-                "update-drain",
-                None,
-            ),
+            Err(error) => return Err(error),
+        };
+        if let Some(state) = self.project_state_mut(context) {
+            state.update_auto_apply.cancel(version);
         }
+        Ok(events)
     }
 
     fn deduplicate_update_host_events(mut events: Vec<OutboundEvent>) -> Vec<OutboundEvent> {
@@ -11095,6 +11325,9 @@ impl AppRuntime {
             | FrontendEvent::TerminalInput { id, .. }
             | FrontendEvent::LoadPmConversation { id }
             | FrontendEvent::LoadPmReports { id, .. }
+            | FrontendEvent::LoadPmRequestTask { id, .. }
+            | FrontendEvent::ReopenPmRequestTask { id, .. }
+            | FrontendEvent::CancelPmRequestTask { id, .. }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
             | FrontendEvent::AttachmentUploadFailed { id, .. }
@@ -11202,7 +11435,8 @@ impl AppRuntime {
                         FrontendEvent::FrontendReady => {
                             self.unopened_project_route_events(&client_id, key)
                         }
-                        event => recovery_center::rejected_action_events(&client_id, &event)
+                        event => pm_chat::rejected_request_task_events(&client_id, &event)
+                            .or_else(|| recovery_center::rejected_action_events(&client_id, &event))
                             .unwrap_or_default(),
                     };
                 };
@@ -11257,6 +11491,7 @@ impl AppRuntime {
             FrontendEvent::ReopenRecentProject { path, request_id } => {
                 self.open_project_path_with_request_events(PathBuf::from(path), request_id)
             }
+            FrontendEvent::CheckForUpdates => self.check_for_updates_events(),
             FrontendEvent::ApplyUpdate => self.apply_pending_update_events(&client_id),
             FrontendEvent::ApplyUpdateStart => self.apply_update_start_events(&client_id),
             FrontendEvent::ApplyUpdateToVersion { version } => {
@@ -11469,6 +11704,9 @@ impl AppRuntime {
             | FrontendEvent::TerminalInput { id, .. }
             | FrontendEvent::LoadPmConversation { id }
             | FrontendEvent::LoadPmReports { id, .. }
+            | FrontendEvent::LoadPmRequestTask { id, .. }
+            | FrontendEvent::ReopenPmRequestTask { id, .. }
+            | FrontendEvent::CancelPmRequestTask { id, .. }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
             | FrontendEvent::AttachmentUploadFailed { id, .. }
@@ -11524,7 +11762,9 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         if !self.project_owns_frontend_request(context, &event) {
             tracing::warn!(project_key = %context.project_key, "rejected frontend request outside its project scope");
-            return recovery_center::rejected_action_events(&client_id, &event).unwrap_or_default();
+            return pm_chat::rejected_request_task_events(&client_id, &event)
+                .or_else(|| recovery_center::rejected_action_events(&client_id, &event))
+                .unwrap_or_default();
         }
         let project_scope = self.frontend_project_log_scope(Some(context), &event);
         let _project_scope = project_scope.as_ref().map(|scope| scope.enter()).unwrap_or_else(|| {
@@ -11621,7 +11861,22 @@ impl AppRuntime {
                 if let Some(refresh) = &self.usage_refresh {
                     refresh.notify_one();
                 }
-                self.frontend_project_sync_events(&client_id, context)
+                let mut events = self.frontend_project_sync_events(&client_id, context);
+                events.extend(self.project_view_challenge_events(context, &client_id));
+                events
+            }
+            FrontendEvent::ProjectViewReady {
+                generation,
+                nonce,
+                view_id,
+            } => self.accept_project_view_ready(context, &client_id, generation, &nonce, &view_id),
+            FrontendEvent::GetProjectExecutionStatus { operation_id, .. } => {
+                vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::ProjectExecutionStatus {
+                        status: self.project_execution_status(context, operation_id.as_deref()),
+                    },
+                )]
             }
             FrontendEvent::RetryWorkspaceStateLoad => {
                 spawn_workspace_projection_reload(
@@ -11796,6 +12051,43 @@ impl AppRuntime {
                 request_id,
                 version,
             } => self.load_pm_reports_events(context, client_id, &id, request_id, version),
+            FrontendEvent::LoadPmRequestTask {
+                id,
+                request_id,
+                task_id,
+                receipt_operation_id,
+            } => self.pm_request_task_events(
+                context,
+                client_id,
+                &id,
+                request_id,
+                pm_chat::PmRequestTaskOperation::Read {
+                    task_id,
+                    receipt_operation_id,
+                },
+            ),
+            FrontendEvent::ReopenPmRequestTask {
+                id,
+                request_id,
+                request,
+            } => self.pm_request_task_events(
+                context,
+                client_id,
+                &id,
+                request_id,
+                pm_chat::PmRequestTaskOperation::Reopen(request),
+            ),
+            FrontendEvent::CancelPmRequestTask {
+                id,
+                request_id,
+                request,
+            } => self.pm_request_task_events(
+                context,
+                client_id,
+                &id,
+                request_id,
+                pm_chat::PmRequestTaskOperation::Cancel(request),
+            ),
             FrontendEvent::PaneName { .. } => Vec::new(),
             FrontendEvent::PaneSendInput { session_id, text } => {
                 self.pane_send_input_events(client_id, &session_id, &text)
@@ -12448,6 +12740,7 @@ impl AppRuntime {
             FrontendEvent::IssueMonitorConfigureProfile => {
                 self.open_issue_monitor_configure_profile_wizard_events(context, &client_id)
             }
+            FrontendEvent::CheckForUpdates => self.check_for_updates_events(),
             FrontendEvent::ApplyUpdate => self.apply_pending_update_events(&client_id),
             FrontendEvent::ApplyUpdateStart => self.apply_update_start_events(&client_id),
             FrontendEvent::ApplyUpdateToVersion { version } => {
@@ -12627,6 +12920,15 @@ impl AppRuntime {
             ));
         }
         events.extend(self.staged_update_sync_events(client_id));
+        events.push(OutboundEvent::reply(
+            client_id,
+            BackendEvent::UpdateCheckResult {
+                checking: self.update_check_in_flight,
+                offer_update: false,
+                result: None,
+                previous_failure: None,
+            },
+        ));
         events
     }
 
@@ -12714,27 +13016,21 @@ impl AppRuntime {
             .filter(|(id, _)| self.project_key_for_window(id) == Some(&context.project_key))
             .map(|(id, text)| (id.clone(), text.clone()))
             .collect();
-        let mut terminal_snapshots = self
+        let runtime_snapshot_ids = self
             .runtimes
             .iter()
             .filter(|(id, _)| self.project_key_for_window(id) == Some(&context.project_key))
-            .filter_map(|(id, runtime)| {
-                // SPEC-1919 FR-001a / SPEC-2008 Phase 26.F: snapshot replay
-                // must preserve the current formatted screen and enough
-                // scrollback history for a fresh xterm.js instance to scroll
-                // immediately after reconnect.
+            .map(|(id, runtime)| {
                 terminal_previews.insert(
                     id.clone(),
                     runtime_events::terminal_preview_text(&runtime.screen),
                 );
-                let (snapshot, seq) = (runtime.screen_ansi.clone(), runtime.screen_seq);
-                (!snapshot.is_empty()).then_some((id.clone(), snapshot, Some(seq)))
+                id.clone()
             })
-            .collect::<Vec<_>>();
-        let runtime_snapshot_ids = terminal_snapshots
-            .iter()
-            .map(|(id, _, _)| id.clone())
             .collect::<std::collections::HashSet<_>>();
+        // Live projections contain only the visible grid. Request the owner's
+        // semantic history instead of replacing xterm's scrollback with it.
+        let mut terminal_snapshots = Vec::new();
         for (id, detail) in &self.launch_error_terminal_details {
             if self.project_key_for_window(id) == Some(&context.project_key)
                 && !runtime_snapshot_ids.contains(id)
@@ -12760,6 +13056,15 @@ impl AppRuntime {
             self.pending_update.clone(),
         );
         events.extend(self.staged_update_sync_events(client_id));
+        events.push(OutboundEvent::reply(
+            client_id,
+            BackendEvent::UpdateCheckResult {
+                checking: self.update_check_in_flight,
+                offer_update: false,
+                result: None,
+                previous_failure: None,
+            },
+        ));
         events.splice(
             1..1,
             terminal_previews.into_iter().map(|(id, text)| {
@@ -12811,6 +13116,9 @@ impl AppRuntime {
         // every live cleanup here instead, or it would see nothing until the
         // worker happens to emit again.
         events.extend(self.live_branch_cleanup_replies(context, client_id));
+        for id in runtime_snapshot_ids {
+            events.extend(self.request_owner_snapshot(&id, Some(client_id.to_string())));
+        }
         events.insert(
             0,
             OutboundEvent::reply(
@@ -13084,6 +13392,9 @@ impl AppRuntime {
                 .iter()
                 .filter_map(|tab| {
                     Some(gwt::HubProjectView {
+                        execution: self
+                            .project_context(&tab.id)
+                            .map(|context| self.project_execution_status(&context, None)),
                         owner_health: self
                             .project_state_for_tab(&tab.id)
                             .and_then(|state| state.project_owner_health.clone()),
@@ -13183,6 +13494,9 @@ impl AppRuntime {
             workspace,
             running_agent_count: running_agents.len() as u32,
             running_agents,
+            execution: self
+                .project_context(&tab.id)
+                .map(|context| self.project_execution_status(&context, None)),
         }
     }
 
@@ -14027,6 +14341,9 @@ impl AppRuntime {
         let changed = state.project_owner_health.as_ref() != Some(&health)
             || state.project_owner_connection_id != connection_id
             || state.project_owner_identity != identity;
+        if changed {
+            state.project_owner_execution_status = None;
+        }
         state.project_owner_connection_id = connection_id;
         state.project_owner_identity =
             if health.state == gwt::protocol::ProjectOwnerHealthState::Healthy {
@@ -14105,7 +14422,7 @@ impl AppRuntime {
     }
 
     pub(crate) fn request_owner_snapshot(
-        &self,
+        &mut self,
         id: &str,
         client_id: Option<ClientId>,
     ) -> Vec<OutboundEvent> {
@@ -14122,6 +14439,18 @@ impl AppRuntime {
         let Some(state) = self.project_state(&context) else {
             return Vec::new();
         };
+        if runtime.has_final_snapshot {
+            let event = BackendEvent::TerminalSnapshot {
+                id: id.to_string(),
+                data_base64: base64::engine::general_purpose::STANDARD.encode(&runtime.screen_ansi),
+            };
+            let event = if let Some(client_id) = client_id {
+                OutboundEvent::reply(client_id, event)
+            } else {
+                OutboundEvent::project(context.project_key.clone(), event)
+            };
+            return vec![event.with_terminal_stream_seq(Some(runtime.screen_seq))];
+        }
         if state.project_owner_identity.as_ref() != Some(&runtime.owner_identity) {
             return Vec::new();
         }
@@ -14134,7 +14463,30 @@ impl AppRuntime {
         if owner_pane_id.is_empty() {
             return Vec::new();
         }
+        let runtime = self.runtimes.get_mut(id).expect("snapshot runtime");
+        if let Some(pending) = &mut runtime.pending_snapshot {
+            if pending.connection_id == connection_id {
+                if !pending.targets.contains(&client_id) {
+                    pending.targets.push(client_id);
+                }
+                return Vec::new();
+            }
+        }
+        let mut targets = runtime
+            .pending_snapshot
+            .take()
+            .map(|pending| pending.targets)
+            .unwrap_or_default();
+        if !targets.contains(&client_id) {
+            targets.push(client_id.clone());
+        }
+        runtime.pending_snapshot = Some(PendingOwnerSnapshot {
+            connection_id,
+            targets,
+            retry_at: None,
+        });
         let id = id.to_string();
+        let pending_id = id.clone();
         let proxy = self.proxy.clone();
         if let Err(error) = self.blocking_tasks.try_spawn(move || {
             let result = tokio::runtime::Builder::new_current_thread()
@@ -14168,6 +14520,13 @@ impl AppRuntime {
                 },
             )));
         }) {
+            if let Some(pending) = self
+                .runtimes
+                .get_mut(&pending_id)
+                .and_then(|runtime| runtime.pending_snapshot.as_mut())
+            {
+                pending.retry_at = Some(Instant::now() + Duration::from_secs(1));
+            }
             tracing::warn!(%error, "could not enqueue project snapshot");
         }
         Vec::new()
@@ -14195,26 +14554,53 @@ impl AppRuntime {
         {
             return Vec::new();
         }
+        let runtime = self.runtimes.get_mut(id).expect("fenced remote runtime");
+        let mut targets = runtime
+            .pending_snapshot
+            .take()
+            .map(|pending| pending.targets)
+            .unwrap_or_else(|| vec![client_id]);
         let snapshot = match result {
             Ok(snapshot)
-                if self
-                    .runtimes
-                    .get(id)
-                    .is_some_and(|runtime| runtime.owner_pane_id == snapshot.id)
-                    && snapshot.incarnation == incarnation =>
+                if runtime.owner_pane_id == snapshot.id && snapshot.incarnation == incarnation =>
             {
                 snapshot
             }
+            Err(error) => {
+                // Output was withheld for these targets. Retry even if the
+                // owner goes idle, with a delay so transport failures cannot spin.
+                runtime.pending_snapshot = Some(PendingOwnerSnapshot {
+                    connection_id,
+                    targets,
+                    retry_at: Some(Instant::now() + Duration::from_secs(1)),
+                });
+                tracing::warn!(%error, id, "project snapshot failed; retry scheduled");
+                return Vec::new();
+            }
             _ => return Vec::new(),
         };
-        let runtime = self.runtimes.get_mut(id).expect("fenced remote runtime");
-        if snapshot.screen_seq < runtime.screen_seq {
-            return Vec::new();
+        if snapshot.screen_seq < runtime.output_seq {
+            // Never replace output already forwarded to clients with an older
+            // snapshot. Preserve every target until the owner catches up.
+            let mut events = Vec::new();
+            for target in targets {
+                events.extend(self.request_owner_snapshot(id, target));
+            }
+            return events;
+        }
+        // HTTP snapshots can overtake the output WebSocket. Every client needs
+        // the bytes that advancing this shared cursor will skip on that stream.
+        if snapshot.screen_seq > runtime.output_seq && !targets.contains(&None) {
+            targets.push(None);
         }
         self.pending_runtime_outputs.remove(id);
-        runtime.screen = snapshot.screen;
-        runtime.screen_ansi = snapshot.screen_ansi;
-        runtime.screen_seq = snapshot.screen_seq;
+        let behind_current_screen = snapshot.screen_seq < runtime.screen_seq;
+        let data_base64 = base64::engine::general_purpose::STANDARD.encode(&snapshot.screen_ansi);
+        if !behind_current_screen {
+            runtime.screen = snapshot.screen;
+            runtime.screen_ansi = snapshot.screen_ansi;
+            runtime.screen_seq = snapshot.screen_seq;
+        }
         runtime.has_unsent_user_input.store(
             snapshot.has_unsent_user_input,
             std::sync::atomic::Ordering::Release,
@@ -14230,20 +14616,34 @@ impl AppRuntime {
             runtime.exit_confirmed = snapshot.exit_confirmed;
             runtime.exit_code = snapshot.exit_code;
         }
-        let data_base64 = base64::engine::general_purpose::STANDARD.encode(&runtime.screen_ansi);
         let status = runtime.status;
         let detail = runtime.detail.clone();
-        let event = BackendEvent::TerminalSnapshot {
+        let snapshot_event = BackendEvent::TerminalSnapshot {
             id: id.to_string(),
             data_base64,
         };
-        let event = if let Some(client_id) = client_id {
-            OutboundEvent::reply(client_id, event)
-        } else {
-            OutboundEvent::project(context.project_key.clone(), event)
-        };
-        let mut events = vec![event.with_terminal_stream_seq(Some(snapshot.screen_seq))];
-        events.extend(self.apply_owner_status_projection(id, status, detail));
+        let status_events = self.apply_owner_status_projection(id, status, detail);
+        let mut events = Vec::new();
+        for target in targets {
+            let event = if let Some(client_id) = &target {
+                OutboundEvent::reply(client_id, snapshot_event.clone())
+            } else {
+                OutboundEvent::project(context.project_key.clone(), snapshot_event.clone())
+            };
+            events.push(event.with_terminal_stream_seq(Some(snapshot.screen_seq)));
+            for mut event in status_events.clone() {
+                if let Some(client_id) = &target {
+                    event.target = DispatchTarget::Client(client_id.clone());
+                }
+                events.push(event);
+            }
+            if behind_current_screen {
+                // Gap repair must make progress even while output overtakes
+                // every worker. Keep the newer projection and converge with
+                // one shared follow-up request, without rolling clients back.
+                events.extend(self.request_owner_snapshot(id, target));
+            }
+        }
         events
     }
 
@@ -14360,6 +14760,20 @@ impl AppRuntime {
         if !self.project_owner_event_is_current(context, connection_id, identity) {
             return Vec::new();
         }
+        if matches!(
+            &event,
+            OwnerEvent::Status { .. }
+                | OwnerEvent::WindowRemoved { .. }
+                | OwnerEvent::Closed { .. }
+                | OwnerEvent::Invalidated
+                | OwnerEvent::AgentStarted { .. }
+                | OwnerEvent::PmLifecycle { .. }
+                | OwnerEvent::ContinueWorkOutcome { .. }
+        ) {
+            self.project_state_mut(context)
+                .expect("fenced owner")
+                .project_owner_execution_status = None;
+        }
         let pending_alias = |owner_id: &str, operation_id: Option<&str>| {
             self.pending_launch_completions
                 .iter()
@@ -14372,6 +14786,31 @@ impl AppRuntime {
                 .map(|(id, _)| id.clone())
         };
         match event {
+            OwnerEvent::ProjectExecutionStatus { status } => {
+                if status.project_key != context.project_key.as_str()
+                    || status.generation != context.generation
+                {
+                    return Vec::new();
+                }
+                let operation = status
+                    .operation_outcome
+                    .as_ref()
+                    .map(|receipt| receipt.operation_id.clone());
+                self.project_state_mut(context)
+                    .expect("fenced owner")
+                    .project_owner_execution_status = Some(status);
+                let mut events = self.reconcile_project_choice(context, operation.as_deref());
+                events.extend([
+                    OutboundEvent::project(
+                        context.project_key.clone(),
+                        BackendEvent::ProjectExecutionStatus {
+                            status: self.project_execution_status(context, None),
+                        },
+                    ),
+                    self.hub_state_broadcast(),
+                ]);
+                events
+            }
             OwnerEvent::Output {
                 id: owner_pane_id,
                 incarnation,
@@ -14391,6 +14830,7 @@ impl AppRuntime {
                 if seq <= runtime.output_seq {
                     return Vec::new();
                 }
+                runtime.has_final_snapshot = false;
                 // Positions are process-wide, so another pane may legitimately
                 // occupy every numerical position between these two outputs.
                 let gap = previous_seq != Some(runtime.output_seq);
@@ -14408,51 +14848,26 @@ impl AppRuntime {
                         previous_seq = ?previous_seq,
                         seq,
                         screen_seq,
-                        repair = if screen_seq.max(runtime.screen_seq) < seq {
-                            "request_snapshot"
-                        } else {
-                            "inline_snapshot"
-                        },
+                        repair = "request_snapshot",
                         "owner output predecessor requires snapshot repair"
                     );
                 }
-                // Coalescing may omit deltas, but the owner carries its full
-                // parsed screen with every output event. Never forward a
-                // surviving delta across a gap as though it were contiguous.
-                if gap && screen_seq.max(runtime.screen_seq) < seq {
-                    self.pending_runtime_outputs.remove(&id);
-                    return self.request_owner_snapshot(&id, None);
-                }
-                runtime.output_seq = seq;
                 if screen_seq >= runtime.screen_seq {
                     runtime.screen = screen;
                     runtime.screen_ansi = screen_ansi;
                     runtime.screen_seq = screen_seq;
                 }
-                let screen = runtime.screen.clone();
-                let repair = gap.then(|| {
-                    runtime.output_seq = runtime.output_seq.max(runtime.screen_seq);
-                    OutboundEvent::project(
-                        context.project_key.clone(),
-                        BackendEvent::TerminalSnapshot {
-                            id: id.clone(),
-                            data_base64: base64::engine::general_purpose::STANDARD
-                                .encode(&runtime.screen_ansi),
-                        },
-                    )
-                    .with_terminal_stream_seq(Some(runtime.screen_seq))
-                });
-                if repair.is_some() {
+                // A visible grid cannot restore scrollback. Hold raw output
+                // during repair too, so contiguous output cannot overtake every
+                // pending snapshot. All clients need the withheld output, so
+                // coalesce a broadcast target with any private restore target.
+                if gap || runtime.pending_snapshot.is_some() {
                     self.pending_runtime_outputs.remove(&id);
+                    return self.request_owner_snapshot(&id, None);
                 }
-                let mut events = self.handle_owner_runtime_output(id, data, seq, screen);
-                if let Some(repair) = repair {
-                    events.retain(|event| {
-                        !matches!(event.event, BackendEvent::TerminalOutput { .. })
-                    });
-                    events.insert(0, repair);
-                }
-                events
+                runtime.output_seq = seq;
+                let screen = runtime.screen.clone();
+                self.handle_owner_runtime_output(id, data, seq, screen)
             }
             OwnerEvent::Status {
                 id,
@@ -14572,6 +14987,7 @@ impl AppRuntime {
                         runtime.screen = frame.screen;
                         runtime.screen_ansi = frame.screen_ansi;
                         runtime.screen_seq = frame.screen_seq;
+                        runtime.has_final_snapshot = true;
                         runtime.output_seq = runtime.output_seq.max(frame.screen_seq);
                         OutboundEvent::project(
                             context.project_key.clone(),
@@ -14957,6 +15373,28 @@ impl AppRuntime {
         if !self.project_context_is_current(context) {
             return Err("Project is closed".into());
         }
+        let lineage = match &request {
+            RemoteOwnerLaunchRequest::Agent { config, .. } => {
+                gwt::project_execution_policy::agent_lineage(&context.project_root, config)
+            }
+            RemoteOwnerLaunchRequest::RestoreSavedSession {
+                expected_source, ..
+            } => gwt::project_execution_policy::session_lineage(
+                &context.project_root,
+                expected_source,
+            ),
+            RemoteOwnerLaunchRequest::ColdAutomaticRestore {
+                source_session_id, ..
+            } => {
+                let source = gwt_agent::Session::load(
+                    &self.sessions_dir.join(format!("{source_session_id}.toml")),
+                )
+                .map_err(|error| format!("Automatic restore source unavailable: {error}"))?;
+                gwt::project_execution_policy::session_lineage(&context.project_root, &source)
+            }
+            _ => Vec::new(),
+        };
+        self.project_execution_admission(context, &lineage)?;
         let generation = window_generation.ok_or("window generation is unavailable")?;
         let owner_pane_id = format!(
             "{}::{}",
@@ -15119,13 +15557,15 @@ impl AppRuntime {
             let mut restore_refusal = None;
             let mut launch_sent = false;
             let result = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|error| error.to_string()).and_then(|executor| executor.block_on(async {
+                let mut _gui_presence = None;
                 let attempt = async {
                 if command.is_none() && !current.load(std::sync::atomic::Ordering::Acquire) {
                     return Err("launch cancelled".into());
                 }
                 let connected = gwt::project_runtime::client::ProjectRuntimeClient::connect_for_gui(context.project_root.clone(), supervisor).await;
-                *client_cell.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(connected.clone());
-                let client = connected?;
+                *client_cell.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(connected.as_ref().map(|(client, _)| client.clone()).map_err(Clone::clone));
+                let (client, presence) = connected?;
+                _gui_presence = Some(presence);
                 if !current.load(std::sync::atomic::Ordering::Acquire) {
                     return Err("launch cancelled".into());
                 }
@@ -15260,8 +15700,13 @@ impl AppRuntime {
                         return Err(snapshot_error);
                     }
                 };
-                let snapshot: RemoteRuntimeSnapshot = serde_json::from_value(value).map_err(|error| error.to_string())?;
+                let mut snapshot: RemoteRuntimeSnapshot = serde_json::from_value(value).map_err(|error| error.to_string())?;
                 if snapshot.id != owner_pane_id || snapshot.incarnation != incarnation || snapshot.session_id.as_deref() != receipt["session_id"].as_str() { return Err("owner launch snapshot identity changed".into()); }
+                snapshot.pm_registration = gwt::pm_registry::load_pm_prefs(
+                    &gwt::pm_registry::pm_prefs_path_for_repo_path(&context.project_root),
+                ).ok().and_then(|prefs| prefs.registration).filter(|registration| {
+                    snapshot.session_id.as_deref() == Some(registration.session_id.as_str())
+                }).map(Box::new);
                 let session = read_owner_session(&snapshot, &sessions_dir);
                 Ok(RemoteOwnerLaunchOutcome::Runtime(snapshot, session))
                 }.await;
@@ -15509,6 +15954,32 @@ impl AppRuntime {
                             Some("owner connection is unavailable".into()),
                         );
                     };
+                    let Some(identity) = client.identity() else {
+                        return Vec::new();
+                    };
+                    if self
+                        .project_state(&context)
+                        .and_then(|state| state.project_owner_identity.as_ref())
+                        .is_some_and(|accepted| accepted != identity)
+                    {
+                        return Vec::new();
+                    }
+                    let pm_root = self
+                        .project_state_mut(&context)
+                        .and_then(|state| state.pending_pm_launches.remove(&window_id));
+                    let pm_cache_changed = match (pm_root, snapshot.pm_registration.as_ref()) {
+                        (Some(root), Some(registration))
+                            if root == context.project_root
+                                && snapshot.session_id.as_deref()
+                                    == Some(registration.session_id.as_str()) =>
+                        {
+                            let changed =
+                                self.pm_session_for_root(&root) != Some(&registration.session_id);
+                            self.sync_pm_session_cache(&root, Some(registration));
+                            changed
+                        }
+                        _ => false,
+                    };
                     if self.runtimes.get(&window_id).is_some_and(|runtime| {
                         runtime.owner_pane_id == snapshot.id
                             && runtime.incarnation == snapshot.incarnation
@@ -15516,7 +15987,12 @@ impl AppRuntime {
                     }) {
                         // Inventory may have installed this same owner before the HTTP launch reply.
                         // A fresh post-install snapshot repairs it without replaying older status/data.
-                        return self.request_owner_snapshot(&window_id, None);
+                        let mut events = Vec::new();
+                        if pm_cache_changed {
+                            events.push(self.workspace_state_broadcast(&context));
+                        }
+                        events.extend(self.request_owner_snapshot(&window_id, None));
+                        return events;
                     }
                     self.record_restore_window_outcome(&window_id, Ok(()));
                     self.restore_launch_windows.remove(&window_id);
@@ -16069,7 +16545,7 @@ impl AppRuntime {
                 .map_err(|error| error.to_string())
                 .and_then(|executor| {
                     executor.block_on(async {
-                        let client =
+                        let (client, _gui_presence) =
                             gwt::project_runtime::client::ProjectRuntimeClient::connect_for_gui(
                                 context.project_root.clone(),
                                 supervisor,

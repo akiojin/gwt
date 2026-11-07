@@ -860,6 +860,37 @@ test("onReceiveError reports a throwing receive and the flush continues", () => 
   assert.match(String(errors[0].error), /render exploded/);
 });
 
+test("a failed terminal receive discards the torn stream and requests one snapshot recovery", () => {
+  for (const kind of ["terminal_output", "terminal_snapshot"]) {
+    const scheduler = manualScheduler();
+    const received = [], errors = [], recovery = [];
+    const dispatcher = createSocketReceiveDispatcher({
+      receive(event) {
+        if (event.data === "failed") {
+          dispatcher.enqueue({ kind: "terminal_output", data: "reentrant suffix" });
+          throw new Error("terminal subscriber failed");
+        }
+        received.push(event.data);
+      },
+      schedule: scheduler.schedule,
+      now: () => 0,
+      onReceiveError: (error, eventKind) => errors.push(eventKind),
+      onResync(reason) {
+        recovery.push(reason);
+        dispatcher.enqueue({ kind: "terminal_snapshot", data: "fresh snapshot" });
+      },
+    });
+    dispatcher.handle({ data: JSON.stringify({ kind, data: "failed" }) });
+    dispatcher.enqueue({ kind: "terminal_output", data: "queued suffix" });
+    scheduler.runOnce();
+    dispatcher.enqueue({ kind: "terminal_output", data: "intervening suffix" });
+    scheduler.runAll();
+    assert.deepEqual(errors, [kind]);
+    assert.deepEqual(recovery, ["receive-error"]);
+    assert.deepEqual(received, ["fresh snapshot"]);
+  }
+});
+
 test("onReceiveError receives the kind hint for raw string payloads", () => {
   const errors = [];
   const scheduler = manualScheduler();

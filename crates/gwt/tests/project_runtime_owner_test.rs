@@ -66,6 +66,10 @@ impl RealOwnerFixture {
             .unwrap()
             .success());
         let scope = RuntimeScope::from_project_root(&repo, RuntimeTarget::Host).unwrap();
+        {
+            let _home = gwt_core::test_support::ScopedGwtHome::set(&home);
+            gwt::project_runtime::test_support::seed_actual_project_view(&repo).unwrap();
+        }
         let path = scope.endpoint_path(&home.join(".gwt"));
         let mut command = gwt_core::process::hidden_command(env!("CARGO_BIN_EXE_gwtd"));
         command
@@ -203,6 +207,47 @@ fn real_daemon_owns_shell_input_snapshot_resize_and_exact_close() {
         let closed = gwt_agent::Session::load(&home.join(".gwt/sessions").join(format!("{session_id}.toml"))).unwrap();
         assert_eq!(closed.status, gwt_agent::AgentStatus::Stopped);
         assert!(!closed.restore_window_on_startup, "public close must finish durable Session state before acknowledgement");
+    });
+}
+
+#[test]
+fn gui_connection_holds_presence_through_its_operation() {
+    use gwt::project_runtime::{client::ProjectRuntimeClient, events::OwnerCommand};
+    let fixture = RealOwnerFixture::start(None);
+    let _home = gwt_core::test_support::ScopedGwtHome::set(&fixture.home);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let observer =
+            ProjectRuntimeClient::from_current_project(&fixture.repo, &fixture.home.join(".gwt"))
+                .await
+                .unwrap();
+        let connection = ProjectRuntimeClient::connect_for_gui(
+            fixture.repo.clone(),
+            std::sync::Arc::new(gwt::daemon_supervisor::DaemonSupervisor::disabled()),
+        )
+        .await
+        .unwrap();
+        let during = observer.command(OwnerCommand::Health).await.unwrap();
+        drop(connection);
+        // test-hygiene: allow-wall-clock-deadline Bounds actual authenticated detach progress, not an elapsed-time ordering assumption.
+        tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+            loop {
+                if observer.command(OwnerCommand::Health).await.unwrap()["gui_presence_count"] == 0
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("operation completion releases its GUI presence");
+        assert_eq!(
+            during["gui_presence_count"], 1,
+            "a launch connection must acquire residency before returning to its worker"
+        );
     });
 }
 

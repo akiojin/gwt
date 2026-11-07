@@ -243,7 +243,8 @@ from other hosts on the same LAN or VPN-extended LAN; pair it with an explicit
 `--port` when you need an operator-selected, well-known port. `--no-tray`
 starts a temporary server without registering a tray icon. It exits when its
 launching parent ends, or five seconds after its last browser session closes
-(reloads can reconnect during that grace). Before any browser connects, the
+(reloads can reconnect during that grace). An explicit Continue keeps it alive
+while that project's admitted work remains unfinished. Before any browser connects, the
 server follows its parent's lifetime. `--no-open` explicitly suppresses browser
 auto-open; startup already suppresses it by default.
 
@@ -288,6 +289,51 @@ The SPEC records the planned deployment, HTTPS bootstrap, network conditions,
 and failure behavior. Runnable mobile setup instructions will follow transport
 integration and validation; the existing LAN bind example is not that setup.
 
+#### Offline Host credential administration (Unix, from source)
+
+`cargo build -p gwt --bin gwt-mobile-coordinator` builds the offline registry
+administrator. It provides no listener or phone connection. Use a trusted user
+home outside repositories, with non-replaceable ancestors. Provision
+`$HOME/.gwt`, `$HOME/.gwt/mobile`, and `$HOME/.gwt/mobile/coordinator` as directories
+owned by your OS user with mode `0700`. Symlinks and macOS extended ACL entries
+are rejected. Inspect existing permissions and explicitly repair them when
+needed; the command does not create directories or change permissions.
+Windows private storage is not supported yet.
+
+Send one JSON request, at most 16 KiB, on stdin:
+
+```sh
+printf '%s\n' '{"schema_version":1,"command":{"operation":"initialize"}}' |
+  target/debug/gwt-mobile-coordinator
+printf '%s\n' '{"schema_version":1,"command":{"operation":"status"}}' |
+  target/debug/gwt-mobile-coordinator
+```
+
+`initialize` creates a registry once; it never replaces one. `status` shows
+public identities, project scopes, expiry, and revocation records. Other commands
+use the same envelope and these `command` fields:
+
+| `operation` | Required fields |
+| --- | --- |
+| `issue` | `origin` (HTTPS origin), `host_id` (non-nil UUID), `projects` (1–16 unique canonical project keys), `expires_at` (future Unix seconds) |
+| `rotate` | `origin`, `credential_id` (non-nil UUID), `expires_at` |
+| `revoke` | `credential_id` |
+
+Project keys are the canonical 16-character lowercase hex identifiers. Unknown
+fields and operations are rejected. Paths, secrets, and clock overrides are not
+request fields. Successful issuance returns only the public identity and private
+credential file path; the bearer stays in that file. Keep it out of Git, logs,
+URLs, and shell arguments. These credentials authorize future Host registration,
+not device approval or terminal input. Host import and online registration are
+not available yet.
+
+Administration holds a separate registry lock. For `busy`, stop the coordinator
+or other administrator and retry. For `commit_uncertain`, run `status` to inspect
+current records before deciding what to do; do not automatically repeat issuance.
+For private-storage or clock errors, repair the reported prerequisite and retry
+without deleting the registry or its revocation records. `--help` lists the
+supported request fields and storage requirements.
+
 ### `gwt serve` removal
 
 The legacy `gwt serve` / `gwt --headless` verbs were removed in
@@ -316,14 +362,20 @@ Every HTTP / WebSocket request is mirrored to `tracing::info!(target =
 real time on stderr and in `~/.gwt/logs/<date>/`. `/healthz` is demoted to
 `debug!` to avoid drowning the stream with health probes.
 
-Lifecycle: the running `gwt` process owns the agent / PTY lifetime. In the default
-tray mode, closing a browser tab leaves the project and its running agents active;
-reopen its project URL to return to the same workspace. To stop a project, choose
-**Close Project**
-in its page header or beside it in the Hub's open-project list. If agents are
-running, a confirmation dialog lists them: **Cancel** keeps them running, while
-**Close Project** stops that project's runtime and agents. Other projects keep
-running, and every browser tab showing the closed project returns to the Hub.
+Lifecycle: new project work starts after its Project screen is displayed.
+Restored tabs and background connections alone do not start it. **Close Project**
+in the page header closes that view; if another view remains, its work continues.
+Closing the last view, or choosing Close in the Hub, offers **Continue**, **Stop**,
+and **Cancel**. Continue saves the choice for that project's admitted work across
+restarts. Stop blocks new starts and drains its running work while retaining work,
+conversations, and history. Cancel keeps the screen open. Other projects are unaffected.
+
+A browser's own close button or a lost connection does not choose Continue or
+Stop. Return to the Hub to resolve a pending choice. The project list and
+project-scoped PM settings show execution state, its reason, observation time,
+and unavailable observations. An uncertain stop remains Stopping or Unknown until
+the runtime confirms it. Agents can inspect `project.execution.status`; a registered
+PM can use `project.execution.choose` with an exact human instruction or approval.
 
 To stop the whole server, choose **Quit** in the tray menu or send `Ctrl-C` /
 `SIGTERM`; gwt drains its PTYs and exits gracefully. The tray-resident process
@@ -474,7 +526,8 @@ Managed hooks and project runtime delegation use `gwtd`. Opening a project
 starts or reconnects to its shared daemon, which owns agent panes and the Issue
 Monitor. A connection failure affects that project; the Hub and other projects
 remain available. GUI-managed daemons drain after the last GUI disconnects and
-a reconnect grace period expires. Closing one GUI does not kill a shared daemon.
+a reconnect grace period expires. An explicit Continue retains that project's
+runtime while admitted work is unfinished. Closing one GUI does not kill a shared daemon.
 An explicit JSON `daemon.start` keeps the daemon resident until it is stopped;
 it also makes an already GUI-managed daemon resident. `daemon.status` reports
 the current endpoint for diagnostics.
@@ -1050,6 +1103,91 @@ Use `source`, `task`, or `receipt` selectors with the corresponding `id` or
 `operation_id` to read one detail. These operations require the current project's
 registered PM and grant no Issue, Monitor, CI or approval authority. Automatic
 intake and the Tasks UI are not connected by this read API.
+
+The generated PM skill reconciles saved requests at startup, on each new human
+turn and in every resident cycle. It pins both ID lists to the summary revision,
+reads selected details, and uses `pm.request_tasks.apply` only for justified
+tracking changes with fresh conditions, review generation and revision checks.
+Uninitialized, unreadable or partially read tracking retains a degraded state;
+it does not establish that no requests remain. Temporary recovery and an empty
+Monitor queue do not complete the original request. This guidance covers saved
+tracking and selected native intake; automatic intake, legacy import, other user
+mutations and the Tasks UI remain separate work. Tracking itself does not launch
+Issues or change delivery gates.
+
+The project-scoped browser protocol supports `load_pm_request_task` for one
+saved `task_id` and an optional `receipt_operation_id`, and
+`reopen_pm_request_task` or `cancel_pm_request_task` with `operation_id`, `expected_revision`, `reason`
+and `task_id` inside `request`. Replies use `pm_request_task` and the caller's
+`request_id`. Reopening records the server-assigned browser user actor and
+returns the task to pending reassessment, including when the PM is stopped.
+Cancellation records the same user audit and marks the task cancelled rather
+than completed, invalidating its and its ancestors' previous completion evidence.
+After a connection loss, read the current task and original receipt: a new
+connection has a new actor, so replaying the old operation there is a conflict.
+The current task and the receipt's historical task state retain their own
+revisions. Missing or unreadable data returns a diagnostic and recovery read.
+Reading a receipt observes its recorded outcome; it does not acknowledge a new
+durable write.
+This transport adapter is available; the Tasks screen and checkbox controls
+are still pending.
+
+For selected native intake, the registered PM reads
+`selector:{kind:"native_turns"}` through `pm.request_tasks.read`. The result gives
+the current `provider`, `conversation_id` and eligible turn IDs with
+`prompt_sha256`, without originals. `window_only:true` and `detail` describe a
+bounded conversation window, not complete history or a durable cursor. Use
+`selector:{kind:"native_turn",provider:"<provider>",conversation_id:"<conversation>",id:"<id>"}`
+to read one original. Both native selectors work independently of unavailable
+Task tracking. To preserve that selected turn as an unclassified pending source,
+call `pm.request_tasks.capture` with `operation_id`, current `expected_revision`,
+`reason`, `provider`, `conversation_id`, `id` and `prompt_sha256`. The server
+resolves the original, source and actor; caller-supplied originals, sources,
+actors and authority are rejected. Resume/replay retains the native source
+identity; identical text with different native IDs remains distinct. Unavailable
+native data, an absent or not-yet-arrived ID, changed selection scope or changed
+digest causes no capture and remains degraded. Capture does not reset an
+unreadable Task store, create a Task or grant instruction or execution authority.
+The PM reads pending sources before using existing `decompose` or
+`classify_non_task`; questions are not execution Tasks.
+
+Incoming prompts in the registered PM are preserved before the latest Q&A receipt
+is replaced, including repeated text and questions. These are unverified input
+candidates, not authenticated human sources, Tasks or instruction authority. The
+reporting diagnostic exposes the current candidate ID. Candidates survive later
+prompts and PM replacement; a storage failure is returned as an error.
+The registered PM can discover candidates from every saved PM session through
+`pm.request_tasks.read` with `selector:{kind:"candidates",limit:50}`. Pages return
+only sorted IDs, `inventory_sha256` and `next_after`. Continue with that exact
+`after` and `expected_inventory_sha256`; a changed ID set returns `conflict`, so
+restart from the first page. Start again each cycle to find new observations.
+The token describes the observed ID set, not an atomic snapshot or authentication.
+Use `selector:{kind:"candidate",id:"<session digest>/<observation UUID>"}` to read
+one original with its unverified observation identity and content hash. Missing
+storage, unreadable storage and a missing candidate are distinct results. These
+reads retain the existing PM authority check, work independently of unavailable
+Task tracking and never consume candidates or modify storage. Returned originals
+remain untrusted input. Candidate-to-native identity reconciliation and automatic
+Task intake remain separate work. Candidate text or matching hashes must never
+be used to infer native identity for capture.
+
+The generated PM skill discovers these candidates at startup, on each new human
+turn and in every resident cycle, even when Task tracking is unavailable. It
+reads selected originals and retains incomplete discovery or recovery as degraded
+evidence; candidate text and matching hashes never establish human authority or
+authorize Task changes.
+
+Candidate detail reads accept at most 4 MiB of serialized JSON (including escapes),
+matching the PM native conversation record budget. Larger records return
+`candidate_too_large` with `limit_bytes` and a recovery selector. Use
+`selector:{kind:"candidate_chunk",id:"<session digest>/<observation UUID>",offset:0}`
+to recover raw JSON bytes in chunks of at most 48 KiB, encoded in `bytes_base64`.
+Continue at `next_offset` until it is null; an offset beyond the observed file length
+returns `invalid_request` with a restart selector. Each response is `unverified_raw`:
+assemble the bytes and validate the full schema, identity and content hash before
+using the record. `observed_total_bytes` is a length observation, not a snapshot;
+restart if the stored file changes while recovering it. Recovery retains the same
+registered-PM check and never changes the stored original or creates a Task.
 
 `policy.dependency_observations` retains every supplied Monitor inbox row, including
 repeated Issues, with its state and canonical dependency blockers, cycle flag and bundle
@@ -2164,6 +2302,13 @@ agents themselves, which otherwise only reads as a slow host. The block is
 present with no processes and no warning on platforms without Spotlight.
 
 ## Pending application updates
+
+Click **Check** beside the version in the header to query the latest release
+immediately. The result shows whether an update is available or why the check
+failed, including a retry time for rate limits. If a previous update restarted
+into the wrong version, the result names the expected version and the version
+recorded after that restart. It offers **Retry update** through the usual update
+dialog or **Manual install**.
 
 A downloaded update can remain staged while agents finish their work. The
 existing drain evaluates safety on the 15-second terminal convergence tick:

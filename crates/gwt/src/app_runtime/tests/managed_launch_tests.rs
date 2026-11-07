@@ -4556,8 +4556,21 @@ fn agent_clean_exit_frees_the_monitor_slot_like_an_error_does() {
             probe.pane.lock().unwrap().last_exit().unwrap().exit_code,
             u32::from(exit_code)
         );
-        owner_fixture_block_on(owner.wait_monitor_idle()).unwrap();
-        let monitor = owner_monitor_read(&repo, 42);
+        let monitor = owner_fixture_block_on(async {
+            // test-hygiene: allow-wall-clock-deadline Bounds actual Monitor/census convergence after the confirmed exit; observed state controls progress.
+            tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+                loop {
+                    owner.wait_monitor_idle().await.unwrap();
+                    let monitor = owner_monitor_read(&repo, 42);
+                    if monitor.active_count() == 0 && !monitor.prefs().failed_issues.is_empty() {
+                        break monitor;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the confirmed exit must release and notify its Monitor slot")
+        });
         assert_eq!(
             monitor.active_count(),
             0,
