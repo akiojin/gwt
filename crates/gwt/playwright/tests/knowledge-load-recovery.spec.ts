@@ -89,7 +89,7 @@ test("ordinary reconnect recovers a lost Knowledge cache reply in the mounted wi
     await expect(surface.getByRole("button", { name: /^Issue load failed/ })).toHaveCount(0);
 
     // Hold the real socket in the CLOSING-before-close observation window.
-    // The read stays in the app's real pending queue until ordinary reconnect.
+    // The read stays in the app's real pending queue until forced recovery.
     await page.clock.install();
     await page.clock.pauseAt(new Date(Date.now() + 1000));
     await page.evaluate(() => {
@@ -112,12 +112,17 @@ test("ordinary reconnect recovers a lost Knowledge cache reply in the mounted wi
     await expect(surface.getByRole("button", { name: /^Issue load failed/ })).toHaveCount(0);
     expect(requests.filter(request => request.kind === "load_knowledge_bridge")).toHaveLength(beforeQueued);
     replacement = undefined;
+    // Controlled inbound frames overflow the actual receive dispatcher and
+    // force socket recovery while the cache read is still in the real queue.
     await page.evaluate(() => {
       const socket = (window as any).__knowledgeQueuedSocket;
-      delete socket.readyState;
-      socket.close();
+      for (let index = 0; index <= 2048; index++) {
+        socket.dispatchEvent(new MessageEvent("message", {
+          data: JSON.stringify({ kind: "issue_monitor_inbox", items: [] }),
+        }));
+      }
     });
-    await page.clock.runFor(1000);
+    await page.clock.runFor(100);
     await page.clock.resume();
     await expect.poll(() => replacement?.reply, { timeout: 20_000 }).toBeDefined();
     expect(replacement!.reads).toHaveLength(1);
