@@ -447,7 +447,9 @@ mod tests {
     #[test]
     fn member_fixture() {
         if std::env::var_os("GWT_RECOVERY_MEMBER_FIXTURE").is_some() {
-            let _env = env_lock().lock().unwrap();
+            let _env = env_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let _source = std::env::var_os("GWT_RECOVERY_CLAIM_CLIENT").map(|_| {
                 let mut forged: serde_json::Value =
                     serde_json::from_str(&std::env::var(SOURCE_ENV).unwrap()).unwrap();
@@ -502,7 +504,9 @@ mod tests {
 
     #[test]
     fn broker_requires_live_origin_and_exact_native_job_membership() {
-        let _env = env_lock().lock().unwrap();
+        let _env = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut job = WindowsJobObject::new().unwrap();
         let source = RecoverySource::new(&job).unwrap();
         let descriptor = source.descriptor();
@@ -529,7 +533,9 @@ mod tests {
 
     #[test]
     fn foreign_query_handle_cannot_become_a_recovery_source() {
-        let _env = env_lock().lock().unwrap();
+        let _env = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut foreign = WindowsJobObject::new().unwrap();
         // A legitimate observer may transiently hold another pane's query-only
         // handle. Locating that handle must never grant recovery authority.
