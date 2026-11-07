@@ -6,6 +6,7 @@
 //! before reporting success. Preparing a candidate is not successful issuance.
 
 pub mod invite;
+pub mod registration;
 pub mod storage;
 
 pub mod admin;
@@ -163,6 +164,17 @@ impl CoordinatorRegistry {
         secret: &[u8],
         now: u64,
     ) -> Result<(), CredentialError> {
+        self.verify_expiry(identity, project, secret, now)
+            .map(|_| ())
+    }
+
+    fn verify_expiry(
+        &mut self,
+        identity: &CredentialIdentity,
+        project: &ProjectKey,
+        secret: &[u8],
+        now: u64,
+    ) -> Result<u64, CredentialError> {
         self.observe(now)?;
         let record = self
             .stored
@@ -182,7 +194,7 @@ impl CoordinatorRegistry {
         if now >= record.expires_at {
             return Err(CredentialError::Expired);
         }
-        Ok(())
+        Ok(record.expires_at)
     }
 
     /// Authority records remain unchanged; only the clock watermark advances.
