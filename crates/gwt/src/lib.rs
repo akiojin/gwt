@@ -80,6 +80,7 @@ pub mod project_execution_policy;
 pub mod project_notifications;
 pub mod project_open_control;
 pub mod project_runtime;
+pub mod project_store_maintenance;
 pub mod project_transport;
 pub mod protocol;
 pub mod provider_reset;

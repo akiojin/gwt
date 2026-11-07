@@ -381,6 +381,20 @@ gwtd <<'JSON'
 JSON
 ```
 
+`workspace.project_scan` は host endpoint の探索について、cache の利用、列挙した
+件数、経過ミリ秒を返します。消失した root と停止済み host は repository identity の
+解決前に除外します。共有 cache は候補一覧だけを保持し、endpoint とプロセスの状態は
+呼び出しごとに確認します。
+
+`workspace.project_prune` は既定で `~/.gwt/projects` の退避候補を調べるだけです。
+候補の hash と `manifest_hash` を確認し、その hash と `dry_run:false` を渡すと
+対象を `~/.gwt/project-quarantine/<id>/` へ移動します。ファイルは削除しません。
+開いている project、稼働中 Session、PM、直近の書き込み、未知・破損状態は保持します。
+走査中に稼働情報が変わったドライランは `protection_changed:true` を返します。
+適用時は保護対象を再読込し、その後の変化があれば中断します。計画が変わった場合は
+ドライランをやり直します。退避先の manifest に復元対象が残り、
+gwt を閉じた後、元の hash の保存先が存在しない場合だけ元へ移動して復元できます。
+
 `fleet.inventory` はプロジェクトの agent プロセス・pane・Monitor 行を1つの
 JSONレポートで返します。対応が取れない行、worktreeの重複、配信の判定根拠、
 一部の観測元が使えない場合の診断も含みます。`fleet.orphans` はpaneが観測されない
