@@ -4558,12 +4558,6 @@ fn apply_monitor_config_set(
     update_drain: Option<crate::IssueMonitorUpdateDrainControl>,
     caller_is_resident_pm: bool,
 ) -> io::Result<()> {
-    if max_active_auto && prefs.agent_roster.is_some() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Project Agent roster capacity is controlled by its enabled members",
-        ));
-    }
     validate_monitor_config_set(
         allowed_labels,
         enabled,
@@ -4825,8 +4819,8 @@ fn run_monitor_config_set<E: CliEnv>(
             "enabled": prefs.enabled,
             "autonomous_mode": prefs.autonomous_mode,
             "max_active": monitor.effective_max_active_agents(),
-            "max_active_agents_override": monitor.max_active_agents_override(),
-            "max_active_mode": prefs.max_active_agents_mode,
+            "max_active_agents_override": monitor.max_active_agents_policy().0,
+            "max_active_mode": if monitor.max_active_agents_policy().0.is_some() { "manual" } else { "auto" },
             "agent_capacity": monitor.status_view().agent_capacity,
             "auto_close_merged_issues": prefs.auto_close_merged_issues,
             "auto_close_merged_issues_effective": prefs

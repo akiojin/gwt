@@ -11,7 +11,8 @@ pub(super) enum PmRequestTaskOperation {
         task_id: String,
         receipt_operation_id: Option<String>,
     },
-    Reopen(gwt::protocol::PmRequestTaskReopenRequest),
+    Reopen(gwt::protocol::PmRequestTaskUserRequest),
+    Cancel(gwt::protocol::PmRequestTaskUserRequest),
 }
 
 fn task_error(code: &str, message: String, current_revision: Option<u64>) -> PmRequestTaskResult {
@@ -57,7 +58,8 @@ pub(super) fn rejected_request_task_events(
 ) -> Option<Vec<OutboundEvent>> {
     let (id, request_id) = match event {
         gwt::FrontendEvent::LoadPmRequestTask { id, request_id, .. }
-        | gwt::FrontendEvent::ReopenPmRequestTask { id, request_id, .. } => (id, *request_id),
+        | gwt::FrontendEvent::ReopenPmRequestTask { id, request_id, .. }
+        | gwt::FrontendEvent::CancelPmRequestTask { id, request_id, .. } => (id, *request_id),
         _ => return None,
     };
     Some(vec![OutboundEvent::reply(
@@ -79,7 +81,7 @@ fn request_task_result(
     client_id: &str,
     operation: PmRequestTaskOperation,
 ) -> Result<PmRequestTaskResult, TaskError> {
-    match operation {
+    let (request, action) = match operation {
         PmRequestTaskOperation::Read {
             task_id,
             receipt_operation_id,
@@ -98,46 +100,54 @@ fn request_task_result(
                     .cloned().map(Box::new)
                     .ok_or_else(|| TaskError::Invalid("operation receipt not found; retain the unresolved operation and reread the current task".into()))
             }).transpose()?;
-            Ok(PmRequestTaskResult::Ready {
+            return Ok(PmRequestTaskResult::Ready {
                 revision: state.revision,
                 task: Box::new(task),
                 receipt,
-            })
+            });
         }
         PmRequestTaskOperation::Reopen(request) => {
-            let receipt = store.apply(
-                &Actor {
-                    kind: ActorKind::User,
-                    id: format!("browser:{client_id}"),
-                },
-                &Request {
-                    operation_id: request.operation_id,
-                    expected_revision: request.expected_revision,
-                    reason: request.reason,
-                    action: Action::Reopen {
-                        task_id: request.task_id.clone(),
-                    },
-                },
-            )?;
-            // An exact retry returns its original applied snapshot, not a claim
-            // about current state. Read/receipt reconciliation observes that separately.
-            let task = receipt
-                .tasks
-                .iter()
-                .find(|task| task.draft.id == request.task_id)
-                .cloned()
-                .ok_or_else(|| {
-                    TaskError::PersistenceUnconfirmed(
-                        "reopen receipt is missing its task; reconcile the exact operation".into(),
-                    )
-                })?;
-            Ok(PmRequestTaskResult::Ready {
-                revision: receipt.revision,
-                task: Box::new(task),
-                receipt: Some(Box::new(receipt)),
-            })
+            let action = Action::Reopen {
+                task_id: request.task_id.clone(),
+            };
+            (request, action)
         }
-    }
+        PmRequestTaskOperation::Cancel(request) => {
+            let action = Action::Cancel {
+                task_id: request.task_id.clone(),
+            };
+            (request, action)
+        }
+    };
+    let receipt = store.apply(
+        &Actor {
+            kind: ActorKind::User,
+            id: format!("browser:{client_id}"),
+        },
+        &Request {
+            operation_id: request.operation_id,
+            expected_revision: request.expected_revision,
+            reason: request.reason,
+            action,
+        },
+    )?;
+    // An exact retry returns its original applied snapshot, not a claim
+    // about current state. Read/receipt reconciliation observes that separately.
+    let task = receipt
+        .tasks
+        .iter()
+        .find(|task| task.draft.id == request.task_id)
+        .cloned()
+        .ok_or_else(|| {
+            TaskError::PersistenceUnconfirmed(
+                "mutation receipt is missing its task; reconcile the exact operation".into(),
+            )
+        })?;
+    Ok(PmRequestTaskResult::Ready {
+        revision: receipt.revision,
+        task: Box::new(task),
+        receipt: Some(Box::new(receipt)),
+    })
 }
 
 fn empty(availability: PmConversationAvailability, detail: &str) -> PmConversationSnapshot {

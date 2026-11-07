@@ -906,7 +906,7 @@ impl AppRuntime {
                 .map_err(|error| error.to_string())
                 .and_then(|runtime| {
                     runtime.block_on(async {
-                        let client =
+                        let (client, _gui_presence) =
                             gwt::project_runtime::client::ProjectRuntimeClient::connect_for_gui(
                                 context.project_root.clone(),
                                 supervisor,
@@ -1172,7 +1172,7 @@ impl AppRuntime {
                 .map_err(|error| error.to_string())
                 .and_then(|executor| {
                     executor.block_on(async {
-                        let client =
+                        let (client, _gui_presence) =
                             gwt::project_runtime::client::ProjectRuntimeClient::connect_for_gui(
                                 context.project_root.clone(),
                                 supervisor,

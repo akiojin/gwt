@@ -949,12 +949,13 @@ mod tests {
             .expect("second lock file");
         first.lock_exclusive().expect("hold first lock");
         let started = Instant::now();
+        // The raw wrapper exposes no contention callback; real expiry is the
+        // behavior under test. Scheduler delays must not decide the verdict.
         let _deadline = ScopedOperationDeadline::enter(started + Duration::from_millis(40));
 
         let error = lock_exclusive(&second).expect_err("contended lock must time out");
 
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
-        assert!(started.elapsed() < Duration::from_secs(1));
         FileExt::unlock(&first).expect("unlock first lock");
     }
 
@@ -969,15 +970,37 @@ mod tests {
             .open(&path)
             .expect("second lock file");
         first.lock_exclusive().expect("hold first lock");
-        let _deadline = ScopedOperationDeadline::enter(Instant::now() + Duration::from_millis(40));
+        let (release, released) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            // test-hygiene: allow-wall-clock-deadline Release a stuck fixture lock if its callback is lost; never decides success.
+            let requested = released.recv_timeout(crate::deadline_budget::HANG_GUARD);
+            FileExt::unlock(&first).expect("unlock first lock");
+            requested
+        });
+        // test-hygiene: allow-wall-clock-deadline Keep host expiry in the past so only the injected operation clock decides this test.
+        let start = Instant::now() - Duration::from_secs(1);
+        let _clock = ScopedOperationClock::set(start);
+        // test-hygiene: allow-short-duration Logical expiry advances only after real OS lock contention.
+        let expiry = start + Duration::from_millis(40);
+        let _deadline = ScopedOperationDeadline::enter(expiry);
         let mut observed = 0;
+        let mut expired_clock = None;
 
-        let error = lock_exclusive_with_observer(&second, || observed += 1)
-            .expect_err("contended lock must time out");
+        let result = lock_exclusive_with_observer(&second, || {
+            assert_eq!(now(), start, "time stays fixed until real contention");
+            observed += 1;
+            expired_clock = Some(ScopedOperationClock::set(expiry));
+        });
+        let _ = release.send(());
+        holder
+            .join()
+            .expect("lock holder")
+            .expect("contention call finishes before the stuck-fixture guard");
+        let error = result.expect_err("contended lock must time out");
+        let _expired_clock = expired_clock.expect("advance the clock from real contention");
 
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert!(observed >= 1, "the exact call reports lock contention");
-        FileExt::unlock(&first).expect("unlock first lock");
     }
 
     #[test]

@@ -97,23 +97,27 @@ impl CapacityUpdate {
         let capacity = read_capacity(project_root);
         let fresh = capacity.is_fresh();
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project_root);
-        let monitor = match crate::load_issue_monitor_prefs(&prefs_path) {
-            Ok(prefs) => Some(crate::IssueMonitorState::with_prefs(
-                crate::IssueMonitorConfig::default(),
-                prefs,
-            )),
+        let monitor = match crate::load_issue_monitor_prefs(&prefs_path).and_then(|prefs| {
+            let roster_owned = prefs.agent_roster.is_some();
+            let policy = crate::machine_agent_settings::ensure_migrated()?;
+            let mut monitor =
+                crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+            monitor.apply_machine_policy(&policy);
+            Ok((monitor, roster_owned))
+        }) {
+            Ok(monitor) => Some(monitor),
             Err(error) => {
                 tracing::warn!(%error, "capacity display could not read Monitor prefs; retaining last valid mode");
                 previous.and_then(|value| value.limits).map(|(_, manual)| {
                     let mut monitor =
                         crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
                     monitor.set_max_active_agents_override(manual);
-                    monitor
+                    (monitor, false)
                 })
             }
         };
-        let limits = monitor.map(|mut monitor| {
-            if monitor.max_active_agents_override().is_none() {
+        let limits = monitor.map(|(mut monitor, roster_owned)| {
+            if !roster_owned && monitor.max_active_agents_policy().0.is_none() {
                 if let Some((limit, _)) = previous.and_then(|value| value.limits) {
                     monitor.config.max_active = limit;
                 }
@@ -121,7 +125,7 @@ impl CapacityUpdate {
             monitor.set_agent_capacity_for_project(project_root, capacity.clone());
             (
                 monitor.effective_max_active_agents(),
-                monitor.max_active_agents_override(),
+                monitor.max_active_agents_policy().0,
             )
         });
         Self {
@@ -171,6 +175,70 @@ mod notification_tests {
         renewed.limits = Some((3, Some(3)));
         assert!(renewed.changed_from(Some(&previous)));
         assert!(renewed.changed_from(None));
+    }
+
+    #[test]
+    fn roster_capacity_overlay_follows_machine_auto_and_retains_mode_on_read_failure() {
+        let _env = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let root = home.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let prefs = crate::IssueMonitorPrefs {
+            agent_roster: Some(
+                serde_json::from_value(serde_json::json!({
+                    "schema_version": 1, "revision": 1,
+                    "members": [{
+                        "agent_member_id": "00000000-0000-4000-8000-000000006732",
+                        "name": "Ada", "enabled": true, "agent_id": "codex",
+                        "created_at": "2026-11-04T00:00:00Z"
+                    }, {
+                        "agent_member_id": "00000000-0000-4000-8000-000000006733",
+                        "name": "Bob", "enabled": true, "agent_id": "codex",
+                        "created_at": "2026-11-04T00:00:00Z"
+                    }]
+                }))
+                .unwrap(),
+            ),
+            max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
+            max_active_agents: 2,
+            ..Default::default()
+        };
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&root),
+            &prefs,
+        )
+        .unwrap();
+        let sample = AgentCapacity {
+            measurement_complete: true,
+            recommended_worker_limit: 2,
+            ..Default::default()
+        };
+        let source = crate::issue_monitor::IssueMonitorMaxActiveChangeSource::Gui;
+        crate::machine_agent_settings::set(Some(1), source, "2026-11-04T00:00:00Z").unwrap();
+        let manual = CapacityUpdate::read_with(&root, None, |_| sample.clone());
+        assert_eq!(manual.limits, Some((1, Some(1))));
+        crate::machine_agent_settings::set(None, source, "2026-11-04T00:00:01Z").unwrap();
+        let auto = CapacityUpdate::read_with(&root, Some(&manual), |_| sample.clone());
+        assert_eq!(
+            auto.limits,
+            Some((2, None)),
+            "roster Manual prefs cannot undo machine Auto"
+        );
+
+        std::fs::write(crate::machine_agent_settings::path(), b"corrupt").unwrap();
+        let retained = CapacityUpdate::read_with(&root, Some(&manual), |_| sample.clone());
+        assert_eq!(
+            retained.limits, manual.limits,
+            "an unreadable policy retains the accepted mode"
+        );
+        let unknown = CapacityUpdate::read_with(&root, None, |_| sample);
+        assert_eq!(
+            unknown.limits, None,
+            "an unreadable policy is not confirmed Auto"
+        );
     }
 }
 

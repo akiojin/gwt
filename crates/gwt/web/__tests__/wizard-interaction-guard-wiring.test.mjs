@@ -821,7 +821,7 @@ test("wizard backend launch materialization state preserves pending feedback", (
 test("app forwards WebSocket connection state to the launch wizard surface", () => {
   assert.match(
     appSource,
-    /function\s+setConnectionState\(connected\)[\s\S]{0,500}?handleLaunchWizardTransportChange\(connected\)/,
+    /function\s+setConnectionState\(connected,\s*recoverSnapshots\s*=\s*false\)[\s\S]{0,500}?handleLaunchWizardTransportChange\(connected\)/,
     "expected reconnect epochs to reach the launch wizard pending-action state",
   );
 });
