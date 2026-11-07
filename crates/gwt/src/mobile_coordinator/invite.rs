@@ -252,6 +252,22 @@ impl InviteRegistry {
         Ok(())
     }
 
+    pub(super) fn close_scoped_connection(
+        &mut self,
+        scope: &InviteScope,
+        connection_id: Uuid,
+        now: Instant,
+    ) -> Result<(), InviteError> {
+        self.observe(now)?;
+        let record = self
+            .records
+            .iter_mut()
+            .find(|record| record.scope == *scope && record.connection_id == Some(connection_id))
+            .ok_or(InviteError::Unauthorized)?;
+        record.closed = true;
+        Ok(())
+    }
+
     /// Close all Projects in exactly this registration. A delayed close from
     /// an old registration must not close a newer generation or Host epoch.
     /// The adapter must also reject future operations from the dead registration.
