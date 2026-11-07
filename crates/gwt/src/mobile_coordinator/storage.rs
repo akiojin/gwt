@@ -45,6 +45,30 @@ pub enum StoreError {
     Io(#[from] io::Error),
 }
 
+/// Reject repository markers even when their symlink targets are unavailable.
+/// Callers supply a canonical directory whose ancestors are trusted.
+pub(crate) fn has_repository_marker(directory: &Path) -> Result<bool, StoreError> {
+    fn entry_present(path: &Path) -> Result<bool, StoreError> {
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    for ancestor in directory.ancestors() {
+        if entry_present(&ancestor.join(".git"))? {
+            return Ok(true);
+        }
+        let head = entry_present(&ancestor.join("HEAD"))?;
+        let refs = entry_present(&ancestor.join("refs"))?;
+        if head && refs {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Public metadata only; the bearer is returned exclusively through its file.
 #[derive(Debug)]
 pub struct IssuedCredential {
@@ -471,6 +495,28 @@ mod tests {
             serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         let secret = hex::decode(data["secret"].as_str().unwrap()).unwrap();
         (data, secret)
+    }
+
+    #[test]
+    fn repository_markers_require_both_bare_entries_and_propagate_metadata_errors() {
+        let dir = private_dir();
+        let child = dir.path().join("child");
+        std::fs::create_dir(&child).unwrap();
+        assert!(!has_repository_marker(&child).unwrap());
+        let head = dir.path().join("HEAD");
+        let refs = dir.path().join("refs");
+        symlink("missing-head", &head).unwrap();
+        assert!(!has_repository_marker(&child).unwrap());
+        symlink("missing-refs", &refs).unwrap();
+        assert!(has_repository_marker(&child).unwrap());
+        std::fs::remove_file(head).unwrap();
+        assert!(!has_repository_marker(&child).unwrap());
+        let file = dir.path().join("not-a-directory");
+        std::fs::write(&file, b"").unwrap();
+        assert!(matches!(
+            has_repository_marker(&file),
+            Err(StoreError::Io(_))
+        ));
     }
 
     #[test]

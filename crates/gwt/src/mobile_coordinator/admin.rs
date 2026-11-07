@@ -4,7 +4,7 @@
 //! ancestors. Storage is fixed below it, never selected by the JSON request.
 
 use super::{
-    storage::{open_directory, same_file, CoordinatorStore, StoreError},
+    storage::{has_repository_marker, open_directory, same_file, CoordinatorStore, StoreError},
     CredentialError,
 };
 use crate::mobile_connection::HostBinding;
@@ -166,7 +166,7 @@ pub fn run(
     let directory = paths[2]
         .canonicalize()
         .map_err(|_| AdminError::UnsafeHome)?;
-    if gwt_git::Repository::discover(&directory).is_ok() {
+    if has_repository_marker(&directory)? {
         return Err(AdminError::RepositoryStorage);
     }
     for (path, guard) in paths.iter().zip(&guards) {
@@ -473,6 +473,15 @@ mod tests {
         let home = home();
         let marker = home.path().join(".gwt/mobile/.git");
         fs::write(&marker, "gitdir: unused-test-marker").unwrap();
+        assert_eq!(
+            call(home.path(), json!({"operation":"initialize"}), NOW)
+                .unwrap_err()
+                .response()["code"],
+            "repository_storage"
+        );
+        assert_eq!(fs::read_dir(directory(home.path())).unwrap().count(), 0);
+        fs::remove_file(&marker).unwrap();
+        std::os::unix::fs::symlink("missing-git-directory", &marker).unwrap();
         assert_eq!(
             call(home.path(), json!({"operation":"initialize"}), NOW)
                 .unwrap_err()
