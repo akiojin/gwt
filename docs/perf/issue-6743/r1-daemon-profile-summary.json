@@ -1,0 +1,25 @@
+{
+  "pid": 36084,
+  "limitation": "Running-state snapshot races and profiler overhead; sample counts are not CPU seconds. Excluded from ten-minute CPU acceptance.",
+  "context_failures": 0,
+  "measurement_use": "Root-cause diagnosis only; excluded from CPU acceptance and collected before full cold-audit readiness gate.",
+  "started_at": "2026-11-04T17:19:18.4503182Z",
+  "requested_seconds": 60,
+  "source_profile": "crates\\gwt\\playwright\\test-results\\issue-5658-after-b35b97a259d14a6cb65a643bd5d27c5e\\idle-cpu-live-Issue-5658-i-7f2f9-authenticated-Ready-polling-chromium-dark\\native-daemon-profile.json",
+  "callers": {
+    "OwnerState::dispatch_agent_frontend": 73,
+    "monitor_duplicate_runtime::publish_counts": 5,
+    "OwnerState::request": 14
+  },
+  "sample_count": 137,
+  "binary": "E:\\gwt\\work\\issue-6743\\target\\debug\\gwtd.exe",
+  "source_sha256": "0f42d2cbfbb5b7a92d2b3206fb538a0608ca5cd384130b31a39555d641dca451",
+  "captured_at": "2026-11-04T17:23:38.3375782Z",
+  "binary_sha256": "3069a9276df448134a82207416ad4dfae1fc761d43a926d41d317c35f0d0b3a6",
+  "method": "AMD64 running-thread snapshot + SuspendThread/GetThreadContext/StackWalk64; symbol resolution after capture",
+  "elapsed_seconds": 60.4310003,
+  "start_epoch_inclusive_samples": 92,
+  "preserved_profile": "r1-daemon-profile.json",
+  "preserved_profile_sha256": "ce42135420f84b4d8df2d1cdb3735376a8a8217cb65d9ba6b1f50436e9581c56",
+  "preserved_profile_format": "LF-normalized JSON for Git; original capture bytes remain in the named source artifact"
+}

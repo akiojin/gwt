@@ -565,6 +565,8 @@ fn collect_sessions_with_clock(
         }
     }
     let confirmed_identity = |session: &gwt_agent::Session| {
+        #[cfg(test)]
+        CONFIRMED_IDENTITY_CALLS.with(|calls| calls.set(calls.get() + 1));
         let project = dunce::canonicalize(
             session
                 .project_state_root
@@ -582,67 +584,82 @@ fn collect_sessions_with_clock(
         // The resident PM has no roster member. Its canonical project-owned
         // container is the stable identity retained across restored Sessions.
         let worktree = dunce::canonicalize(&session.worktree_path).ok()?;
+        if !gwt::pm_registry::is_canonical_pm_worktree(&worktree) {
+            return None;
+        }
         let expected = gwt::pm_registry::pm_worktree_path_for_repo_path(&project);
-        (gwt::pm_registry::is_canonical_pm_worktree(&worktree)
-            && dunce::canonicalize(expected).ok().as_ref() == Some(&worktree))
-        .then_some((ConversationOwner::ProjectManager(worktree), project))
+        (dunce::canonicalize(expected).ok().as_ref() == Some(&worktree))
+            .then_some((ConversationOwner::ProjectManager(worktree), project))
     };
     let mut registered_pms = HashMap::<PathBuf, Option<String>>::new();
+    let mut conversation_decisions = HashMap::new();
     for (session, provider, agent_sid) in references {
-        let conversation_owners = owners
-            .get(&(provider, agent_sid.clone()))
-            .expect("every conversation reference has an owner");
-        let identity = conversation_owners
-            .first()
-            .and_then(|owner| confirmed_identity(owner));
-        let same_identity = identity.as_ref().is_some_and(|identity| {
-            conversation_owners
-                .iter()
-                .all(|owner| confirmed_identity(owner).as_ref() == Some(identity))
-        });
-        let ambiguous = conversation_owners.len() > 1 && !same_identity;
-        if !ambiguous && conversation_owners.len() > 1 {
-            // A restore can retain the same provider conversation across gwt
-            // Sessions. Prefer the registered PM, otherwise the newest exact
-            // project/member owner, and count the conversation only once.
-            // Ledger status is a display hint, never a proof of physical liveness.
-            let registered_pm = identity.as_ref().and_then(|(owner, project)| {
-                let ConversationOwner::ProjectManager(worktree) = owner else {
-                    return None;
+        let (ambiguous, selected_session_id) = conversation_decisions
+            .entry((provider, agent_sid.clone()))
+            .or_insert_with_key(|conversation_key| {
+                let conversation_owners = owners
+                    .get(conversation_key)
+                    .expect("every conversation reference has an owner");
+                let identity = conversation_owners
+                    .first()
+                    .filter(|_| conversation_owners.len() > 1)
+                    .and_then(|owner| confirmed_identity(owner));
+                let same_identity = identity.as_ref().is_some_and(|identity| {
+                    conversation_owners
+                        .iter()
+                        .all(|owner| confirmed_identity(owner).as_ref() == Some(identity))
+                });
+                let ambiguous = conversation_owners.len() > 1 && !same_identity;
+                let selected_session_id = if !ambiguous && conversation_owners.len() > 1 {
+                    // A restore can retain the same provider conversation across gwt
+                    // Sessions. Prefer the registered PM, otherwise the newest exact
+                    // project/member owner, and count the conversation only once.
+                    // Ledger status is a display hint, never a proof of physical liveness.
+                    let registered_pm = identity.as_ref().and_then(|(owner, project)| {
+                        let ConversationOwner::ProjectManager(worktree) = owner else {
+                            return None;
+                        };
+                        registered_pms
+                            .entry(project.clone())
+                            .or_insert_with(|| {
+                                let registration = gwt::pm_registry::load_pm_prefs(
+                                    &gwt::pm_registry::pm_prefs_path_for_repo_path(project),
+                                )
+                                .ok()?
+                                .registration?;
+                                (dunce::canonicalize(registration.worktree_path)
+                                    .ok()
+                                    .as_ref()
+                                    == Some(worktree))
+                                .then_some(registration.session_id)
+                            })
+                            .as_deref()
+                    });
+                    let selected = registered_pm
+                        .and_then(|id| conversation_owners.iter().find(|owner| owner.id == id))
+                        .or_else(|| {
+                            conversation_owners.iter().max_by(|a, b| {
+                                (a.created_at, a.updated_at, &a.id).cmp(&(
+                                    b.created_at,
+                                    b.updated_at,
+                                    &b.id,
+                                ))
+                            })
+                        })
+                        .expect("a shared conversation has owners");
+                    Some(selected.id.clone())
+                } else {
+                    None
                 };
-                registered_pms
-                    .entry(project.clone())
-                    .or_insert_with(|| {
-                        let registration = gwt::pm_registry::load_pm_prefs(
-                            &gwt::pm_registry::pm_prefs_path_for_repo_path(project),
-                        )
-                        .ok()?
-                        .registration?;
-                        (dunce::canonicalize(registration.worktree_path)
-                            .ok()
-                            .as_ref()
-                            == Some(worktree))
-                        .then_some(registration.session_id)
-                    })
-                    .as_deref()
+                (ambiguous, selected_session_id)
             });
-            let selected = registered_pm
-                .and_then(|id| conversation_owners.iter().find(|owner| owner.id == id))
-                .or_else(|| {
-                    conversation_owners.iter().max_by(|a, b| {
-                        (a.created_at, a.updated_at, &a.id).cmp(&(
-                            b.created_at,
-                            b.updated_at,
-                            &b.id,
-                        ))
-                    })
-                })
-                .expect("a shared conversation has owners");
-            if selected.id != session.id {
-                continue;
-            }
+        if selected_session_id
+            .as_ref()
+            .is_some_and(|selected| selected != &session.id)
+        {
+            continue;
         }
-        let usage_home = if ambiguous || agent_sid.is_empty() {
+        let usage_home = if *ambiguous || agent_sid.is_empty() {
             None
         } else {
             match provider {
@@ -691,6 +708,11 @@ fn collect_sessions_with_clock(
             usage
         })
         .collect()
+}
+
+#[cfg(test)]
+thread_local! {
+    static CONFIRMED_IDENTITY_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -767,6 +789,7 @@ mod tests {
             claude_account_enabled: false,
         };
         let mut cache = UsageCache::default();
+        let identity_calls_before = CONFIRMED_IDENTITY_CALLS.get();
         let rows = collect_sessions_with_clock(&config, &mut cache, || {
             // This append occurs after observation ends and belongs to the next poll.
             for (provider, _, path) in &paths {
@@ -779,6 +802,11 @@ mod tests {
             }
             observed
         });
+        assert_eq!(
+            CONFIRMED_IDENTITY_CALLS.get() - identity_calls_before,
+            0,
+            "singleton conversation owners need no identity comparison"
+        );
         assert_eq!(rows.len(), 2);
         for row in rows {
             let telemetry = row.telemetry.unwrap();
@@ -977,7 +1005,13 @@ mod tests {
             codex_enabled: false,
             claude_account_enabled: false,
         };
+        let identity_calls_before = CONFIRMED_IDENTITY_CALLS.get();
         let rows = collect_sessions_at(&config, &mut UsageCache::default(), now());
+        assert_eq!(
+            CONFIRMED_IDENTITY_CALLS.get() - identity_calls_before,
+            5,
+            "shared owner identities must be compared once per captured conversation group"
+        );
         let pm = rows
             .iter()
             .filter(|row| row.provider_session_id.as_deref() == Some("pm-conversation"))
