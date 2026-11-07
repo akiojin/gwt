@@ -4,7 +4,9 @@ use super::credential::{decode_host_credential, CredentialLoadError, LoadedHostC
 use crate::{
     mobile_connection::HostBinding,
     mobile_coordinator::{
-        storage::{open_directory, read_private_credential, same_file, StoreError},
+        storage::{
+            has_repository_marker, open_directory, read_private_credential, same_file, StoreError,
+        },
         CredentialIdentity,
     },
 };
@@ -73,7 +75,7 @@ impl MobileHostConfig {
             .map(|p| open_directory(p))
             .collect::<Result<Vec<_>, _>>()?;
         let directory = paths[2].canonicalize().map_err(StoreError::Io)?;
-        if gwt_git::Repository::discover(&directory).is_ok() {
+        if has_repository_marker(&directory)? {
             return Err(HostConfigError::RepositoryStorage);
         }
         let bytes = read_private_credential(&directory.join("config.json"))?;
@@ -269,6 +271,12 @@ mod tests {
         fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
         let marker = directory.join(".git");
         fs::write(&marker, "gitdir: unused-test-marker").unwrap();
+        assert!(matches!(
+            MobileHostConfig::load(home.path(), &binding, &project, || Ok(100)),
+            Err(HostConfigError::RepositoryStorage)
+        ));
+        fs::remove_file(&marker).unwrap();
+        std::os::unix::fs::symlink("missing-git-directory", &marker).unwrap();
         assert!(matches!(
             MobileHostConfig::load(home.path(), &binding, &project, || Ok(100)),
             Err(HostConfigError::RepositoryStorage)

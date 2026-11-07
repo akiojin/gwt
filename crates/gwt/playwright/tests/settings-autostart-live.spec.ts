@@ -22,24 +22,31 @@ test.describe("Autostart Settings (isolated live backend)", () => {
     await withLiveGwtBackendLock(BASE, info, async () => {
       const errors: string[] = [];
       const requests: string[] = [];
+      let preventedPmOpens = 0;
       let lostReply = false;
-      let recovered: { enabled: boolean } | undefined;
+      let reconnectRequested = false;
+      let replacement: { reads: number; reply?: { enabled: boolean } } | undefined;
       page.on("pageerror", error => errors.push(error.message));
       page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
       const theme = info.project.name.endsWith("light") ? "light" : "dark";
       await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
-      await page.routeWebSocket(/\/ws(?:\?|$)/, socket => {
+      await page.routeWebSocket(/\/ws\?.*repo_hash=/, socket => {
+        const connection: { reads: number; reply?: { enabled: boolean } } = { reads: 0 };
+        if (reconnectRequested && !replacement) replacement = connection;
         const server = socket.connectToServer();
         socket.onMessage(message => {
           const request = typeof message === "string" ? JSON.parse(message) : null;
           if (request?.kind) requests.push(request.kind);
+          // This read-only fixture never starts a resident PM.
+          if (request?.kind === "open_pm_agent") { preventedPmOpens++; return; }
+          if (request?.kind === "get_autostart_status") connection.reads++;
           server.send(message);
         });
         server.onMessage(message => {
           const reply = typeof message === "string" ? JSON.parse(message) : null;
           if (reply?.kind === "autostart_status") {
             if (!lostReply) { lostReply = true; return; }
-            recovered = reply;
+            connection.reply = reply;
           }
           // Show the provider draft controls without saving remote configuration.
           if (reply?.kind === "system_settings") socket.send(JSON.stringify({ ...reply, board_provider: "slack" }));
@@ -64,16 +71,17 @@ test.describe("Autostart Settings (isolated live backend)", () => {
       await port.blur();
       await client.evaluate(input => { (window as any).__settingsReconnectClient = input; });
       await port.evaluate(input => { (window as any).__settingsReconnectPort = input; });
+      reconnectRequested = true;
       await page.evaluate(() => {
         const socket = (window as any).__gwtPlaywrightSockets.findLast((socket: WebSocket) =>
           socket.readyState === WebSocket.OPEN && new URL(socket.url).searchParams.has("repo_hash"));
         if (!socket) throw new Error("missing owning project socket");
         socket.close();
       });
-      await expect.poll(() => requests.filter(kind => kind === "get_autostart_status").length).toBe(2);
-      await expect.poll(() => recovered).toBeDefined();
+      await expect.poll(() => replacement?.reply).toBeDefined();
+      expect(replacement!.reads, "one status read on the replacement project socket").toBe(1);
       await expect(toggle).toBeEnabled();
-      expect(await toggle.isChecked()).toBe(recovered!.enabled);
+      expect(await toggle.isChecked()).toBe(replacement!.reply!.enabled);
       await expect(status).toHaveText("");
       await expect(client).toHaveValue("unsaved-client-draft");
       await expect(port).toHaveValue("9876");
@@ -82,8 +90,13 @@ test.describe("Autostart Settings (isolated live backend)", () => {
       expect(requests.filter(kind => ["update_system_settings", "update_autostart", "set_auto_apply_updates",
         "update_board_provider_config", "update_board_oauth_port", "update_custom_agent", "delete_custom_agent"].includes(kind))).toEqual([]);
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      // Recovery is proven above, even when navigation has parked this live view.
+      await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "system" } })));
+      await expect(settings).toBeVisible();
+      expect(await client.evaluate(input => input.isConnected && input === (window as any).__settingsReconnectClient)).toBe(true);
+      expect(await port.evaluate(input => input.isConnected && input === (window as any).__settingsReconnectPort)).toBe(true);
       await info.attach(`settings-reconnect-${theme}`, { body: await settings.screenshot(), contentType: "image/png" });
-      await info.attach("Settings reconnect requests", { body: JSON.stringify(requests), contentType: "application/json" });
+      await info.attach("Settings reconnect requests", { body: JSON.stringify({ requests, preventedPmOpens }), contentType: "application/json" });
       expect(errors).toEqual([]);
     });
   });
@@ -289,14 +302,30 @@ test.describe("Autostart Settings (isolated live backend)", () => {
       await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
       const requests: any[] = [];
       let transport: WebSocketRoute | undefined;
-      await page.routeWebSocket(/\/ws(?:\?|$)/, socket => {
+      let recoverCatalog = false;
+      let preventedPmOpens = 0;
+      let replacement: { reads: number; replied: boolean } | undefined;
+      await page.routeWebSocket(/\/ws\?.*repo_hash=/, socket => {
+        const connection = { reads: 0, replied: false };
+        if (recoverCatalog && !replacement) replacement = connection;
         transport = socket;
         const server = socket.connectToServer();
         socket.onMessage(message => {
           const payload = typeof message === "string" ? JSON.parse(message) : null;
+          if (payload?.kind === "open_pm_agent") { preventedPmOpens++; return; }
           // Exercise the receiver and controls without persisting fixture agents.
           if (["list_custom_agents", "update_custom_agent", "delete_custom_agent"].includes(payload?.kind)) requests.push(payload);
           else server.send(message);
+          if (payload?.kind === "list_custom_agents") {
+            connection.reads++;
+            if (recoverCatalog && connection === replacement) {
+              socket.send(JSON.stringify({ kind: "custom_agent_list", agents: [recoveredAgent] }));
+              // Existing status receipt proves the following model frame has rendered.
+              socket.send(JSON.stringify({ kind: "backend_connection_result", models: ["fixture-model"] }));
+              connection.replied = true;
+              recoverCatalog = false;
+            }
+          }
         });
         server.onMessage(message => {
           const payload = typeof message === "string" ? JSON.parse(message) : null;
@@ -307,6 +336,8 @@ test.describe("Autostart Settings (isolated live backend)", () => {
       const agent = { id: "fixture-cli", display_name: "Fixture CLI", command: "fixture-command",
         default_args: ["--fixture"], mode_args: { normal: [], continue: ["--continue"], resume: ["--resume"] },
         skip_permissions_args: [], env: { FIXTURE_TOKEN: "***REDACTED***" } };
+      const recoveredAgent = { ...agent, display_name: "Recovered CLI", command: "recovered-command",
+        env: { FIXTURE_TOKEN: "server-saved-value" } };
       await gotoLiveGwt(page, BASE, { enableTestBridge: true });
       await openLiveGwtProject(page, PROJECT);
       await page.bringToFront();
@@ -365,6 +396,26 @@ test.describe("Autostart Settings (isolated live backend)", () => {
       await panel.getByLabel("Edit agent environment", { exact: true }).click();
       await expect(panel.getByLabel("Environment value", { exact: true })).toHaveValue("***REDACTED***");
       await panel.getByLabel("Environment value", { exact: true }).fill("fixture-updated-value");
+      await panel.getByLabel("Environment value", { exact: true }).evaluate(input => {
+        (window as any).__customAgentReconnectDraft = input;
+      });
+      recoverCatalog = true;
+      await page.evaluate(() => {
+        const socket = (window as any).__gwtPlaywrightSockets.findLast((socket: WebSocket) =>
+          socket.readyState === WebSocket.OPEN && new URL(socket.url).searchParams.has("repo_hash"));
+        if (!socket) throw new Error("missing owning project socket");
+        socket.close();
+      });
+      await expect.poll(() => replacement?.replied).toBe(true);
+      expect(replacement!.reads).toBe(1);
+      await expect(panel).toContainText("/v1/models returned 1 model(s).");
+      await expect(panel.getByLabel("Environment value", { exact: true })).toHaveValue("fixture-updated-value");
+      expect(await panel.getByLabel("Environment value", { exact: true }).evaluate(input =>
+        input.isConnected && input === (window as any).__customAgentReconnectDraft)).toBe(true);
+      expect(requests.filter(request => request.kind === "update_custom_agent")).toHaveLength(0);
+      // Resume editing the recovered live view if navigation has parked it.
+      await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "custom-agents" } })));
+      await expect(settings).toBeVisible();
       const savedEditor = await panel.getByLabel("Save environment changes", { exact: true }).evaluate(async button => {
         const panel = button.closest('[data-settings-panel="custom-agents"]')!;
         button.click();
@@ -380,13 +431,11 @@ test.describe("Autostart Settings (isolated live backend)", () => {
       await panel.getByLabel("Cancel environment editing", { exact: true }).click();
       await expect(panel).toContainText("Saving custom agent…");
       await expect.poll(() => requests.filter(request => request.kind === "update_custom_agent").length).toBe(1);
-      expect(requests.find(request => request.kind === "update_custom_agent").agent).toEqual({ ...agent,
-        display_name: "Fallback custom agent", env: { FIXTURE_TOKEN: "fixture-updated-value" } });
+      expect(requests.find(request => request.kind === "update_custom_agent").agent).toEqual({ ...recoveredAgent,
+        env: { FIXTURE_TOKEN: "fixture-updated-value" } });
       reply({ kind: "custom_agent_saved", agent: { ...agent, display_name: "Updated CLI" } });
       await expect(panel).toContainText("Updated CLI");
       await expect(panel).toContainText('Saved custom agent "fixture-cli".');
-      reply({ kind: "backend_connection_result", models: ["fixture-model"] });
-      await expect(panel).toContainText("/v1/models returned 1 model(s).");
       reply({ kind: "custom_agent_error", code: "invalid", message: "Fixture rejected" });
       await expect(panel).toContainText("Error [invalid]: Fixture rejected");
       page.once("dialog", dialog => dialog.accept());
@@ -405,6 +454,7 @@ test.describe("Autostart Settings (isolated live backend)", () => {
       await expect(panel).toContainText("Fixture CLI");
       expect(requests.filter(request => ["update_custom_agent", "delete_custom_agent"].includes(request.kind))).toHaveLength(2);
       await info.attach(`custom-agents-${theme}`, { body: await settings.screenshot(), contentType: "image/png" });
+      await info.attach("Custom Agent reconnect requests", { body: JSON.stringify({ requests, preventedPmOpens }), contentType: "application/json" });
       expect(errors).toEqual([]);
     });
   });
