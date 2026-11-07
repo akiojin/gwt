@@ -171,4 +171,3 @@ Module._resolveFilename = function(request, parent, ...rest) {
     if ($gui -and !$stopped) { throw 'Owned GUI failed to stop.' }
 }
 exit $exitCode
-

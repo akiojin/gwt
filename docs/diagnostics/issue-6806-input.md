@@ -109,3 +109,27 @@ User Verification Result: n/a (autonomous)
 Agent Visual Check: recorded separately in the owner Issue's canonical evidence.
 Coverage: unmeasured locally; the required CI gates decide coverage for the PR SHA
 (gwt-core + gwt 90%, remaining domain crates 80%, configured outer-shell exclusions).
+
+## 2026-11-07 resumed verification
+
+The existing repair was retained and develop was merged at `f3be57925` to include
+the Windows verification recovery/source-authority repair from PR #6829. An
+independent read-only review found no blocking lock-order, exact-ACK, discard,
+ownership or input-hint defect. No additional production change was required.
+
+The unchanged assertions and timeouts passed all 24 direct headed Chromium cases
+on Windows, covering continuity, disconnected-input discard and scrollback in
+both themes. The real-PTY observation lasted 181,978 ms in dark and 182,491 ms in
+light (total test times 190,251 ms and 189,934 ms). Each theme accepted exactly
+six quiet-control lines and twelve streaming-pane lines, with ordered synthetic
+WebSocket input, child stdin receipts, application ACKs and no console/page
+errors. Resize and a fresh browser/WebSocket connection were exercised.
+
+Evidence: `target/issue6806-relaunch-headed.log` and
+`target/issue-6806-home-13ea2b525556445699f2c8f9fd368168`, including both trace
+attachments and `shutdown.json` confirming that owned GUI PID 12552 stopped.
+The earlier dark state-observation/scroll failures did not recur. Their exact
+cause remains unproven, so neither production code nor fixture assertions were
+changed to conceal them. The final pushed HEAD is verified separately through
+the complete canonical matrix; its record and delivery result belong in the
+owner Issue and PR. The existing limits above still apply.
