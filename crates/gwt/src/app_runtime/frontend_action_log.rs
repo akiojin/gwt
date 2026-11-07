@@ -683,6 +683,9 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::CancelPmRequestTask { id, .. } => {
             FrontendUserActionLog::new("cancel_pm_request_task", "pm").window(id)
         }
+        FrontendEvent::UpdatePmRequestTask { id, .. } => {
+            FrontendUserActionLog::new("update_pm_request_task", "pm").window(id)
+        }
         FrontendEvent::PmPaneSendInput { window_id, .. } => {
             FrontendUserActionLog::new("pm_pane_send_input", "terminal").target(window_id)
         }
