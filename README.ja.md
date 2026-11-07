@@ -309,12 +309,54 @@ Project key は小文字 16 進数 16 文字の正規識別子です。未知 fi
 path・secret・時計上書きは request field にありません。発行成功時の応答は公開 identity と
 私有資格 file の path だけで、bearer は file 内に保持します。Git・log・URL・shell 引数へ
 秘密を載せないでください。この資格は将来の Host 登録用であり、端末承認や terminal 入力の
-権限ではありません。Host import とオンライン登録はまだ利用できません。
+権限ではありません。オンライン登録はまだ利用できません。
 
 管理中は台帳と別の lock を保持します。`busy` なら coordinator または他の管理 process を
 停止して再試行します。`commit_uncertain` なら `status` で現在の記録を確認してから判断し、
 自動再発行しないでください。私有保存や時計の error は表示された前提条件を修復して
 再試行し、台帳や失効記録は削除しないでください。`--help` でも field と保存条件を確認できます。
+
+#### PC 資格の offline import と点検（Unix、source build）
+
+PC で `cargo build -p gwt --bin gwt-mobile-host` を実行します。repository 外に
+ユーザー所有・mode `0700` の `$HOME/.gwt`、`$HOME/.gwt/mobile`、
+`$HOME/.gwt/mobile/host` を用意し、symlink と macOS の拡張 ACL entry を使わず、
+祖先を信頼できる非置換の状態に保ちます。発行済み source file も repository 外の
+私有領域に置き、`0600`・single-link regular file・私有 parent を満たしてください。
+コマンドは directory 作成や権限修復を行いません。
+
+期待する Host/origin/Project は source file と独立に指定します。
+
+```sh
+printf '%s\n' '{"schema_version":1,"command":{"operation":"import","source":"/private/issued/host-credential.json","binding":{"host_id":"11111111-1111-4111-8111-111111111111","coordinator_origin":"https://coordinator.example"},"project":"0123456789abcdef"}}' |
+  target/debug/gwt-mobile-host
+```
+
+例の公開識別子・origin・source path は実際の値へ置き換えます。request は標準入力で
+渡します（最大 16 KiB）。秘密・時計上書き・destination path・有効化 field は受け付けません。
+成功応答は公開 identity と immutable な私有 copy の path だけです。既 copy の置換、
+選択資格・登録・enable 状態・端末承認の変更は行いません。
+
+copy を明示選択して点検するには、私有 mode `0600` の
+`$HOME/.gwt/mobile/host/config.json` を作成します。identity は信頼できない資格から
+推測せず、coordinator の発行 receipt にある公開 identity を指定してください。
+
+```json
+{"schema_version":1,"binding":{"host_id":"11111111-1111-4111-8111-111111111111","coordinator_origin":"https://coordinator.example"},"project":"0123456789abcdef","identity":{"host_id":"11111111-1111-4111-8111-111111111111","credential_id":"22222222-2222-4222-8222-222222222222","generation":"33333333-3333-4333-8333-333333333333"}}
+```
+
+```sh
+printf '%s\n' '{"schema_version":1,"command":{"operation":"inspect","binding":{"host_id":"11111111-1111-4111-8111-111111111111","coordinator_origin":"https://coordinator.example"},"project":"0123456789abcdef"}}' |
+  target/debug/gwt-mobile-host
+```
+
+点検応答は公開 identity・binding・project・期限だけです。scope/identity 不一致、期限切れ、
+私有保存条件違反は拒否します。`already_exists` または `commit_uncertain` では、期待する
+発行 identity を明示設定して `inspect` を実行し、結果を見て復旧を判断してください。
+自動再試行・copy 削除・再発行は行いません。不正な設定・私有保存の前提・時計は明示的に
+修復してから再点検します。両操作とも通信を開始せず、現在の台帳上の発行・失効状態や
+登録成功を証明しません。Windows の私有保存には未対応です。`--help` でも request と
+保存条件を確認できます。
 
 ### `gwt serve` 廃止について
 
