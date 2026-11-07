@@ -6689,8 +6689,8 @@ fn app_runtime_monitor_live_native_writer_survives_waits_and_read_errors() {
             fixture
                 .runtime
                 .live_issue_agent_window("tab-1", 3165, "work/issue-3165"),
-            Some(window_id.clone()),
-            "{status:?}"
+            None,
+            "{status:?}: native writer reservation alone cannot send an owner ACK"
         );
     }
     fixture
