@@ -215,6 +215,37 @@ fn gui_connection_holds_presence_through_its_operation() {
     use gwt::project_runtime::{client::ProjectRuntimeClient, events::OwnerCommand};
     let fixture = RealOwnerFixture::start(None);
     let _home = gwt_core::test_support::ScopedGwtHome::set(&fixture.home);
+    let caller = fixture._temp.path().join("sibling");
+    assert!(gwt_core::process::hidden_command("git")
+        .args(["clone", "--quiet"])
+        .arg(&fixture.repo)
+        .arg(&caller)
+        .status()
+        .unwrap()
+        .success());
+    assert!(gwt_core::process::hidden_command("git")
+        .args([
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/example/owner-runtime-fixture.git"
+        ])
+        .current_dir(&caller)
+        .status()
+        .unwrap()
+        .success());
+    let caller_scope = RuntimeScope::from_project_root(&caller, RuntimeTarget::Host).unwrap();
+    assert_eq!(caller_scope.repo_hash, fixture.scope.repo_hash);
+    assert_ne!(caller_scope.worktree_hash, fixture.scope.worktree_hash);
+    let caller_endpoint = caller_scope.endpoint_path(&fixture.home.join(".gwt"));
+    assert!(!caller_endpoint.exists());
+    let mut endpoint = fixture.endpoint.clone();
+    endpoint["daemon_version"] = json!(format!(" v{} ", env!("CARGO_PKG_VERSION")));
+    gwt_core::atomic_file::write_atomic(
+        &fixture.endpoint_path,
+        &serde_json::to_vec(&endpoint).unwrap(),
+    )
+    .unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -224,8 +255,13 @@ fn gui_connection_holds_presence_through_its_operation() {
             ProjectRuntimeClient::from_current_project(&fixture.repo, &fixture.home.join(".gwt"))
                 .await
                 .unwrap();
+        let sibling =
+            ProjectRuntimeClient::from_current_project(&caller, &fixture.home.join(".gwt"))
+                .await
+                .expect("a sibling worktree must discover the existing project owner");
+        assert_eq!(sibling.identity(), observer.identity());
         let connection = ProjectRuntimeClient::connect_for_gui(
-            fixture.repo.clone(),
+            caller,
             std::sync::Arc::new(gwt::daemon_supervisor::DaemonSupervisor::disabled()),
         )
         .await
@@ -248,6 +284,21 @@ fn gui_connection_holds_presence_through_its_operation() {
             during["gui_presence_count"], 1,
             "a launch connection must acquire residency before returning to its worker"
         );
+        assert!(
+            !caller_endpoint.exists(),
+            "discovery must not create an alias"
+        );
+        endpoint["daemon_version"] = json!("0.0.0");
+        let stale = serde_json::to_vec(&endpoint).unwrap();
+        gwt_core::atomic_file::write_atomic(&fixture.endpoint_path, &stale).unwrap();
+        assert!(ProjectRuntimeClient::from_current_project(
+            &fixture.repo,
+            &fixture.home.join(".gwt")
+        )
+        .await
+        .is_err());
+        assert_eq!(fs::read(&fixture.endpoint_path).unwrap(), stale);
+        assert!(gwt::process::is_process_alive(fixture.child.0.id()));
     });
 }
 
