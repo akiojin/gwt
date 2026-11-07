@@ -531,8 +531,6 @@ mod tests {
 
     #[cfg(unix)]
     fn selected_orphan(worktree: &Path) -> (OwnedChild, Value, FleetTarget) {
-        use std::os::unix::process::CommandExt;
-
         std::fs::create_dir_all(worktree).unwrap();
         crate::cli::trusted_store::init_git_repo_with_origin(worktree);
         let mut session =
@@ -540,7 +538,7 @@ mod tests {
         session.id = "orphan-session".into();
         session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
         let executable = worktree.join("codex");
-        std::fs::copy("/bin/cat", &executable).unwrap();
+        std::fs::copy("/bin/sh", &executable).unwrap();
         #[cfg(target_os = "macos")]
         {
             // Relocated system binaries retain a platform signature that can
@@ -556,8 +554,11 @@ mod tests {
         let mut child = OwnedChild(
             resolved_command(ProcessPlanRequest::new(&executable))
                 .unwrap()
-                // Multicall coreutils selects the cat applet by argv[0].
-                .arg0("cat")
+                // A builtin echo loop keeps this executable alive as codex.
+                .args([
+                    "-c",
+                    r#"while IFS= read -r line; do printf '%s\n' "$line"; done"#,
+                ])
                 .current_dir(worktree)
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
