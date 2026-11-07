@@ -34,7 +34,6 @@ short-wall-clock|crates/gwt-core/src/coordination.rs|replace_retry_schedule_fits
 short-wall-clock|crates/gwt-core/src/coordination.rs|replace_retry_schedule_starts_small_and_grows
 short-wall-clock|crates/gwt-core/src/index_coordinator.rs|a_deferred_claimant_keeps_its_place_and_the_queue_shows_it
 short-wall-clock|crates/gwt-core/src/index_coordinator.rs|a_newcomer_queues_behind_the_waiter
-short-wall-clock|crates/gwt-core/src/index_coordinator.rs|background_defers_while_higher_priority_claimant_is_pending
 short-wall-clock|crates/gwt-core/src/index_coordinator.rs|lease_extension_pushes_the_expiry_out
 short-wall-clock|crates/gwt-core/src/index_coordinator.rs|wait_until
 short-wall-clock|crates/gwt-core/src/operation_deadline.rs|contended_file_lock_stops_at_the_shared_deadline
