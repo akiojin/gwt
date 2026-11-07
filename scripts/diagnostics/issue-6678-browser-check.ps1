@@ -33,6 +33,11 @@ function Assert-Preflight($Doctor) {
 
 Push-Location -LiteralPath $checkout
 try {
+    $pythonCommand = if ($IsWindows) { 'python' } else { 'python3' }
+    $pythonApp = Get-Command $pythonCommand -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (!$pythonApp) { throw "$pythonCommand must be on PATH for locked log seeding." }
+    & ($pythonApp.Source) -I -c "import importlib, os; importlib.import_module('msvcrt' if os.name == 'nt' else 'fcntl')"
+    if ($LASTEXITCODE -ne 0) { throw "$pythonCommand must provide the standard file-lock module for log seeding." }
     $cargoArtifacts = & cargo build -p gwt --bin gwt --bin gwtd --target-dir (Join-Path $checkout 'target') --message-format=json
     if ($LASTEXITCODE -ne 0) { throw 'cargo build failed; checkout binaries are not fresh.' }
     $executables = @{}
