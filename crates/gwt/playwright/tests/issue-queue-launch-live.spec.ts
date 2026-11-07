@@ -230,7 +230,9 @@ test.describe("Issue queue real backend launch", () => {
       expect(unfinishedWork.status_category).not.toMatch(/done|blocked/);
       expect(fixture.executionStatus(source.cwd).ecr_status).toBe("active");
       await current.close();
-      await fixture.restart();
+      await fixture.restartHost();
+      expect(Number.isSafeInteger(sourceAssignment.host_pid) && sourceAssignment.host_pid > 0).toBe(true);
+      expect(fixture.processAlive(sourceAssignment.host_pid)).toBe(false);
       current = await page.context().newPage();
       capture(current);
       await current.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
@@ -765,7 +767,9 @@ test.describe("Issue queue real backend launch", () => {
     page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
     const theme = info.project.name.includes("light") ? "light" : "dark";
     try {
-      await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+      await page.addInitScript(theme => {
+        if (location.protocol === "http:" || location.protocol === "https:") localStorage.setItem("gwt:ui:theme", theme);
+      }, theme);
       await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       await sendLiveGwtEvent(page, { kind: "create_window", preset: "issue",
@@ -815,12 +819,14 @@ test.describe("Issue queue real backend launch", () => {
       // initialization script on an opaque about:blank origin.
       const context = page.context();
       await page.close();
-      await fixture.restart();
+      await fixture.restartHost();
       expect(fixture.ownedPid).not.toBe(previousPid);
       const restored = await context.newPage();
       restored.on("pageerror", error => errors.push(error.message));
       restored.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
-      await restored.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+      await restored.addInitScript(theme => {
+        if (location.protocol === "http:" || location.protocol === "https:") localStorage.setItem("gwt:ui:theme", theme);
+      }, theme);
       await gotoLiveGwt(restored, fixture.url, { enableTestBridge: true });
       await expect(restored.locator("html")).toHaveAttribute("data-theme", theme);
       await expect.poll(() => {
@@ -837,12 +843,15 @@ test.describe("Issue queue real backend launch", () => {
       expect(restoreSummary.reasons).toContain("execution_blocked");
       await expect.poll(async () => (await agentWindow(restored))?.status,
         { timeout: 60_000, message: "Blocked Session keeps its stopped diagnostic window" }).toBe("stopped");
+      const retained = await agentWindow(restored);
+      expect(retained.session_id).toBe(launch.gwt_session_id);
+      expect(typeof retained.id === "string" && retained.id.length > 0).toBe(true);
       // The stopped diagnostic remains in the catalog; Works only shows live census members.
-      await expect(restored.locator(`.workspace-window[data-id="${windowId}"]`)).toHaveCount(1);
+      await expect(restored.locator(`.workspace-window[data-id="${retained.id}"]`)).toHaveCount(1);
       await restored.locator('.op-rail__surface[data-surface="works"]').click();
       if (await restored.locator(".works-surface:not(.works-surface--preview) .works-full:not([hidden])").isVisible())
         await restored.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
-      await expect(restored.locator(`.work-row[data-window-id="${windowId}"]`)).toHaveCount(0);
+      await expect(restored.locator(`.work-row[data-window-id="${retained.id}"]`)).toHaveCount(0);
       await expect(restored.locator(".works-empty")).toHaveText("No local agents are active.");
       expect(await fixture.launches(), "Blocked generation must not launch another provider after restore completes").toHaveLength(1);
       expect(fixture.executionStatus(launch.cwd).ecr_status).toBe("blocked");
@@ -879,7 +888,9 @@ test.describe("Issue queue real backend launch", () => {
         .find((window: any) => window.session_id === sessionId);
     }, sessionId);
     try {
-      await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+      await page.addInitScript(theme => {
+        if (location.protocol === "http:" || location.protocol === "https:") localStorage.setItem("gwt:ui:theme", theme);
+      }, theme);
       await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       await sendLiveGwtEvent(page, { kind: "issue_monitor_queue_push", issue_numbers: [fixture.issueNumber] });
@@ -915,7 +926,9 @@ test.describe("Issue queue real backend launch", () => {
       await fixture.restart();
       const restored = await context.newPage();
       capture(restored);
-      await restored.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+      await restored.addInitScript(theme => {
+        if (location.protocol === "http:" || location.protocol === "https:") localStorage.setItem("gwt:ui:theme", theme);
+      }, theme);
       await gotoLiveGwt(restored, fixture.url, { enableTestBridge: true });
       await expect(restored.locator("html")).toHaveAttribute("data-theme", theme);
       await expect.poll(() => fixture.startupReport().startup_id !== previousStartup

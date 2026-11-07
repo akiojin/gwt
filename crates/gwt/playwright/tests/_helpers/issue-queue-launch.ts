@@ -391,6 +391,20 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
     executionStatus: (cwd: string) => readOperation("execution.status", cwd),
     terminalExecutionStatus: (cwd: string) => readOperation("execution.status", cwd, true),
     startupReport: () => readOperation("perf.startup", active.project).startup,
+    async restartHost() {
+      const current = daemon;
+      if (!current?.pid || current.exitCode !== null || current.signalCode !== null)
+        throw new Error("Fixture Host restart requires its live owned daemon");
+      await active.stop(async () => {
+        await stopDaemon();
+        const exited = current.exitCode !== null || current.signalCode !== null;
+        await info.attach("fixture-owned-host-restart", {
+          body: JSON.stringify({ pid: current.pid, exited }), contentType: "application/json",
+        });
+        if (!exited) throw new Error(`Owned fixture daemon ${current.pid} remained before restart`);
+      });
+      return active.restart();
+    },
     async stop() {
       try { await active.stop(); }
       finally {

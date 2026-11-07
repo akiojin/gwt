@@ -499,8 +499,9 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     if (result.status !== 0 || paths.length !== 1 || !paths[0]) throw new Error(`Unknown PID ${pid} cwd`);
     return realpath(paths[0]);
   };
-  async function stop() {
+  async function stop(afterGuiStop?: () => Promise<void>) {
     let browserError: Error | undefined;
+    let afterGuiStopError: Error | undefined;
     if (setup.page && url) {
       try {
         const origin = new URL(url).origin;
@@ -511,7 +512,8 @@ readline.createInterface({input:process.stdin}).on('line', line => {
         browserError = new Error("Fixture browser unload failed");
       }
     }
-    const ownedPid = child?.pid;
+    const ownedGui = child;
+    const ownedPid = ownedGui?.pid;
     const ownerObservationSupported = process.platform === "darwin" || process.platform === "linux";
     const providerPaths = [join(bin, windows ? "codex.cjs" : "codex"), join(bin, windows ? "claude.cjs" : "claude")];
     let owner: { pid: number; birth: number; instance: string; startup_intent: "gui_managed" | "standalone"; natural: boolean | null } | null = null;
@@ -596,6 +598,15 @@ readline.createInterface({input:process.stdin}).on('line', line => {
           while (current.exitCode === null && current.signalCode === null && Date.now() < forcedDeadline) await delay(100);
         }
       }
+      if (afterGuiStop) {
+        try {
+          if (!ownedGui?.pid || child !== ownedGui || (ownedGui.exitCode === null && ownedGui.signalCode === null))
+            throw new Error("Fixture GUI exit is unconfirmed before Host drain");
+          await afterGuiStop();
+        } catch (error) {
+          afterGuiStopError = error instanceof Error ? error : new Error("Fixture post-GUI shutdown callback failed");
+        }
+      }
       if (owner?.startup_intent === "gui_managed") {
         try {
           const deadline = performance.now() + 30_000;
@@ -661,10 +672,13 @@ readline.createInterface({input:process.stdin}).on('line', line => {
       }
       child = undefined;
     } catch (error) {
-      const errors = [browserError, ownerError].filter((failure): failure is Error => failure !== undefined);
+      const errors = [browserError, ownerError, afterGuiStopError].filter((failure): failure is Error => failure !== undefined);
       if (!errors.length) throw error;
       throw new AggregateError([...errors, new Error("Fixture physical cleanup failed")], "Fixture cleanup failed");
     }
+    if (afterGuiStopError) throw new AggregateError(
+      [browserError, ownerError, afterGuiStopError].filter((failure): failure is Error => failure !== undefined),
+      "Fixture post-GUI shutdown cleanup failed");
     if (browserError && ownerError) throw new AggregateError([browserError, ownerError], "Fixture browser and owner cleanup failed");
     if (browserError) throw browserError;
     if (ownerError) throw ownerError;
