@@ -25,6 +25,7 @@
 import { createInteractionGuard } from "/interaction-guard.js";
 import { renderIndexSettingsPanel } from "/index-settings-panel.js";
 import { renderCustomAgentEnvEditor } from "/custom-agent-env-editor.js";
+import { renderHookCenterPanel, hookRepairUnavailableReason } from "/hook-center-panel.js";
 import { createUiStateStore } from "./ui-state-store.js";
 import { bindControlExplanations, setControlExplanation } from "./control-explanations.js";
 
@@ -925,6 +926,49 @@ export function createSettingsSurface({
       // Renderer cache only: the model remains the sole source of settings values.
       const renderedSystemPanels = new WeakMap();
       const settingsWindowBodies = new Set();
+      const hookDoctorModel = createUiStateStore({}, { scheduleFrame });
+      let nextHookDoctorRequest = 0;
+      function requestHookDoctor(projectRoot, repair = false, recovering = false) {
+        if (!projectRoot || projectRoot !== activeProjectTab()?.project_root) return;
+        const current = hookDoctorModel.read()[projectRoot];
+        if (repair && hookRepairUnavailableReason(current)) return;
+        if (!recovering && current?.pending) return;
+        const requestId = ++nextHookDoctorRequest;
+        hookDoctorModel.update(state => ({ ...state, [projectRoot]: {
+          report: null, error: null, requestId, pending: true, repairRequested: repair,
+          lastRepairOutcome: repair ? "unknown" : current?.lastRepairOutcome ?? null,
+        } }));
+        const result = send({ kind: "get_hook_doctor", request_id: requestId, repair });
+        if (repair && result === "unavailable") hookDoctorModel.update(state => ({ ...state, [projectRoot]: {
+          ...state[projectRoot], pending: false,
+          error: "Repair could not be confirmed on this connection. Reconnect and refresh the audit; the repair will not be retried automatically.",
+        } }));
+      }
+      function applyHookDoctorEvent(event) {
+        const current = hookDoctorModel.read()[event.project_root];
+        if (!current?.pending || current.requestId !== event.request_id) return;
+        hookDoctorModel.update(state => ({ ...state, [event.project_root]: {
+          ...current, pending: false, report: event.report || null,
+          error: event.error || (event.report ? null : "Hook audit did not return a report."),
+          lastRepairOutcome: current.repairRequested
+            ? !event.error && event.report?.repair?.repaired === true ? "regenerated"
+              : !event.error && event.report?.repair?.repaired === false ? "no_changes" : "unknown"
+            : current.lastRepairOutcome,
+        } }));
+      }
+      function renderHookCenterPanels(state = hookDoctorModel.read()) {
+        purgeDetachedSettingsBodies();
+        for (const body of settingsWindowBodies) {
+          const panel = body.querySelector('[data-settings-panel="hooks"]');
+          if (!panel) continue;
+          const root = body.dataset.settingsProjectRoot || "";
+          renderHookCenterPanel(panel, {
+            projectRoot: root, state: state[root], available: Boolean(root && root === activeProjectTab()?.project_root),
+            onRefresh: () => requestHookDoctor(root), onRepair: () => requestHookDoctor(root, true),
+          });
+        }
+      }
+      hookDoctorModel.subscribeFrame(state => state, renderHookCenterPanels);
       agentBackendsModel.subscribeFrame(state => state, state => {
         renderAgentBackendsPanelInAllSettingsWindows(state);
       });
@@ -1206,6 +1250,15 @@ export function createSettingsSurface({
         }
       }
 
+      function resyncHookDoctor() {
+        purgeDetachedSettingsBodies();
+        const root = activeProjectTab()?.project_root;
+        // Lost replies must recover after leaving the tab; never replay repair.
+        if (hookDoctorModel.read()[root]?.pending
+          || [...settingsWindowBodies].some(body => body.dataset.settingsProjectRoot === root && body.dataset.settingsSection === "hooks")) requestHookDoctor(root, false, true);
+        renderHookCenterPanels();
+      }
+
       function resyncSettings() {
         purgeDetachedSettingsBodies();
         if (settingsWindowBodies.size) {
@@ -1215,6 +1268,7 @@ export function createSettingsSurface({
           // Works shares this global presentation setting without mounting Settings.
           send({ kind: "get_system_settings" });
         }
+        resyncHookDoctor();
       }
       let editingCustomAgentId = null;
 
@@ -1294,6 +1348,7 @@ export function createSettingsSurface({
         );
         tabs.appendChild(createNode("span", "settings-label", `Project settings · ${body.dataset.settingsProjectName}`));
         tabs.appendChild(buildSettingsTab("issues", "Issues execution settings", false, windowData.id));
+        tabs.appendChild(buildSettingsTab("hooks", "Hook Center", false, windowData.id));
         // PM settings are also project-owned; keep all project tabs together.
         tabs.appendChild(tabs.querySelector('[data-settings-tab="project-manager"]'));
 
@@ -1376,6 +1431,12 @@ export function createSettingsSurface({
         panelIssues.dataset.settingsPanel = "issues";
         linkSettingsPanel(panelIssues, windowData.id, "issues");
         bodyEl.appendChild(panelIssues);
+        const panelHooks = document.createElement("section");
+        panelHooks.className = "settings-panel hidden";
+        panelHooks.setAttribute("role", "tabpanel");
+        panelHooks.dataset.settingsPanel = "hooks";
+        linkSettingsPanel(panelHooks, windowData.id, "hooks");
+        bodyEl.appendChild(panelHooks);
         const controls = createDiv();
         controls.dataset.settingsIssuesControls = "";
         panelIssues.appendChild(controls);
@@ -1408,6 +1469,10 @@ export function createSettingsSurface({
           send({ kind: "focus_window", id: windowData.id });
         });
         settingsWindowBodies.add(body);
+        body.addEventListener("settings:section-changed", event => {
+          if (event.detail.section === "hooks") requestHookDoctor(body.dataset.settingsProjectRoot);
+        });
+        renderHookCenterPanels();
         renderUpdateStatus(body, globalUpdateModel.read());
         body.addEventListener("focusout", event => {
           // activeElement can still be BODY until the next focusin fires.
@@ -2393,6 +2458,29 @@ export function createSettingsSurface({
         }
       }
 
+      function renderCustomAgentStatus(scroll, state) {
+        let section = scroll.querySelector('[data-role="custom-agent-status"]');
+        if (!state.statusMessage) {
+          section?.remove();
+          return;
+        }
+        if (!section) {
+          section = createDiv("mock-section");
+          section.dataset.role = "custom-agent-status";
+          const label = createDiv("mock-label");
+          label.textContent = "Status";
+          section.appendChild(label);
+          const row = createDiv("mock-row");
+          row.appendChild(document.createElement("span"));
+          section.appendChild(row);
+          scroll.insertBefore(section, scroll.children[1] || null);
+        }
+        section.querySelector(".mock-label").style.color = state.statusKind === "error"
+          ? "var(--color-state-blocked)" : state.statusKind === "success"
+            ? "var(--color-state-success)" : "var(--color-text-muted)";
+        section.querySelector("span").textContent = state.statusMessage;
+      }
+
       function renderSettingsAgentList(state = customAgentsModel.read()) {
         for (const body of Array.from(settingsWindowBodies)) {
           if (!body.isConnected) {
@@ -2401,6 +2489,13 @@ export function createSettingsSurface({
           }
           const scroll = body.querySelector("[data-role='settings-scroll']");
           if (!scroll) continue;
+          const editor = scroll.querySelector('[data-role="custom-agent-env-editor"]');
+          if (editor?.dataset.agentId === editingCustomAgentId &&
+              state.catalog.agents.some(agent => agent.id === editingCustomAgentId)) {
+            // Keep the live draft and focus while the canonical catalog advances.
+            renderCustomAgentStatus(scroll, state);
+            continue;
+          }
           while (scroll.firstChild) scroll.removeChild(scroll.firstChild);
 
           const addBtn = document.createElement("button");
@@ -2426,25 +2521,7 @@ export function createSettingsSurface({
             );
           });
           scroll.appendChild(addBtn);
-
-          if (state.statusMessage) {
-            const section = createDiv("mock-section");
-            const label = createDiv("mock-label");
-            label.textContent = "Status";
-            label.style.color =
-              state.statusKind === "error"
-                ? "#ff6b6b"
-                : state.statusKind === "success"
-                  ? "#7abf7a"
-                  : "#999";
-            section.appendChild(label);
-            const row = createDiv("mock-row");
-            const text = document.createElement("span");
-            text.textContent = state.statusMessage;
-            row.appendChild(text);
-            section.appendChild(row);
-            scroll.appendChild(section);
-          }
+          renderCustomAgentStatus(scroll, state);
 
           if (state.catalog.loading && state.catalog.agents.length === 0) {
             const section = createDiv("mock-section");
@@ -2507,22 +2584,29 @@ export function createSettingsSurface({
             row.appendChild(delBtn);
             section.appendChild(row);
             if (editingCustomAgentId === agent.id) {
-              section.appendChild(
-                renderCustomAgentEnvEditor({
-                  document,
-                  agent,
-                  onSave: (updatedAgent) => {
-                    editingCustomAgentId = null;
-                    setSettingsStatus("Saving custom agent…", "info");
+              const editor = renderCustomAgentEnvEditor({
+                document,
+                agent,
+                onSave: (draftAgent) => {
+                  const currentAgent = customAgentsModel.read().catalog.agents.find(entry => entry.id === draftAgent.id);
+                  editingCustomAgentId = null;
+                  if (!currentAgent) {
+                    setSettingsStatus("Custom agent is no longer available.", "error");
                     renderSettingsAgentList();
-                    send({ kind: "update_custom_agent", agent: updatedAgent });
-                  },
-                  onCancel: () => {
-                    editingCustomAgentId = null;
-                    renderSettingsAgentList();
-                  },
-                }),
-              );
+                    return;
+                  }
+                  const updatedAgent = { ...currentAgent, env: draftAgent.env };
+                  setSettingsStatus("Saving custom agent…", "info");
+                  renderSettingsAgentList();
+                  send({ kind: "update_custom_agent", agent: updatedAgent });
+                },
+                onCancel: () => {
+                  editingCustomAgentId = null;
+                  renderSettingsAgentList();
+                },
+              });
+              editor.dataset.agentId = agent.id;
+              section.appendChild(editor);
             }
             scroll.appendChild(section);
           }
@@ -2596,6 +2680,8 @@ export function createSettingsSurface({
       }
 
       return {
+        hookDoctorModel,
+        applyHookDoctorEvent,
         applyGlobalUpdateSettings,
         applyIssueSettingsStatus,
         applyIssueMonitorProfiles,
@@ -2615,6 +2701,7 @@ export function createSettingsSurface({
         applySupportedAgentList,
         applySupportedAgentMaintenance,
         requestSupportedAgentRefresh,
+        resyncHookDoctor,
         resyncSettings,
         renderSettingsWindow,
         renderSettingsAgentList,

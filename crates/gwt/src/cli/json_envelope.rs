@@ -558,6 +558,21 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 ids: optional_string_vec(params, "ids")?,
             })
         }
+        "workspace.project_scan" => {
+            reject_unknown_params(params, &[], "workspace.project_scan")?;
+            CliCommand::Workspace(WorkspaceCommand::ProjectScan)
+        }
+        "workspace.project_prune" => {
+            reject_unknown_params(
+                params,
+                &["dry_run", "manifest_hash"],
+                "workspace.project_prune",
+            )?;
+            CliCommand::Workspace(WorkspaceCommand::ProjectPrune {
+                dry_run: optional_bool(params, "dry_run")?.unwrap_or(true),
+                manifest_hash: optional_string(params, "manifest_hash")?,
+            })
+        }
         "workspace.work_repair" => {
             reject_unknown_params(params, &["work_id", "dry_run"], "workspace.work_repair")?;
             CliCommand::Workspace(WorkspaceCommand::WorkRepair {
@@ -687,6 +702,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }),
         "issue.spec.repair" => CliCommand::Issue(IssueCommand::SpecRepair {
             number: required_u64(params, "number")?,
+            archive_comments: optional_u64_vec(params, "archive_comments")?,
         }),
         "issue.cache.repair" => CliCommand::Issue(IssueCommand::CacheRepair {
             number: required_u64(params, "number")?,
@@ -1021,6 +1037,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             number: required_u64(params, "number")?,
         }),
         "discussion.create"
+        | "actions.release_policy.add"
+        | "actions.release_policy.rollback"
+        | "actions.diagnostic.policy.add"
+        | "actions.diagnostic.policy.rollback"
         | "board.config.set"
         | "repository.required_checks.update"
         | "repository.settings.set"
@@ -1029,6 +1049,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         | "pr.review.submit"
         | "pr.auto_merge.enable"
         | "update.settings.set"
+        | "project.execution.choose"
         | "pm.approval.request"
         | "pm.approval.status"
         | "pm.approval.revoke"
@@ -1335,6 +1356,34 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                     .map(|_| required_string(params, "thread_id"))
                     .transpose()?,
             })
+        }
+        "actions.diagnostic.request"
+        | "actions.diagnostic.observe"
+        | "actions.diagnostic.cancel" => {
+            // Decode the closed contract before the general key audit so a
+            // private caller-controlled key is never copied into diagnostics.
+            let command = super::actions::diagnostic::parse(&envelope.operation, &envelope.params)?;
+            let keys: &[&str] = match envelope.operation.as_str() {
+                "actions.diagnostic.request" => &[
+                    "request_id",
+                    "profile_id",
+                    "expected_profile_digest",
+                    "preexecution_of",
+                    "expected_predecessor_revision",
+                ],
+                "actions.diagnostic.observe" => &["request_id", "profile_id"],
+                _ => &["request_id", "expected_run_id", "expected_revision"],
+            };
+            reject_unknown_params(params, keys, &envelope.operation)?;
+            CliCommand::Actions(ActionsCommand::Diagnostic(command))
+        }
+        "actions.diagnostic.policy.status" => {
+            super::actions::release_policy::parse_status(&envelope.params)?;
+            CliCommand::Actions(ActionsCommand::DiagnosticPolicyStatus)
+        }
+        "actions.release_policy.status" => {
+            super::actions::release_policy::parse_status(&envelope.params)?;
+            CliCommand::Actions(ActionsCommand::ReleasePolicyStatus)
         }
         "actions.dispatch" => {
             reject_unknown_params(params, &["workflow", "ref", "inputs"], "actions.dispatch")?;
@@ -1843,7 +1892,73 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 operation_id,
             })
         }
+        "project.execution.status" => {
+            let operation_id = optional_string(params, "operation_id")?;
+            if operation_id.as_ref().is_some_and(|id| {
+                !uuid::Uuid::parse_str(id).is_ok_and(|parsed| parsed.to_string() == *id)
+            }) {
+                return Err(CliParseError::InvalidJson(
+                    "operation_id must be a canonical lowercase UUID".into(),
+                ));
+            }
+            CliCommand::Pm(crate::cli::pm::PmCommand::ProjectExecutionStatus { operation_id })
+        }
         "pm.capabilities" => CliCommand::Pm(crate::cli::pm::PmCommand::Capabilities),
+        "pm.request_tasks.read" => {
+            reject_unknown_params(params, &["selector"], "pm.request_tasks.read")?;
+            let selector: crate::cli::pm::RequestTaskSelector = lookup(params, "selector")
+                .map(|value| serde_json::from_value(value.clone()))
+                .transpose()
+                .map_err(|error| CliParseError::InvalidJson(error.to_string()))?
+                .unwrap_or(crate::cli::pm::RequestTaskSelector::Summary {});
+            selector
+                .validate()
+                .map_err(|error| CliParseError::InvalidJson(error.into()))?;
+            CliCommand::Pm(crate::cli::pm::PmCommand::RequestTasksRead { selector })
+        }
+        "pm.request_tasks.capture" => {
+            reject_unknown_params(
+                params,
+                &[
+                    "operation_id",
+                    "expected_revision",
+                    "reason",
+                    "provider",
+                    "conversation_id",
+                    "id",
+                    "prompt_sha256",
+                ],
+                "pm.request_tasks.capture",
+            )?;
+            let request: crate::cli::pm::NativeCaptureRequest =
+                serde_json::from_value(Value::Object(params.clone()))
+                    .map_err(|error| CliParseError::InvalidJson(error.to_string()))?;
+            request
+                .validate()
+                .map_err(|error| CliParseError::InvalidJson(error.into()))?;
+            CliCommand::Pm(crate::cli::pm::PmCommand::RequestTasksCapture {
+                request: Box::new(request),
+            })
+        }
+        "pm.request_tasks.apply" => {
+            reject_unknown_params(
+                params,
+                &["operation_id", "expected_revision", "reason", "action"],
+                "pm.request_tasks.apply",
+            )?;
+            let request: gwt_core::pm_request_tasks::Request =
+                serde_json::from_value(Value::Object(params.clone()))
+                    .map_err(|error| CliParseError::InvalidJson(error.to_string()))?;
+            if matches!(
+                request.action,
+                gwt_core::pm_request_tasks::Action::Capture { .. }
+            ) {
+                return Err(CliParseError::InvalidJson("Capture requires authenticated native intake; pm.request_tasks.apply only changes tracking state".into()));
+            }
+            CliCommand::Pm(crate::cli::pm::PmCommand::RequestTasksApply {
+                request: Box::new(request),
+            })
+        }
         "pm.plan.status" => {
             reject_unknown_params(params, &[], "pm.plan.status")?;
             CliCommand::Pm(crate::cli::pm::PmCommand::PlanStatus)
@@ -5126,6 +5241,26 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn project_store_maintenance_json_defaults_to_dry_run_and_rejects_unknown_scope() {
+        assert!(matches!(
+            ok("workspace.project_prune", json!({})),
+            CliCommand::Workspace(WorkspaceCommand::ProjectPrune {
+                dry_run: true,
+                manifest_hash: None
+            })
+        ));
+        assert!(matches!(
+            ok("workspace.project_scan", json!({})),
+            CliCommand::Workspace(WorkspaceCommand::ProjectScan)
+        ));
+        assert!(
+            err("workspace.project_prune", json!({"ids": ["unexpected"]}))
+                .to_string()
+                .contains("ids")
+        );
+    }
+
     /// Issue #4465 AC-8: `workspace.work_prune` mutates durable Work state, so
     /// an unqualified call only reports candidates. The first call used to be
     /// an immediate `APPLIED` across every Work on the machine (1100 rows,
@@ -5793,6 +5928,85 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn release_policy_status_is_read_only_and_has_a_fixed_target() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let mut env = TestEnv::new(repo);
+        env.stdin = envelope("actions.release_policy.status", json!({}));
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 0);
+        let reply: Value = serde_json::from_slice(&env.stdout).unwrap();
+        let status: Value = serde_json::from_str(reply["output"].as_str().unwrap()).unwrap();
+        assert_eq!(status["workflow"], "prepare-release.yml");
+        assert_eq!(status["repository"], "owner/repo");
+        assert_eq!(status["allowed"], false);
+        assert_eq!(
+            status["requirement"]["permission_stage"],
+            "instruction_or_approval"
+        );
+        assert_eq!(status["token"].as_str().unwrap().len(), 64);
+        assert!(!gwt_core::paths::gwt_config_path().exists());
+        assert!(
+            crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "actions.release_policy.status"
+            )
+        );
+        assert!(
+            !crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "actions.release_policy.add"
+            )
+        );
+        assert!(
+            !crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "actions.release_policy.rollback"
+            )
+        );
+        std::fs::create_dir_all(gwt_core::paths::gwt_home()).unwrap();
+        std::fs::write(
+            gwt_core::paths::gwt_config_path(),
+            "private_metadata = 'POLICY_SECRET_SENTINEL'\n",
+        )
+        .unwrap();
+        env.stdin = envelope("actions.release_policy.status", json!({}));
+        env.stdout.clear();
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 0);
+        assert!(!String::from_utf8_lossy(&env.stdout).contains("POLICY_SECRET_SENTINEL"));
+    }
+
+    #[test]
+    fn release_policy_contract_is_fixed_and_strict() {
+        ok("actions.release_policy.status", json!({}));
+        let request = json!({
+            "request_id": "b4ae91f1-98f3-4fa6-929c-8ce5e3510597",
+            "expected_token": "a".repeat(64),
+            "reason": "Enable the release workflow",
+            "approval_id": "recorded-approval"
+        });
+        ok("actions.release_policy.add", request.clone());
+        for (key, value) in [
+            ("repo", json!("another/repository")),
+            ("workflow", json!("other.yml")),
+            ("ref", json!("main")),
+            ("approved", json!(true)),
+            ("request_id", json!("../receipt")),
+            ("expected_token", json!("HEAD")),
+            ("reason", json!("")),
+        ] {
+            let mut invalid = request.clone();
+            invalid[key] = value;
+            err("actions.release_policy.add", invalid);
+        }
+        err(
+            "actions.release_policy.status",
+            json!({"repo":"another/repository"}),
+        );
+        let mut rollback = request;
+        rollback["added_by"] = json!("cbd15e96-bc2b-478c-a354-302baf307de4");
+        ok("actions.release_policy.rollback", rollback);
     }
 
     #[test]
@@ -7156,6 +7370,18 @@ mod tests {
     }
 
     #[test]
+    fn issue_spec_repair_accepts_explicit_archive_comments() {
+        assert!(matches!(
+            ok(
+                "issue.spec.repair",
+                json!({"number": 3590, "archive_comments": [5565328835u64]})
+            ),
+            CliCommand::Issue(IssueCommand::SpecRepair { number: 3590, archive_comments })
+                if archive_comments == vec![5565328835]
+        ));
+    }
+
+    #[test]
     fn issue_operations_parse() {
         for op in [
             "issue.view",
@@ -7961,6 +8187,170 @@ mod tests {
     }
 
     #[test]
+    fn pm_request_tasks_operations_parse_only_project_local_typed_requests() {
+        for selector in [
+            json!({"kind":"summary"}),
+            json!({"kind":"pending"}),
+            json!({"kind":"tasks","limit":100}),
+            json!({"kind":"pending","limit":1,"after":"source-1","expected_revision":2}),
+            json!({"kind":"tasks","after":"task-1","expected_revision":2}),
+            json!({"kind":"source","id":"source-1"}),
+            json!({"kind":"task","id":"task-1"}),
+            json!({"kind":"receipt","operation_id":"operation-1"}),
+        ] {
+            ok("pm.request_tasks.read", json!({"selector":selector}));
+        }
+        ok("pm.request_tasks.read", json!({}));
+        let request = json!({"operation_id":"classify-1","expected_revision":1,
+            "reason":"A question, not a work request",
+            "action":{"kind":"classify_non_task","source_id":"source-1"}});
+        ok("pm.request_tasks.apply", request.clone());
+        for field in ["actor", "project_root", "project_key", "path"] {
+            assert!(matches!(
+                err("pm.request_tasks.read", json!({field:"forged"})),
+                CliParseError::InvalidJson(_)
+            ));
+            let mut forged = request.clone();
+            forged[field] = json!("forged");
+            assert!(matches!(
+                err("pm.request_tasks.apply", forged),
+                CliParseError::InvalidJson(_)
+            ));
+        }
+        for selector in [
+            json!({"kind":"source","id":" "}),
+            json!({"kind":"summary","id":"unexpected"}),
+            json!({"kind":"pending","limit":0}),
+            json!({"kind":"tasks","limit":101}),
+            json!({"kind":"pending","limit":-1}),
+            json!({"kind":"tasks","after":"task-1"}),
+            json!({"kind":"pending","after":" ","expected_revision":2}),
+            json!({"kind":"tasks","expected_revision":"2"}),
+            json!({"kind":"pending","actor":"forged"}),
+        ] {
+            assert!(matches!(
+                err("pm.request_tasks.read", json!({"selector":selector})),
+                CliParseError::InvalidJson(_)
+            ));
+        }
+        let mut capture = request;
+        capture["action"] = json!({"kind":"capture","source":{
+            "id":"forged","project_key":"project","original":"forged",
+            "authority":{"session_id":"pm","turn_id":"turn","prompt_sha256":"hash"}}});
+        assert!(matches!(
+            err("pm.request_tasks.apply", capture),
+            CliParseError::InvalidJson(_)
+        ));
+        for operation in ["pm.request_tasks.read", "pm.request_tasks.apply"] {
+            assert!(crate::cli::pm::capabilities_report()
+                .capabilities
+                .iter()
+                .any(|row| row.operation == operation && row.executable));
+        }
+    }
+
+    #[test]
+    fn pm_request_tasks_native_selection_cannot_supply_provenance() {
+        let selection = json!({"provider":"codex", "conversation_id":"conversation", "id":"turn"});
+        ok(
+            "pm.request_tasks.read",
+            json!({"selector":{"kind":"native_turns"}}),
+        );
+        let mut detail = selection.clone();
+        detail["kind"] = json!("native_turn");
+        ok("pm.request_tasks.read", json!({"selector":detail}));
+        let mut capture = selection;
+        capture["operation_id"] = json!("capture-1");
+        capture["expected_revision"] = json!(0);
+        capture["reason"] = json!("Preserve this native request for classification");
+        capture["prompt_sha256"] = json!("a".repeat(64));
+        ok("pm.request_tasks.capture", capture.clone());
+        for field in [
+            "actor",
+            "authority",
+            "source",
+            "original",
+            "project_root",
+            "path",
+        ] {
+            let mut forged = capture.clone();
+            forged[field] = json!("forged");
+            assert!(matches!(
+                err("pm.request_tasks.capture", forged),
+                CliParseError::InvalidJson(_)
+            ));
+        }
+        for field in [
+            "provider",
+            "conversation_id",
+            "id",
+            "prompt_sha256",
+            "operation_id",
+            "reason",
+        ] {
+            let mut invalid = capture.clone();
+            invalid[field] = json!(" ");
+            assert!(matches!(
+                err("pm.request_tasks.capture", invalid),
+                CliParseError::InvalidJson(_)
+            ));
+        }
+        for field in [
+            "provider",
+            "conversation_id",
+            "id",
+            "prompt_sha256",
+            "expected_revision",
+        ] {
+            let mut missing = capture.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(matches!(
+                err("pm.request_tasks.capture", missing),
+                CliParseError::InvalidJson(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn pm_request_tasks_candidate_selectors_are_bounded_and_path_free() {
+        let id = format!(
+            "{}/{}",
+            "a".repeat(64),
+            "12345678-1234-4234-8234-123456789abc"
+        );
+        let digest = "b".repeat(64);
+        for selector in [
+            json!({"kind":"candidates"}),
+            json!({"kind":"candidates","limit":100,"after":id,"expected_inventory_sha256":digest}),
+            json!({"kind":"candidate","id":id}),
+            json!({"kind":"candidate_chunk","id":id}),
+            json!({"kind":"candidate_chunk","id":id,"offset":u64::MAX}),
+        ] {
+            ok("pm.request_tasks.read", json!({"selector":selector}));
+        }
+        for selector in [
+            json!({"kind":"candidates","limit":0}),
+            json!({"kind":"candidates","limit":101}),
+            json!({"kind":"candidates","after":id}),
+            json!({"kind":"candidates","expected_inventory_sha256":"invalid"}),
+            json!({"kind":"candidates","after":"../foreign","expected_inventory_sha256":digest}),
+            json!({"kind":"candidate","id":"../foreign"}),
+            json!({"kind":"candidate","id":id.to_uppercase()}),
+            json!({"kind":"candidate","id":id,"session_id":"forged"}),
+            json!({"kind":"candidate_chunk","id":"../foreign"}),
+            json!({"kind":"candidate_chunk","id":id,"offset":-1}),
+            json!({"kind":"candidate_chunk","id":id,"offset":1.5}),
+            json!({"kind":"candidate_chunk","id":id,"limit":1000000}),
+            json!({"kind":"candidates","path":"/tmp/foreign"}),
+        ] {
+            assert!(matches!(
+                err("pm.request_tasks.read", json!({"selector":selector})),
+                CliParseError::InvalidJson(_)
+            ));
+        }
+    }
+
+    #[test]
     fn pm_plan_status_accepts_only_empty_params() {
         assert!(matches!(
             ok("pm.plan.status", json!({})),
@@ -8165,6 +8555,67 @@ mod tests {
                 "pm.capabilities"
             )
         );
+    }
+
+    #[test]
+    fn project_execution_policy_operations_are_typed_and_project_fixed() {
+        assert!(matches!(
+            ok("project.execution.status", json!({})),
+            CliCommand::Pm(crate::cli::pm::PmCommand::ProjectExecutionStatus {
+                operation_id: None
+            })
+        ));
+        match ok(
+            "project.execution.status",
+            json!({"operation_id":"00000000-0000-4000-8000-000000000001"}),
+        ) {
+            CliCommand::Pm(crate::cli::pm::PmCommand::ProjectExecutionStatus { operation_id }) => {
+                assert_eq!(
+                    operation_id.as_deref(),
+                    Some("00000000-0000-4000-8000-000000000001")
+                );
+            }
+            _ => panic!("expected typed ProjectExecutionStatus"),
+        }
+        let choice = json!({
+            "operation_id":"00000000-0000-4000-8000-000000000001",
+            "expected_revision":0,"expected_generation":1,"choice":"continue",
+            "instruction_id":"human-instruction"
+        });
+        let _ = ok("project.execution.choose", choice.clone());
+        assert!(
+            crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "project.execution.status"
+            )
+        );
+        assert!(
+            !crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "project.execution.choose"
+            )
+        );
+        for (key, value) in [
+            ("project_root", json!("/other")),
+            ("approved", json!(true)),
+            ("choice", json!("cancel")),
+            ("operation_id", json!("not-a-uuid")),
+        ] {
+            let mut invalid = choice.clone();
+            invalid[key] = value;
+            let _ = err("project.execution.choose", invalid);
+        }
+        for operation_id in [
+            "550E8400-E29B-41D4-A716-446655440000",
+            "550e8400e29b41d4a716446655440000",
+        ] {
+            let _ = err(
+                "project.execution.status",
+                json!({"operation_id": operation_id}),
+            );
+            let mut invalid = choice.clone();
+            invalid["operation_id"] = operation_id.into();
+            let _ = err("project.execution.choose", invalid);
+        }
+        let _ = err("project.execution.status", json!({"project_root":"/other"}));
     }
 
     // Issue #3607: PM stop/deregister parse variants.
@@ -8938,9 +9389,99 @@ mod tests {
     }
 
     #[test]
+    fn diagnostic_policy_contract_names_only_the_fixed_target() {
+        assert!(matches!(
+            ok("actions.diagnostic.policy.status", json!({})),
+            CliCommand::Actions(_)
+        ));
+        let request = json!({"request_id":"d703dbb3-88e3-4e2d-a5b8-6a5d30a1ad4e","expected_token":"a".repeat(64),"reason":"fixed diagnostic permission","instruction_id":"fixture-scope"});
+        ok("actions.diagnostic.policy.add", request.clone());
+        let mut rollback = request.clone();
+        rollback["added_by"] = json!("d703dbb3-88e3-4e2d-a5b8-6a5d30a1ad4f");
+        ok("actions.diagnostic.policy.rollback", rollback);
+        let mut foreign = request;
+        foreign["workflow"] = json!("foreign.yml");
+        err("actions.diagnostic.policy.add", foreign);
+        err(
+            "actions.diagnostic.policy.status",
+            json!({"repository":"foreign/repo"}),
+        );
+        assert!(
+            super::super::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "actions.diagnostic.policy.status"
+            )
+        );
+        assert!(
+            !super::super::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "actions.diagnostic.policy.add"
+            )
+        );
+    }
+
+    #[test]
+    fn actions_diagnostic_accepts_only_the_fixed_profile_contract() {
+        let id = "d703dbb3-88e3-4e2d-a5b8-6a5d30a1ad4e";
+        let profile = "windows-4777-restore-f351-v1";
+        let digest = "a".repeat(64);
+        for (operation, params) in [
+            (
+                "actions.diagnostic.request",
+                json!({"request_id":id,"profile_id":profile,"expected_profile_digest":digest}),
+            ),
+            ("actions.diagnostic.observe", json!({"profile_id":profile})),
+            ("actions.diagnostic.observe", json!({"request_id":id})),
+            (
+                "actions.diagnostic.cancel",
+                json!({"request_id":id,"expected_run_id":1,"expected_revision":1}),
+            ),
+        ] {
+            assert!(matches!(ok(operation, params), CliCommand::Actions(_)));
+        }
+        for (operation, params) in [
+            (
+                "actions.diagnostic.request",
+                json!({"request_id":id,"profile_id":profile,"expected_profile_digest":digest,"source":"foreign"}),
+            ),
+            (
+                "actions.diagnostic.request",
+                json!({"request_id":id,"profile_id":"unknown","expected_profile_digest":digest}),
+            ),
+            (
+                "actions.diagnostic.request",
+                json!({"request_id":"../foreign","profile_id":profile,"expected_profile_digest":digest}),
+            ),
+            (
+                "actions.diagnostic.request",
+                json!({"request_id":id,"profile_id":profile,"expected_profile_digest":digest,"preexecution_of":id}),
+            ),
+            (
+                "actions.diagnostic.observe",
+                json!({"profile_id":profile,"request_id":id}),
+            ),
+            ("actions.diagnostic.observe", json!({})),
+            (
+                "actions.diagnostic.cancel",
+                json!({"request_id":id,"expected_run_id":0,"expected_revision":1}),
+            ),
+            (
+                "actions.diagnostic.cancel",
+                json!({"request_id":id,"expected_run_id":1,"expected_revision":1,"token":"private-sentinel"}),
+            ),
+            (
+                "actions.diagnostic.observe",
+                json!({"profile_id":profile,"private-sentinel":true}),
+            ),
+        ] {
+            let error = err(operation, params).to_string();
+            assert!(!error.contains("private-sentinel"));
+        }
+    }
+
+    #[test]
     fn actions_dispatch_accepts_selectors_and_rejects_invalid_contract() {
         for workflow in [
             json!("prepare-release.yml"),
+            json!("windows-diagnostic.yml"),
             json!("日本語 Release.yml"),
             json!(42),
         ] {

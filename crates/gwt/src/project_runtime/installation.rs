@@ -1,4 +1,8 @@
 //! Exact owner-local Session/PTY installation and publication.
+#[path = "project_catalog.rs"]
+mod project_catalog;
+pub(crate) use project_catalog::owner_host_project_catalog;
+
 use super::workspace::{save_resumed_workspace_projection, save_start_work_workspace_projection};
 use super::{launch_finalization::*, launch_payload::*, ActiveLaunchHandshakeCleanup};
 use crate::launch_runtime::same_worktree_path;
@@ -80,6 +84,26 @@ pub(crate) struct OwnerRestoreRefusal {
     pub remove_placeholder: bool,
     pub source_session_id: String,
     pub retryable: bool,
+}
+
+/// Known restore admission decisions that do not describe a failed launch.
+pub fn is_expected_restore_exclusion(code: &str) -> bool {
+    matches!(
+        code,
+        "closed_work_diagnostic_retained"
+            | "completed_work_retained"
+            | "execution_blocked"
+            | "landed_worktree"
+            | "empty_landed_worktree"
+            | "settled_execution"
+            | "closed_issue"
+            | "closed_issue_bookkeeping_warning"
+            | "revoked_launch"
+            | "lost_ownership"
+            | "monitor_stopped"
+            | "launch_revoked"
+            | "unregistered_pm"
+    )
 }
 
 impl OwnerSavedSessionRestore {
@@ -398,6 +422,12 @@ pub(crate) fn prepare_owner_saved_session_restore(
             && admission != RestoreAdmission::RefuseCompletedWork
         {
             let terminal = matches!(admission, RestoreAdmission::RefuseTerminal(_));
+            let retire_source = terminal
+                || matches!(
+                    admission,
+                    RestoreAdmission::RefuseRetainedTerminal
+                        | RestoreAdmission::RefuseHeld("launch_revoked")
+                );
             let reason = match admission {
                 RestoreAdmission::RefuseTerminal(reason) => reason.as_str(),
                 RestoreAdmission::RefuseRetainedTerminal => "closed_work_diagnostic_retained",
@@ -407,14 +437,16 @@ pub(crate) fn prepare_owner_saved_session_restore(
                 | RestoreAdmission::RefuseUnprovable(reason) => reason,
                 RestoreAdmission::Admit => unreachable!(),
             };
-            if terminal {
+            if retire_source {
                 mark_restore_source_completed_exact(sessions_dir, &restore.source)?;
+            }
+            if terminal {
                 remove_restore_placeholders(root, restore, false)?;
             }
             let error = restore.refuse(
                 reason,
                 format!("Automatic restore refused: {reason}"),
-                !terminal,
+                !retire_source,
             );
             restore
                 .refusal
@@ -429,8 +461,8 @@ pub(crate) fn prepare_owner_saved_session_restore(
             owner_restore_placeholder_known_empty(restore),
         ) {
             let remove_placeholder = code == "empty_landed_worktree";
+            mark_restore_source_completed_exact(sessions_dir, &restore.source)?;
             if remove_placeholder {
-                mark_restore_source_completed_exact(sessions_dir, &restore.source)?;
                 remove_restore_placeholders(root, restore, true)?;
             }
             let error = restore.refuse(code, format!("Automatic restore refused: {code}"), false);
@@ -442,6 +474,7 @@ pub(crate) fn prepare_owner_saved_session_restore(
             return Err(error);
         }
         if admission == RestoreAdmission::RefuseCompletedWork {
+            mark_restore_source_completed_exact(sessions_dir, &restore.source)?;
             return Err(restore.refuse(
                 "completed_work_retained",
                 "Automatic restore refused: completed_work_retained",
@@ -3045,41 +3078,48 @@ pub(crate) fn owner_host_project_roots(project_root: &Path) -> Result<Vec<PathBu
             .map(|tab| tab.project_root)
             .collect::<Vec<_>>();
     roots.push(project_root.into());
-    let projects = match std::fs::read_dir(gwt_core::paths::gwt_projects_dir()) {
-        Ok(projects) => Some(projects),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error.to_string()),
-    };
-    if let Some(projects) = projects {
-        for project in projects {
-            let project = project.map_err(|error| error.to_string())?;
-            let descriptors = match std::fs::read_dir(project.path().join("runtime/daemon")) {
-                Ok(descriptors) => descriptors,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error.to_string()),
-            };
-            for descriptor in descriptors {
-                let descriptor = descriptor.map_err(|error| error.to_string())?;
-                if descriptor
-                    .path()
-                    .extension()
-                    .is_none_or(|extension| extension != "json")
-                {
-                    continue;
-                }
-                if let Some(endpoint) = std::fs::read(descriptor.path()).ok().and_then(|bytes| {
-                    serde_json::from_slice::<gwt_core::daemon::DaemonEndpoint>(&bytes).ok()
-                }) {
-                    if endpoint.scope.target == gwt_core::daemon::RuntimeTarget::Host {
-                        roots.push(endpoint.scope.project_root);
-                    }
-                }
-            }
-        }
-    }
+    let (catalog_roots, metrics) =
+        owner_host_project_catalog().map_err(|error| error.to_string())?;
+    tracing::debug!(target: "gwt::project_catalog", ?metrics, "host project catalog observed");
+    roots.extend(catalog_roots);
     roots.sort();
     roots.dedup();
     Ok(roots)
+}
+
+#[cfg(test)]
+mod project_catalog_tests {
+    use super::owner_host_project_roots;
+    use gwt_core::daemon::{persist_endpoint, DaemonEndpoint, RuntimeScope, RuntimeTarget};
+
+    #[test]
+    fn owner_host_project_roots_excludes_missing_roots_and_dead_hosts() {
+        let arena = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(arena.path());
+        let current = arena.path().join("current");
+        let live = arena.path().join("live");
+        let dead = arena.path().join("dead");
+        let missing = arena.path().join("removed-test-root");
+        for root in [&current, &live, &dead] {
+            std::fs::create_dir(root).unwrap();
+        }
+        for (name, root, pid) in [
+            ("live", &live, std::process::id()),
+            ("dead", &dead, 0),
+            ("missing", &missing, std::process::id()),
+        ] {
+            let scope = RuntimeScope::new(name, "host", root.clone(), RuntimeTarget::Host).unwrap();
+            let path = scope.endpoint_path(&gwt_core::paths::gwt_home());
+            persist_endpoint(
+                &path,
+                &DaemonEndpoint::new(scope, pid, "test".into(), "test".into(), "test".into()),
+            )
+            .unwrap();
+        }
+        let mut expected = vec![current.clone(), dunce::canonicalize(live).unwrap()];
+        expected.sort();
+        assert_eq!(owner_host_project_roots(&current).unwrap(), expected);
+    }
 }
 
 /// Facts read from the exact Worktree's execution diagnosis.

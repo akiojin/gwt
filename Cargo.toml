@@ -19,7 +19,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "9.147.0"
+version = "9.153.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/akiojin/gwt"
@@ -129,7 +129,7 @@ hex = "0.4"
 regex = "1"
 
 # Markdown rendering
-pulldown-cmark = "0.13.4"
+pulldown-cmark = "0.13.6"
 ammonia = "4.1.4"
 
 [profile.release]

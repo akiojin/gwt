@@ -148,9 +148,13 @@ fn pm_wakes_exclude_terminal_and_superseded_escalations() {
     active
         .save(&gwt_core::paths::gwt_sessions_dir())
         .expect("stop last active subject");
-    assert!(runtime
+    let periodic = runtime
         .pm_periodic_wake_decision_at(&repo, "2026-08-18T01:10:00Z")
-        .is_none());
+        .expect("periodic supervision continues without active escalation subjects");
+    let prompt = periodic.delivery_prompt();
+    for subject in ["ACTIVE-SUBJECT", "STOPPED-SUBJECT", "SUPERSEDED-SUBJECT"] {
+        assert!(!prompt.contains(subject), "{prompt}");
+    }
     assert_eq!(
         gwt_core::coordination::load_escalation_store(&repo)
             .unwrap()
@@ -2292,19 +2296,62 @@ fn assert_issue5596_unsubmitted_answer_packet_retries(
             }
         };
         assert!(evidence.pty.is_none());
-        assert!(
-            matches!(
-                gwt::load_issue_monitor_prefs(&prefs_path)
-                    .unwrap()
-                    .autonomous_handoffs[0]
-                    .delivery,
-                gwt::autonomous_handoff::AutonomousHandoffDeliveryState::Attempting {
-                    attempt: 1,
-                    ..
+        let delivery = gwt::load_issue_monitor_prefs(&prefs_path)
+            .unwrap()
+            .autonomous_handoffs[0]
+            .delivery
+            .clone();
+        if !matches!(
+            delivery,
+            gwt::autonomous_handoff::AutonomousHandoffDeliveryState::Attempting { attempt: 1, .. }
+        ) {
+            use super::super::RemoteOwnerLaunchOutcome as Outcome;
+
+            // This checkpoint also pauses failed preparation. Observe its real
+            // result after releasing the worker, without changing the predicate.
+            let state = serde_json::to_value(&delivery).unwrap()["state"].clone();
+            let materialized_session = evidence.session.is_some();
+            let current = evidence.current.load(std::sync::atomic::Ordering::Acquire);
+            pause.release();
+            launch_worker.join().unwrap();
+            let recorded = fixture.recorded_events.lock().unwrap();
+            let completion =
+                recorded
+                    .iter()
+                    .find_map(|event| match recorded_project_payload(event) {
+                        UserEvent::RemoteOwnerLaunchComplete(completion)
+                            if completion.operation_id == evidence.operation_id
+                                && completion.owner_pane_id == evidence.id =>
+                        {
+                            Some(completion)
+                        }
+                        _ => None,
+                    });
+            let (outcome, detail) = match completion.map(|completion| &completion.result) {
+                None => ("missing_completion", None),
+                Some(Err(detail)) => ("error", Some(detail.as_str())),
+                Some(Ok(Outcome::RetainedManualFailure(failure))) => {
+                    ("retained_manual_failure", Some(failure.detail.as_str()))
                 }
-            ),
-            "the actual owner must persist an unsubmitted write-ahead token"
-        );
+                Some(Ok(Outcome::MonitorFailureClosed { detail })) => {
+                    ("monitor_failure_closed", Some(detail.as_str()))
+                }
+                Some(Ok(Outcome::CompensatedFailure(failure))) => {
+                    ("compensated_failure", Some(failure.error.as_str()))
+                }
+                Some(Ok(Outcome::Failed { failure, .. })) => {
+                    ("failed", Some(failure.detail.as_str()))
+                }
+                Some(Ok(Outcome::DiagnosticClosed { detail, .. })) => {
+                    ("diagnostic_closed", detail.as_deref())
+                }
+                Some(Ok(Outcome::NaturallyClosed { .. })) => ("naturally_closed", None),
+                Some(Ok(Outcome::Runtime(..))) => ("runtime", None),
+            };
+            let detail = detail.map(AppRuntime::sanitize_launch_log_error);
+            drop(recorded);
+            panic!("the actual owner must persist an unsubmitted write-ahead token: state={state}, materialized_session={materialized_session}, current={current}, owner_outcome={outcome}, detail={detail:?}");
+        }
         fixture.runtime.close_project_tab_events("tab-1");
         let close_tasks = queued.clone();
         let close_worker = thread::spawn(move || drain_queued_blocking_tasks(&close_tasks));

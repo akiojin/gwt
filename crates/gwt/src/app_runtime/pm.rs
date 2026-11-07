@@ -70,6 +70,7 @@ pub(crate) struct AgentIdleWakes {
     pending: std::collections::BTreeMap<String, String>,
     retry_scheduled: bool,
     delivery_in_flight: Option<PmIdleWakeInFlight>,
+    failed_delivery: Option<(PmWakeDelivery, u8)>,
 }
 
 impl PmWakeDecision {
@@ -410,7 +411,37 @@ impl AppRuntime {
                 return Vec::new();
             }
         };
+        let mut lineage = vec!["pm".to_string()];
+        lineage.extend(
+            prefs
+                .registration
+                .as_ref()
+                .map(|registration| format!("session:{}", registration.session_id)),
+        );
+        if let Err(reason) = self
+            .project_context(tab_id)
+            .ok_or_else(|| "Project context is unavailable".to_string())
+            .and_then(|context| self.project_execution_admission(&context, &lineage))
+        {
+            tracing::info!(project_root = %project_root.display(), %reason, "PM ensure withheld by Project execution policy");
+            return Vec::new();
+        }
         self.sync_pm_session_cache(&project_root, prefs.registration.as_ref());
+        // Cold restore may be accepted before the GUI first reads the PM prefs.
+        // Preserve any newer request's existing projection authority.
+        if !self
+            .project_state_for_root(&project_root)
+            .is_some_and(|state| {
+                state
+                    .pending_pm_launches
+                    .values()
+                    .any(|root| root == &project_root)
+            })
+        {
+            if let Some(registration) = prefs.registration.as_ref() {
+                self.mark_pm_resume_launches(tab_id, &HashSet::new(), &registration.session_id);
+            }
+        }
         if trigger == PmEnsureTrigger::Automatic && !prefs.settings.auto_start {
             tracing::info!(
                 project_root = %project_root.display(),
@@ -1191,9 +1222,8 @@ impl AppRuntime {
 
     /// FR-108(b) (T-201, Issue #3505): the periodic wake — re-arm a quiet
     /// resident PM on the scheduled tick even when no new monitor signal
-    /// arrived, as long as there is standing supervision work (running
-    /// launches or a non-empty queue). The delta wake (T-093) covers "new
-    /// things happened"; this covers "old things still need watching".
+    /// arrived. PM loop pause/quiet/interval settings own this cadence;
+    /// Monitor Off and an empty queue do not stop PM reconciliation.
     ///
     /// The same quiet gate as the delta wake keeps the two from double-firing:
     /// an actively-looping or freshly-prompted PM is never interrupted, and a
@@ -1231,9 +1261,9 @@ impl AppRuntime {
     fn pm_periodic_wake_decision_for_monitor_with_standing_work_at(
         &mut self,
         project_root: &Path,
-        monitor: &gwt::IssueMonitorState,
+        _monitor: &gwt::IssueMonitorState,
         now: &str,
-        standing_durable_work: Option<bool>,
+        _standing_durable_work: Option<bool>,
     ) -> Option<PmWakeDecision> {
         if self
             .project_state_for_root(project_root)?
@@ -1243,33 +1273,12 @@ impl AppRuntime {
         {
             return None;
         }
-        if !monitor.config.enabled {
-            return None;
-        }
         let prefs_path = pm_registry::pm_prefs_path_for_repo_path(project_root);
         let prefs = pm_registry::load_pm_prefs(&prefs_path).ok()?;
         if prefs.settings.paused {
             return None;
         }
-        let status = monitor.agent_status();
         if self.retry_held_pm_wake(project_root) {
-            return None;
-        }
-        // Issue #3655 AC-5: a standing unblock request is supervision work in
-        // its own right. Without this the worst case parks itself — the queue
-        // empties precisely because every agent stopped, so the tick that
-        // should raise the alarm decides there is nothing to supervise.
-        if status.active_launches.is_empty()
-            && status.queue.is_empty()
-            && status.needs_human.is_empty()
-            && !monitor.inbox.iter().any(|item| {
-                matches!(
-                    item.state,
-                    gwt::MonitorInboxState::LaunchFailed | gwt::MonitorInboxState::AgentFailed
-                )
-            })
-            && !standing_durable_work.unwrap_or_else(|| pm_has_standing_durable_work(project_root))
-        {
             return None;
         }
         let registration = prefs.registration?;
@@ -1405,9 +1414,8 @@ impl AppRuntime {
     }
 
     /// Execute the wake: inject the prompt into the registered PM's pane. A
-    /// write failure is logged and dropped — the retained fingerprint was
-    /// already consumed, but the next genuinely new event will retry, and the
-    /// crash/resume paths own a dead pane.
+    /// failed write retains the same operation for one external-event retry.
+    /// The crash/resume paths own a dead pane.
     pub(crate) fn pm_wake_events(
         &mut self,
         project_root: &Path,
@@ -1463,6 +1471,53 @@ impl AppRuntime {
     }
 
     fn write_pm_wake_prompt(&mut self, decision: &PmWakeDecision) -> Result<PmWakeWrite, String> {
+        let exhausted = decision.idle_notifications.is_empty()
+            && self
+                .project_state_for_root(&decision.project_root)
+                .and_then(|state| state.pm_agent_idle_wakes.failed_delivery.as_ref())
+                .zip(self.runtimes.get(&decision.window_id))
+                .is_some_and(|((failed, attempts), runtime)| {
+                    *attempts >= 2
+                        && failed.decision.wake_id == decision.wake_id
+                        && failed.owner_pane_id == runtime.owner_pane_id
+                        && failed.incarnation == runtime.incarnation
+                        && failed.owner_identity == runtime.owner_identity
+                });
+        // Do not reacquire a failing prefs lock after exhaustion. A new loop
+        // identity (including Pause/Resume) still passes through stale checks.
+        if exhausted
+            && (decision.unconfirmed
+                || pm_registry::load_pm_loop_state(&pm_registry::pm_loop_state_path_for_repo_path(
+                    &decision.project_root,
+                ))
+                .map_or(true, |state| state.last_wake_id == decision.wake_id))
+        {
+            return Ok(PmWakeWrite::Deferred);
+        }
+        let result = self.queue_pm_wake_prompt(decision);
+        if let Err(error) = &result {
+            if decision.idle_notifications.is_empty() {
+                if let Some((context, runtime)) = self
+                    .project_state_for_root(&decision.project_root)
+                    .map(|state| state.context.clone())
+                    .zip(self.runtimes.get(&decision.window_id))
+                {
+                    self.hold_failed_pm_wake(PmWakeDelivery {
+                        context,
+                        decision: decision.clone(),
+                        owner_pane_id: runtime.owner_pane_id.clone(),
+                        incarnation: runtime.incarnation,
+                        owner_identity: runtime.owner_identity.clone(),
+                        result: Err(error.clone()),
+                    });
+                    return Ok(PmWakeWrite::Deferred);
+                }
+            }
+        }
+        result
+    }
+
+    fn queue_pm_wake_prompt(&mut self, decision: &PmWakeDecision) -> Result<PmWakeWrite, String> {
         let prefs = pm_registry::load_pm_prefs(&pm_registry::pm_prefs_path_for_repo_path(
             &decision.project_root,
         ))
@@ -1687,6 +1742,15 @@ impl AppRuntime {
         if !same_pane {
             return;
         }
+        if matches!(
+            delivery.result,
+            Ok(PmWakeWrite::Injected | PmWakeWrite::Discarded)
+        ) {
+            self.project_state_mut(&delivery.context)
+                .unwrap()
+                .pm_agent_idle_wakes
+                .failed_delivery = None;
+        }
         match delivery.result {
             Ok(PmWakeWrite::Unconfirmed) => {
                 delivery.decision.unconfirmed = true;
@@ -1706,26 +1770,11 @@ impl AppRuntime {
                     .pending_pm_wakes
                     .entry(window_id.clone())
                     .or_insert(delivery.decision);
-                // The user may already have cleared the composer before this
-                // completion arrived. That input event could not flush this slot.
-                let busy = self
-                    .active_agent_sessions
-                    .get(&window_id)
-                    .zip(self.runtimes.get(&window_id))
-                    .is_some_and(|(session, runtime)| {
-                        pm_wake_runtime_is_busy(
-                            &gwt_agent::runtime_state_path(&self.sessions_dir, &session.session_id),
-                            runtime.incarnation,
-                        )
-                    });
-                let paused = pm_registry::load_pm_prefs(&pm_registry::pm_prefs_path_for_repo_path(
-                    &delivery.context.project_root,
-                ))
-                .map(|prefs| prefs.settings.paused)
-                .unwrap_or(true);
-                if !busy && !paused {
-                    self.flush_pending_pm_wake(&window_id);
-                }
+                // The owner's Deferred result outranks the GUI's possibly stale
+                // busy projection. Resubmitting from this completion creates a
+                // tight completion -> worker -> Deferred loop (Issue #6678).
+                // Retain the wake for the next Monitor snapshot, completed input,
+                // runtime hook or Idle edge, which already retry held wakes.
             }
             Ok(PmWakeWrite::Injected) => {
                 tracing::info!(
@@ -1734,19 +1783,43 @@ impl AppRuntime {
                 );
             }
             Ok(PmWakeWrite::Queued | PmWakeWrite::Discarded) => {}
-            Err(error) => {
-                self.project_state_mut(&delivery.context)
-                    .unwrap()
-                    .pending_pm_wakes
-                    .entry(delivery.decision.window_id.clone())
-                    .or_insert_with(|| delivery.decision.clone());
-                tracing::warn!(
-                    %error,
-                    window_id = %delivery.decision.window_id,
-                    "PM wake prompt injection failed"
-                );
-            }
+            Err(_) => self.hold_failed_pm_wake(delivery),
         }
+    }
+
+    fn hold_failed_pm_wake(&mut self, delivery: PmWakeDelivery) {
+        let state = self.project_state_mut(&delivery.context).unwrap();
+        let previous = state
+            .pm_agent_idle_wakes
+            .failed_delivery
+            .as_ref()
+            .filter(|(failed, _)| {
+                failed.decision.wake_id == delivery.decision.wake_id
+                    && failed.owner_pane_id == delivery.owner_pane_id
+                    && failed.incarnation == delivery.incarnation
+                    && failed.owner_identity == delivery.owner_identity
+            })
+            .map_or(0, |(_, attempts)| *attempts);
+        state
+            .pending_pm_wakes
+            .entry(delivery.decision.window_id.clone())
+            .or_insert_with(|| delivery.decision.clone());
+        if previous >= 2 {
+            return;
+        }
+        let error = delivery.result.as_ref().unwrap_err();
+        if previous == 1 {
+            tracing::warn!(
+                %error,
+                window_id = %delivery.decision.window_id,
+                wake_id = ?delivery.decision.wake_id,
+                "PM wake failed after 2 attempts; held until owner/pane replacement or GUI restart"
+            );
+        } else {
+            tracing::debug!(%error, window_id = %delivery.decision.window_id,
+                "PM wake held for one retry at the next external opportunity");
+        }
+        state.pm_agent_idle_wakes.failed_delivery = Some((delivery, previous + 1));
     }
 
     /// Issue #3702 AC-2: deliver a held wake once the composer is submitted
@@ -2062,6 +2135,10 @@ impl AppRuntime {
             .unwrap_or_default();
         if let Some(state) = self.project_state_for_root_mut(project_root) {
             for combined in new_ids {
+                // Only the latest accepted PM request may update this root's cache.
+                state
+                    .pending_pm_launches
+                    .retain(|_, root| root != project_root);
                 state
                     .pending_pm_launches
                     .insert(combined, project_root.to_path_buf());
@@ -2098,6 +2175,9 @@ impl AppRuntime {
             .collect();
         if let Some(state) = self.project_state_mut(&context) {
             for window in accepted {
+                state
+                    .pending_pm_launches
+                    .retain(|_, root| root != &context.project_root);
                 state
                     .pending_pm_launches
                     .insert(window, context.project_root.clone());
@@ -2573,12 +2653,266 @@ mod delivery_tests {
     }
 
     #[test]
+    fn issue_6691_preparation_failure_is_retained_and_warned_once() {
+        let _env_lock = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let (repo, mut runtime, window_id) = pm_wake_fixture(&temp);
+        let _pane = attach_live_pm_pane(&mut runtime, &window_id);
+        let (spawner, tasks) = BlockingTaskSpawner::queued();
+        runtime.blocking_tasks = spawner;
+        let trace_path = temp.path().join("wake-preparation-failure.jsonl");
+        let _subscriber = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .json()
+                .with_max_level(tracing::Level::WARN)
+                .with_writer(std::sync::Mutex::new(
+                    std::fs::File::create(&trace_path).unwrap(),
+                ))
+                .finish(),
+        );
+        let decision = normal_wake(repo.clone(), window_id.clone());
+        std::fs::write(pm_registry::pm_prefs_path_for_repo_path(&repo), "invalid").unwrap();
+        assert_eq!(
+            runtime.write_pm_wake_prompt(&decision),
+            Ok(PmWakeWrite::Deferred)
+        );
+        for _ in 0..4 {
+            assert!(runtime.retry_held_pm_wake(&repo));
+        }
+        assert!(tasks.lock().unwrap().is_empty());
+        assert_eq!(
+            runtime
+                .project_state_for_root(&repo)
+                .unwrap()
+                .pending_pm_wakes[&window_id],
+            decision
+        );
+        let warnings = std::fs::read_to_string(&trace_path).unwrap();
+        let failures_logged = warnings
+            .lines()
+            .filter(|row| row.contains("PM wake failed after 2 attempts"))
+            .count();
+        assert_eq!(
+            failures_logged, 1,
+            "preparation failures use the same finite diagnostic budget"
+        );
+    }
+
+    #[test]
+    fn issue_6691_host_failure_retries_once_and_recovers_without_duplicate_wakes() {
+        use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
+        use gwt_core::daemon::{DaemonEndpoint, RuntimeScope, RuntimeTarget};
+        use std::sync::atomic::AtomicUsize;
+
+        let _env_lock = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for failures in [1, 2] {
+            let temp = tempfile::tempdir().unwrap();
+            let _home = ScopedGwtHome::set(temp.path());
+            let (repo, mut runtime, window_id) = pm_wake_fixture(&temp);
+            let _pane = attach_live_pm_pane(&mut runtime, &window_id);
+            let (proxy, recorded) = AppEventProxy::stub();
+            runtime.proxy = proxy;
+            let (spawner, tasks) = BlockingTaskSpawner::queued();
+            runtime.blocking_tasks = spawner;
+            let trace_path = temp.path().join("wake-failures.jsonl");
+            let _subscriber = tracing::subscriber::set_default(
+                tracing_subscriber::fmt()
+                    .json()
+                    .with_max_level(tracing::Level::WARN)
+                    .with_writer(std::sync::Mutex::new(
+                        std::fs::File::create(&trace_path).unwrap(),
+                    ))
+                    .finish(),
+            );
+            let server = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .unwrap();
+            let requests = Arc::new(AtomicUsize::new(0));
+            let state = requests.clone();
+            let address = server.block_on(async {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let router = Router::new()
+                    .route(
+                        "/private/project/command",
+                        post(|State(count): State<Arc<AtomicUsize>>| async move {
+                            if count.fetch_add(1, Ordering::SeqCst) == 1 {
+                                return (
+                                    StatusCode::OK,
+                                    Json(serde_json::json!({ "status": "deferred" })),
+                                );
+                            }
+                            (
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                Json(serde_json::json!({
+                                    "error": "fixture host command unavailable"
+                                })),
+                            )
+                        }),
+                    )
+                    .with_state(state);
+                tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+                address
+            });
+            let scope =
+                RuntimeScope::new("fixture", "fixture", repo.clone(), RuntimeTarget::Host).unwrap();
+            let mut endpoint = DaemonEndpoint::new(
+                scope,
+                std::process::id(),
+                "fixture".into(),
+                "inert-fixture".into(),
+                "fixture".into(),
+            );
+            endpoint.project_transport_url = Some(format!("http://{address}"));
+            let target = runtime.runtimes.get_mut(&window_id).unwrap();
+            let original_client = target.client.clone();
+            let original_identity = target.owner_identity.clone();
+            target.client =
+                gwt::project_runtime::client::ProjectRuntimeClient::new(&endpoint).unwrap();
+            if failures == 2 {
+                target.owner_identity.host_instance_id = "failed-owner-generation".into();
+            }
+            let decision = normal_wake(repo.clone(), window_id.clone());
+            runtime.write_pm_wake_prompt(&decision).unwrap();
+            for attempt in 1..=failures {
+                tasks.lock().unwrap().remove(0)();
+                let UserEvent::ProjectCompletion { event, .. } =
+                    recorded.lock().unwrap().pop().unwrap()
+                else {
+                    panic!("project completion");
+                };
+                let UserEvent::PmWakeDeliveryComplete(delivery) = *event else {
+                    panic!("wake completion");
+                };
+                assert_eq!(
+                    delivery.result,
+                    Err("fixture host command unavailable".into())
+                );
+                runtime.pm_wake_delivery_complete(delivery);
+                assert!(
+                    tasks.lock().unwrap().is_empty(),
+                    "completion must not retry itself"
+                );
+                assert_eq!(
+                    runtime
+                        .project_state_for_root(&repo)
+                        .unwrap()
+                        .pending_pm_wakes[&window_id],
+                    decision
+                );
+                if attempt < failures {
+                    assert!(runtime.retry_held_pm_wake(&repo));
+                    runtime.flush_pending_pm_wake(&window_id);
+                    assert_eq!(
+                        tasks.lock().unwrap().len(),
+                        1,
+                        "one external retry in flight"
+                    );
+                    tasks.lock().unwrap().remove(0)();
+                    let UserEvent::ProjectCompletion { event, .. } =
+                        recorded.lock().unwrap().pop().unwrap()
+                    else {
+                        panic!("project completion");
+                    };
+                    let UserEvent::PmWakeDeliveryComplete(delivery) = *event else {
+                        panic!("wake completion");
+                    };
+                    assert_eq!(delivery.result, Ok(PmWakeWrite::Deferred));
+                    runtime.pm_wake_delivery_complete(delivery);
+                    assert!(tasks.lock().unwrap().is_empty());
+                    assert!(runtime.retry_held_pm_wake(&repo));
+                    assert_eq!(tasks.lock().unwrap().len(), 1);
+                }
+            }
+            if failures == 2 {
+                for _ in 0..3 {
+                    assert!(runtime.retry_held_pm_wake(&repo));
+                    assert!(
+                        tasks.lock().unwrap().is_empty(),
+                        "exhausted host must not be resubmitted"
+                    );
+                }
+                // An unconfirmed wake owns an exact transaction even after
+                // Pause/Resume changes the loop. It must keep the same budget.
+                runtime
+                    .project_state_for_root_mut(&repo)
+                    .unwrap()
+                    .pending_pm_wakes
+                    .get_mut(&window_id)
+                    .unwrap()
+                    .unconfirmed = true;
+                let loop_path = pm_registry::pm_loop_state_path_for_repo_path(&repo);
+                let original_loop = pm_registry::load_pm_loop_state(&loop_path).unwrap();
+                pm_registry::save_pm_loop_state(&loop_path, &Default::default()).unwrap();
+                assert!(runtime.retry_held_pm_wake(&repo));
+                assert!(tasks.lock().unwrap().is_empty());
+                pm_registry::save_pm_loop_state(&loop_path, &original_loop).unwrap();
+            }
+            let warnings = std::fs::read_to_string(&trace_path).unwrap();
+            let failures_logged = warnings
+                .lines()
+                .filter(|row| row.contains("fixture host command unavailable"))
+                .count();
+            assert_eq!(
+                failures_logged,
+                usize::from(failures == 2),
+                "warn once only after the retry budget is exhausted"
+            );
+            assert_eq!(
+                requests.load(Ordering::SeqCst),
+                failures + usize::from(failures == 2)
+            );
+            let target = runtime.runtimes.get_mut(&window_id).unwrap();
+            target.client = original_client;
+            target.owner_identity = original_identity;
+            runtime.flush_pending_pm_wake(&window_id);
+            assert_eq!(tasks.lock().unwrap().len(), 1);
+            // The pane fixture drains input without a provider. Its shared
+            // helper supplies the exact issued body to the real hook ACK path.
+            crate::app_runtime::tests::drain_pm_wake_delivery_tasks(&mut runtime);
+            let receipt = pm_registry::pm_delivery_receipt_for_operation(
+                &pm_registry::pm_delivery_receipts_path_for_repo_path(&repo),
+                decision.wake_id.as_deref().unwrap(),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                receipt.status,
+                pm_registry::PmDeliveryReceiptStatus::Verified
+            );
+            runtime.flush_pending_pm_wake(&window_id);
+            assert!(tasks.lock().unwrap().is_empty());
+            assert!(runtime
+                .project_state_for_root(&repo)
+                .unwrap()
+                .pending_pm_wakes
+                .is_empty());
+        }
+    }
+
+    #[test]
     fn pm_wake_worker_defers_a_turn_started_after_enqueue() {
         let _env_lock = env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(temp.path());
+        let trace_path = temp.path().join("pm-lock-stages.jsonl");
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_env_filter("gwt.pm.refresh=debug")
+            .with_writer(std::sync::Mutex::new(
+                std::fs::File::create(&trace_path).unwrap(),
+            ))
+            .finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
         let (repo, mut runtime, window_id) = pm_wake_fixture(&temp);
         let _pane = attach_live_pm_pane(&mut runtime, &window_id);
         let (spawner, tasks) = BlockingTaskSpawner::queued();
@@ -2603,6 +2937,15 @@ mod delivery_tests {
         state.source_event = Some("Stop".into());
         state.last_activity_at = chrono::Utc::now() - chrono::Duration::hours(1);
         state.save(&path).unwrap();
+        let lock_count = || {
+            std::fs::read_to_string(&trace_path)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                .filter(|row| row["fields"]["stage"] == "pm_prefs.lock")
+                .count()
+        };
+        let locks_before = lock_count();
         tasks.lock().unwrap().remove(0)();
         assert!(
             capture.prompts().is_empty(),
@@ -2616,11 +2959,24 @@ mod delivery_tests {
             panic!("wake completion")
         };
         assert_eq!(delivery.result, Ok(PmWakeWrite::Deferred));
+        // Native owner truth can arrive before its GUI Session projection.
+        // A missing GUI row used to mean "not busy" and immediately requeue
+        // this same Deferred operation, taking its three locks on every lap.
+        let projection = runtime.active_agent_sessions.remove(&window_id).unwrap();
         runtime.pm_wake_delivery_complete(delivery);
         assert!(
             tasks.lock().unwrap().is_empty(),
             "a silent turn must not cause a retry task storm"
         );
+        let acquisitions = lock_count() - locks_before;
+        assert!(
+            (1..=4).contains(&acquisitions),
+            "one wake acquired {acquisitions} PM locks; limit is 4"
+        );
+        println!("Issue #6678: one deferred PM wake acquired {acquisitions} locks (limit 4)");
+        runtime
+            .active_agent_sessions
+            .insert(window_id.clone(), projection);
         state.status = gwt_agent::AgentStatus::Idle;
         state.last_completed_hook_event_at = Some(state.updated_at);
         state.save(&path).unwrap();
@@ -2794,7 +3150,7 @@ mod delivery_tests {
     }
 
     #[test]
-    fn pm_wake_delivery_retries_when_composer_clears_before_deferred_completion() {
+    fn issue_6678_deferred_pm_wake_waits_for_next_event_after_composer_clears() {
         let _env_lock = env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2828,6 +3184,20 @@ mod delivery_tests {
         finish_input_task(&mut runtime, &tasks, 0);
         runtime.pm_wake_delivery_complete(delivery);
 
+        assert!(
+            tasks.lock().unwrap().is_empty(),
+            "a Deferred completion must not resubmit itself against stale GUI state"
+        );
+        assert_eq!(
+            runtime
+                .project_state(&runtime.test_context())
+                .unwrap()
+                .pending_pm_wakes
+                .get(&window_id),
+            Some(&decision),
+            "the wake remains available to the next external event"
+        );
+        runtime.flush_pending_pm_wake(&window_id);
         assert_eq!(tasks.lock().unwrap().len(), 1);
         assert!(runtime
             .project_state(&runtime.test_context())

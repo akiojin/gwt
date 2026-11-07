@@ -13,10 +13,11 @@ use std::{
     path::Path,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Condvar, Mutex, RwLock,
+        Arc, Condvar, Mutex, RwLock, Weak,
     },
 };
 
+use crate::mobile_input_permit::NativeInputPermit;
 use gwt_core::repo_hash::ProjectKey;
 use ring::signature::{UnparsedPublicKey, ECDSA_P256_SHA256_FIXED};
 use serde::{Deserialize, Serialize};
@@ -32,10 +33,87 @@ const MAX_CHALLENGES_PER_DEVICE: usize = 4;
 const MAX_DEVICES: usize = 64;
 const MAX_SNAPSHOT_BYTES: u64 = 128 * 1024;
 
+/// Non-secret identity of the Host and its trusted HTTPS coordinator origin.
+/// Credential rotation preserves this binding; changing either part requires
+/// new pairing rather than transplanting existing approvals.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "StoredHostBinding")]
+pub struct HostBinding {
+    host_id: String,
+    coordinator_origin: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredHostBinding {
+    host_id: String,
+    coordinator_origin: String,
+}
+
+impl HostBinding {
+    pub(crate) fn host_id(&self) -> &str {
+        &self.host_id
+    }
+
+    pub fn new(host_id: &str, coordinator_origin: &str) -> io::Result<Self> {
+        let host_id = Uuid::parse_str(host_id)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid mobile Host ID"))?;
+        let origin = reqwest::Url::parse(coordinator_origin)
+            .ok()
+            .filter(|url| {
+                url.scheme() == "https"
+                    && url.host_str().is_some()
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && url.path() == "/"
+                    && url.query().is_none()
+                    && url.fragment().is_none()
+                    // URL parsing removes empty userinfo and dot segments.
+                    // An origin must contain only its original authority.
+                    && coordinator_origin.split_once("://").is_some_and(|(_, rest)| {
+                        !rest.strip_suffix('/').unwrap_or(rest).contains(['@', '/', '\\'])
+                    })
+                    && coordinator_origin.trim() == coordinator_origin
+                    && !coordinator_origin.chars().any(char::is_control)
+            })
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid mobile coordinator origin",
+                )
+            })?;
+        Ok(Self {
+            host_id: host_id.to_string(),
+            coordinator_origin: origin.origin().ascii_serialization(),
+        })
+    }
+}
+
+impl TryFrom<StoredHostBinding> for HostBinding {
+    type Error = io::Error;
+
+    fn try_from(stored: StoredHostBinding) -> Result<Self, Self::Error> {
+        Self::new(&stored.host_id, &stored.coordinator_origin)
+    }
+}
+
+fn deserialize_host_binding<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<HostBinding>, D::Error> {
+    // Missing is legacy schema1; an explicitly present null is never a binding.
+    HostBinding::deserialize(deserializer).map(Some)
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredDevices {
     schema_version: u32,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_host_binding"
+    )]
+    host_binding: Option<HostBinding>,
     devices: Vec<DeviceRecord>,
 }
 
@@ -59,6 +137,8 @@ pub enum AuthorizationError {
     Revoked,
     #[error("device is not authorized for this project")]
     WrongProject,
+    #[error("mobile peer binding mismatch; reconnect using a fresh peer-bound challenge")]
+    WrongPeer,
     #[error("invalid device signature")]
     InvalidSignature,
     #[error("session belongs to a previous Host epoch")]
@@ -67,6 +147,10 @@ pub enum AuthorizationError {
     Replay,
     #[error("mobile authorization synchronization is unavailable")]
     Unavailable,
+    #[error("mobile input was abandoned with an unknown physical outcome; do not retry")]
+    AbandonedUnknown,
+    #[error("native owner does not support revocable mobile input; reconnect after the project owner restarts with the current gwt")]
+    UnsupportedNativeOwner,
 }
 
 /// Authorization rejection does not write; a storage error disables access.
@@ -135,6 +219,38 @@ struct Pairing {
     issued_at: u64,
 }
 
+/// Connection-specific public identity supplied by the trusted Host adapter.
+/// The adapter must first validate the actual DTLS certificates against these
+/// SHA-256 fingerprints. Constructing this value is not peer verification or
+/// proof that a connection/registration lease is still live. Never deserialize
+/// it from a mobile request or persist it as part of a device approval.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerBinding {
+    host: HostBinding,
+    connection_id: Uuid,
+    host_fingerprint: [u8; 32],
+    mobile_fingerprint: [u8; 32],
+}
+
+impl PeerBinding {
+    pub fn new(
+        host: HostBinding,
+        connection_id: Uuid,
+        host_fingerprint: [u8; 32],
+        mobile_fingerprint: [u8; 32],
+    ) -> Result<Self, AuthorizationError> {
+        if connection_id.is_nil() || host_fingerprint == [0; 32] || mobile_fingerprint == [0; 32] {
+            return Err(AuthorizationError::WrongPeer);
+        }
+        Ok(Self {
+            host,
+            connection_id,
+            host_fingerprint,
+            mobile_fingerprint,
+        })
+    }
+}
+
 /// Sign these exact bytes, without reserializing them on the client.
 #[derive(Debug)]
 pub struct AuthenticationChallenge {
@@ -144,6 +260,7 @@ pub struct AuthenticationChallenge {
 
 struct Challenge {
     public: AuthenticationChallenge,
+    peer_binding: Option<PeerBinding>,
     device_id: String,
     project: ProjectKey,
     issued_at: u64,
@@ -153,6 +270,7 @@ struct Challenge {
 /// Host-only, non-cloneable session. Never deserialize client-supplied sessions.
 #[derive(Debug)]
 pub struct AuthenticatedSession {
+    peer_binding: Option<PeerBinding>,
     host_epoch: Uuid,
     device_id: String,
     project: ProjectKey,
@@ -171,6 +289,42 @@ pub struct MobileConnection {
     current_turn: Mutex<u64>,
     turns_changed: Condvar,
     order_failed: AtomicBool,
+    native_revocation: Arc<NativeRevocation>,
+}
+
+#[derive(Default)]
+struct NativeRevocation {
+    revoked: AtomicBool,
+    permits: Mutex<Vec<Weak<NativeInputPermit>>>,
+}
+
+impl NativeRevocation {
+    fn register(&self, permit: &Arc<NativeInputPermit>) -> Result<(), AuthorizationError> {
+        let mut permits = self
+            .permits
+            .lock()
+            .map_err(|_| AuthorizationError::Unavailable)?;
+        if self.revoked.load(Ordering::Acquire) {
+            permit.revoke();
+            return Err(AuthorizationError::Revoked);
+        }
+        permits.retain(|permit| permit.strong_count() != 0);
+        permits.push(Arc::downgrade(permit));
+        Ok(())
+    }
+
+    fn revoke(&self) {
+        self.revoked.store(true, Ordering::Release);
+        // Only short registration code takes this mutex, never a native worker
+        // or an RPC. Poisoning must also revoke every retained permit.
+        let mut permits = self
+            .permits
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        for permit in permits.drain(..).filter_map(|permit| permit.upgrade()) {
+            permit.revoke();
+        }
+    }
 }
 
 impl MobileConnection {
@@ -181,6 +335,29 @@ impl MobileConnection {
         authorization: Arc<RwLock<MobileAuthorization>>,
         session: AuthenticatedSession,
     ) -> Self {
+        let native_revocation = Arc::new(NativeRevocation::default());
+        if let Ok(authority) = authorization.read() {
+            if !authority.enabled
+                || authority.host_epoch != session.host_epoch
+                || authority
+                    .devices
+                    .get(&session.device_id)
+                    .is_none_or(|device| device.revoked)
+            {
+                native_revocation.revoke();
+            }
+            let mut connections = authority
+                .native_connections
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            connections.retain(|(_, connection)| connection.strong_count() != 0);
+            connections.push((
+                session.device_id.clone(),
+                Arc::downgrade(&native_revocation),
+            ));
+        } else {
+            native_revocation.revoke();
+        }
         Self {
             authorization,
             session: Mutex::new(session),
@@ -188,7 +365,39 @@ impl MobileConnection {
             current_turn: Mutex::new(0),
             turns_changed: Condvar::new(),
             order_failed: AtomicBool::new(false),
+            native_revocation,
         }
+    }
+
+    /// Authorize a peer-bound read without consuming an input sequence.
+    /// Session and authority locks cover the synchronous effect, just as for
+    /// input. The adapter must check the current registration lease, live client,
+    /// Project/pane payload allowlist inside `effect`, then synchronously accept
+    /// the DataChannel write. Peer equality alone proves none of those checks.
+    /// Do not await, enqueue a later unauthenticated effect, or reenter these locks.
+    pub fn with_authorized_read<T>(
+        &self,
+        project: &ProjectKey,
+        peer: &PeerBinding,
+        now: impl FnOnce() -> u64,
+        effect: impl FnOnce() -> Result<T, AuthorizationError>,
+    ) -> Result<T, AuthorizationError> {
+        let session = self
+            .session
+            .lock()
+            .map_err(|_| AuthorizationError::Unavailable)?;
+        let authorization = self
+            .authorization
+            .read()
+            .map_err(|_| AuthorizationError::Unavailable)?;
+        if self.native_revocation.revoked.load(Ordering::Acquire) {
+            return Err(AuthorizationError::Revoked);
+        }
+        if session.peer_binding.as_ref() != Some(peer) {
+            return Err(AuthorizationError::WrongPeer);
+        }
+        authorization.check_session(&session, project, now())?;
+        effect()
     }
 
     /// Call at the synchronous effect, never just to enqueue it. Read trusted
@@ -196,6 +405,8 @@ impl MobileConnection {
     /// Neither callback may reenter this connection or mutate its authority;
     /// never call dispatch while holding that authority's write lock.
     /// The adapter must also recheck the live client and current Project binding.
+    /// Native owner RPC must instead use `MobileInputRequest::authorize_native_with`
+    /// and the shared permit, never retain this synchronous fence while waiting.
     pub fn dispatch<T>(
         &self,
         project: &ProjectKey,
@@ -366,6 +577,76 @@ impl MobileInputRequest {
         &self.data
     }
 
+    /// Create an unarmed native permit. Registration grants no input authority,
+    /// but lets revoke interrupt even a preparation whose owner never replies.
+    #[doc(hidden)]
+    pub fn native_permit(&self) -> Result<Arc<NativeInputPermit>, AuthorizationError> {
+        let permit = NativeInputPermit::new().map_err(|_| AuthorizationError::Unavailable)?;
+        self.connection.native_revocation.register(&permit)?;
+        Ok(permit)
+    }
+
+    /// An unknown result ends this connection's input stream. Recovery needs a
+    /// fresh authenticated connection, never a replay of the abandoned request.
+    #[doc(hidden)]
+    pub fn abandon_native(&self) {
+        self.connection.order_failed.store(true, Ordering::Release);
+        self.connection.native_revocation.revoke();
+        self.connection.turns_changed.notify_all();
+    }
+
+    /// Consume the sequence and arm one immutable native input under the short
+    /// Host/session fence. The physical owner accepts it using its shared CAS;
+    /// no network wait or physical write belongs in this authorization callback.
+    #[doc(hidden)]
+    pub fn authorize_native(
+        &self,
+        permit: &NativeInputPermit,
+        current_project: impl FnOnce() -> Option<ProjectKey>,
+        now: impl FnOnce() -> u64,
+    ) -> Result<(), AuthorizationError> {
+        self.authorize_native_with(current_project, now, |issued, expires, time| {
+            permit
+                .arm(issued, expires, time)
+                .map_err(|_| AuthorizationError::Unavailable)
+        })
+    }
+
+    /// A trusted adapter can add its short client-binding fence around arming.
+    /// Lock order remains session, Host authority, client binding, atomic arm.
+    #[doc(hidden)]
+    pub fn authorize_native_with<T>(
+        &self,
+        current_project: impl FnOnce() -> Option<ProjectKey>,
+        now: impl FnOnce() -> u64,
+        arm: impl FnOnce(u64, u64, u64) -> Result<T, AuthorizationError>,
+    ) -> Result<T, AuthorizationError> {
+        let mut session = self
+            .connection
+            .session
+            .lock()
+            .map_err(|_| AuthorizationError::Unavailable)?;
+        let authority = self
+            .connection
+            .authorization
+            .read()
+            .map_err(|_| AuthorizationError::Unavailable)?;
+        let time = now();
+        let issued_at = session.issued_at;
+        let expires_at = session.expires_at.min(
+            authority
+                .devices
+                .get(&session.device_id)
+                .map_or(0, |device| device.expires_at),
+        );
+        authority.dispatch(&mut session, &self.project, self.sequence, time, || {
+            if current_project().as_ref() != Some(&self.project) {
+                return Err(AuthorizationError::WrongProject);
+            }
+            arm(issued_at, expires_at, time)
+        })?
+    }
+
     /// Accept an operation at final synchronous dispatch, using current time
     /// after the authorization locks. Retain those locks until the effect ends.
     /// Recheck the live client here, and the current window owner in `effect`.
@@ -392,9 +673,11 @@ impl MobileInputRequest {
 pub struct MobileAuthorization {
     enabled: bool,
     host_epoch: Uuid,
+    host_binding: Option<HostBinding>,
     devices: HashMap<String, DeviceRecord>,
     pending: HashMap<String, Pairing>,
     challenges: HashMap<String, Challenge>,
+    native_connections: Mutex<Vec<(String, Weak<NativeRevocation>)>>,
 }
 
 impl Default for MobileAuthorization {
@@ -402,9 +685,11 @@ impl Default for MobileAuthorization {
         Self {
             enabled: false,
             host_epoch: Uuid::new_v4(),
+            host_binding: None,
             devices: HashMap::new(),
             pending: HashMap::new(),
             challenges: HashMap::new(),
+            native_connections: Mutex::default(),
         }
     }
 }
@@ -416,6 +701,7 @@ impl MobileAuthorization {
     }
 
     pub fn disable(&mut self) {
+        self.revoke_native_connections(None);
         self.enabled = false;
         self.host_epoch = Uuid::new_v4();
         self.pending.clear();
@@ -502,9 +788,26 @@ impl MobileAuthorization {
             .get_mut(device_id)
             .ok_or(AuthorizationError::UnknownDevice)?
             .revoked = true;
+        self.revoke_native_connections(Some(device_id));
         self.challenges
             .retain(|_, challenge| challenge.device_id != device_id);
         Ok(())
+    }
+
+    fn revoke_native_connections(&self, device_id: Option<&str>) {
+        let mut connections = self
+            .native_connections
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        connections.retain(|(device, connection)| {
+            let Some(connection) = connection.upgrade() else {
+                return false;
+            };
+            if device_id.is_none_or(|id| id == device) {
+                connection.revoke();
+            }
+            true
+        });
     }
 
     /// Approve on the trusted PC control plane, returning success only after save.
@@ -547,13 +850,40 @@ impl MobileAuthorization {
         Ok(())
     }
 
+    /// Legacy unbound challenge for existing callers, never a mobile transport fallback.
     pub fn challenge(
         &mut self,
         device_id: &str,
         project: &ProjectKey,
         now: u64,
     ) -> Result<AuthenticationChallenge, AuthorizationError> {
+        self.issue_challenge(device_id, project, None, now)
+    }
+
+    /// Reauthenticate an approved device on the exact verified transport peer.
+    /// The authority must have been loaded/bound explicitly to this Host/origin.
+    /// A new certificate/connection uses a fresh challenge and the same device key.
+    pub fn challenge_peer_bound(
+        &mut self,
+        device_id: &str,
+        project: &ProjectKey,
+        peer: &PeerBinding,
+        now: u64,
+    ) -> Result<AuthenticationChallenge, AuthorizationError> {
+        self.issue_challenge(device_id, project, Some(peer), now)
+    }
+
+    fn issue_challenge(
+        &mut self,
+        device_id: &str,
+        project: &ProjectKey,
+        peer: Option<&PeerBinding>,
+        now: u64,
+    ) -> Result<AuthenticationChallenge, AuthorizationError> {
         self.check_enabled()?;
+        if peer.is_some_and(|peer| self.host_binding.as_ref() != Some(&peer.host)) {
+            return Err(AuthorizationError::WrongPeer);
+        }
         let device = self
             .devices
             .get(device_id)
@@ -572,20 +902,51 @@ impl MobileAuthorization {
             return Err(AuthorizationError::Capacity);
         }
         let id = Uuid::new_v4().to_string();
-        // JSON tuple gives unambiguous UTF-8 encoding and explicit protocol/Host binding.
-        let signing_payload = serde_json::to_vec(&(
-            "gwt-mobile-auth-v1",
-            self.host_epoch.to_string(),
-            device_id,
-            project.as_str(),
-            &id,
-            now,
-            expires_at,
-        ))
+        // Fixed tuple order is the wire signing contract. The browser must
+        // validate every field against its own trusted bootstrap/local+remote
+        // peer descriptions before signing; never blindly sign arbitrary bytes.
+        let signing_payload = if let Some(peer) = peer {
+            use ring::rand::SecureRandom;
+            let mut nonce = [0; 32];
+            ring::rand::SystemRandom::new()
+                .fill(&mut nonce)
+                .map_err(|_| AuthorizationError::Unavailable)?;
+            serde_json::to_vec(&(
+                "gwt-mobile-auth-v2",
+                "pc-host",
+                "mobile-client",
+                &peer.host,
+                self.host_epoch.to_string(),
+                device_id,
+                hex::encode(ring::digest::digest(
+                    &ring::digest::SHA256,
+                    &device.public_key,
+                )),
+                project.as_str(),
+                peer.connection_id.to_string(),
+                hex::encode(peer.host_fingerprint),
+                hex::encode(peer.mobile_fingerprint),
+                hex::encode(nonce),
+                &id,
+                now,
+                expires_at,
+            ))
+        } else {
+            serde_json::to_vec(&(
+                "gwt-mobile-auth-v1",
+                self.host_epoch.to_string(),
+                device_id,
+                project.as_str(),
+                &id,
+                now,
+                expires_at,
+            ))
+        }
         .expect("string/integer tuple is serializable");
         self.challenges.insert(
             id.clone(),
             Challenge {
+                peer_binding: peer.cloned(),
                 public: AuthenticationChallenge {
                     id: id.clone(),
                     signing_payload: signing_payload.clone(),
@@ -610,11 +971,36 @@ impl MobileAuthorization {
         signature: &[u8],
         now: u64,
     ) -> Result<AuthenticatedSession, AuthorizationError> {
+        self.authenticate_challenge(challenge_id, None, signature, now)
+    }
+
+    /// Consume one challenge on this exact peer; failure also consumes it.
+    /// Legacy challenges are rejected rather than upgraded to peer-bound sessions.
+    pub fn authenticate_peer_bound(
+        &mut self,
+        challenge_id: &str,
+        peer: &PeerBinding,
+        signature: &[u8],
+        now: u64,
+    ) -> Result<AuthenticatedSession, AuthorizationError> {
+        self.authenticate_challenge(challenge_id, Some(peer), signature, now)
+    }
+
+    fn authenticate_challenge(
+        &mut self,
+        challenge_id: &str,
+        peer: Option<&PeerBinding>,
+        signature: &[u8],
+        now: u64,
+    ) -> Result<AuthenticatedSession, AuthorizationError> {
         self.check_enabled()?;
         let challenge = self
             .challenges
             .remove(challenge_id)
             .ok_or(AuthorizationError::UnknownRequest)?;
+        if challenge.peer_binding.as_ref() != peer {
+            return Err(AuthorizationError::WrongPeer);
+        }
         check_time(challenge.issued_at, challenge.expires_at, now)?;
         let device = self
             .devices
@@ -625,6 +1011,7 @@ impl MobileAuthorization {
             .verify(&challenge.public.signing_payload, signature)
             .map_err(|_| AuthorizationError::InvalidSignature)?;
         Ok(AuthenticatedSession {
+            peer_binding: challenge.peer_binding,
             host_epoch: self.host_epoch,
             device_id: device.id.clone(),
             project: challenge.project,
@@ -648,6 +1035,20 @@ impl MobileAuthorization {
         now: u64,
         effect: impl FnOnce() -> T,
     ) -> Result<T, AuthorizationError> {
+        self.check_session(session, project, now)?;
+        if sequence != session.next_sequence {
+            return Err(AuthorizationError::Replay);
+        }
+        session.next_sequence = sequence.checked_add(1).ok_or(AuthorizationError::Replay)?;
+        Ok(effect())
+    }
+
+    fn check_session(
+        &self,
+        session: &AuthenticatedSession,
+        project: &ProjectKey,
+        now: u64,
+    ) -> Result<(), AuthorizationError> {
         self.check_enabled()?;
         if session.host_epoch != self.host_epoch {
             return Err(AuthorizationError::StaleSession);
@@ -661,25 +1062,60 @@ impl MobileAuthorization {
             return Err(AuthorizationError::WrongProject);
         }
         check_time(session.issued_at, session.expires_at, now)?;
-        if sequence != session.next_sequence {
-            return Err(AuthorizationError::Replay);
-        }
-        session.next_sequence = sequence.checked_add(1).ok_or(AuthorizationError::Replay)?;
-        Ok(effect())
+        Ok(())
     }
 
     pub fn snapshot(&self) -> Vec<DeviceRecord> {
         self.devices().into_iter().cloned().collect()
     }
 
-    /// Load public device records, disabled and with a fresh Host epoch.
+    /// Load legacy schema1 records, disabled and with a fresh Host epoch.
     /// Only a missing file starts empty; corrupt or unreadable state fails closed.
-    /// The owner supplies a path in its private, trusted directory.
+    /// Bound snapshots require [`Self::load_bound`], never a binding-free fallback.
+    /// The owner supplies a path in its private, trusted directory and holds its
+    /// single-writer fence for all snapshot operations.
     pub fn load(path: &Path) -> io::Result<Self> {
+        Self::load_snapshot(path, None)
+    }
+
+    /// Restore only schema2 with the expected Host/origin. A missing snapshot
+    /// starts empty and bound, without writing or implicitly enabling access.
+    /// Legacy records require an explicit trusted-PC migration first.
+    pub fn load_bound(path: &Path, expected: &HostBinding) -> io::Result<Self> {
+        Self::load_snapshot(path, Some(expected))
+    }
+
+    /// Explicit trusted-PC binding of an existing schema1 snapshot in place.
+    /// Never rebind schema2, create a missing snapshot, or enable access. The
+    /// caller must hold the same private-path/single-writer fence as `save`.
+    pub fn bind_legacy_snapshot(path: &Path, binding: &HostBinding) -> io::Result<Self> {
+        let stored = Self::read_snapshot(path)?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "legacy mobile snapshot does not exist",
+            )
+        })?;
+        let mut authority = Self::restore_stored(stored, None)?;
+        authority.host_binding = Some(binding.clone());
+        authority.save(path)?;
+        Ok(authority)
+    }
+
+    fn load_snapshot(path: &Path, expected: Option<&HostBinding>) -> io::Result<Self> {
+        match Self::read_snapshot(path)? {
+            Some(stored) => Self::restore_stored(stored, expected),
+            None => Ok(Self {
+                host_binding: expected.cloned(),
+                ..Self::default()
+            }),
+        }
+    }
+
+    fn read_snapshot(path: &Path) -> io::Result<Option<StoredDevices>> {
         gwt_config::home::assert_test_path(path);
         let file = match File::open(path) {
             Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
         };
         let mut bytes = Vec::new();
@@ -690,16 +1126,31 @@ impl MobileAuthorization {
                 "mobile device snapshot exceeds size limit",
             ));
         }
-        let stored: StoredDevices = serde_json::from_slice(&bytes)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        if stored.schema_version != 1 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "unsupported mobile device snapshot schema",
-            ));
-        }
-        Self::restore(stored.devices)
+        serde_json::from_slice(&bytes)
+            .map(Some)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+    }
+
+    fn restore_stored(stored: StoredDevices, expected: Option<&HostBinding>) -> io::Result<Self> {
+        let problem = match (
+            stored.schema_version,
+            stored.host_binding.as_ref(),
+            expected,
+        ) {
+            (1, None, None) => None,
+            (1, None, Some(_)) => Some("legacy mobile snapshot requires explicit PC binding"),
+            (2, Some(binding), Some(expected)) if binding == expected => None,
+            (2, Some(_), Some(_)) => Some("mobile snapshot Host/origin binding mismatch"),
+            (2, Some(_), None) => Some("mobile snapshot requires an expected Host/origin binding"),
+            _ => Some("invalid or unsupported mobile device snapshot schema"),
+        };
+        if let Some(problem) = problem {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, problem));
+        }
+        let mut authority = Self::restore(stored.devices)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        authority.host_binding = stored.host_binding;
+        Ok(authority)
     }
 
     /// Atomically replace the public device snapshot, including revoked records.
@@ -721,11 +1172,18 @@ impl MobileAuthorization {
         serde_json::to_writer(
             &mut temp,
             &StoredDevices {
-                schema_version: 1,
+                schema_version: if self.host_binding.is_some() { 2 } else { 1 },
+                host_binding: self.host_binding.clone(),
                 devices: self.snapshot(),
             },
         )
         .map_err(io::Error::other)?;
+        if temp.as_file().metadata()?.len() > MAX_SNAPSHOT_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "mobile device snapshot exceeds size limit",
+            ));
+        }
         temp.as_file().sync_all()?;
         temp.persist(path).map_err(|error| error.error)?;
         #[cfg(unix)]
@@ -832,6 +1290,304 @@ mod tests {
             .unwrap();
         auth.authenticate(&challenge.id, signature.as_ref(), NOW)
             .unwrap()
+    }
+
+    fn bound_authority() -> (MobileAuthorization, PeerBinding) {
+        let binding =
+            HostBinding::new(&Uuid::new_v4().to_string(), "https://mobile.example").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut auth =
+            MobileAuthorization::load_bound(&dir.path().join("devices.json"), &binding).unwrap();
+        auth.enable();
+        let peer = PeerBinding::new(binding, Uuid::new_v4(), [1; 32], [2; 32]).unwrap();
+        (auth, peer)
+    }
+
+    fn peer_session(
+        auth: &mut MobileAuthorization,
+        peer: &PeerBinding,
+        device: &DeviceRecord,
+        key: &EcdsaKeyPair,
+    ) -> AuthenticatedSession {
+        let challenge = auth
+            .challenge_peer_bound(&device.id, &project(), peer, NOW)
+            .unwrap();
+        let signature = key
+            .sign(&SystemRandom::new(), &challenge.signing_payload)
+            .unwrap();
+        auth.authenticate_peer_bound(&challenge.id, peer, signature.as_ref(), NOW)
+            .unwrap()
+    }
+
+    #[test]
+    fn peer_challenge_signs_exact_context_and_reconnects_with_same_device() {
+        let (mut auth, peer) = bound_authority();
+        let key = key();
+        let device = paired(&mut auth, &key);
+        let challenge = auth
+            .challenge_peer_bound(&device.id, &project(), &peer, NOW)
+            .unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&challenge.signing_payload).unwrap();
+        let nonce = payload[11].as_str().unwrap();
+        assert_eq!(hex::decode(nonce).unwrap().len(), 32);
+        assert_eq!(
+            payload,
+            serde_json::json!([
+                "gwt-mobile-auth-v2",
+                "pc-host",
+                "mobile-client",
+                peer.host,
+                auth.host_epoch.to_string(),
+                device.id,
+                hex::encode(ring::digest::digest(
+                    &ring::digest::SHA256,
+                    key.public_key().as_ref()
+                )),
+                project().as_str(),
+                peer.connection_id.to_string(),
+                hex::encode([1; 32]),
+                hex::encode([2; 32]),
+                nonce,
+                challenge.id,
+                NOW,
+                NOW + CHALLENGE_TTL_SECS
+            ])
+        );
+        let signature = key
+            .sign(&SystemRandom::new(), &challenge.signing_payload)
+            .unwrap();
+        let mut session = auth
+            .authenticate_peer_bound(&challenge.id, &peer, signature.as_ref(), NOW)
+            .unwrap();
+        assert_eq!(session.peer_binding.as_ref(), Some(&peer));
+        assert_eq!(auth.dispatch(&mut session, &project(), 0, NOW, || 7), Ok(7));
+        let mut next_peer = peer.clone();
+        next_peer.connection_id = Uuid::new_v4();
+        next_peer.host_fingerprint = [3; 32];
+        next_peer.mobile_fingerprint = [4; 32];
+        let next = auth
+            .challenge_peer_bound(&device.id, &project(), &next_peer, NOW)
+            .unwrap();
+        let next_payload: serde_json::Value =
+            serde_json::from_slice(&next.signing_payload).unwrap();
+        assert_ne!(next_payload[11], payload[11]);
+        let signature = key
+            .sign(&SystemRandom::new(), &next.signing_payload)
+            .unwrap();
+        assert!(auth
+            .authenticate_peer_bound(&next.id, &next_peer, signature.as_ref(), NOW)
+            .is_ok());
+        assert_eq!(auth.devices().len(), 1);
+    }
+
+    #[test]
+    fn peer_authentication_rejects_substitution_versions_and_consumes_failures() {
+        let (mut auth, peer) = bound_authority();
+        let key = key();
+        let device = paired(&mut auth, &key);
+        let mut foreign = peer.clone();
+        foreign.host =
+            HostBinding::new(&Uuid::new_v4().to_string(), "https://mobile.example").unwrap();
+        let mut origin = peer.clone();
+        origin.host = HostBinding::new(&peer.host.host_id, "https://other.example").unwrap();
+        let mut connection = peer.clone();
+        connection.connection_id = Uuid::new_v4();
+        let mut host_fp = peer.clone();
+        host_fp.host_fingerprint = [5; 32];
+        let mut mobile_fp = peer.clone();
+        mobile_fp.mobile_fingerprint = [6; 32];
+        for wrong_peer in [foreign, origin, connection, host_fp, mobile_fp] {
+            let c = auth
+                .challenge_peer_bound(&device.id, &project(), &peer, NOW)
+                .unwrap();
+            let signature = key.sign(&SystemRandom::new(), &c.signing_payload).unwrap();
+            assert_eq!(
+                auth.authenticate_peer_bound(&c.id, &wrong_peer, signature.as_ref(), NOW)
+                    .unwrap_err(),
+                AuthorizationError::WrongPeer
+            );
+            assert_eq!(
+                auth.authenticate_peer_bound(&c.id, &peer, signature.as_ref(), NOW)
+                    .unwrap_err(),
+                AuthorizationError::UnknownRequest
+            );
+        }
+        let c = auth
+            .challenge_peer_bound(&device.id, &project(), &peer, NOW)
+            .unwrap();
+        let signature = key.sign(&SystemRandom::new(), &c.signing_payload).unwrap();
+        assert_eq!(
+            auth.authenticate(&c.id, signature.as_ref(), NOW)
+                .unwrap_err(),
+            AuthorizationError::WrongPeer
+        );
+        let c = auth.challenge(&device.id, &project(), NOW).unwrap();
+        let signature = key.sign(&SystemRandom::new(), &c.signing_payload).unwrap();
+        assert_eq!(
+            auth.authenticate_peer_bound(&c.id, &peer, signature.as_ref(), NOW)
+                .unwrap_err(),
+            AuthorizationError::WrongPeer
+        );
+        let c = auth
+            .challenge_peer_bound(&device.id, &project(), &peer, NOW)
+            .unwrap();
+        assert_eq!(
+            auth.authenticate_peer_bound(&c.id, &peer, &[0; 64], NOW)
+                .unwrap_err(),
+            AuthorizationError::InvalidSignature
+        );
+        assert_eq!(
+            auth.authenticate_peer_bound(&c.id, &peer, &[0; 64], NOW)
+                .unwrap_err(),
+            AuthorizationError::UnknownRequest
+        );
+        let c = auth
+            .challenge_peer_bound(&device.id, &project(), &peer, NOW)
+            .unwrap();
+        assert_eq!(
+            auth.authenticate_peer_bound(&c.id, &peer, &[0; 64], NOW + CHALLENGE_TTL_SECS)
+                .unwrap_err(),
+            AuthorizationError::Expired
+        );
+        assert_eq!(
+            auth.challenge_peer_bound(&device.id, &other_project(), &peer, NOW)
+                .unwrap_err(),
+            AuthorizationError::WrongProject
+        );
+        assert_eq!(
+            MobileAuthorization::default()
+                .challenge_peer_bound(&device.id, &project(), &peer, NOW)
+                .unwrap_err(),
+            AuthorizationError::Disabled
+        );
+        let mut legacy = MobileAuthorization::default();
+        legacy.enable();
+        let legacy_device = paired(&mut legacy, &key);
+        assert_eq!(
+            legacy
+                .challenge_peer_bound(&legacy_device.id, &project(), &peer, NOW)
+                .unwrap_err(),
+            AuthorizationError::WrongPeer
+        );
+    }
+
+    #[test]
+    fn peer_challenges_share_legacy_capacity_and_revocation() {
+        let (mut auth, peer) = bound_authority();
+        let key = key();
+        let device = paired(&mut auth, &key);
+        let old = auth.challenge(&device.id, &project(), NOW).unwrap();
+        for _ in 0..3 {
+            auth.challenge_peer_bound(&device.id, &project(), &peer, NOW)
+                .unwrap();
+        }
+        assert_eq!(
+            auth.challenge_peer_bound(&device.id, &project(), &peer, NOW)
+                .unwrap_err(),
+            AuthorizationError::Capacity
+        );
+        assert_eq!(
+            auth.challenge(&device.id, &project(), NOW).unwrap_err(),
+            AuthorizationError::Capacity
+        );
+        let signature = key
+            .sign(&SystemRandom::new(), &old.signing_payload)
+            .unwrap();
+        auth.authenticate(&old.id, signature.as_ref(), NOW).unwrap();
+        let c = auth
+            .challenge_peer_bound(&device.id, &project(), &peer, NOW)
+            .unwrap();
+        auth.revoke(&device.id).unwrap();
+        assert_eq!(
+            auth.authenticate_peer_bound(&c.id, &peer, &[0; 64], NOW)
+                .unwrap_err(),
+            AuthorizationError::UnknownRequest
+        );
+        assert_eq!(
+            auth.challenge_peer_bound(&device.id, &project(), &peer, NOW)
+                .unwrap_err(),
+            AuthorizationError::Revoked
+        );
+        assert!(PeerBinding::new(peer.host.clone(), Uuid::nil(), [1; 32], [2; 32]).is_err());
+        assert!(PeerBinding::new(peer.host, Uuid::new_v4(), [0; 32], [2; 32]).is_err());
+    }
+
+    #[test]
+    fn peer_read_fence_preserves_sequence_and_rechecks_authority() {
+        let (mut auth, peer) = bound_authority();
+        let key = key();
+        let device = paired(&mut auth, &key);
+        let session = peer_session(&mut auth, &peer, &device, &key);
+        let auth = Arc::new(RwLock::new(auth));
+        let connection = MobileConnection::new(auth.clone(), session);
+        let effects = std::cell::Cell::new(0);
+        let read = |scope: &ProjectKey, peer: &PeerBinding, now| {
+            connection.with_authorized_read(
+                scope,
+                peer,
+                || now,
+                || {
+                    assert!(connection.session.try_lock().is_err());
+                    assert!(auth.try_write().is_err());
+                    effects.set(effects.get() + 1);
+                    Ok(7)
+                },
+            )
+        };
+        assert_eq!(read(&project(), &peer, NOW), Ok(7));
+        assert_eq!(read(&project(), &peer, NOW), Ok(7));
+        assert_eq!(connection.dispatch(&project(), 0, || NOW, || 9), Ok(9));
+        assert_eq!(
+            read(&other_project(), &peer, NOW),
+            Err(AuthorizationError::WrongProject)
+        );
+        assert_eq!(
+            read(&project(), &peer, NOW + SESSION_TTL_SECS),
+            Err(AuthorizationError::Expired)
+        );
+        let mut wrong = peer.clone();
+        wrong.connection_id = Uuid::new_v4();
+        assert_eq!(
+            read(&project(), &wrong, NOW),
+            Err(AuthorizationError::WrongPeer)
+        );
+        auth.write().unwrap().revoke(&device.id).unwrap();
+        assert_eq!(
+            read(&project(), &peer, NOW),
+            Err(AuthorizationError::Revoked)
+        );
+        assert_eq!(effects.get(), 2);
+    }
+
+    #[test]
+    fn peer_read_rejects_logical_abandon_legacy_and_previous_epoch_sessions() {
+        let (mut auth, peer) = bound_authority();
+        let key = key();
+        let device = paired(&mut auth, &key);
+        let legacy_session = session(&mut auth, &device, &key);
+        let abandoned_session = peer_session(&mut auth, &peer, &device, &key);
+        let stale_session = peer_session(&mut auth, &peer, &device, &key);
+        let auth = Arc::new(RwLock::new(auth));
+        let legacy = MobileConnection::new(auth.clone(), legacy_session);
+        let abandoned = MobileConnection::new(auth.clone(), abandoned_session);
+        let stale = MobileConnection::new(auth.clone(), stale_session);
+        let read = |connection: &MobileConnection| {
+            connection.with_authorized_read(
+                &project(),
+                &peer,
+                || NOW,
+                || panic!("unauthorized read"),
+            )
+        };
+        assert_eq!(read(&legacy), Err::<(), _>(AuthorizationError::WrongPeer));
+        abandoned.native_revocation.revoke();
+        assert_eq!(read(&abandoned), Err(AuthorizationError::Revoked));
+        auth.write().unwrap().host_epoch = Uuid::new_v4();
+        assert_eq!(read(&stale), Err(AuthorizationError::StaleSession));
+        auth.write().unwrap().disable();
+        auth.write().unwrap().enable();
+        assert!(read(&stale).is_err());
     }
 
     #[test]
@@ -1003,6 +1759,40 @@ mod tests {
         let queued = || connection.dispatch(&project(), 0, || NOW, || panic!("revoked effect"));
         auth.write().unwrap().revoke(device.id()).unwrap();
         assert_eq!(queued(), Err(AuthorizationError::Revoked));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_permits_are_revoked_without_waiting_for_the_session_or_owner() {
+        let mut authority = MobileAuthorization::default();
+        authority.enable();
+        let key = key();
+        let device = paired(&mut authority, &key);
+        let session = session(&mut authority, &device, &key);
+        let authority = Arc::new(RwLock::new(authority));
+        let connection = Arc::new(MobileConnection::new(authority.clone(), session));
+        let request = MobileInputRequest::new(
+            connection.clone(),
+            "phone".into(),
+            project(),
+            0,
+            "pane".into(),
+            "input".into(),
+        );
+        let permit = request.native_permit().unwrap();
+        request
+            .authorize_native(&permit, || Some(project()), || NOW)
+            .unwrap();
+        // A native RPC may hold the connection's session on its own worker;
+        // PC revocation must depend only on the short Host writer operation.
+        let _session = connection.session.lock().unwrap();
+        authority
+            .try_write()
+            .expect("native authorization releases the Host fence")
+            .revoke(device.id())
+            .unwrap();
+        assert!(permit.is_revoked());
+        assert!(permit.arm(NOW, NOW + SESSION_TTL_SECS, NOW).is_err());
     }
 
     #[test]
@@ -1341,6 +2131,180 @@ mod tests {
             MobileAuthorization::restore(vec![invalid_key]),
             Err(AuthorizationError::InvalidDevice)
         ));
+    }
+
+    #[test]
+    fn host_bound_snapshot_requires_explicit_migration_and_preserves_device_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("devices.json");
+        let binding =
+            HostBinding::new(&Uuid::new_v4().to_string(), "https://EXAMPLE.com:443/").unwrap();
+        let mut auth = MobileAuthorization::default();
+        auth.enable();
+        let key = key();
+        let device = paired(&mut auth, &key);
+        let revoked = paired(&mut auth, &self::key());
+        auth.revoke(&revoked.id).unwrap();
+        let mut old = session(&mut auth, &device, &key);
+        auth.save(&path).unwrap();
+        let legacy = std::fs::read(&path).unwrap();
+        assert!(MobileAuthorization::load_bound(&path, &binding).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), legacy);
+
+        let migrated = MobileAuthorization::bind_legacy_snapshot(&path, &binding).unwrap();
+        assert_eq!(migrated.check_enabled(), Err(AuthorizationError::Disabled));
+        assert_eq!(migrated.snapshot().len(), 2);
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["schema_version"], 2);
+        let legacy: serde_json::Value = serde_json::from_slice(&legacy).unwrap();
+        assert_eq!(saved["devices"], legacy["devices"]);
+        assert_eq!(
+            saved["host_binding"]["coordinator_origin"],
+            "https://example.com"
+        );
+        assert!(MobileAuthorization::load(&path).is_err());
+        let mut restored = MobileAuthorization::load_bound(&path, &binding).unwrap();
+        assert_eq!(restored.check_enabled(), Err(AuthorizationError::Disabled));
+        restored.enable();
+        assert_eq!(
+            restored.dispatch(&mut old, &project(), 0, NOW, || ()),
+            Err(AuthorizationError::StaleSession)
+        );
+        assert_eq!(
+            restored
+                .challenge(&revoked.id, &project(), NOW)
+                .unwrap_err(),
+            AuthorizationError::Revoked
+        );
+        let pending = restored
+            .request_pairing("Tablet", self::key().public_key().as_ref(), project(), NOW)
+            .unwrap();
+        let added = restored.approve_and_save(&pending.id, NOW, &path).unwrap();
+        let missing = dir.path().join("missing/devices.json");
+        assert!(matches!(
+            restored.revoke_and_save(&added.id, &missing),
+            Err(DeviceUpdateError::Storage(_))
+        ));
+        assert_eq!(restored.check_enabled(), Err(AuthorizationError::Disabled));
+        restored.save(&path).unwrap();
+        let recovered = MobileAuthorization::load_bound(&path, &binding).unwrap();
+        assert_eq!(recovered.snapshot().len(), 3);
+        assert!(recovered
+            .devices()
+            .iter()
+            .find(|d| d.id() == added.id)
+            .unwrap()
+            .is_revoked());
+        assert_eq!(recovered.check_enabled(), Err(AuthorizationError::Disabled));
+    }
+
+    #[test]
+    fn host_bound_snapshot_rejects_mismatch_rebinding_and_invalid_envelopes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("devices.json");
+        let id = Uuid::new_v4().to_string();
+        let binding = HostBinding::new(&id, "https://example.com").unwrap();
+        assert!(MobileAuthorization::bind_legacy_snapshot(&path, &binding).is_err());
+        let fresh = MobileAuthorization::load_bound(&path, &binding).unwrap();
+        assert!(!path.exists());
+        assert_eq!(fresh.check_enabled(), Err(AuthorizationError::Disabled));
+        fresh.save(&path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        for other in [
+            HostBinding::new(&Uuid::new_v4().to_string(), "https://example.com").unwrap(),
+            HostBinding::new(&id, "https://other.example.com").unwrap(),
+            HostBinding::new(&id, "https://example.com:8443").unwrap(),
+        ] {
+            assert!(MobileAuthorization::load_bound(&path, &other).is_err());
+            assert!(MobileAuthorization::bind_legacy_snapshot(&path, &other).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        }
+        assert!(MobileAuthorization::bind_legacy_snapshot(&path, &binding).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let valid: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        for (field, value) in [
+            ("schema_version", serde_json::json!(1)),
+            ("schema_version", serde_json::json!(3)),
+            ("host_binding", serde_json::Value::Null),
+            (
+                "host_binding",
+                serde_json::json!({"host_id": "invalid", "coordinator_origin": "https://example.com"}),
+            ),
+            (
+                "host_binding",
+                serde_json::json!({"host_id": id, "coordinator_origin": "http://example.com"}),
+            ),
+            ("unexpected", serde_json::json!(true)),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = value;
+            let encoded = serde_json::to_vec(&invalid).unwrap();
+            std::fs::write(&path, &encoded).unwrap();
+            assert!(MobileAuthorization::load_bound(&path, &binding).is_err());
+            assert!(MobileAuthorization::load(&path).is_err());
+            assert!(MobileAuthorization::bind_legacy_snapshot(&path, &binding).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), encoded);
+        }
+        std::fs::write(&path, br#"{"schema_version":2,"devices":[]}"#).unwrap();
+        assert!(MobileAuthorization::load_bound(&path, &binding).is_err());
+    }
+
+    #[test]
+    fn host_bound_snapshot_oversize_migration_preserves_legacy_and_can_recover() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("devices.json");
+        let mut auth = MobileAuthorization::default();
+        auth.enable();
+        paired(&mut auth, &key());
+        auth.save(&path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let id = Uuid::new_v4().to_string();
+        let oversized =
+            HostBinding::new(&id, &format!("https://{}.example", "a".repeat(128 * 1024))).unwrap();
+        assert!(MobileAuthorization::bind_legacy_snapshot(&path, &oversized).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let binding = HostBinding::new(&id, "https://example.com").unwrap();
+        MobileAuthorization::bind_legacy_snapshot(&path, &binding).unwrap();
+        assert_eq!(
+            MobileAuthorization::load_bound(&path, &binding)
+                .unwrap()
+                .devices()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn host_binding_validates_origins_and_normalizes_identity_on_deserialization() {
+        let id = Uuid::new_v4().to_string();
+        let expected = HostBinding::new(&id, "https://example.com").unwrap();
+        let encoded = serde_json::json!({"host_id": id.to_uppercase(), "coordinator_origin": "https://EXAMPLE.com:443/"});
+        assert_eq!(
+            serde_json::from_value::<HostBinding>(encoded).unwrap(),
+            expected
+        );
+        assert!(HostBinding::new("invalid", "https://example.com").is_err());
+        assert!(serde_json::from_value::<HostBinding>(serde_json::json!({
+            "host_id": "invalid", "coordinator_origin": "https://example.com"
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<HostBinding>(serde_json::json!({
+            "host_id": id, "coordinator_origin": "http://example.com"
+        }))
+        .is_err());
+        for origin in [
+            "http://example.com",
+            "https://@example.com",
+            "https://user:password@example.com",
+            "https://example.com/mobile/",
+            "https://example.com/mobile/..",
+            "https://example.com?secret=x",
+            "https://example.com#secret",
+            "https://example.com\n",
+        ] {
+            assert!(HostBinding::new(&id, origin).is_err(), "{origin:?}");
+        }
     }
 
     #[test]

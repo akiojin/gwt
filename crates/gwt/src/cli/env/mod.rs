@@ -191,7 +191,32 @@ pub trait CliEnv {
     /// Issue #3515: re-run a failed run or job. Returns the outcome line.
     fn rerun_actions(&mut self, target: crate::cli::ActionsRerunTarget) -> io::Result<String>;
     fn dispatch_actions(&mut self, call: crate::cli::ActionsDispatchCall) -> io::Result<String>;
+    fn actions_diagnostic(
+        &mut self,
+        command: super::actions::DiagnosticCommand,
+    ) -> io::Result<serde_json::Value> {
+        super::actions::diagnostic::execute(self, command)
+    }
+    fn diagnostic_workflow_context(&mut self) -> io::Result<serde_json::Value> {
+        Err(super::actions::diagnostic::unavailable())
+    }
+    fn diagnostic_run_snapshot(&mut self, _run_id: u64) -> io::Result<serde_json::Value> {
+        Err(super::actions::diagnostic::unavailable())
+    }
+    fn diagnostic_artifact(&mut self, _run_id: u64, _artifact_id: u64) -> io::Result<Vec<u8>> {
+        Err(super::actions::diagnostic::unavailable())
+    }
+    fn dispatch_diagnostic_workflow(
+        &mut self,
+        _git_ref: &str,
+        _inputs: &serde_json::Map<String, serde_json::Value>,
+    ) -> io::Result<gwt_github::client::http::DiagnosticDispatchAck> {
+        Err(super::actions::diagnostic::unavailable())
+    }
     fn github_repository(&self) -> io::Result<(String, String)>;
+    fn release_policy_context(&mut self) -> io::Result<crate::cli::ReleasePolicyContext> {
+        super::actions::release_policy::context(self.repo_path())
+    }
     fn pm_settings_snapshot(
         &mut self,
         operation: &str,

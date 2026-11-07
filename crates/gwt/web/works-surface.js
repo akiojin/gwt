@@ -25,16 +25,19 @@ function currentWorks(catalog, activity, roster) {
   }).sort((a, b) => Number(!!b.assignment.is_pm) - Number(!!a.assignment.is_pm) || order(a) - order(b));
 }
 
+const sparkStates = new WeakMap();
 function drawSpark(document, svg, input, maximum) {
   const values = Array.from({ length: 30 }, (_, index) => finite(input?.[index]) ? Math.max(0, input[index]) : null);
   const known = values.filter(finite);
+  const max = Math.max(1, maximum || 0, ...known);
+  const previous = sparkStates.get(svg);
+  if (previous?.maximum === max && previous.values.every((value, index) => value === values[index])) return;
   svg.replaceChildren();
   svg.setAttribute("viewBox", "0 0 300 56");
   svg.setAttribute("preserveAspectRatio", "none");
   svg.setAttribute("role", "img");
   svg.setAttribute("aria-label", `Tokens per minute, last 30 minutes: ${known.length} measured minutes, ${30 - known.length} unavailable`);
   svg.dataset.knownCount = String(known.length);
-  const max = Math.max(1, maximum || 0, ...known);
   let points = [];
   const append = () => {
     if (!points.length) return;
@@ -52,6 +55,7 @@ function drawSpark(document, svg, input, maximum) {
     svg.append(dot);
   });
   append();
+  sparkStates.set(svg, { values, maximum: max });
 }
 
 export function createWorksSurface({ document, windowCatalogModel, activityModel, rosterModel, windowDisplayTitle, systemSettingsModel,
@@ -129,7 +133,8 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
     const available = work.data.session_id && ["running", "waiting", "idle"].includes(work.state);
     full.querySelector(".works-full-meta").textContent = `${work.assignment.is_pm ? "PM" : work.assignment.issue_number ? `#${work.assignment.issue_number}` : "—"} · ${purposeFor(work)} · ${labelFor(work.state)} · ${seconds(t.elapsed_seconds)} · ${providerFor(work)} / ${work.member?.model || t.model || "—"} · ${available ? "Interactive" : "Input unavailable"}`;
     full.querySelector(".works-full-usage").textContent = `${number(t.input_tokens)} input / ${number(t.cache_tokens)} cache / ${number(t.output_tokens)} output · Context ${finite(t.context_remaining_percent) ? `${t.context_remaining_percent}%` : "—"}`;
-    if (rehost && isPresented()) mountTerminal(work.data.id, entry.terminal, { readOnly: false });
+    // Attachment progress may remain after another surface moves the native xterm.
+    if ((rehost || !entry.terminal.querySelector(".xterm")) && isPresented()) mountTerminal(work.data.id, entry.terminal, { readOnly: false });
   }
   function openWork(target) {
     if (disposed) return false;
@@ -215,6 +220,8 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
   }
   function render(rehost) {
     if (disposed) return;
+    const header = selected && isPresented() ? full.querySelector(".works-full-header") : null;
+    const previousHeader = header?.textContent;
     const lines = previewLines();
     const linesChanged = element.style.getPropertyValue("--works-preview-lines") !== String(lines);
     element.style.setProperty("--works-preview-lines", String(lines));
@@ -263,7 +270,8 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
       }
     }
     renderedCatalog = catalog; renderedActivity = activity; renderedRoster = roster; syncPreview();
-    if (changed || rehost) onLayout();
+    // A model update can wrap the header while hidden ResizeObservers pause.
+    if (changed || rehost || (header && header.textContent !== previousHeader)) onLayout();
   }
   element.querySelector('[data-action="back"]').addEventListener("click", () => back());
   for (const [action, delta] of [["previous", -1], ["next", 1]]) element.querySelector(`[data-action="${action}"]`).addEventListener("click", () => {
@@ -279,7 +287,7 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
     rosterModel.subscribeFrame(state => state, value => { if (value !== renderedRoster) render(false); }),
     systemSettingsModel?.subscribeFrame(state => state.worksPreviewLines, () => render(false)),
   ];
-  return { element, sync: () => render(true), openWork, reveal: openWork, showList: () => back(false), setPreviewHost,
+  return { element, sync: (rehost = true) => render(rehost), openWork, reveal: openWork, showList: () => back(false), setPreviewHost,
     contains: id => !!exactWork(id), isVisible: id => !element.hidden && !!exactWork(id),
     dispose() { if (disposed) return; for (const unsubscribe of unsubscribers) unsubscribe?.(); setPreviewHost(null); for (const entry of entries.values()) entry.cleanup?.(); entries.clear(); disposed = true; },
   };

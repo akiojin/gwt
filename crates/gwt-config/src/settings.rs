@@ -2,11 +2,13 @@
 
 use std::{
     collections::BTreeMap,
+    fs::{File, OpenOptions},
     num::NonZeroU16,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Mutex, MutexGuard},
 };
 
+use fs2::FileExt;
 use serde::{Deserialize, Deserializer, Serialize};
 use toml_edit::{value, DocumentMut, Item, Table};
 use tracing::{debug, error, info, warn};
@@ -24,6 +26,90 @@ use crate::{
 };
 
 static UPDATE_LOCK: Mutex<()> = Mutex::new(());
+
+struct SettingsWriteGuard {
+    target: PathBuf,
+    _process: MutexGuard<'static, ()>,
+    _file: File,
+}
+
+fn settings_write_guard(path: &Path) -> Result<SettingsWriteGuard> {
+    assert_test_path(path);
+    let process = UPDATE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let target = resolve_existing_settings_target(path)?;
+    let lock_path = target.with_extension("settings.lock");
+    assert_test_path(&target);
+    assert_test_path(&lock_path);
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)?;
+    file.lock_exclusive()?;
+    Ok(SettingsWriteGuard {
+        target,
+        _process: process,
+        _file: file,
+    })
+}
+
+/// Fixed workflows supported by the bounded policy writer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkflowPolicyTarget {
+    Release,
+    WindowsDiagnostic,
+}
+
+impl WorkflowPolicyTarget {
+    pub const fn filename(self) -> &'static str {
+        match self {
+            Self::Release => "prepare-release.yml",
+            Self::WindowsDiagnostic => "windows-diagnostic.yml",
+        }
+    }
+
+    fn validate_repository(self, repository: &str) -> Result<()> {
+        validate_release_repository(repository)?;
+        if self == Self::WindowsDiagnostic && repository != "akiojin/gwt" {
+            return Err(ConfigError::ValidationError {
+                reason: "Windows diagnostic workflow policy requires akiojin/gwt".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Internal configuration bytes for the bounded workflow-policy executors.
+/// Never serialize `content` into a user-facing diagnostic or audit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleasePolicySnapshot {
+    pub content: String,
+    pub allowed: bool,
+}
+
+fn validate_release_repository(repository: &str) -> Result<()> {
+    let parts: Vec<_> = repository.split('/').collect();
+    if parts.len() != 2
+        || parts.iter().any(|part| {
+            part.is_empty()
+                || matches!(*part, "." | "..")
+                || !part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        })
+    {
+        return Err(ConfigError::ValidationError {
+            reason: "release policy requires an owner/repository identity".into(),
+        });
+    }
+    Ok(())
+}
 
 fn deserialize_optional_nonzero_port<'de, D>(
     deserializer: D,
@@ -273,6 +359,11 @@ impl Settings {
 
     /// Save settings to the given path using atomic write.
     pub fn save(&self, path: &Path) -> Result<()> {
+        let guard = settings_write_guard(path)?;
+        self.save_unlocked(&guard.target)
+    }
+
+    fn save_unlocked(&self, path: &Path) -> Result<()> {
         let content = toml::to_string_pretty(self).map_err(|e| ConfigError::WriteError {
             reason: format!("failed to serialize settings: {e}"),
         })?;
@@ -289,12 +380,9 @@ impl Settings {
     /// future keys, and the file's minimal shape. The typed parse still runs
     /// first so malformed or incompatible settings remain fatal.
     pub fn persist_embedded_port(path: &Path, port: NonZeroU16) -> Result<()> {
-        assert_test_path(path);
-        let _guard = UPDATE_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let target_path = resolve_existing_settings_target(path)?;
-        let content = match std::fs::read_to_string(&target_path) {
+        let guard = settings_write_guard(path)?;
+        let target_path = &guard.target;
+        let content = match std::fs::read_to_string(target_path) {
             Ok(content) => content,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(error) => {
@@ -331,7 +419,7 @@ impl Settings {
             *updated.decor_mut() = existing_decor;
         }
 
-        write_atomic(&target_path, &document.to_string())?;
+        write_atomic(target_path, &document.to_string())?;
         info!(path = %path.display(), port = port.get(), "Embedded server port saved");
         Ok(())
     }
@@ -357,10 +445,8 @@ impl Settings {
     where
         F: FnOnce(&mut Self) -> Result<T>,
     {
-        crate::home::assert_test_path(path);
-        let _guard = UPDATE_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let guard = settings_write_guard(path)?;
+        let path = &guard.target;
 
         let mut settings = if path.exists() {
             Self::load_from_path(path)?
@@ -368,7 +454,7 @@ impl Settings {
             Self::default()
         };
         let result = mutate(&mut settings)?;
-        settings.save(path)?;
+        settings.save_unlocked(path)?;
         Ok(result)
     }
 
@@ -378,12 +464,9 @@ impl Settings {
     where
         F: FnOnce(Option<bool>) -> Result<bool>,
     {
-        crate::home::assert_test_path(path);
-        let _guard = UPDATE_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let target = resolve_existing_settings_target(path)?;
-        let content = match std::fs::read_to_string(&target) {
+        let guard = settings_write_guard(path)?;
+        let target = &guard.target;
+        let content = match std::fs::read_to_string(target) {
             Ok(content) => content,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(error) => {
@@ -406,8 +489,117 @@ impl Settings {
                     reason: error.to_string(),
                 })?;
         document["auto_apply_updates"] = value(enabled);
-        write_atomic(&target, &document.to_string())?;
+        write_atomic(target, &document.to_string())?;
         Ok(enabled)
+    }
+
+    /// Read the fixed workflow's policy without creating directories or locks.
+    pub fn release_policy_snapshot(path: &Path, repository: &str) -> Result<ReleasePolicySnapshot> {
+        Self::workflow_policy_snapshot(path, repository, WorkflowPolicyTarget::Release)
+    }
+
+    /// Read one typed fixed workflow's policy without creating directories or locks.
+    pub fn workflow_policy_snapshot(
+        path: &Path,
+        repository: &str,
+        target: WorkflowPolicyTarget,
+    ) -> Result<ReleasePolicySnapshot> {
+        assert_test_path(path);
+        target.validate_repository(repository)?;
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(error.into()),
+        };
+        let settings: Self = toml::from_str(&content).map_err(|error| ConfigError::ParseError {
+            reason: error.to_string(),
+        })?;
+        let allowed = settings
+            .allowed_workflows
+            .get(repository)
+            .is_some_and(|names| names.iter().any(|name| name == target.filename()));
+        Ok(ReleasePolicySnapshot { content, allowed })
+    }
+
+    /// Merge only `prepare-release.yml` for one already-resolved repository.
+    /// The callback performs the caller's CAS, final authorization and pending
+    /// receipt publication while all Settings writers are excluded. A callback
+    /// error leaves configuration unchanged; it is invoked even for a no-op.
+    pub fn with_locked_release_policy<F, T>(
+        path: &Path,
+        repository: &str,
+        allow: bool,
+        before_write: F,
+    ) -> Result<(T, ReleasePolicySnapshot)>
+    where
+        F: FnOnce(&ReleasePolicySnapshot, &ReleasePolicySnapshot) -> Result<T>,
+    {
+        Self::with_locked_workflow_policy(
+            path,
+            repository,
+            WorkflowPolicyTarget::Release,
+            allow,
+            before_write,
+        )
+    }
+
+    /// Update one fixed workflow through the shared Settings lock and writer.
+    /// The callback runs under that lock before any configuration effect,
+    /// including when the requested policy is already present.
+    pub fn with_locked_workflow_policy<F, T>(
+        path: &Path,
+        repository: &str,
+        target: WorkflowPolicyTarget,
+        allow: bool,
+        before_write: F,
+    ) -> Result<(T, ReleasePolicySnapshot)>
+    where
+        F: FnOnce(&ReleasePolicySnapshot, &ReleasePolicySnapshot) -> Result<T>,
+    {
+        target.validate_repository(repository)?;
+        let guard = settings_write_guard(path)?;
+        let before = Self::workflow_policy_snapshot(&guard.target, repository, target)?;
+        let mut after = before.clone();
+        if before.allowed != allow {
+            let mut document =
+                before
+                    .content
+                    .parse::<DocumentMut>()
+                    .map_err(|error| ConfigError::ParseError {
+                        reason: error.to_string(),
+                    })?;
+            if document.get("allowed_workflows").is_none() {
+                document["allowed_workflows"] = Item::Table(Table::new());
+            }
+            let policies = document["allowed_workflows"]
+                .as_table_like_mut()
+                .ok_or_else(|| ConfigError::ParseError {
+                    reason: "allowed_workflows must be a table".into(),
+                })?;
+            if policies.get(repository).is_none() {
+                policies.insert(repository, value(toml_edit::Array::new()));
+            }
+            let workflows = policies
+                .get_mut(repository)
+                .and_then(Item::as_array_mut)
+                .ok_or_else(|| ConfigError::ParseError {
+                    reason: "repository workflow policy must be an array".into(),
+                })?;
+            if allow {
+                workflows.push(target.filename());
+            } else {
+                workflows.retain(|name| name.as_str() != Some(target.filename()));
+            }
+            after = ReleasePolicySnapshot {
+                content: document.to_string(),
+                allowed: allow,
+            };
+        }
+        let result = before_write(&before, &after)?;
+        if after.content != before.content {
+            write_atomic(&guard.target, &after.content)?;
+        }
+        Ok((result, after))
     }
 }
 
@@ -664,14 +856,13 @@ gwtd_mutation_p95_ms = 350.0
         let (loaded_tx, loaded_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let updater = thread::spawn(move || {
-            let _guard = UPDATE_LOCK
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let mut settings = Settings::load_from_path(&updater_path).expect("load old snapshot");
-            loaded_tx.send(()).expect("signal old snapshot loaded");
-            release_rx.recv().expect("release global updater");
-            settings.debug = true;
-            settings.save(&updater_path).expect("save global update");
+            Settings::update_at_path(&updater_path, |settings| {
+                loaded_tx.send(()).expect("signal old snapshot loaded");
+                release_rx.recv().expect("release global updater");
+                settings.debug = true;
+                Ok(())
+            })
+            .expect("save global update");
         });
         loaded_rx.recv().expect("wait for old snapshot load");
 

@@ -426,6 +426,43 @@ impl AgentResourceSettings {
     }
 }
 
+/// A browser can reopen or cancel tracking, but cannot supply actor or provenance.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PmRequestTaskUserRequest {
+    pub operation_id: String,
+    pub expected_revision: u64,
+    pub reason: String,
+    pub task_id: String,
+}
+
+/// Correct a saved draft without accepting actor or source provenance.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PmRequestTaskUpdateRequest {
+    pub operation_id: String,
+    pub expected_revision: u64,
+    pub reason: String,
+    pub task: gwt_core::pm_request_tasks::TaskDraft,
+}
+
+/// Selected tracking data only; originals remain outside this browser adapter.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum PmRequestTaskResult {
+    Ready {
+        revision: u64,
+        task: Box<gwt_core::pm_request_tasks::Task>,
+        receipt: Option<Box<gwt_core::pm_request_tasks::Receipt>>,
+    },
+    Error {
+        code: String,
+        message: String,
+        current_revision: Option<u64>,
+        recovery_operation: String,
+    },
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FrontendEvent {
@@ -532,12 +569,33 @@ pub enum FrontendEvent {
     },
     PreviewCloseProject {
         project_key: String,
+        #[serde(default)]
+        project_wide: bool,
     },
     ConfirmCloseProject {
         token: CloseProjectToken,
+        #[serde(default)]
+        choice: Option<gwt_core::project_execution_policy::Choice>,
+        #[serde(default)]
+        operation_id: Option<String>,
+        #[serde(default)]
+        expected_policy_revision: Option<u64>,
+        #[serde(default)]
+        expected_view_set_revision: Option<u64>,
     },
     CancelCloseProject {
         token: CloseProjectToken,
+    },
+    ProjectViewReady {
+        generation: u64,
+        nonce: String,
+        view_id: String,
+    },
+    GetProjectExecutionStatus {
+        #[serde(default)]
+        project_key: Option<String>,
+        #[serde(default)]
+        operation_id: Option<String>,
     },
     CreateWindow {
         preset: WindowPreset,
@@ -647,6 +705,28 @@ pub enum FrontendEvent {
         request_id: u64,
         #[serde(default)]
         version: Option<PmReportsVersion>,
+    },
+    LoadPmRequestTask {
+        id: String,
+        request_id: u64,
+        task_id: String,
+        #[serde(default)]
+        receipt_operation_id: Option<String>,
+    },
+    ReopenPmRequestTask {
+        id: String,
+        request_id: u64,
+        request: PmRequestTaskUserRequest,
+    },
+    CancelPmRequestTask {
+        id: String,
+        request_id: u64,
+        request: PmRequestTaskUserRequest,
+    },
+    UpdatePmRequestTask {
+        id: String,
+        request_id: u64,
+        request: PmRequestTaskUpdateRequest,
     },
     /// Inject one line of input into the pane bound to the given agent
     /// session (SPEC-3050 FR-001/FR-002). Carries a session id instead of a
@@ -974,6 +1054,12 @@ pub enum FrontendEvent {
     },
     /// Read app-wide update preference and the requesting project's drain.
     GetUpdateSettings,
+    /// Audit the authenticated connection's project; repair is explicit.
+    GetHookDoctor {
+        request_id: u64,
+        #[serde(default)]
+        repair: bool,
+    },
     /// GUI-only app-wide update preference shared by projects and the Hub.
     SetAutoApplyUpdates {
         enabled: bool,
@@ -1058,6 +1144,8 @@ pub enum FrontendEvent {
         linked_issue_kind: Option<crate::LinkedIssueKind>,
     },
     IssueMonitorConfigureProfile,
+    /// Explicit header discovery, independent of automatic check scheduling.
+    CheckForUpdates,
     /// Legacy Phase 14 entry point. Frontend now sends
     /// [`FrontendEvent::ApplyUpdateStart`] / [`FrontendEvent::ApplyUpdateRestartNow`]
     /// instead. Kept so older clients and unit tests that still drive
@@ -1431,6 +1519,55 @@ pub struct ProjectTabView {
     pub running_agent_count: u32,
     #[serde(default)]
     pub running_agents: Vec<RunningAgentSummary>,
+    #[serde(default)]
+    pub execution: Option<ProjectExecutionStatusView>,
+}
+
+/// Project-local observed execution, separate from the durable user choice.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectExecutionStatusView {
+    pub project_key: String,
+    pub generation: u64,
+    pub revision: u64,
+    pub choice: Option<gwt_core::project_execution_policy::Choice>,
+    pub effective_state: String,
+    pub start_reason: String,
+    pub view_state: String,
+    pub lineage_summary: Vec<String>,
+    pub operation_outcome: Option<ProjectExecutionOperationView>,
+    pub observed_at: String,
+    pub degraded: bool,
+    pub recovery_operation: Option<String>,
+    pub view_set_revision: u64,
+    #[serde(default)]
+    pub policy_corruption_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectExecutionOperationView {
+    pub operation_id: String,
+    pub before_revision: u64,
+    pub after_revision: u64,
+    pub generation: u64,
+    pub choice: gwt_core::project_execution_policy::Choice,
+    pub effect_state: gwt_core::project_execution_policy::EffectState,
+    pub reason: Option<String>,
+    pub decided_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl From<&gwt_core::project_execution_policy::Receipt> for ProjectExecutionOperationView {
+    fn from(receipt: &gwt_core::project_execution_policy::Receipt) -> Self {
+        Self {
+            operation_id: receipt.operation_id.clone(),
+            before_revision: receipt.before_revision,
+            after_revision: receipt.after_revision,
+            generation: receipt.generation,
+            choice: receipt.choice,
+            effect_state: receipt.effect_state,
+            reason: receipt.reason.clone(),
+            decided_at: receipt.decided_at,
+        }
+    }
 }
 
 /// Client-bound, single-use authority for one incarnation of an open Project.
@@ -1517,6 +1654,7 @@ pub struct ProjectOwnerHealthView {
 /// Lightweight project catalog. No workspace, terminal, or agent payloads.
 #[derive(Debug, Clone, Serialize)]
 pub struct HubProjectView {
+    pub execution: Option<ProjectExecutionStatusView>,
     pub owner_health: Option<ProjectOwnerHealthView>,
     pub id: String,
     pub project_key: String,
@@ -2183,10 +2321,29 @@ pub enum BackendEvent {
         token: CloseProjectToken,
         title: String,
         running_agents: Vec<RunningAgentSummary>,
+        choice_required: bool,
+        policy_revision: u64,
+        view_set_revision: u64,
+        view_count: usize,
+        project_wide: bool,
     },
     CloseProjectError {
         project_key: String,
         message: String,
+        code: String,
+        operation_id: Option<String>,
+        retry_same_intent: bool,
+    },
+    ProjectViewChallenge {
+        project_key: String,
+        generation: u64,
+        nonce: String,
+    },
+    ProjectViewClosed {
+        project_key: String,
+    },
+    ProjectExecutionStatus {
+        status: ProjectExecutionStatusView,
     },
     ProjectClosed {
         project_key: String,
@@ -2318,6 +2475,11 @@ pub enum BackendEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         current: Option<Box<crate::pm_current::PmCurrentSnapshot>>,
         error: Option<String>,
+    },
+    PmRequestTask {
+        id: String,
+        request_id: u64,
+        result: PmRequestTaskResult,
     },
     /// Origin-client completion receipt for one authenticated pane snapshot
     /// sync (Issue #3755). Snapshot frames precede this event; these disjoint
@@ -2778,6 +2940,14 @@ pub enum BackendEvent {
         event: RuntimeHookEvent,
     },
     UpdateState(gwt_core::update::UpdateState),
+    /// Shared outcome of an explicit header check. Discovery does not stage an update.
+    UpdateCheckResult {
+        checking: bool,
+        /// False while a download owns the active CTA and candidate.
+        offer_update: bool,
+        result: Option<gwt_core::update::UpdateState>,
+        previous_failure: Option<gwt_core::update::UpdateApplyResult>,
+    },
     /// SPEC-2041 Phase 19 (FR-054): download progress for the current update.
     /// Emitted from `Backend` while a download is active; the `#update-modal`
     /// uses these to drive the progress bar and byte counter.
@@ -2937,6 +3107,13 @@ pub enum BackendEvent {
         blocking: Vec<crate::update_drain::UpdateBlocker>,
         issue_numbers: Vec<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// Correlated Hook Center result, never a trust or session-upgrade grant.
+    HookDoctor {
+        project_root: String,
+        request_id: u64,
+        report: Option<serde_json::Value>,
         error: Option<String>,
     },
     /// SPEC-1933 US-4: response to [`FrontendEvent::GetSystemSettings`].
@@ -3145,6 +3322,11 @@ impl BackendEventPolicy {
 
 pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
     BackendEventPolicy::new(
+        "pm_request_task",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
         "pm_reports",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
@@ -3173,6 +3355,21 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         "project_closed",
         BackendEventDeliveryClass::EphemeralStatus,
         BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
+        "project_view_challenge",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "project_view_closed",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
+        "project_execution_status",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
         "project_owner_health",
@@ -3704,6 +3901,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
+        "hook_doctor",
+        BackendEventDeliveryClass::Streamed,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
         "system_settings",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
@@ -3773,6 +3975,9 @@ impl BackendEvent {
             BackendEvent::WorkspaceStateNotice { .. } => "workspace_state_notice",
             BackendEvent::CloseProjectPreview { .. } => "close_project_preview",
             BackendEvent::CloseProjectError { .. } => "close_project_error",
+            BackendEvent::ProjectViewChallenge { .. } => "project_view_challenge",
+            BackendEvent::ProjectViewClosed { .. } => "project_view_closed",
+            BackendEvent::ProjectExecutionStatus { .. } => "project_execution_status",
             BackendEvent::ProjectClosed { .. } => "project_closed",
             BackendEvent::ProjectOwnerHealth { .. } => "project_owner_health",
             BackendEvent::ProjectAgentAggregate { .. } => "project_agent_aggregate",
@@ -3801,6 +4006,7 @@ impl BackendEvent {
             BackendEvent::TerminalSnapshot { .. } => "terminal_snapshot",
             BackendEvent::PmConversation { .. } => "pm_conversation",
             BackendEvent::PmReports { .. } => "pm_reports",
+            BackendEvent::PmRequestTask { .. } => "pm_request_task",
             BackendEvent::PaneSyncComplete { .. } => "pane_sync_complete",
             BackendEvent::TerminalStatus { .. } => "terminal_status",
             BackendEvent::PaneSendResult { .. } => "pane_send_result",
@@ -3876,6 +4082,7 @@ impl BackendEvent {
             BackendEvent::ProjectIndexStatus { .. } => "project_index_status",
             BackendEvent::RuntimeHookEvent { .. } => "runtime_hook_event",
             BackendEvent::UpdateState(_) => "update_state",
+            BackendEvent::UpdateCheckResult { .. } => "update_check_result",
             BackendEvent::UpdateProgress { .. } => "update_progress",
             BackendEvent::UpdateReady { .. } => "update_ready",
             BackendEvent::UpdateAutoApply { .. } => "update_auto_apply",
@@ -3898,6 +4105,7 @@ impl BackendEvent {
             BackendEvent::MigrationDone { .. } => "migration_done",
             BackendEvent::MigrationError { .. } => "migration_error",
             BackendEvent::UpdateSettings { .. } => "update_settings",
+            BackendEvent::HookDoctor { .. } => "hook_doctor",
             BackendEvent::UpdateRestartImpact { .. } => "update_restart_impact",
             BackendEvent::SystemSettings { .. } => "system_settings",
             BackendEvent::BoardAuthStatus { .. } => "board_auth_status",
@@ -4011,6 +4219,41 @@ mod tests {
         let mut invalid = legacy;
         invalid["surface_owner"] = serde_json::json!("unknown");
         assert!(serde_json::from_value::<FrontendEvent>(invalid).is_err());
+    }
+
+    #[test]
+    fn pm_request_task_user_wire_accepts_reads_and_rejects_forged_actors() {
+        let read = serde_json::json!({"kind":"load_pm_request_task", "id":"pm",
+            "request_id":1,"task_id":"task","receipt_operation_id":"reopen"});
+        let _: FrontendEvent = serde_json::from_value(read).expect("selected task read");
+        let reopen = serde_json::json!({"kind":"reopen_pm_request_task", "id":"pm",
+            "request_id":2,"request":{"operation_id":"reopen","expected_revision":3,
+                "reason":"Needs a fresh assessment","task_id":"task"}});
+        let _: FrontendEvent = serde_json::from_value(reopen.clone()).expect("user reopen");
+        let mut forged = reopen;
+        forged["request"]["actor"] = serde_json::json!({"kind":"pm","id":"claimed"});
+        assert!(serde_json::from_value::<FrontendEvent>(forged).is_err());
+        let cancel = serde_json::json!({"kind":"cancel_pm_request_task", "id":"pm",
+            "request_id":3,"request":{"operation_id":"cancel","expected_revision":3,
+                "reason":"Withdraw this request","task_id":"task"}});
+        let _: FrontendEvent = serde_json::from_value(cancel.clone()).expect("user cancel");
+        let mut forged = cancel;
+        forged["request"]["actor"] = serde_json::json!({"kind":"pm","id":"claimed"});
+        assert!(serde_json::from_value::<FrontendEvent>(forged).is_err());
+        let update = serde_json::json!({"kind":"update_pm_request_task", "id":"pm",
+            "request_id":4,"request":{"operation_id":"update","expected_revision":3,
+                "reason":"Correct the original outcome","task":{"id":"task","title":"Corrected task",
+                    "purpose":"The original purpose","completion_conditions":["Verified outcome"],
+                    "issue_numbers":[],"goal_ids":[],"assignee":null}}});
+        let _: FrontendEvent = serde_json::from_value(update.clone()).expect("user update");
+        for field in ["actor", "source", "project_key", "task_id"] {
+            let mut forged = update.clone();
+            forged["request"][field] = serde_json::json!("claimed");
+            assert!(serde_json::from_value::<FrontendEvent>(forged).is_err());
+        }
+        let mut forged = update;
+        forged["request"]["task"]["source_id"] = serde_json::json!("claimed");
+        assert!(serde_json::from_value::<FrontendEvent>(forged).is_err());
     }
 
     #[test]
@@ -4160,10 +4403,18 @@ mod tests {
                 token,
                 title: "A".into(),
                 running_agents: Vec::new(),
+                choice_required: true,
+                policy_revision: 0,
+                view_set_revision: 0,
+                view_count: 1,
+                project_wide: false,
             },
             super::BackendEvent::CloseProjectError {
                 project_key: "a".into(),
                 message: "expired".into(),
+                code: "StaleCloseRequest".into(),
+                operation_id: None,
+                retry_same_intent: false,
             },
             super::BackendEvent::ProjectClosed {
                 project_key: "a".into(),
@@ -4665,6 +4916,28 @@ mod tests {
         assert_eq!(
             policy.backpressure,
             BackendEventBackpressurePolicy::FailOpenError
+        );
+    }
+
+    #[test]
+    fn hook_center_request_defaults_to_read_only() {
+        let event = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+            "kind": "get_hook_doctor", "request_id": 1935
+        }))
+        .expect("Hook Center accepts a project-scoped audit request");
+        assert!(matches!(
+            event,
+            FrontendEvent::GetHookDoctor {
+                request_id: 1935,
+                repair: false
+            }
+        ));
+        assert!(
+            serde_json::from_value::<FrontendEvent>(serde_json::json!({
+                "kind": "get_hook_doctor", "repair": true
+            }))
+            .is_err(),
+            "a correlated request ID is required even for repair"
         );
     }
 

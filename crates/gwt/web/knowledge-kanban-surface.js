@@ -845,6 +845,7 @@ export function createKnowledgeKanbanSurface({
   openSurfaceNotice = () => false,
 }) {
       const knowledgeBridgeStateMap = new Map();
+      let knowledgeTransportOnline = false;
       const terminalPreviewText = new Map();
       const issueControlExplanations = new Map();
       const issueExplanationBindings = new WeakMap();
@@ -1409,6 +1410,11 @@ export function createKnowledgeKanbanSurface({
           }
           limit.title = limit.disabled ? "Automatic or roster-managed limit. Configure in Issues settings." : "Machine-wide agent limit; existing agents continue.";
         }
+        const autoLimit = bar.querySelector('[data-action="monitor-limit-auto"]');
+        if (autoLimit) {
+          autoLimit.disabled = status.max_active_agents_override == null;
+          autoLimit.title = autoLimit.disabled ? "Automatic machine-wide agent limit is active." : "Use the automatic machine-wide agent limit; existing agents continue.";
+        }
         // Issue #4366 AC-6b: the saved settings and the held fallback stay two
         // separate lines, now of the ⚙ tooltip.
         const settings = bar.querySelector('[data-action="monitor-settings"]');
@@ -1663,6 +1669,9 @@ export function createKnowledgeKanbanSurface({
           }
           input.value = String(status.agent_roster_capacity ?? status.max_active_agents_override ?? status.max_active_agents ?? 1);
         });
+        bar.querySelector('[data-action="monitor-limit-auto"]')?.addEventListener("click", () => {
+          send({kind:"set_issue_monitor_max_active_agents",max_active_agents:null});
+        });
         bar
           .querySelector('[data-action="monitor-toggle"]')
           ?.addEventListener("click", () => {
@@ -1872,6 +1881,8 @@ export function createKnowledgeKanbanSurface({
             queuedSearchQuery: "",
             queuedLoadRefresh: false,
             loadRecoveryTimer: null,
+            loadInterrupted: false,
+            loadQueued: false,
             loadSlow: false,
             error: "",
             emptyMessage: "",
@@ -1890,7 +1901,6 @@ export function createKnowledgeKanbanSurface({
             pendingPhaseUpdates: new Map(),
             autoRefreshTimer: null,
             eventRefreshDirty: false,
-            workSnapshotDirty: false,
             autoRefreshDirty: false,
             autoRefreshChanged: false,
             autoRefreshRevision: null,
@@ -2030,6 +2040,11 @@ export function createKnowledgeKanbanSurface({
           clearTimeout(state.pendingSearchTimer);
           state.pendingSearchTimer = null;
         }
+        if (state?.queueColumnNoticeTimer) {
+          clearTimeout(state.queueColumnNoticeTimer);
+          state.queueColumnNoticeTimer = null;
+          state.queueColumnNotice = null;
+        }
         // AS-17.2: window destroy invalidates the silent retry owner.
         invalidateKnowledgeSemanticRetry(state);
         if (state) {
@@ -2122,6 +2137,8 @@ export function createKnowledgeKanbanSurface({
 
       function finishKnowledgeLoad(state, windowId, knowledgeKind) {
         clearKnowledgeLoadRecoveryTimer(state);
+        state.loadInterrupted = false;
+        state.loadQueued = false;
         state.loading = false;
         state.refreshing = false;
         state.loadSlow = false;
@@ -2150,6 +2167,7 @@ export function createKnowledgeKanbanSurface({
         }
         const requestId = nextKnowledgeLoadRequestId++;
         state.loadRequestId = requestId;
+        state.loadInterrupted = false;
         state.ownedLoadRequestIds.add(requestId);
         while (state.ownedLoadRequestIds.size > 4) {
           state.ownedLoadRequestIds.delete(
@@ -2165,14 +2183,14 @@ export function createKnowledgeKanbanSurface({
         state.queuedLoadRefresh = false;
         state.error = "";
         const effectiveKind = knowledgeKind || state.kind;
-        send({
+        state.loadQueued = send({
           kind: "load_knowledge_bridge",
           id: windowId,
           knowledge_kind: effectiveKind,
           request_id: requestId,
           selected_number: state.selectedNumber ?? null,
           refresh,
-        });
+        }) === "queued";
         scheduleKnowledgeLoadRecovery(windowId, effectiveKind, requestId);
       }
 
@@ -2206,11 +2224,14 @@ export function createKnowledgeKanbanSurface({
       function refreshKnowledgeWorkSnapshot(forceReload) {
         const projection = getActiveWorkProjection?.();
         const issueKey = workAssociationKey(projection);
-        for (const state of knowledgeBridgeStateMap.values()) {
-          state.eventRefreshDirty ||= forceReload || issueKey !== issueWorkAssociationKey;
-          state.workSnapshotDirty = true;
-        }
+        const associationChanged = forceReload || issueKey !== issueWorkAssociationKey;
         issueWorkAssociationKey = issueKey;
+        for (const [windowId, state] of knowledgeBridgeStateMap) {
+          state.eventRefreshDirty ||= associationChanged;
+          // Already committed local data must not wait for a visible-only reload.
+          updateKnowledgeWorkSnapshot(state);
+          renderKnowledgeBridge(windowId);
+        }
         scheduleKnowledgeEventRefresh();
       }
 
@@ -2240,11 +2261,6 @@ export function createKnowledgeKanbanSurface({
               continue;
             }
             if (!isKnowledgeWindowVisible(windowId)) continue;
-            if (state.workSnapshotDirty) {
-              state.workSnapshotDirty = false;
-              updateKnowledgeWorkSnapshot(state);
-              renderKnowledgeBridge(windowId);
-            }
             if (state.eventRefreshDirty && !state.loading) {
               state.eventRefreshDirty = false;
               requestKnowledgeBridge(windowId, state.kind, false);
@@ -2262,7 +2278,7 @@ export function createKnowledgeKanbanSurface({
         if (relatedWorkRefreshTimer !== null) return;
         if ([...knowledgeBridgeStateMap].some(([id, state]) =>
           isKnowledgeWindowVisible(id) &&
-          (state.workSnapshotDirty || (state.eventRefreshDirty && !state.loading)))) {
+          state.eventRefreshDirty && !state.loading)) {
           scheduleKnowledgeEventRefresh();
         }
       }
@@ -2495,8 +2511,29 @@ export function createKnowledgeKanbanSurface({
 
       // SPEC #3170 AS-17.2: disconnect invalidates every retry owner;
       // reconnect restarts a degraded still-open window/query at 5 seconds.
-      function handleKnowledgeTransportChange(online) {
+      function handleKnowledgeTransportChange(online, recoverSnapshots = false) {
+        const disconnected = knowledgeTransportOnline && !online;
+        knowledgeTransportOnline = online;
         for (const [windowId, state] of knowledgeBridgeStateMap.entries()) {
+          if (disconnected && state.loading && !state.loadQueued) {
+            // Only a read sent before this disconnect needs a replacement.
+            // Repeated offline notifications must not duplicate queued reads.
+            state.loadInterrupted = true;
+            clearKnowledgeLoadRecoveryTimer(state);
+          }
+          // Forced recovery already replaces every read through resyncKnowledge.
+          if (online && !recoverSnapshots && state.loadInterrupted && workspaceWindowById(windowId)) {
+            state.loadInterrupted = false;
+            if (state.loading) {
+              state.ownedLoadRequestIds.clear();
+              state.loading = false;
+              requestKnowledgeBridge(windowId, state.kind, state.refreshing || state.queuedLoadRefresh);
+            }
+          }
+          if (online && state.loadQueued && workspaceWindowById(windowId)) {
+            // The current project's pending queue is flushed just after open.
+            state.loadQueued = false;
+          }
           if (!online && state.revisionPending) {
             state.revisionPending = false;
             state.autoRefreshDirty = true;
@@ -3390,6 +3427,16 @@ export function createKnowledgeKanbanSurface({
             }[phase]);
             heading.after(rule);
           }
+          const noticeText = state.queueColumnNotice?.phase === phase ? state.queueColumnNotice.message : "";
+          let notice = column.querySelector(".issue-queue-column-notice");
+          if (noticeText) {
+            if (!notice) {
+              notice = createNode("div", "issue-queue-column-notice");
+              notice.setAttribute("role", "status");
+              rule.after(notice);
+            }
+            if (notice.textContent !== noticeText) notice.textContent = noticeText;
+          } else notice?.remove();
           if (phase === "backlog" && items.some((entry,index) => index >= 5 &&
               (entry.number === focusedNumber || entry.number === state.selectedNumber))) state.backlogExpanded = true;
           const collapsed = phase === "backlog" && !state.backlogExpanded && !state.query.trim();
@@ -3496,9 +3543,27 @@ export function createKnowledgeKanbanSurface({
             column.appendChild(empty);
           } else if (items.length) empty?.remove();
           if (column.parentNode) continue;
-          column.addEventListener("dragover", event => event.preventDefault());
+          const refuses = phase === "active" || phase === "done";
+          // Approved mock: accepting columns light up while a card is over them;
+          // Active/Done refuse with dropEffect=none and explain at their top.
+          const hover = event => {
+            column.dataset.dropState = refuses ? "reject" : "accept";
+            if (refuses) {
+              if (event.dataTransfer) event.dataTransfer.dropEffect = "none";
+              showQueueColumnNotice(windowId, state, phase);
+              return;
+            }
+            event.preventDefault();
+            if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+          };
+          column.addEventListener("dragenter", hover);
+          column.addEventListener("dragover", hover);
+          column.addEventListener("dragleave", event => {
+            if (!column.contains(event.relatedTarget)) delete column.dataset.dropState;
+          });
           column.addEventListener("drop", event => {
             event.preventDefault();
+            delete column.dataset.dropState;
             const explain = message => {
               state.queueFeedback = message;
               issueWindowViewModel.update(() => ({windowId}));
@@ -3515,8 +3580,8 @@ export function createKnowledgeKanbanSurface({
               explain(`Issue #${number} is no longer on this board. Refresh and try again.`);
               return;
             }
-            if (phase === "active" || phase === "done") {
-              explain(`${label} is controlled by the monitor and work lifecycle; drop into Backlog or Queued.`);
+            if (refuses) {
+              showQueueColumnNotice(windowId, state, phase);
               return;
             }
             const origin = issueQueueColumnForEntry(entry, windowId);
@@ -3552,6 +3617,32 @@ export function createKnowledgeKanbanSurface({
           });
           board.appendChild(column);
         }
+        if (!board.dataset.dragEndWired) {
+          board.dataset.dragEndWired = "true";
+          board.addEventListener("dragend", () => {
+            for (const column of board.querySelectorAll("[data-drop-state]")) delete column.dataset.dropState;
+          });
+        }
+      }
+
+      const QUEUE_COLUMN_REFUSAL_REASONS = Object.freeze({
+        active: "The system controls issues while an implementation agent runs. To stop one, use Stop agent on its card.",
+        done: "Landed issues cannot be moved. Start new work with a fresh launch.",
+      });
+      const QUEUE_COLUMN_NOTICE_MS = 4000;
+
+      // The refusal stays readable after the drag ends, then clears itself so it
+      // is never mistaken for a lasting state (approved mock: about 4 seconds).
+      function showQueueColumnNotice(windowId, state, phase) {
+        const changed = state.queueColumnNotice?.phase !== phase;
+        state.queueColumnNotice = { phase, message: QUEUE_COLUMN_REFUSAL_REASONS[phase] };
+        clearTimeout(state.queueColumnNoticeTimer);
+        state.queueColumnNoticeTimer = setTimeout(() => {
+          state.queueColumnNoticeTimer = null;
+          state.queueColumnNotice = null;
+          issueWindowViewModel.update(() => ({windowId}));
+        }, QUEUE_COLUMN_NOTICE_MS);
+        if (changed) issueWindowViewModel.update(() => ({windowId}));
       }
 
       function kanbanEmptyMessage(state, phase) {
@@ -5317,6 +5408,7 @@ export function createKnowledgeKanbanSurface({
                       <span class="knowledge-monitor-switch__state">Off</span>
                     </button>
                     <label class="issue-monitor-limit">Agent limit <input type="number" min="1" step="1" data-action="monitor-limit" aria-label="Agent limit" value="1" disabled /></label>
+                    <button type="button" class="wizard-button is-compact" data-action="monitor-limit-auto" aria-label="Set Agent limit to Auto" disabled>Auto</button>
                     <button type="button" class="wizard-button is-compact" data-action="monitor-settings" aria-label="Issues settings">⚙ Issues settings</button>
                     <button type="button" class="wizard-button is-compact primary" data-action="monitor-toggle">Start</button>
                     <button type="button" class="wizard-button is-compact" data-action="monitor-diagnostics" aria-haspopup="dialog" hidden>Monitor details</button>

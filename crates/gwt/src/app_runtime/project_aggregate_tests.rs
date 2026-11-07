@@ -339,6 +339,70 @@ fn project_notification_silent_process_install_does_not_infer_agent_running() {
 }
 
 #[test]
+fn owner_output_interleaving_preserves_contiguous_pane_deltas() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut runtime = aggregate_test_runtime(temp.path());
+    let context = runtime.project_context("a").unwrap();
+    let identity = gwt::daemon_subscriber::ProjectOwnerIdentity {
+        pid: 42,
+        host_started_at: 100,
+        host_instance_id: "interleaved-owner".into(),
+    };
+    let state = runtime.project_state_mut(&context).unwrap();
+    state.project_owner_connection_id = 1;
+    state.project_owner_identity = Some(identity.clone());
+    let mut endpoint = gwt_core::daemon::DaemonEndpoint::new(
+        gwt_core::daemon::RuntimeScope::new(
+            context.project_key.as_str(),
+            "fixture",
+            context.project_root.clone(),
+            gwt_core::daemon::RuntimeTarget::Host,
+        )
+        .unwrap(),
+        identity.pid,
+        "fixture".into(),
+        "private-fixture".into(),
+        "fixture".into(),
+    );
+    endpoint.project_transport_url = Some("http://127.0.0.1:1".into());
+    for (alias, owner_id) in [("a::agent", "owner-a"), ("a::shell", "owner-b")] {
+        runtime.runtimes.insert(
+            alias.into(),
+            WindowRuntime::remote(
+                owner_id.into(),
+                7,
+                100,
+                gwt::project_runtime::client::ProjectRuntimeClient::new(&endpoint).unwrap(),
+                identity.clone(),
+            ),
+        );
+    }
+    let mut events = Vec::new();
+    // Global stream positions interleave; each pane's own predecessor remains exact.
+    for (id, seq, previous_seq) in [("owner-a", 1, 0), ("owner-b", 2, 0), ("owner-a", 3, 1)] {
+        let output = serde_json::from_value(serde_json::json!({
+            "type": "output", "id": id, "incarnation": 7,
+            "seq": seq, "previous_seq": previous_seq, "screen_seq": seq,
+            "data": [b'x'], "screen": "x", "screen_ansi": [b'x'],
+        }))
+        .unwrap();
+        events.extend(runtime.handle_project_owner_event(&context, 1, &identity, output));
+    }
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event, BackendEvent::TerminalOutput { .. }))
+            .count(),
+        3,
+        "another pane's output must not replace a continuous delta with a snapshot"
+    );
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::TerminalSnapshot { .. })));
+}
+
+#[test]
 fn project_owner_health_is_project_scoped_and_rejects_stale_context() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
@@ -437,6 +501,7 @@ fn project_owner_health_is_project_scoped_and_rejects_stale_context() {
         incarnation,
         data: b"owner bytes".to_vec(),
         seq: 5,
+        previous_seq: Some(4),
         screen: "owner screen".into(),
         screen_ansi: b"owner ANSI".to_vec(),
         screen_seq: 5,
@@ -518,6 +583,7 @@ fn project_owner_health_is_project_scoped_and_rejects_stale_context() {
         exit_confirmed: false,
         exit_code: None,
         session_id: None,
+        pm_registration: None,
         agent_id: None,
         agent_name: None,
         display_name: None,
@@ -549,6 +615,7 @@ fn project_owner_health_is_project_scoped_and_rejects_stale_context() {
     );
     assert!(runtime.runtimes["a::agent"].exit_confirmed);
 
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
     let gap = runtime.handle_project_owner_event(
         &a,
         2,
@@ -557,17 +624,17 @@ fn project_owner_health_is_project_scoped_and_rejects_stale_context() {
             id: "owner-pane-a".into(),
             incarnation: 7,
             seq: 8,
+            previous_seq: Some(7),
             data: b"delta after a dropped chunk".to_vec(),
             screen: "full repaired screen".into(),
             screen_ansi: b"full repaired ANSI".to_vec(),
             screen_seq: 8,
         },
     );
-    assert!(gap.iter().any(|event| matches!(&event.event,
-        BackendEvent::TerminalSnapshot { data_base64, .. }
-        if base64::engine::general_purpose::STANDARD.decode(data_base64).unwrap() == b"full repaired ANSI")
-        && event.terminal_stream_seq == Some(8)),
-        "a conflated owner stream must repair from its authoritative ANSI screen");
+    assert!(!gap.iter().any(|event| matches!(event.event, BackendEvent::TerminalSnapshot { .. })),
+        "a visible-only frame cannot replace the terminal's retained history");
+    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else { unreachable!() };
+    assert_eq!(tasks.lock().unwrap().len(), 1, "request the owner's semantic snapshot");
     assert!(
         !gap.iter()
             .any(|event| matches!(event.event, BackendEvent::TerminalOutput { .. })),
@@ -601,20 +668,46 @@ fn project_owner_health_is_project_scoped_and_rejects_stale_context() {
         .is_empty());
     runtime.handle_project_owner_event(&a, 2, &identity, closed(7, Some("close failed"), 9));
     assert_eq!(runtime.runtimes["a::agent"].screen, "full repaired screen");
-    let finalized =
-        runtime.handle_project_owner_event(&a, 2, &identity, closed(7, None, 9));
-    assert_eq!(runtime.runtimes["a::agent"].screen, "final diagnostic screen");
+    let finalized = runtime.handle_project_owner_event(&a, 2, &identity, closed(7, None, 9));
+    assert_eq!(
+        runtime.runtimes["a::agent"].screen,
+        "final diagnostic screen"
+    );
     assert_eq!(runtime.runtimes["a::agent"].screen_seq, 9);
     assert_eq!(runtime.runtimes["a::agent"].output_seq, 9);
     assert!(finalized.iter().any(|event| matches!(&event.event,
         BackendEvent::TerminalSnapshot { data_base64, .. }
         if base64::engine::general_purpose::STANDARD.decode(data_base64).unwrap() == b"final ANSI")
         && event.terminal_stream_seq == Some(9)));
+    let restored = runtime.request_owner_snapshot("a::agent", Some("reconnected-client".into()));
+    assert!(restored.iter().any(|event| matches!(&event.event,
+        BackendEvent::TerminalSnapshot { data_base64, .. }
+        if base64::engine::general_purpose::STANDARD.decode(data_base64).unwrap() == b"final ANSI")
+        && event.terminal_stream_seq == Some(9)
+        && event.target == DispatchTarget::Client("reconnected-client".into())),
+        "closed diagnostic panes restore the final semantic snapshot without a live owner");
     assert!(runtime
         .handle_project_owner_event(&a, 2, &identity, output(7))
         .is_empty());
     runtime.handle_project_owner_event(&a, 2, &identity, closed(7, None, 7));
     assert_eq!(runtime.runtimes["a::agent"].screen_seq, 9);
+
+    let legacy = serde_json::from_value(serde_json::json!({
+        "type": "output", "id": "owner-pane-a", "incarnation": 7,
+        "seq": 10, "screen_seq": 10, "data": b"legacy delta",
+        "screen": "legacy screen", "screen_ansi": b"legacy ANSI",
+    }))
+    .unwrap();
+    let legacy = runtime.handle_project_owner_event(&a, 2, &identity, legacy);
+    assert!(!legacy
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::TerminalSnapshot { .. })));
+    assert!(
+        !legacy
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::TerminalOutput { .. })),
+        "an older sender without a predecessor witness requires snapshot repair"
+    );
 
     assert!(
         runtime

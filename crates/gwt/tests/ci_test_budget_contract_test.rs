@@ -22,6 +22,35 @@ use std::path::PathBuf;
 const TEST_WORKFLOW: &str = ".github/workflows/test.yml";
 
 #[test]
+fn macos_socket_targets_compile_before_the_execution_budget() {
+    let workflow: serde_yaml::Value =
+        serde_yaml::from_str(&read(".github/workflows/build.yml")).unwrap();
+    let steps = workflow["jobs"]["check-macos"]["steps"]
+        .as_sequence()
+        .unwrap();
+    let execution = steps
+        .iter()
+        .position(|step| step["run"] == "bash scripts/test-short-socket-fixtures.sh")
+        .unwrap();
+    assert_eq!(steps[execution]["timeout-minutes"].as_u64(), Some(15));
+    let preparation = steps[..execution]
+        .iter()
+        .find(|step| step["name"] == "Check macOS compilation")
+        .unwrap();
+    assert!(preparation["if"].is_null() && preparation["continue-on-error"].is_null());
+    let commands = preparation["run"].as_str().unwrap();
+    for command in [
+        "cargo test -p gwt-core --lib --test test_hygiene_test --test daemon_socket_path_limit --no-run",
+        "cargo test -p gwt --lib --test runtime_tests --no-run",
+    ] {
+        assert!(
+            commands.lines().any(|line| line.trim() == command),
+            "prepare every socket fixture target before the execution budget: {command}"
+        );
+    }
+}
+
+#[test]
 fn real_model_step_only_runs_index_runner_ignored_tests() {
     let workflow = read(TEST_WORKFLOW);
     let steps = named_steps(&workflow);
@@ -37,6 +66,26 @@ fn real_model_step_only_runs_index_runner_ignored_tests() {
         command, "cargo test -p gwt-core --test index_runner_spawn -- --ignored",
         "Do not run watcher_native or baseline regeneration in the model job"
     );
+}
+
+#[test]
+fn real_model_bootstrap_installs_cpu_torch_before_runtime_dependencies() {
+    let workflow = read(TEST_WORKFLOW);
+    let steps = named_steps(&workflow);
+    let (_, body) = steps
+        .iter()
+        .find(|(name, _)| name == "Bootstrap gwt runtime assets")
+        .expect("real model bootstrap must exist");
+    let cpu_install = body
+        .find("pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu")
+        .expect("CPU runner must select CPU torch instead of downloading the CUDA stack");
+    let runtime_install = body
+        .find(
+            "pip install --no-cache-dir -r crates/gwt-core/runtime/project_index_requirements.txt",
+        )
+        .expect("keep shared runtime requirements without caching disposable wheels");
+    assert!(cpu_install < runtime_install);
+    assert!(body.contains("pip check"));
 }
 
 const NIGHTLY_WORKFLOW: &str = ".github/workflows/nightly.yml";
@@ -584,6 +633,18 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
                     .contains("grep -Fq 'test result: ok. 2 passed; 0 failed; 0 ignored;'"),
                 "the native handle filter must not pass with zero matches"
             );
+            let issuer = &steps[build + 4];
+            assert_eq!(
+                issuer["name"].as_str(),
+                Some("Run Windows diagnostic issuer contracts")
+            );
+            assert_eq!(issuer["shell"].as_str(), Some("bash"));
+            assert_eq!(issuer["timeout-minutes"].as_u64(), Some(5));
+            assert!(issuer["if"].is_null());
+            assert!(issuer["continue-on-error"].is_null());
+            let issuer_run = issuer["run"].as_str().unwrap();
+            assert!(issuer_run.contains("node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::actions::diagnostic::tests:: -- --test-threads=1 --nocapture | tee \"$RUNNER_TEMP/diagnostic-issuer.log\""));
+            assert!(issuer_run.contains("grep -Fq 'test result: ok. 7 passed; 0 failed; 0 ignored;' \"$RUNNER_TEMP/diagnostic-issuer.log\""));
         }
         for (index, step) in steps.iter().enumerate() {
             if step["uses"].as_str() == Some("Swatinem/rust-cache@v2") {
@@ -676,6 +737,7 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
     let mut expected_filters = vec![
         "gwt lib gwt cli::feedback -- --test-threads=1 --nocapture | tee \"$RUNNER_TEMP/feedback-ownership.log\"",
         "gwt lib gwt cli::fleet_disposition::tests::orphan_process_handle_ -- --test-threads=1 --nocapture",
+        "gwt lib gwt cli::actions::diagnostic::tests:: -- --test-threads=1 --nocapture | tee \"$RUNNER_TEMP/diagnostic-issuer.log\"",
         "gwt lib gwt issue_cache::tests::targeted_issue_refresh_writes_one_snapshot_without_marking_full_cache_fresh -- --exact",
         "gwt bin gwt app_runtime::tests::continuation_completion_tests::startup_self_heal_converges_legacy_config_without_a_runtime_guard -- --exact --test-threads=1",
         "gwt test hook_contracts hook_health_test::codex_hook_audit_and_repair_cover_worktree_local_and_workspace_home_copies -- --exact --test-threads=1",
@@ -691,6 +753,7 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
         "gwt-terminal lib gwt_terminal pty::windows_spawn::tests -- --test-threads=1",
         "gwt-agent lib gwt_agent claude_child_session_marker -- --test-threads=1",
         "gwt test ci_contracts windows_binary_subsystem_test:: -- --test-threads=1",
+        "gwt test ci_contracts ci_concurrency_contract_test::windows_diagnostic_selftest_keeps_secret_sentinels_private -- --exact --test-threads=1",
         "gwt test runtime_tests pty_start_gate_console_test:: -- --test-threads=1",
         "gwt-terminal test pty_start_gate_test -- --test-threads=1",
         "gwt bin gwt scheduled_tick_is_single_flight_per_canonical_project_scope -- --test-threads=1",
@@ -743,7 +806,7 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
         "gwt test cli_contracts memory_cli_test::memory_add_writes_to_machine_local_work_notes -- --exact --test-threads=1 --nocapture",
         "gwt test cli_contracts gwtd_cli_test::auto_feedback_real_worker_has_no_consent_auth_process_or_raw_sinks -- --exact --test-threads=1 --nocapture",
     ];
-    assert_eq!(expected_filters.len(), 68);
+    assert_eq!(expected_filters.len(), 70);
     expected_filters.sort_unstable();
     actual_filters.sort_unstable();
     assert_eq!(actual_filters, expected_filters);

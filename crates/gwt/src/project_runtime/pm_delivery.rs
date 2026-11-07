@@ -14,6 +14,10 @@ use std::{
 use crate::pm_registry::{self, PmLaunchProfile, PmRegistration};
 use crate::{BackendEvent, PmAgentOption};
 
+/// Outcome fixtures may pin this budget; production still gets two seconds.
+pub const PM_WAKE_DELIVERY_BUDGET: gwt_core::deadline_budget::DeadlineBudget =
+    gwt_core::deadline_budget::DeadlineBudget::new("PM_WAKE_DELIVERY", Duration::from_secs(2));
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PmWakeInput {
     pub operation_id: String,
@@ -275,6 +279,7 @@ pub(crate) struct MobileInputTransaction {
     ready: OwnerMobileInputReady,
     deadline: Instant,
     permitted: Arc<AtomicBool>,
+    native_permit: crate::mobile_input_permit::OwnerInputPermit,
     outcome: Mutex<OwnerMobileInputOutcome>,
     replies: Mutex<MobileInputReplies>,
     changed: Condvar,
@@ -285,7 +290,11 @@ pub(crate) struct MobileInputTransaction {
 }
 
 impl MobileInputTransaction {
-    fn new(identity: OwnerMobileInputIdentity, permitted: Arc<AtomicBool>) -> Self {
+    fn new(
+        identity: OwnerMobileInputIdentity,
+        permitted: Arc<AtomicBool>,
+        native_permit: crate::mobile_input_permit::OwnerInputPermit,
+    ) -> Self {
         static EPOCH: OnceLock<Instant> = OnceLock::new();
         let now = gwt_core::operation_deadline::now();
         let expires_at_mono_ms = u64::try_from(
@@ -309,6 +318,7 @@ impl MobileInputTransaction {
             replies: Mutex::default(),
             deadline: now + MOBILE_INPUT_PREPARE_LIFETIME,
             permitted,
+            native_permit,
             changed: Condvar::new(),
             #[cfg(any(test, feature = "test-gh-guard"))]
             drop_commit_reply: AtomicBool::new(false),
@@ -389,7 +399,16 @@ impl MobileInputTransaction {
 
     pub(crate) fn can_write(&self) -> bool {
         self.permitted.load(Ordering::Acquire)
+            && !self.native_permit.is_revoked()
             && gwt_core::operation_deadline::now() < self.deadline
+    }
+
+    /// Linearize one input only at the reserved physical writer. Host revoke
+    /// races this shared CAS, rather than waiting for an owner RPC response.
+    pub(crate) fn accept_native(&self) -> Result<(), String> {
+        self.native_permit
+            .accept()
+            .map_err(|error| error.to_string())
     }
 
     pub(crate) fn commit(&self, ready: &OwnerMobileInputReady) -> Result<(), String> {
@@ -399,6 +418,7 @@ impl MobileInputTransaction {
         }
         if outcome.phase == OwnerMobileInputPhase::Ready
             && self.permitted.load(Ordering::Acquire)
+            && !self.native_permit.is_revoked()
             && gwt_core::operation_deadline::now() < self.deadline
         {
             outcome.phase = OwnerMobileInputPhase::Committing;
@@ -421,6 +441,7 @@ impl MobileInputTransaction {
     pub(crate) fn wait_for_commit(&self) -> Result<(), String> {
         let mut outcome = self.outcome.lock().map_err(|error| error.to_string())?;
         if !self.permitted.load(Ordering::Acquire)
+            || self.native_permit.is_revoked()
             || gwt_core::operation_deadline::now() >= self.deadline
         {
             return Err("native prepared input was cancelled or expired".into());
@@ -434,6 +455,7 @@ impl MobileInputTransaction {
         self.changed.notify_all();
         loop {
             if !self.permitted.load(Ordering::Acquire)
+                || self.native_permit.is_revoked()
                 || gwt_core::operation_deadline::now() >= self.deadline
             {
                 return Err("native prepared input was cancelled or expired".into());
@@ -446,7 +468,10 @@ impl MobileInputTransaction {
                 .saturating_duration_since(gwt_core::operation_deadline::now());
             outcome = self
                 .changed
-                .wait_timeout(outcome, remaining)
+                // Host revoke changes shared memory without an RPC/Condvar
+                // notification. Release an unaccepted writer promptly when
+                // this process is running, without making PC revoke wait.
+                .wait_timeout(outcome, remaining.min(Duration::from_millis(100)))
                 .map_err(|error| error.to_string())?
                 .0;
         }
@@ -496,6 +521,20 @@ impl PmWakePermits {
         if identity.operation_id.trim().is_empty() {
             return Err("native input operation id is empty".into());
         }
+        // Logical abandonment does not release physical-job admission. Only a
+        // completed writer whose creator lease was released may retire its
+        // receipt. A live creator can still observe Cancel/Settle while another
+        // client prepares; the 32-slot cap also continues to bound workers.
+        self.0.retain(|_, entry| {
+            entry.mobile.as_ref().is_none_or(|mobile| {
+                mobile.ready.identity == *identity
+                    || !mobile.native_permit.is_revoked()
+                    || !mobile.native_permit.creator_released()
+                    || !mobile
+                        .outcome()
+                        .is_ok_and(|outcome| outcome.phase.is_finished())
+            })
+        });
         if let Some(entry) = self.0.get(&identity.operation_id) {
             let mobile = entry
                 .mobile
@@ -516,9 +555,14 @@ impl PmWakePermits {
             return Err("native prepared input capacity reached".into());
         }
         let permitted = Arc::new(AtomicBool::new(true));
+        let native_permit = identity.permit.open().map_err(|error| error.to_string())?;
+        if native_permit.is_revoked() {
+            return Err("native mobile input permit was revoked".into());
+        }
         let mobile = Arc::new(MobileInputTransaction::new(
             identity.clone(),
             permitted.clone(),
+            native_permit,
         ));
         self.0.insert(
             identity.operation_id.clone(),
@@ -531,6 +575,20 @@ impl PmWakePermits {
             },
         );
         Ok((mobile, true))
+    }
+
+    pub(crate) fn finish_mobile(
+        &mut self,
+        identity: &OwnerMobileInputIdentity,
+        transaction: &Arc<MobileInputTransaction>,
+    ) {
+        if let Some(entry) = self.0.get_mut(&identity.operation_id) {
+            if entry.mobile.as_ref().is_some_and(|current| {
+                current.ready.identity == *identity && Arc::ptr_eq(current, transaction)
+            }) {
+                entry.started = false;
+            }
+        }
     }
 
     pub(crate) fn mobile(
@@ -680,7 +738,7 @@ pub(crate) fn deliver_pm_wake(
         PM_DELIVERY_TERMINAL_MARGIN, PM_DELIVERY_UNCONFIRMED_REASON,
     };
     let (sessions_dir, target_session, incarnation, pane, output_seq) = runtime;
-    let operation_deadline = Instant::now() + Duration::from_secs(2);
+    let operation_deadline = Instant::now() + PM_WAKE_DELIVERY_BUDGET.resolve();
     let _operation_budget = (!delivery.idle)
         .then(|| gwt_core::operation_deadline::ScopedOperationDeadline::enter(operation_deadline));
     let deadline = operation_deadline - PM_DELIVERY_TERMINAL_MARGIN;
@@ -1285,6 +1343,81 @@ pub fn pm_agent_options(configured: &str) -> Vec<PmAgentOption> {
 mod tests {
     use super::*;
     use crate::project_runtime::{events::OwnerCommand, test_support::ProjectOwnerHarness};
+
+    #[test]
+    fn revoked_native_inputs_keep_worker_capacity_until_physical_completion() {
+        use crate::mobile_input_permit::NativeInputPermit;
+        let mut permits = PmWakePermits::default();
+        let mut gates = Vec::new();
+        let identity = |operation: usize, gate: &NativeInputPermit| OwnerMobileInputIdentity {
+            operation_id: operation.to_string(),
+            host_instance_id: "host".into(),
+            id: "project::pane".into(),
+            incarnation: 1,
+            session_id: None,
+            data_sha256: "digest".into(),
+            permit: gate.reference(),
+        };
+        let mut first = None;
+        for operation in 0..MAX_UNSETTLED_MOBILE_INPUTS {
+            let gate = NativeInputPermit::new().unwrap();
+            let id = identity(operation, &gate);
+            let (transaction, _) = permits.prepare_mobile(&id).unwrap();
+            if operation == 0 {
+                first = Some((id, transaction));
+            }
+            if operation != 1 {
+                gate.revoke();
+            }
+            gates.push(gate);
+        }
+        let replacement = NativeInputPermit::new().unwrap();
+        assert!(permits.prepare_mobile(&identity(0, &replacement)).is_err());
+        let (old_identity, old_transaction) = first.unwrap();
+        permits.finish_mobile(&old_identity, &old_transaction);
+        old_transaction.finish(false, Err("physically prevented".into()), None);
+        let new_identity = identity(0, &replacement);
+        assert!(
+            permits.prepare_mobile(&new_identity).is_err(),
+            "a live creator must retain its finished cleanup receipt across another Prepare"
+        );
+        assert_eq!(
+            permits.cancel_mobile(&old_identity).unwrap().phase,
+            OwnerMobileInputPhase::Prevented
+        );
+        drop(gates.remove(0));
+        // A concurrent fork can retain the creator's descriptor until its
+        // child closes it; Drop alone does not establish lease release.
+        // test-hygiene: allow-wall-clock-deadline Observe the real kernel lease release; this existing hang guard does not establish ordering by elapsed time.
+        let deadline = Instant::now() + gwt_core::deadline_budget::HANG_GUARD;
+        while !old_transaction.native_permit.creator_released() {
+            assert!(
+                // test-hygiene: allow-wall-clock-deadline Only bounds a stuck inherited descriptor; lease observation controls progress.
+                Instant::now() < deadline,
+                "dropped creator's native input lease was not released"
+            );
+            thread::sleep(Duration::from_millis(100));
+        }
+        let (_, created) = permits.prepare_mobile(&new_identity).unwrap();
+        assert!(created);
+        assert_eq!(permits.0.len(), MAX_UNSETTLED_MOBILE_INPUTS);
+        // A late duplicate completion from the old job cannot finish the new
+        // operation at this same id, even after its old receipt was retired.
+        permits.finish_mobile(&old_identity, &old_transaction);
+        assert!(permits.0["0"].started);
+
+        // Model a creator crash without Drop: the shared state stays Unarmed,
+        // but loss of its descriptor lease must still reclaim a finished job.
+        let crashed_identity = identity(1, &gates[0]);
+        let crashed = permits.mobile(&crashed_identity).unwrap();
+        gates[0].release_creator_lease_for_test();
+        assert!(!crashed.can_write());
+        permits.finish_mobile(&crashed_identity, &crashed);
+        crashed.finish(false, Err("creator disappeared".into()), None);
+        let recovered = NativeInputPermit::new().unwrap();
+        assert!(permits.prepare_mobile(&identity(1, &recovered)).unwrap().1);
+        assert_eq!(permits.0.len(), MAX_UNSETTLED_MOBILE_INPUTS);
+    }
 
     #[test]
     fn physical_owner_preserves_early_idle_cancellation_and_composer_fence() {

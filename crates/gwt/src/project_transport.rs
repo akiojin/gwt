@@ -127,6 +127,7 @@ impl OutboundEvent {
                     | BackendEvent::SupportedAgentList { .. }
                     | BackendEvent::SupportedAgentMaintenance { .. }
                     | BackendEvent::UpdateState(_)
+                    | BackendEvent::UpdateCheckResult { .. }
                     | BackendEvent::UpdateProgress { .. }
                     | BackendEvent::UpdateReady { .. }
                     | BackendEvent::UpdateAutoApply { .. }
@@ -270,6 +271,9 @@ impl TransportState {
     }
 }
 pub enum TransportEvent {
+    BrowserDisconnected {
+        client_id: String,
+    },
     MobileInput(Arc<crate::mobile_connection::MobileInputRequest>),
     FreshExecutionReadyResend {
         grant: AgentCapabilityGrant,
@@ -685,6 +689,8 @@ pub struct ClientQueue {
     notify: tokio::sync::Notify,
     input_liveness: std::sync::RwLock<bool>,
     input_close_requested: std::sync::atomic::AtomicBool,
+    native_input_permits:
+        Mutex<Vec<std::sync::Weak<crate::mobile_input_permit::NativeInputPermit>>>,
 }
 
 impl Default for ClientQueue {
@@ -694,6 +700,7 @@ impl Default for ClientQueue {
             notify: tokio::sync::Notify::new(),
             input_liveness: std::sync::RwLock::new(true),
             input_close_requested: std::sync::atomic::AtomicBool::new(false),
+            native_input_permits: Mutex::default(),
         }
     }
 }
@@ -909,6 +916,16 @@ impl ClientQueue {
 
     fn close_with_frame(&self, close_frame: Option<ClientCloseFrame>) {
         self.input_close_requested.store(true, Ordering::Release);
+        // Native effects do not hold the client lease across RPC. Closing the
+        // registration instead invalidates each input's shared final permit.
+        let mut permits = self
+            .native_input_permits
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for permit in permits.drain(..).filter_map(|permit| permit.upgrade()) {
+            permit.revoke();
+        }
+        drop(permits);
         let mut state = self
             .state
             .lock()
@@ -1025,6 +1042,30 @@ pub struct ClientProjectBinding {
 }
 
 impl ClientProjectBinding {
+    /// The callback may only perform short local authorization/permit arming;
+    /// never retain this lease through an RPC or physical write.
+    pub fn with_native_permit<T>(
+        &self,
+        project: &gwt_core::repo_hash::ProjectKey,
+        permit: &Arc<crate::mobile_input_permit::NativeInputPermit>,
+        effect: impl FnOnce() -> T,
+    ) -> Option<T> {
+        self.while_current(project, || {
+            let mut permits = self.queue.native_input_permits.lock().ok()?;
+            // Pair this check/registration with close's mutex. A concurrent
+            // close either precedes registration or revokes the registered gate.
+            if self.queue.input_close_requested.load(Ordering::Acquire) {
+                return None;
+            }
+            permits.retain(|permit| permit.strong_count() != 0);
+            let weak = Arc::downgrade(permit);
+            if !permits.iter().any(|existing| existing.ptr_eq(&weak)) {
+                permits.push(weak);
+            }
+            Some(effect())
+        })?
+    }
+
     pub fn while_current<T>(
         &self,
         project: &gwt_core::repo_hash::ProjectKey,
@@ -3056,6 +3097,9 @@ async fn client_session_with_scope(
     }
 
     state.clients.unregister(&client_id);
+    if matches!(scope, ClientSessionScope::Browser(_)) {
+        state.send(TransportEvent::BrowserDisconnected { client_id });
+    }
 }
 
 #[cfg(any(test, feature = "test-gh-guard"))]
@@ -3146,6 +3190,32 @@ pub async fn send_agent_self_close_acceptance_for_test<S>(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn closing_a_client_revokes_its_native_input_permit_without_a_writer_wait() {
+        use super::{ClientHub, ClientScope};
+        use crate::mobile_input_permit::NativeInputPermit;
+        let project = gwt_core::paths::project_scope_hash(std::path::Path::new("/mobile-fixture"));
+        let clients = ClientHub::default();
+        clients.register_scoped("phone".into(), ClientScope::Project(project.clone()));
+        let binding = clients.capture_project_binding("phone").unwrap();
+        let permit = NativeInputPermit::new().unwrap();
+        assert_eq!(binding.with_native_permit(&project, &permit, || 1), Some(1));
+        clients.unregister("phone");
+        assert!(permit.is_revoked());
+        assert_eq!(binding.with_native_permit(&project, &permit, || 2), None);
+        clients.register_scoped("phone".into(), ClientScope::Project(project.clone()));
+        let fresh = NativeInputPermit::new().unwrap();
+        assert_eq!(
+            clients
+                .capture_project_binding("phone")
+                .unwrap()
+                .with_native_permit(&project, &fresh, || 3),
+            Some(3)
+        );
+        assert!(!fresh.is_revoked());
+    }
+
     #[test]
     fn issue_3713_direct_self_close_refusal_crosses_the_origin_socket_with_recovery() {
         use futures_util::{SinkExt, StreamExt};
@@ -3990,10 +4060,35 @@ mod tests {
             },
         )
         .expect("bound agent principal");
-        let bound_scope = super::AgentPaneSessionScope::new(super::AgentCapabilityGrant::new(
+        let mut bound_scope = super::AgentPaneSessionScope::new(super::AgentCapabilityGrant::new(
             "bound-capability".to_string(),
             bound_principal.clone(),
         ));
+        bound_scope.filter_outbound(workspace.to_string()).unwrap();
+        for agent in [&scope, &bound_scope] {
+            assert!(agent.allowed_window_ids.contains("tab-owned::agent-1"));
+            for wire in [
+                serde_json::json!({"kind":"load_pm_request_task","id":"tab-owned::agent-1",
+                    "request_id":1,"task_id":"task"}),
+                serde_json::json!({"kind":"reopen_pm_request_task","id":"tab-owned::agent-1",
+                    "request_id":2,"request":{"operation_id":"reopen","expected_revision":3,
+                        "reason":"needs another review","task_id":"task"}}),
+                serde_json::json!({"kind":"cancel_pm_request_task","id":"tab-owned::agent-1",
+                    "request_id":3,"request":{"operation_id":"cancel","expected_revision":3,
+                        "reason":"withdraw this request","task_id":"task"}}),
+                serde_json::json!({"kind":"update_pm_request_task","id":"tab-owned::agent-1",
+                    "request_id":4,"request":{"operation_id":"update","expected_revision":3,
+                        "reason":"correct this request","task":{"id":"task","title":"Changed","purpose":"Changed",
+                            "completion_conditions":["Outcome"],"issue_numbers":[],"goal_ids":[],"assignee":null}}}),
+            ] {
+                assert!(
+                    agent
+                        .filter_inbound(serde_json::from_value(wire).unwrap())
+                        .is_none(),
+                    "inspection and producing agents cannot claim the browser user task adapter"
+                );
+            }
+        }
         assert!(matches!(
             bound_scope.filter_inbound(FrontendEvent::PaneSendInput {
                 session_id: "session-1".to_string(),
@@ -4674,6 +4769,22 @@ mod tests {
 
     // SPEC-2359 W-17 (FR-395): lossless events must survive any lossy flood.
     #[test]
+    fn client_queue_keeps_project_view_closed_under_saturation() {
+        let queue = ClientQueue::default();
+        for index in 0..LOSSY_HIGH_WATER {
+            queue.enqueue(&prepare_outbound(&lossless_error(&format!("fill-{index}"))));
+        }
+        queue.enqueue(&prepare_outbound(&BackendEvent::ProjectViewClosed {
+            project_key: "0123456789abcdef".into(),
+        }));
+        let (payloads, _) = drain_all(&queue);
+        assert!(payloads
+            .iter()
+            .any(|payload| payload.contains("project_view_closed")));
+        assert_eq!(queue.dropped_lossy(), 0);
+    }
+
+    #[test]
     fn client_queue_keeps_lossless_under_lossy_flood() {
         let queue = ClientQueue::default();
 
@@ -5119,6 +5230,32 @@ mod tests {
         assert_eq!(payloads.len(), 2, "distinct windows must both be delivered");
         assert!(payloads.iter().any(|payload| payload.contains("window-1")));
         assert!(payloads.iter().any(|payload| payload.contains("window-2")));
+        for request_id in [41, 42] {
+            queue.enqueue(&prepare_outbound(&BackendEvent::PmRequestTask {
+                id: "same-window".into(),
+                request_id,
+                result: crate::protocol::PmRequestTaskResult::Error {
+                    code: "conflict".into(),
+                    message: "reread task".into(),
+                    current_revision: Some(3),
+                    recovery_operation: "load_pm_request_task".into(),
+                },
+            }));
+        }
+        let (payloads, _) = drain_all(&queue);
+        let request_ids: Vec<_> = payloads
+            .iter()
+            .map(|payload| {
+                serde_json::from_str::<serde_json::Value>(payload).unwrap()["request_id"]
+                    .as_u64()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            request_ids,
+            [41, 42],
+            "correlated task replies must not coalesce"
+        );
     }
 
     /// Issue #3755 AC-2: pane hydration finishes with one lossless receipt.

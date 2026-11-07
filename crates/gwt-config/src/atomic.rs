@@ -11,7 +11,7 @@ use crate::error::{ConfigError, Result};
 pub fn write_atomic(path: &Path, content: &str) -> Result<()> {
     crate::home::assert_test_path(path);
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        create_dir_all_durable(parent)?;
     }
 
     // Use PID + timestamp to avoid collisions when multiple processes
@@ -44,7 +44,6 @@ pub fn write_atomic(path: &Path, content: &str) -> Result<()> {
         .map_err(|e| ConfigError::WriteError {
             reason: format!("failed to write temp file: {e}"),
         })?;
-    drop(temp_file);
 
     #[cfg(unix)]
     {
@@ -59,16 +58,128 @@ pub fn write_atomic(path: &Path, content: &str) -> Result<()> {
         }
     }
 
+    temp_file.sync_all().map_err(|e| ConfigError::WriteError {
+        reason: format!("failed to sync temp file before rename: {e}"),
+    })?;
+    drop(temp_file);
+
     std::fs::rename(&temp_path, path).map_err(|e| ConfigError::WriteError {
         reason: format!("failed to rename temp file: {e}"),
     })?;
 
+    #[cfg(unix)]
+    {
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        sync_directory(parent).map_err(|e| ConfigError::WriteError {
+            reason: format!("file renamed but parent sync failed; inspect current settings before retrying: {e}"),
+        })?;
+    }
+
+    Ok(())
+}
+
+/// Create directories durably, rechecking the existing boundary after a failed
+/// sync. Call before opening a stable lock file in a newly created directory.
+pub fn create_dir_all_durable(path: &Path) -> Result<()> {
+    let mut missing = Vec::new();
+    let mut existing = path;
+    while !existing.as_os_str().is_empty() && !existing.is_dir() {
+        missing.push(existing.to_path_buf());
+        existing = existing.parent().unwrap_or_else(|| Path::new(""));
+    }
+    // A failed previous attempt may have created this directory before its
+    // link was synced. Recheck just this boundary before creating descendants.
+    let existing = if existing.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        existing
+    };
+    sync_directory_and_parent(existing)?;
+    for directory in missing.iter().rev() {
+        match std::fs::create_dir(directory) {
+            Ok(()) => {}
+            Err(error)
+                if error.kind() == std::io::ErrorKind::AlreadyExists && directory.is_dir() => {}
+            Err(error) => return Err(error.into()),
+        }
+        sync_directory_and_parent(directory)?;
+    }
+    Ok(())
+}
+
+fn sync_directory_and_parent(path: &Path) -> Result<()> {
+    sync_directory(path)?;
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        sync_directory(parent)?;
+    }
+    Ok(())
+}
+
+fn sync_directory(_path: &Path) -> Result<()> {
+    #[cfg(test)]
+    if tests::directory_sync_fails(_path) {
+        return Err(std::io::Error::other("injected directory sync failure").into());
+    }
+    #[cfg(unix)]
+    std::fs::File::open(_path)?.sync_all()?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    thread_local! {
+        static FAIL_DIRECTORY_SYNC: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) };
+    }
+
+    struct DirectorySyncFailure(Option<std::path::PathBuf>);
+
+    impl DirectorySyncFailure {
+        fn at(path: &Path) -> Self {
+            Self(FAIL_DIRECTORY_SYNC.with(|fault| fault.replace(Some(path.to_path_buf()))))
+        }
+    }
+
+    impl Drop for DirectorySyncFailure {
+        fn drop(&mut self) {
+            FAIL_DIRECTORY_SYNC.with(|fault| fault.replace(self.0.take()));
+        }
+    }
+
+    pub(super) fn directory_sync_fails(path: &Path) -> bool {
+        FAIL_DIRECTORY_SYNC.with(|fault| fault.borrow().as_deref() == Some(path))
+    }
+
+    #[test]
+    fn newly_created_ancestor_sync_failure_prevents_publication_and_retries() {
+        let directory = tempfile::tempdir().unwrap();
+        let ancestor = directory.path().join("project-state");
+        let path = ancestor.join("release-policy").join("request.json");
+        let failure = DirectorySyncFailure::at(&ancestor);
+        assert!(
+            write_atomic(&path, "pending").is_err(),
+            "ancestor sync failure must be reported before publication"
+        );
+        assert!(
+            !path.exists(),
+            "an unsynced directory chain cannot contain a published receipt"
+        );
+        assert!(
+            write_atomic(&path, "pending").is_err(),
+            "retry must recheck the failed directory link"
+        );
+        assert!(!path.exists());
+        drop(failure);
+        write_atomic(&path, "pending").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "pending");
+    }
 
     #[test]
     fn write_atomic_creates_file() {

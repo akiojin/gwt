@@ -1,0 +1,9 @@
+{
+  "generation": "R1",
+  "source_head": "bcf777ed432df9fd96dc5dd9c13d01ec859d7ea2",
+  "source_sha256": {
+    "crates/gwt/src/usage_poller.rs": "8c4baba9693f7866a1cc1182697bb10662a7a1e8c3ea818f571081537493494f",
+    "crates/gwt/src/monitor_duplicate_runtime.rs": "97e852f58b6559f170b396cb91b2a889e626cb867bfd00c232ac86c7ef7ff80b",
+    "crates/gwt/src/session_inventory.rs": "01d1fb1a14904822fe914494a6a92489f5a11bd6b3ac634469c4d1d93aa0cc4b"
+  }
+}

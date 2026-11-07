@@ -3824,6 +3824,39 @@ fn issue_5343_reconnect_restores_staged_cta_and_elevation_notice() {
 }
 
 #[test]
+fn issue_5343_unknown_msi_scope_reconnect_names_reason_and_preserves_staged_payload() {
+    let temp = tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let payload = temp.path().join("update.msi");
+    fs::write(&payload, "invalid MSI fixture").unwrap();
+    gwt_core::update::persist_pending_update_manifest(&gwt_core::update::PendingUpdateManifest {
+        version: "999.0.0".into(),
+        asset_url: "https://example.invalid/update.msi".into(),
+        payload: gwt_core::update::PreparedPayload::Installer {
+            path: payload.clone(),
+            kind: gwt_core::update::InstallerKind::WindowsMsi,
+        },
+        downloaded_at: chrono::Utc::now().to_rfc3339(),
+        origin: gwt_core::update::PendingUpdateOrigin::Automatic,
+        auto_apply_deferred: false,
+    })
+    .unwrap();
+    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let events = runtime.frontend_sync_events("browser");
+    assert!(events.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::UpdateApplyPendingPersisted { .. }
+    )));
+    assert!(update_resume_toasts(&events)
+        .iter()
+        .any(|(level, message)| {
+            *level == "warn" && message.contains("Windows MSI") && message.contains("manually")
+        }));
+    assert!(gwt_core::update::load_pending_update_manifest().is_some());
+    assert!(payload.exists());
+}
+
+#[test]
 fn app_runtime_enabled_fallback_epoch_overflow_is_zero_write_error() {
     let temp = tempdir().expect("tempdir");
     let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
@@ -5886,6 +5919,16 @@ fn assert_expired_launch_ack_cleanup(
         launch_payload::OwnerLaunchMetadata,
         test_support::OwnerLaunchStage,
     };
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // This verifies ownership across ACKs, not the daemon's wall-clock latency.
+    let _control_budget = ScopedEnvVar::set(
+        "GWT_TEST_BUDGET_DURABLE_ISSUE_MONITOR_CONTROL_MS",
+        gwt_core::deadline_budget::HANG_GUARD
+            .as_millis()
+            .to_string(),
+    );
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
     let (root, owner, delivery_id) =
@@ -6018,6 +6061,10 @@ fn assert_expired_launch_ack_cleanup(
             .await
             .unwrap()
     });
+    assert!(
+        captured.session.is_some(),
+        "the paused launch must have materialized its Session before changing Monitor state"
+    );
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&root);
     let expired = if disabled_monitor {
         gwt::daemon_publisher::publish_durable_issue_monitor_control(
@@ -7154,6 +7201,13 @@ fn issue_5642_materializing_replay_preserves_the_unconsumed_initial_launch() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // This verifies replay ownership, not the daemon's wall-clock ACK latency.
+    let _control_budget = ScopedEnvVar::set(
+        "GWT_TEST_BUDGET_DURABLE_ISSUE_MONITOR_CONTROL_MS",
+        gwt_core::deadline_budget::HANG_GUARD
+            .as_millis()
+            .to_string(),
+    );
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -7461,6 +7515,14 @@ fn durable_issue_monitor_delivery_preserves_live_materializer_and_replays_after_
             assert!(waiting_since.elapsed() < gwt_core::deadline_budget::HANG_GUARD);
             thread::sleep(Duration::from_millis(100));
         }
+        assert_eq!(
+            gwt::project_execution_policy::observation(&repo)
+                .unwrap()
+                .unwrap()
+                .host_pid,
+            std::process::id(),
+            "the physical materializer preserves its controller's actual Project view"
+        );
         let client = owner_fixture_block_on(ProjectRuntimeClient::from_current_project(
             &repo,
             &gwt_core::paths::gwt_home(),
@@ -8769,6 +8831,7 @@ fn app_runtime_issue_monitor_auto_launch_uses_last_settings_runtime_target() {
     run_git(&repo, &["push", "origin", "develop"]);
 
     run_git(&fixture.worktree, &["merge", "--ff-only", "develop"]);
+    eprintln!("last-settings-runtime phase: worktree_ready");
     let mut previous = gwt_agent::Session::load(
         &fixture
             .sessions_dir
@@ -8812,7 +8875,9 @@ fn app_runtime_issue_monitor_auto_launch_uses_last_settings_runtime_target() {
             capture_path.to_str().unwrap(),
         )],
     );
+    eprintln!("last-settings-runtime phase: owner_start");
     let owner = start_monitor_relaunch_owner(&mut fixture, false);
+    eprintln!("last-settings-runtime phase: owner_ready");
     let runtime = &mut fixture.runtime;
     let profiles = runtime.issue_monitor_previous_profiles(&runtime.tabs[0].project_root);
     let repo_profile = profiles.repo_local().expect("repo-local last settings");
@@ -8828,11 +8893,13 @@ fn app_runtime_issue_monitor_auto_launch_uses_last_settings_runtime_target() {
         3165,
         LinkedIssueKind::Spec,
     );
+    eprintln!("last-settings-runtime phase: prepare");
     events.extend(commit_issue_monitor_preparations(
         runtime,
         &tasks,
         &fixture.recorded_events,
     ));
+    eprintln!("last-settings-runtime phase: prepared");
     let window_id = runtime
         .runtimes
         .keys()
@@ -8871,20 +8938,24 @@ fn app_runtime_issue_monitor_auto_launch_uses_last_settings_runtime_target() {
     });
     let screen =
         gwt_core::process_console::redact_line(&pane.pane.lock().unwrap().screen().contents());
+    eprintln!("last-settings-runtime phase: close");
     let close = owner_fixture_block_on(owner.command(
         gwt::project_runtime::events::OwnerCommand::Close {
             id: pane.id.clone(),
             incarnation: pane.incarnation,
         },
     ));
+    eprintln!("last-settings-runtime phase: closed");
     runtime.runtimes.remove(&window_id);
     runtime.test_project_owners.remove(&repo);
+    eprintln!("last-settings-runtime phase: shutdown");
     owner_fixture_block_on(
         Arc::try_unwrap(owner)
             .ok()
             .expect("drained last-settings owner")
             .shutdown(),
     );
+    eprintln!("last-settings-runtime phase: stopped");
     let captured = captured
         .unwrap_or_else(|error| panic!("{error}; close={close:?}; provider screen={screen}"));
     close.unwrap();

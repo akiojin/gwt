@@ -78,6 +78,7 @@ root_js_modules! {
     "branch-list-state.js" => "applyBranchEntriesEvent",
     // SPEC-2013 FR-012: close project tab confirm modal renderer.
     "close-project-confirm-modal.js" => "createCloseProjectController",
+    "project-execution-policy-model.js" => "createProjectExecutionPolicyModel",
     // SPEC-2013 2026-06-16 amendment: project switcher popover and
     // Shift+Cmd+Up/Down project tab cycling helpers.
     // SPEC-2013 2026-06-16 amendment: quiet long-running Agent completion
@@ -104,6 +105,7 @@ root_js_modules! {
     "recovery-center-modal.js" => "createRecoveryCenterController",
     // SPEC-1939 Phase 12 / T-IDX-106 — Settings.Index tab renderer.
     "index-settings-panel.js" => "renderIndexSettingsPanel",
+    "hook-center-panel.js" => "renderHookCenterPanel",
     // SPEC-2008 Phase 24 — terminal viewport reflow primitives.
     "terminal-viewport-reflow.js" => "attachHostResizeReflow",
     // Issue #2694 Phase C — kind-coalesced, rAF-flushed WebSocket inbound

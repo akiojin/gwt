@@ -243,7 +243,8 @@ from other hosts on the same LAN or VPN-extended LAN; pair it with an explicit
 `--port` when you need an operator-selected, well-known port. `--no-tray`
 starts a temporary server without registering a tray icon. It exits when its
 launching parent ends, or five seconds after its last browser session closes
-(reloads can reconnect during that grace). Before any browser connects, the
+(reloads can reconnect during that grace). An explicit Continue keeps it alive
+while that project's admitted work remains unfinished. Before any browser connects, the
 server follows its parent's lifetime. `--no-open` explicitly suppresses browser
 auto-open; startup already suppresses it by default.
 
@@ -288,6 +289,95 @@ The SPEC records the planned deployment, HTTPS bootstrap, network conditions,
 and failure behavior. Runnable mobile setup instructions will follow transport
 integration and validation; the existing LAN bind example is not that setup.
 
+#### Offline Host credential administration (Unix, from source)
+
+`cargo build -p gwt --bin gwt-mobile-coordinator` builds the offline registry
+administrator. It provides no listener or phone connection. Use a trusted user
+home outside repositories, with non-replaceable ancestors. Provision
+`$HOME/.gwt`, `$HOME/.gwt/mobile`, and `$HOME/.gwt/mobile/coordinator` as directories
+owned by your OS user with mode `0700`. Symlinks and macOS extended ACL entries
+are rejected. Inspect existing permissions and explicitly repair them when
+needed; the command does not create directories or change permissions.
+Windows private storage is not supported yet.
+
+Send one JSON request, at most 16 KiB, on stdin:
+
+```sh
+printf '%s\n' '{"schema_version":1,"command":{"operation":"initialize"}}' |
+  target/debug/gwt-mobile-coordinator
+printf '%s\n' '{"schema_version":1,"command":{"operation":"status"}}' |
+  target/debug/gwt-mobile-coordinator
+```
+
+`initialize` creates a registry once; it never replaces one. `status` shows
+public identities, project scopes, expiry, and revocation records. Other commands
+use the same envelope and these `command` fields:
+
+| `operation` | Required fields |
+| --- | --- |
+| `issue` | `origin` (HTTPS origin), `host_id` (non-nil UUID), `projects` (1–16 unique canonical project keys), `expires_at` (future Unix seconds) |
+| `rotate` | `origin`, `credential_id` (non-nil UUID), `expires_at` |
+| `revoke` | `credential_id` |
+
+Project keys are the canonical 16-character lowercase hex identifiers. Unknown
+fields and operations are rejected. Paths, secrets, and clock overrides are not
+request fields. Successful issuance returns only the public identity and private
+credential file path; the bearer stays in that file. Keep it out of Git, logs,
+URLs, and shell arguments. These credentials authorize future Host registration,
+not device approval or terminal input. Online registration is not available yet.
+
+Administration holds a separate registry lock. For `busy`, stop the coordinator
+or other administrator and retry. For `commit_uncertain`, run `status` to inspect
+current records before deciding what to do; do not automatically repeat issuance.
+For private-storage or clock errors, repair the reported prerequisite and retry
+without deleting the registry or its revocation records. `--help` lists the
+supported request fields and storage requirements.
+
+#### Offline PC credential import and inspection (Unix, from source)
+
+Build `cargo build -p gwt --bin gwt-mobile-host` on the PC. Provision the
+user-owned `0700` directories `$HOME/.gwt`, `$HOME/.gwt/mobile`, and
+`$HOME/.gwt/mobile/host` outside repositories, without symlinks or macOS extended
+ACL entries. Keep their ancestors trusted and non-replaceable. The issued source
+file must be private (`0600`, single-link regular file, private parent) and outside
+repositories too. The command does not create directories or repair permissions.
+
+Provide the expected Host/origin/Project independently of the source file:
+
+```sh
+printf '%s\n' '{"schema_version":1,"command":{"operation":"import","source":"/private/issued/host-credential.json","binding":{"host_id":"11111111-1111-4111-8111-111111111111","coordinator_origin":"https://coordinator.example"},"project":"0123456789abcdef"}}' |
+  target/debug/gwt-mobile-host
+```
+
+Replace the example public identifiers, origin and source path with your own.
+Use stdin for the request (maximum 16 KiB); secrets, clock overrides, destination
+paths and activation fields are not accepted. Success returns only the public
+identity and the immutable private copy's path. Import never replaces a copy or
+changes the selected credential, registration, enable state or device approvals.
+
+To explicitly select and inspect a copy, create the private `0600` file
+`$HOME/.gwt/mobile/host/config.json` using the coordinator issuance receipt's
+public identity, not values inferred from an untrusted credential:
+
+```json
+{"schema_version":1,"binding":{"host_id":"11111111-1111-4111-8111-111111111111","coordinator_origin":"https://coordinator.example"},"project":"0123456789abcdef","identity":{"host_id":"11111111-1111-4111-8111-111111111111","credential_id":"22222222-2222-4222-8222-222222222222","generation":"33333333-3333-4333-8333-333333333333"}}
+```
+
+```sh
+printf '%s\n' '{"schema_version":1,"command":{"operation":"inspect","binding":{"host_id":"11111111-1111-4111-8111-111111111111","coordinator_origin":"https://coordinator.example"},"project":"0123456789abcdef"}}' |
+  target/debug/gwt-mobile-host
+```
+
+Inspection returns only public identity, binding, project and expiry. It rejects
+scope/identity mismatches, expired credentials and unsafe storage. For
+`already_exists` or `commit_uncertain`, explicitly configure the expected
+issuance identity and run `inspect` before deciding recovery; do not automatically
+retry, delete the copy or reissue credentials. Correct an invalid configuration,
+private-storage prerequisite or clock explicitly, then inspect again. Neither
+operation opens a network connection or proves current registry issuance,
+revocation status or successful registration. Windows private storage remains
+unsupported. `--help` describes the request and storage requirements.
+
 ### `gwt serve` removal
 
 The legacy `gwt serve` / `gwt --headless` verbs were removed in
@@ -316,14 +406,20 @@ Every HTTP / WebSocket request is mirrored to `tracing::info!(target =
 real time on stderr and in `~/.gwt/logs/<date>/`. `/healthz` is demoted to
 `debug!` to avoid drowning the stream with health probes.
 
-Lifecycle: the running `gwt` process owns the agent / PTY lifetime. In the default
-tray mode, closing a browser tab leaves the project and its running agents active;
-reopen its project URL to return to the same workspace. To stop a project, choose
-**Close Project**
-in its page header or beside it in the Hub's open-project list. If agents are
-running, a confirmation dialog lists them: **Cancel** keeps them running, while
-**Close Project** stops that project's runtime and agents. Other projects keep
-running, and every browser tab showing the closed project returns to the Hub.
+Lifecycle: new project work starts after its Project screen is displayed.
+Restored tabs and background connections alone do not start it. **Close Project**
+in the page header closes that view; if another view remains, its work continues.
+Closing the last view, or choosing Close in the Hub, offers **Continue**, **Stop**,
+and **Cancel**. Continue saves the choice for that project's admitted work across
+restarts. Stop blocks new starts and drains its running work while retaining work,
+conversations, and history. Cancel keeps the screen open. Other projects are unaffected.
+
+A browser's own close button or a lost connection does not choose Continue or
+Stop. Return to the Hub to resolve a pending choice. The project list and
+project-scoped PM settings show execution state, its reason, observation time,
+and unavailable observations. An uncertain stop remains Stopping or Unknown until
+the runtime confirms it. Agents can inspect `project.execution.status`; a registered
+PM can use `project.execution.choose` with an exact human instruction or approval.
 
 To stop the whole server, choose **Quit** in the tray menu or send `Ctrl-C` /
 `SIGTERM`; gwt drains its PTYs and exits gracefully. The tray-resident process
@@ -350,6 +446,22 @@ gwtd <<'JSON'
 {"schema_version":1,"operation":"daemon.status","params":{}}
 JSON
 ```
+
+`workspace.project_scan` reports host endpoint discovery costs, including cache
+hits, enumerated entries and elapsed milliseconds. Missing roots and stopped
+hosts are excluded before repository identity resolution. Its shared candidate
+cache never replaces fresh endpoint and process checks.
+
+`workspace.project_prune` inspects abandoned stores under `~/.gwt/projects`
+without changing them by default. Review its candidate hashes and `manifest_hash`,
+then pass `dry_run:false` with that hash to move eligible stores to
+`~/.gwt/project-quarantine/<id>/`. No files are deleted. Open projects, active
+Sessions, PM stores, recent writes, unknown data and malformed state are retained.
+A dry run reports `protection_changed:true` if the fleet changes during inspection;
+applying always reloads protection and refuses further changes. A changed plan
+requires another dry run. Each quarantine includes a recovery
+manifest; after closing gwt, a store can be moved back to its original hash only
+if that destination is absent.
 
 `fleet.inventory` returns project agent processes, panes, and Monitor rows in one
 JSON report, including unmatched rows, duplicate worktrees, delivery evidence,
@@ -390,6 +502,45 @@ in `~/.gwt/config.toml`:
 [allowed_workflows]
 "akiojin/gwt" = ["prepare-release.yml"]
 ```
+
+For the release workflow, the registered PM can configure this permission through
+`actions.release_policy.status` and `actions.release_policy.add`. Read the status
+first, then submit a UUID `request_id`, its current `expected_token`, a short
+`reason`, and an exact scoped `instruction_id` or native `approval_id`. This adds
+only `prepare-release.yml` for the current repository and retains existing
+configuration. The verified checkout CLI can use the PM's existing Host bridge
+before the installed app is updated; replacement credentials are not needed.
+Read `pm.capabilities` when a runtime does not recognize these operations.
+
+Repeating a completed request returns its receipt without applying it again.
+For an unknown outcome, read the status and preserve the request; do not resend.
+`actions.release_policy.rollback` also requires a fresh request and scoped
+authority, plus `added_by` naming the successful add request. It removes only
+permission added by that request while its recorded post-state remains current.
+These operations configure permission; workflow submission remains separate.
+
+For the fixed historical Windows diagnostic, inspect `actions.diagnostic.observe`
+with `profile_id: "windows-4777-restore-f351-v1"`. The response reports the
+published profile digest, required PM authority, repository permission and recovery.
+`actions.diagnostic.request` accepts that profile, its `expected_profile_digest`
+and a UUID `request_id`; it cannot select another source, patch or command.
+The dedicated workflow must already be explicitly permitted. For `akiojin/gwt`,
+read `actions.diagnostic.policy.status`, then use `actions.diagnostic.policy.add`
+with a fresh UUID `request_id`, its current `expected_token`, a short `reason`,
+and an exact scoped `instruction_id` or native `approval_id`. This permits only
+`windows-diagnostic.yml` and retains existing settings. Its `.rollback` operation
+uses the same parameters plus `added_by` naming its successful add receipt.
+Release policy approval cannot authorize this operation. Configuring permission
+does not submit the diagnostic.
+
+Observe a submitted request by `request_id`. An unknown submission is retained
+without resending. Only a verified preexecution result permits one correction
+using `preexecution_of` and `expected_predecessor_revision`.
+`actions.diagnostic.cancel` requires its exact `expected_run_id` and current
+`expected_revision`; cancellation acknowledgement does not prove cleanup.
+Results retain failures and unknown cleanup, and do not count as Ready evidence.
+Each case's exit code is the shared provider test process exit, not a separate
+case process. Binary metadata records Cargo's `test` profile and actual hashes.
 
 ```bash
 gwtd <<'JSON'
@@ -435,7 +586,8 @@ Managed hooks and project runtime delegation use `gwtd`. Opening a project
 starts or reconnects to its shared daemon, which owns agent panes and the Issue
 Monitor. A connection failure affects that project; the Hub and other projects
 remain available. GUI-managed daemons drain after the last GUI disconnects and
-a reconnect grace period expires. Closing one GUI does not kill a shared daemon.
+a reconnect grace period expires. An explicit Continue retains that project's
+runtime while admitted work is unfinished. Closing one GUI does not kill a shared daemon.
 An explicit JSON `daemon.start` keeps the daemon resident until it is stopped;
 it also makes an already GUI-managed daemon resident. `daemon.status` reports
 the current endpoint for diagnostics.
@@ -543,6 +695,9 @@ In terminal windows, drag to select text and release the mouse button to copy.
 On Windows, `Ctrl+C` copies the current terminal selection and clears it; if no
 selection exists, `Ctrl+C` stays mapped to the running terminal process. On
 Linux, `Ctrl+Shift+C` also copies the current terminal selection.
+The mouse wheel scrolls retained history even when an agent tracks the mouse.
+Use `Shift+drag` to select text in mouse-tracking applications (`Option+drag` on
+macOS); the terminal's hover hint also shows these modifiers.
 
 ## Issue surface and Issue Monitor
 
@@ -623,10 +778,10 @@ See [SPEC #3200](https://github.com/akiojin/gwt/issues/3200) for the shared capa
 the recommendation are allowed, with a warning that verification may not finish and
 timing-dependent test failures may block unrelated PRs. In roster projects, automation uses
 `issue.monitor.config.set` with `{"max_active":4}` to resize the roster to four enabled
-members; Auto requests are rejected to keep membership and requested capacity equal.
-For legacy projects without a roster, automation uses
-`issue.monitor.config.set` with `{"max_active_mode":"auto"}` for Auto or
-`{"max_active":4}` for a Manual limit of four. `issue.monitor.status` reports the effective limit,
+members. To return the machine limit to Auto, use the **Auto** button beside
+**Agent limit** or `issue.monitor.config.set` with `{"max_active_mode":"auto"}`;
+this also works with a roster and keeps its members. Without a roster,
+`{"max_active":4}` sets a Manual limit of four. `issue.monitor.status` reports the effective limit,
 `max_active_agents_override` (the shared requested value), `max_active_agents_scope: "machine"`,
 and the shared `agent_capacity` measurement. Roster projects also report
 `agent_roster_capacity` and `agent_roster_revision` for the project member setting.
@@ -995,6 +1150,113 @@ missing milestone information. Monitor observations include their source and
 scan time; unavailable or incomplete observations do not prove full coverage.
 Reported milestone health and confidence remain unverified until supporting
 evidence is connected.
+
+The registered PM can inspect saved request tracking with `pm.request_tasks.read`.
+Omitting `selector` returns counts; `{"selector":{"kind":"pending"}}` lists
+unclassified source IDs, and `{"selector":{"kind":"tasks","limit":50}}` lists
+all task IDs, including completed and cancelled tasks. Pages contain only IDs,
+use exact lexical ordering, and accept a limit of 1–100 (default 50). If
+`next_after` is non-null, pass it as `after` together with the returned revision
+as `expected_revision`. A revision conflict requires restarting without `after`;
+an unreadable store is an error, while an uninitialized store reports `absent`.
+Use `source`, `task`, or `receipt` selectors with the corresponding `id` or
+`operation_id` to read one detail. These operations require the current project's
+registered PM and grant no Issue, Monitor, CI or approval authority. Automatic
+intake and the Tasks UI are not connected by this read API.
+
+The generated PM skill reconciles saved requests at startup, on each new human
+turn and in every resident cycle. It pins both ID lists to the summary revision,
+reads selected details, and uses `pm.request_tasks.apply` only for justified
+tracking changes with fresh conditions, review generation and revision checks.
+Uninitialized, unreadable or partially read tracking retains a degraded state;
+it does not establish that no requests remain. Temporary recovery and an empty
+Monitor queue do not complete the original request. This guidance covers saved
+tracking and selected native intake; automatic intake, legacy import, other user
+mutations and the Tasks UI remain separate work. Tracking itself does not launch
+Issues or change delivery gates.
+
+The project-scoped browser protocol supports `load_pm_request_task` for one
+saved `task_id` and an optional `receipt_operation_id`, and
+`reopen_pm_request_task` or `cancel_pm_request_task` with `operation_id`, `expected_revision`, `reason`
+and `task_id` inside `request`. Replies use `pm_request_task` and the caller's
+`request_id`. Reopening records the server-assigned browser user actor and
+returns the task to pending reassessment, including when the PM is stopped.
+Cancellation records the same user audit and marks the task cancelled rather
+than completed, invalidating its and its ancestors' previous completion evidence.
+`update_pm_request_task` corrects the saved draft with `operation_id`,
+`expected_revision`, `reason` and `task: TaskDraft` inside `request`; `task.id`
+is the only target ID. The server assigns the browser user actor. Update returns
+the current task and revision observed after applying the operation, alongside
+the receipt at its original applied revision. An unchanged draft is also valid
+and records a receipt with an empty task delta. Replaying an Update preserves
+that receipt while the current task may reflect later changes. Reopen and Cancel
+continue to return their receipt's applied task state.
+After a connection loss, read the current task and original receipt: a new
+connection has a new actor, so replaying the old operation there is a conflict.
+The current task and the receipt's historical task state retain their own
+revisions. Missing or unreadable data returns a diagnostic and recovery read.
+Reading a receipt observes its recorded outcome; it does not acknowledge a new
+durable write.
+This transport adapter is available; the Tasks screen and checkbox controls
+are still pending.
+
+For selected native intake, the registered PM reads
+`selector:{kind:"native_turns"}` through `pm.request_tasks.read`. The result gives
+the current `provider`, `conversation_id` and eligible turn IDs with
+`prompt_sha256`, without originals. `window_only:true` and `detail` describe a
+bounded conversation window, not complete history or a durable cursor. Use
+`selector:{kind:"native_turn",provider:"<provider>",conversation_id:"<conversation>",id:"<id>"}`
+to read one original. Both native selectors work independently of unavailable
+Task tracking. To preserve that selected turn as an unclassified pending source,
+call `pm.request_tasks.capture` with `operation_id`, current `expected_revision`,
+`reason`, `provider`, `conversation_id`, `id` and `prompt_sha256`. The server
+resolves the original, source and actor; caller-supplied originals, sources,
+actors and authority are rejected. Resume/replay retains the native source
+identity; identical text with different native IDs remains distinct. Unavailable
+native data, an absent or not-yet-arrived ID, changed selection scope or changed
+digest causes no capture and remains degraded. Capture does not reset an
+unreadable Task store, create a Task or grant instruction or execution authority.
+The PM reads pending sources before using existing `decompose` or
+`classify_non_task`; questions are not execution Tasks.
+
+Incoming prompts in the registered PM are preserved before the latest Q&A receipt
+is replaced, including repeated text and questions. These are unverified input
+candidates, not authenticated human sources, Tasks or instruction authority. The
+reporting diagnostic exposes the current candidate ID. Candidates survive later
+prompts and PM replacement; a storage failure is returned as an error.
+The registered PM can discover candidates from every saved PM session through
+`pm.request_tasks.read` with `selector:{kind:"candidates",limit:50}`. Pages return
+only sorted IDs, `inventory_sha256` and `next_after`. Continue with that exact
+`after` and `expected_inventory_sha256`; a changed ID set returns `conflict`, so
+restart from the first page. Start again each cycle to find new observations.
+The token describes the observed ID set, not an atomic snapshot or authentication.
+Use `selector:{kind:"candidate",id:"<session digest>/<observation UUID>"}` to read
+one original with its unverified observation identity and content hash. Missing
+storage, unreadable storage and a missing candidate are distinct results. These
+reads retain the existing PM authority check, work independently of unavailable
+Task tracking and never consume candidates or modify storage. Returned originals
+remain untrusted input. Candidate-to-native identity reconciliation and automatic
+Task intake remain separate work. Candidate text or matching hashes must never
+be used to infer native identity for capture.
+
+The generated PM skill discovers these candidates at startup, on each new human
+turn and in every resident cycle, even when Task tracking is unavailable. It
+reads selected originals and retains incomplete discovery or recovery as degraded
+evidence; candidate text and matching hashes never establish human authority or
+authorize Task changes.
+
+Candidate detail reads accept at most 4 MiB of serialized JSON (including escapes),
+matching the PM native conversation record budget. Larger records return
+`candidate_too_large` with `limit_bytes` and a recovery selector. Use
+`selector:{kind:"candidate_chunk",id:"<session digest>/<observation UUID>",offset:0}`
+to recover raw JSON bytes in chunks of at most 48 KiB, encoded in `bytes_base64`.
+Continue at `next_offset` until it is null; an offset beyond the observed file length
+returns `invalid_request` with a restart selector. Each response is `unverified_raw`:
+assemble the bytes and validate the full schema, identity and content hash before
+using the record. `observed_total_bytes` is a length observation, not a snapshot;
+restart if the stored file changes while recovering it. Recovery retains the same
+registered-PM check and never changes the stored original or creates a Task.
+
 `policy.dependency_observations` retains every supplied Monitor inbox row, including
 repeated Issues, with its state and canonical dependency blockers, cycle flag and bundle
 references. Absent typed status stays null with `dependency_status` named as missing.
@@ -1303,6 +1565,9 @@ The design lives in SPEC
 gwt keeps project knowledge close to the agent workspace:
 
 - JSON operation `issue.spec.read` reads GitHub Issue-backed SPECs from the local cache.
+- `issue.spec.edit` reports `outcome: committed_unverified` when the write committed
+  but cleanup or final confirmation failed. Read the section before retrying; this
+  outcome does not confirm a verified write.
 - JSON operations `issue.view` and `issue.comments` provide cache-backed Issue
   access through the gwt CLI surface.
 - `gwt-search` searches SPECs, Issues, source files, docs, and PM Reports through the shared
@@ -1394,6 +1659,19 @@ stores are no longer read and need no manual removal.
 Managed hooks preserve user hooks while adding gwt runtime behavior for agent
 state, workflow guardrails, Board reminders, discussion/plan/build Stop checks,
 and coordination-event summaries.
+
+**Settings → Project → Hook Center** audits the selected project's hook
+configuration, binary fallbacks, Codex discovery/trust, and opt-in profile path.
+**Regenerate managed hooks** uses the existing managed-only repair and preserves
+user hooks. Trust registration and starting a new agent session remain separate;
+regeneration does not upgrade running sessions. An unknown binary observation
+does not imply trust or successful hook execution.
+If an audit reports invalid or unreadable configuration, fix the listed file
+and refresh the audit before regeneration is available.
+Repairs require the live project connection and are never replayed after
+reconnect. A lost repair reply leaves the outcome Unknown; a read-only refresh
+does not confirm completion. The latest audit and last repair outcome are shown
+separately.
 
 If an agent stop or pane close reports unread Board evidence, read the bodies
 in that same agent session with JSON operation `board.show` and
@@ -1991,6 +2269,15 @@ JSON
   Section writes serialize writers sharing the host cache and check fresh body
   content before replacing the index; cross-host/external writes and unknown
   network outcomes are outside this guarantee.
+  Section edit bodies must omit artifact markers; the operation adds them and
+  rejects marker-bearing input before writing. `issue.spec.repair` repairs
+  duplicated markers. After confirming that an old orphan artifact has been
+  superseded, pass its comment ID in `archive_comments` to the repair operation
+  (for example, `{"number":1784,"archive_comments":[12345]}`). This preserves
+  the comment text and retires only its outer markers, including `part=N/M`
+  markers from complete or incomplete orphan groups. Indexed comments are
+  refused. Retrying the same IDs skips comments already archived.
+  Run `issue.spec.lint` again to confirm index health.
 
 ```bash
 gwtd <<'JSON'
@@ -2013,6 +2300,12 @@ JSON
 Open the Logs surface and select **Project** for that project’s events, or
 **Global** for startup and diagnostics without a project. Background events
 remain with their originating project when you switch projects.
+
+Diagnostic logs keep seven days of history by default, with a 2 GiB total
+limit for `gwt.log.YYYY-MM-DD` files in each log directory. Other files,
+including `ui-trace-*.jsonl`, are outside this limit. Oldest dated files are
+removed first. If the current day alone reaches the limit, it restarts with
+the next complete log entry.
 
 - App logs:
   `~/.gwt/projects/<repo-hash>/logs/gwt.log.YYYY-MM-DD`
@@ -2077,6 +2370,13 @@ agents themselves, which otherwise only reads as a slow host. The block is
 present with no processes and no warning on platforms without Spotlight.
 
 ## Pending application updates
+
+Click **Check** beside the version in the header to query the latest release
+immediately. The result shows whether an update is available or why the check
+failed, including a retry time for rate limits. If a previous update restarted
+into the wrong version, the result names the expected version and the version
+recorded after that restart. It offers **Retry update** through the usual update
+dialog or **Manual install**.
 
 A downloaded update can remain staged while agents finish their work. The
 existing drain evaluates safety on the 15-second terminal convergence tick:
@@ -2396,8 +2696,16 @@ If the GUI was started separately, also set `GWT_VERIFY_TARGET_PIDS=1234`
 On Windows, verification waits for the CPU hard caps on its gwt pane Jobs to
 clear before measuring. All canonical slots and the legacy verification lane
 participate; configured caps return after their holders leave. Process priority
-and pane-close cleanup remain in effect. Restart gwt with the updated runtime
-if an older GUI's Job ancestry cannot be inspected.
+and pane-close cleanup remain in effect.
+
+If an ancestor GUI has no registered Job, `verify.run` automatically retries
+the same measured request in a hidden worker without restarting that GUI.
+Windows must confirm that the worker starts outside all Jobs before gwt puts
+it in a dedicated cleanup Job. The worker keeps the same session, environment,
+working directory, and complete verification matrix; its temporary context is
+encrypted for the current Windows user and removed after transfer. If Windows
+cannot provide that environment, recovery refuses and reports the cause.
+Separately nominated GUI targets still need their own readable, uncapped Jobs.
 
 The command's `measurement` evidence records target PIDs and start times,
 observed Job caps, sampled CPU time/utilization, admission wait, and cap-relief

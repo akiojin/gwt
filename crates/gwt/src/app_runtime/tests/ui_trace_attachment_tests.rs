@@ -1306,6 +1306,7 @@ fn app_runtime_agent_failed_ack_runs_ui_finalize_without_a_local_write() {
                 reviewed_sha: None,
                 review_passed: None,
                 wait: None,
+                wait_control: None,
                 needs_human_kind: None,
                 steering: None,
                 review_dispatch_hold: None,
@@ -1380,6 +1381,7 @@ fn app_runtime_agent_failed_ack_closes_default_mode_monitor_bootstrap_error_wind
             42,
             1,
             bootstrap_error,
+            false,
         );
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
     let window_id = runtime.runtimes.keys().next().unwrap().clone();

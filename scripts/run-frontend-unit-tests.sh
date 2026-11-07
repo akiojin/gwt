@@ -3,6 +3,7 @@ set -euo pipefail
 
 bash scripts/run-node-tests-with-linkedom.sh "$@" \
   crates/gwt/web/__tests__/close-project.test.mjs \
+  crates/gwt/web/__tests__/project-execution-policy-model.test.mjs \
   crates/gwt/web/__tests__/socket-project-scope.test.mjs \
   crates/gwt/web/__tests__/frontend-route.test.mjs \
   crates/gwt/web/__tests__/hub-app.test.mjs \
@@ -11,6 +12,7 @@ bash scripts/run-node-tests-with-linkedom.sh "$@" \
   crates/gwt/web/__tests__/theme-segmented.test.mjs \
   crates/gwt/web/__tests__/hotkey.test.mjs \
   crates/gwt/web/__tests__/index-settings-panel.test.mjs \
+  crates/gwt/web/__tests__/hook-center-panel.test.mjs \
   crates/gwt/web/__tests__/index-status-controller.test.mjs \
   crates/gwt/web/__tests__/index-works-scope.test.mjs \
   crates/gwt/web/__tests__/launch-wizard-intake.test.mjs \

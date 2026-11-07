@@ -822,15 +822,24 @@ pub(super) fn managed_project_owner_projection(
     runtime
 }
 
-fn managed_exit_command(exit_code: u8) -> (String, Vec<String>) {
+fn managed_exit_command(exit_code: u8, output_before_ready: bool) -> (String, Vec<String>) {
     if cfg!(windows) {
-        ("powershell".into(), vec!["-NoProfile".into(), "-Command".into(), format!(
-            "[Console]::WriteLine('GWT_MANAGED_EXIT_READY'); $null = [Console]::ReadLine(); [Console]::WriteLine($env:GWT_EXIT_FIXTURE_OUTPUT); exit {exit_code}"
-        )])
+        let command = if output_before_ready {
+            format!("[Console]::WriteLine($env:GWT_EXIT_FIXTURE_OUTPUT); [Console]::WriteLine('GWT_MANAGED_EXIT_READY'); $null = [Console]::ReadLine(); exit {exit_code}")
+        } else {
+            format!("[Console]::WriteLine('GWT_MANAGED_EXIT_READY'); $null = [Console]::ReadLine(); [Console]::WriteLine($env:GWT_EXIT_FIXTURE_OUTPUT); exit {exit_code}")
+        };
+        (
+            "powershell".into(),
+            vec!["-NoProfile".into(), "-Command".into(), command],
+        )
     } else {
-        ("/bin/sh".into(), vec!["-c".into(), format!(
-            "stty -echo; printf 'GWT_MANAGED_EXIT_READY\\n'; IFS= read -r line; printf '%s\\n' \"$GWT_EXIT_FIXTURE_OUTPUT\"; exit {exit_code}"
-        )])
+        let command = if output_before_ready {
+            format!("stty -echo; printf '%s\\n' \"$GWT_EXIT_FIXTURE_OUTPUT\"; printf 'GWT_MANAGED_EXIT_READY\\n'; IFS= read -r line; exit {exit_code}")
+        } else {
+            format!("stty -echo; printf 'GWT_MANAGED_EXIT_READY\\n'; IFS= read -r line; printf '%s\\n' \"$GWT_EXIT_FIXTURE_OUTPUT\"; exit {exit_code}")
+        };
+        ("/bin/sh".into(), vec!["-c".into(), command])
     }
 }
 
@@ -862,7 +871,7 @@ pub(super) fn managed_exit_fixture(
         (repo, owner, config)
     };
     let events = owner.subscribe();
-    (config.command, config.args) = managed_exit_command(exit_code);
+    (config.command, config.args) = managed_exit_command(exit_code, false);
     config
         .env_vars
         .insert("GWT_EXIT_FIXTURE_OUTPUT".into(), output.into());
@@ -885,6 +894,7 @@ pub(super) fn managed_monitor_exit_fixture(
     issue: u64,
     exit_code: u8,
     output: &str,
+    output_before_ready: bool,
 ) -> (
     PathBuf,
     gwt::project_runtime::test_support::ProjectOwnerHarness,
@@ -896,7 +906,7 @@ pub(super) fn managed_monitor_exit_fixture(
         owner_monitor_fixture(temp, issue, true, &["pane-contract-fixture"]);
     let observed = owner.subscribe();
     let mut config = pane_control_tests::control_launch_config(&repo, issue);
-    (config.command, config.args) = managed_exit_command(exit_code);
+    (config.command, config.args) = managed_exit_command(exit_code, output_before_ready);
     config
         .env_vars
         .insert("GWT_EXIT_FIXTURE_OUTPUT".into(), output.into());
@@ -4354,7 +4364,7 @@ fn agent_hook_arrival_refreshes_the_issue_monitor_activity_clock() {
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let (repo, owner, probe, mut runtime, mut observed) =
-        managed_monitor_exit_fixture(temp.path(), 4975, 0, "provider finished");
+        managed_monitor_exit_fixture(temp.path(), 4975, 0, "provider finished", false);
     assert!(probe.policy.last_heartbeat.is_none());
     let session_id = &probe.session.as_ref().unwrap().id;
     let mut hook = runtime_hook_state_for_event("Running", "PostToolUse", session_id);
@@ -4539,14 +4549,28 @@ fn agent_clean_exit_frees_the_monitor_slot_like_an_error_does() {
             42,
             exit_code,
             "agent stopped",
+            false,
         );
         let _ = finish_managed_exit(&owner, &probe, &mut runtime, &mut observed);
         assert_eq!(
             probe.pane.lock().unwrap().last_exit().unwrap().exit_code,
             u32::from(exit_code)
         );
-        owner_fixture_block_on(owner.wait_monitor_idle()).unwrap();
-        let monitor = owner_monitor_read(&repo, 42);
+        let monitor = owner_fixture_block_on(async {
+            // test-hygiene: allow-wall-clock-deadline Bounds actual Monitor/census convergence after the confirmed exit; observed state controls progress.
+            tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+                loop {
+                    owner.wait_monitor_idle().await.unwrap();
+                    let monitor = owner_monitor_read(&repo, 42);
+                    if monitor.active_count() == 0 && !monitor.prefs().failed_issues.is_empty() {
+                        break monitor;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the confirmed exit must release and notify its Monitor slot")
+        });
         assert_eq!(
             monitor.active_count(),
             0,
@@ -4589,10 +4613,26 @@ fn agent_error_frees_the_monitor_slot_even_when_the_pane_is_kept_for_diagnosis()
             42,
             7,
             "You've hit your usage limit.",
+            false,
         );
         if !live_hook {
             let _ = finish_managed_exit(&owner, &probe, &mut runtime, &mut observed);
-            return owner_monitor_read(&repo, 42);
+            return owner_fixture_block_on(async {
+                // test-hygiene: allow-wall-clock-deadline Bounds actual Monitor/census convergence after the confirmed control exit; observed state controls progress.
+                tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+                    loop {
+                        owner.wait_monitor_idle().await.unwrap();
+                        let monitor = owner_monitor_read(&repo, 42);
+                        if monitor.active_count() == 0 && !monitor.prefs().failed_issues.is_empty()
+                        {
+                            break monitor;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("the control exit must release and notify its Monitor slot")
+            });
         }
         let mut hook =
             runtime_hook_state_for_event("Idle", "Stop", &probe.session.as_ref().unwrap().id);
