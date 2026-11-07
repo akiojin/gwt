@@ -1,8 +1,154 @@
 //! The PM's text projection is separate from its unchanged PTY execution.
 
 use gwt::pm_conversation::{PmConversationAvailability, PmConversationSnapshot};
+use gwt::protocol::PmRequestTaskResult;
+use gwt_core::pm_request_tasks::{Action, Actor, ActorKind, Request, TaskError, TaskStore};
 
 use super::{AppRuntime, BackendEvent, ClientId, OutboundEvent, ProjectContext, UserEvent};
+
+pub(super) enum PmRequestTaskOperation {
+    Read {
+        task_id: String,
+        receipt_operation_id: Option<String>,
+    },
+    Reopen(gwt::protocol::PmRequestTaskUserRequest),
+    Cancel(gwt::protocol::PmRequestTaskUserRequest),
+}
+
+fn task_error(code: &str, message: String, current_revision: Option<u64>) -> PmRequestTaskResult {
+    PmRequestTaskResult::Error {
+        code: code.into(),
+        message,
+        current_revision,
+        recovery_operation: "load_pm_request_task".into(),
+    }
+}
+
+fn domain_task_error(store: &TaskStore, error: TaskError) -> PmRequestTaskResult {
+    let code = match &error {
+        TaskError::ForeignProject => "foreign_project",
+        TaskError::Unauthorized => "unauthorized",
+        TaskError::Conflict { .. } => "conflict",
+        TaskError::OperationConflict => "operation_conflict",
+        TaskError::StaleReview => "stale_review",
+        TaskError::ReassessmentRequired => "reassessment_required",
+        TaskError::UnfinishedChildren => "unfinished_children",
+        TaskError::Invalid(_) => "invalid_request",
+        TaskError::MissingSource => "missing_source",
+        TaskError::MissingTask => "missing_task",
+        TaskError::Unreadable(_) => "unreadable_store",
+        TaskError::PersistenceUnconfirmed(_) => "persistence_unconfirmed",
+    };
+    let revision = match &error {
+        TaskError::Conflict { current_revision } => Some(*current_revision),
+        TaskError::ForeignProject | TaskError::Unauthorized | TaskError::Unreadable(_) => None,
+        // A publication may have renamed before losing its acknowledgement.
+        // Observe after failure; never claim the pre-write revision is current.
+        _ => store
+            .read()
+            .ok()
+            .map(|state| state.map_or(0, |state| state.revision)),
+    };
+    task_error(code, error.to_string(), revision)
+}
+
+pub(super) fn rejected_request_task_events(
+    client_id: &str,
+    event: &gwt::FrontendEvent,
+) -> Option<Vec<OutboundEvent>> {
+    let (id, request_id) = match event {
+        gwt::FrontendEvent::LoadPmRequestTask { id, request_id, .. }
+        | gwt::FrontendEvent::ReopenPmRequestTask { id, request_id, .. }
+        | gwt::FrontendEvent::CancelPmRequestTask { id, request_id, .. } => (id, *request_id),
+        _ => return None,
+    };
+    Some(vec![OutboundEvent::reply(
+        client_id,
+        BackendEvent::PmRequestTask {
+            id: id.clone(),
+            request_id,
+            result: task_error(
+                "foreign_project",
+                "Reload the current project before reading or changing a request task.".into(),
+                None,
+            ),
+        },
+    )])
+}
+
+fn request_task_result(
+    store: &TaskStore,
+    client_id: &str,
+    operation: PmRequestTaskOperation,
+) -> Result<PmRequestTaskResult, TaskError> {
+    let (request, action) = match operation {
+        PmRequestTaskOperation::Read {
+            task_id,
+            receipt_operation_id,
+        } => {
+            if task_id.trim().is_empty() {
+                return Err(TaskError::Invalid("nonempty task_id is required".into()));
+            }
+            let state = store.read()?.ok_or(TaskError::MissingTask)?;
+            let task = state
+                .tasks
+                .get(&task_id)
+                .ok_or(TaskError::MissingTask)?
+                .clone();
+            let receipt = receipt_operation_id.map(|operation_id| {
+                state.receipts.iter().find(|receipt| receipt.operation_id == operation_id)
+                    .cloned().map(Box::new)
+                    .ok_or_else(|| TaskError::Invalid("operation receipt not found; retain the unresolved operation and reread the current task".into()))
+            }).transpose()?;
+            return Ok(PmRequestTaskResult::Ready {
+                revision: state.revision,
+                task: Box::new(task),
+                receipt,
+            });
+        }
+        PmRequestTaskOperation::Reopen(request) => {
+            let action = Action::Reopen {
+                task_id: request.task_id.clone(),
+            };
+            (request, action)
+        }
+        PmRequestTaskOperation::Cancel(request) => {
+            let action = Action::Cancel {
+                task_id: request.task_id.clone(),
+            };
+            (request, action)
+        }
+    };
+    let receipt = store.apply(
+        &Actor {
+            kind: ActorKind::User,
+            id: format!("browser:{client_id}"),
+        },
+        &Request {
+            operation_id: request.operation_id,
+            expected_revision: request.expected_revision,
+            reason: request.reason,
+            action,
+        },
+    )?;
+    // An exact retry returns its original applied snapshot, not a claim
+    // about current state. Read/receipt reconciliation observes that separately.
+    let task = receipt
+        .tasks
+        .iter()
+        .find(|task| task.draft.id == request.task_id)
+        .cloned()
+        .ok_or_else(|| {
+            TaskError::PersistenceUnconfirmed(
+                "mutation receipt is missing its task; reconcile the exact operation".into(),
+            )
+        })?;
+    Ok(PmRequestTaskResult::Ready {
+        revision: receipt.revision,
+        task: Box::new(task),
+        receipt: Some(Box::new(receipt)),
+    })
+}
 
 fn empty(availability: PmConversationAvailability, detail: &str) -> PmConversationSnapshot {
     PmConversationSnapshot {
@@ -14,6 +160,57 @@ fn empty(availability: PmConversationAvailability, detail: &str) -> PmConversati
 }
 
 impl AppRuntime {
+    pub(super) fn pm_request_task_events(
+        &self,
+        context: &ProjectContext,
+        client_id: ClientId,
+        window_id: &str,
+        request_id: u64,
+        operation: PmRequestTaskOperation,
+    ) -> Vec<OutboundEvent> {
+        // The connection's project gate runs before this window lookup. Missing
+        // windows cannot become a fallback to another project's private store.
+        let root = self
+            .window_lookup
+            .get(window_id)
+            .and_then(|address| self.tab(&address.tab_id))
+            .filter(|tab| tab.project_root == context.project_root)
+            .map(|tab| tab.project_root.clone());
+        let Some(root) = root else {
+            return vec![OutboundEvent::reply(&client_id, BackendEvent::PmRequestTask {
+                id: window_id.into(), request_id,
+                result: task_error("unauthorized", "The selected project window is unavailable; reload the current project before retrying.".into(), None),
+            })];
+        };
+        let proxy = self.proxy.for_project(context.clone());
+        let reply_client = client_id.clone();
+        let id = window_id.to_owned();
+        let spawn = self.blocking_tasks.try_spawn(move || {
+            let store = TaskStore::for_repo(&root);
+            let result = request_task_result(&store, &reply_client, operation)
+                .unwrap_or_else(|error| domain_task_error(&store, error));
+            proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
+                &reply_client,
+                BackendEvent::PmRequestTask {
+                    id,
+                    request_id,
+                    result,
+                },
+            )]));
+        });
+        match spawn {
+            Ok(()) => Vec::new(),
+            Err(error) => vec![OutboundEvent::reply(
+                &client_id,
+                BackendEvent::PmRequestTask {
+                    id: window_id.into(),
+                    request_id,
+                    result: task_error("unavailable", error, None),
+                },
+            )],
+        }
+    }
+
     pub(super) fn load_pm_reports_events(
         &self,
         context: &ProjectContext,

@@ -1,6 +1,158 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.152.0] - 2026-11-06
+
+### Bug Fixes
+
+- **web:** 通常再接続でProfile読込を回復する
+- **web:** 未確認rename中のProfile編集を保持する
+- **usage:** Restrict Claude account totals to shared windows
+- **usage:** Route resumed acceptance to the live project
+- **usage:** Harden browser check setup and cleanup
+- **usage:** Scope browser check to model limit regression
+- **update:** Discard failed staged updates and prevent replay
+- **ci:** Migrate release macOS runners to macos-15
+- **execution:** 完了履歴の通信失敗を警告として扱う
+- **web:** Recover index searches after reconnect
+- **terminal:** 再接続と出力修復でスクロール履歴を保持
+- **terminal:** Keep snapshot repair advancing during output
+- **terminal:** Keep reconnect snapshots ahead of live output
+- **terminal:** Broadcast snapshots that overtake live output
+- **terminal:** Retry failed history snapshots while output is idle
+
+### Documentation
+
+- **perf:** Reconcile delivered child acceptance for issue 5390
+
+### Features
+
+- **pm:** Capture selected native requests for tracking
+- **pm:** Expose browser task reassessment
+
+### Miscellaneous Tasks
+
+- **work:** Profile回復PRの関連付けを保存する
+- **work:** Native wake修復の配送検証を記録
+- **work:** Rename保護PRの関連付けを保存する
+- **work:** Record usage fix delivery verification
+- **work:** Resume update failure delivery
+- **work:** Deliver verified update failure recovery
+- **work:** Resume failed update delivery
+- **work:** Record index reconnect PR association
+- **work:** Native選択受付PRの関連付けを保存する
+- **work:** Record scrollback repair delivery continuation
+- **work:** Record scrollback delivery verification scope
+- **work:** Preserve scrollback environment handoff
+- **work:** Preserve scrollback retry verification handoff
+- **work:** Record scrollback delivery scope
+- **work:** 端末履歴修復の配信範囲を確定
+
+### Testing
+
+- **pm:** Reject unconfirmed native wake before file wait
+- **pm:** Wake回帰fixtureのHOMEを隔離する
+- **windows:** Observe snapshots in survivor output probe
+- **pm:** Reject unconfirmed native wake before file wait
+- **terminal:** Align async snapshot fixtures with scrollback restore
+
+## [9.151.0] - 2026-11-06
+
+### Bug Fixes
+
+- **ui:** 非表示時の受信更新を共有スケジューラで進める
+- **monitor:** Wait の制御状態を更新と終了処理で保持する
+- **actions:** Reject contradictory diagnostic cleanup receipts
+- **issue:** Kanban のドラッグ受入と拒否理由を表示する
+- **verify:** Recover measured runs from opaque windows gui jobs
+- **gui:** Qualify and resolve local agent error notifications
+- **gui:** Retain recovered issue diagnostics across page reloads
+- **gui:** Keep routine restore exclusions out of agent errors
+- **gui:** Share routine restore exclusion classification
+- **verify:** Measure headed Playwright runs across trace versions
+- **verify:** Reject nominated targets in unregistered native jobs
+- **render:** 更新チェック結果を共有state経由で反映する
+- **mobile:** Revoke native input without waiting for owner replies
+- **update:** 手動チェックの更新状態と再接続を整合させる
+- **update:** ステージ保持と失敗時の回復性を保証する
+- **monitor:** Preserve launches after completion probe timeouts
+- **monitor:** Skip impossible completion readbacks
+- **web:** 端末受信失敗後のストリームを再同期する
+- **web:** 端末バッチ失敗後にストリームを再同期する
+- **web:** Snapshot適用成功まで端末の復旧待ちを維持する
+- **web:** 端末出力の保留量を制限しsnapshotで回復する
+- **project:** Fence execution authority and reconcile close outcomes
+- **project:** Reconcile completed close notifications
+- **project:** Preserve admissions across reconciliation
+- **monitor:** Skip settlements without project admission
+- **mobile:** MacOSの拡張ACL付き資格を拒否する
+- **pm:** 候補原文の読込容量を制限し大容量の回収経路を保つ
+- **web:** 非アクティブなWorks端末の寸法を追従させる
+- **web:** Recover Board and Logs reads on reconnect
+
+### Documentation
+
+- **mobile:** Host資格pathをRustdocのコード表記にする
+
+### Features
+
+- **update:** ヘッダから手動で更新を確認する
+- **mobile:** Bind device snapshots to host identity
+- **mobile:** Bind authentication to connection peers
+- **mobile:** 登録leaseの期限と一回限りの更新を管理する
+- **pm:** 保存済み依頼タスクの継続照合をPMへ接続
+- **mobile:** Host資格台帳の検証と更新候補を追加する
+- **pm:** Preserve unverified prompt candidates before reporting
+- **mobile:** Persist host credentials under a private registry lock
+- **pm:** 未認証入力候補の一覧と原文を取得する
+- **project:** Add explicit project execution choices
+- **mobile:** Validate private host credential files
+- **pm:** 未認証入力候補の照合手順を生成ガイダンスへ接続する
+- **mobile:** Add offline host credential administration
+- **mobile:** Host資格を固定私有領域へ取り込む
+
+### Miscellaneous Tasks
+
+- **work:** Settle mobile touch scroll delivery
+- **work:** Record diagnostic cleanup delivery
+- **work:** Record issue 6735 delivery checkpoint
+- **work:** Record notification repair delivery
+- **work:** Record Playwright trace delivery
+- **work:** Issue #6744 の検証環境と再開条件を記録
+- **work:** Record verified nominated target delivery
+- **work:** 非表示端末の再描画調査を記録する
+- **work:** レビュー修正のPR配信記録を保存する
+- **work:** PM依頼タスク照合のPR関連付けを保存
+- **work:** Save request candidate PR association
+- **work:** Record mobile credential PR association
+- **work:** 入力候補取得PRの関連付けを保存する
+- **work:** PR #6791 の関連付けを記録する
+- **work:** Host資格読込PRの関連付けを保存する
+- **work:** 候補容量PRの関連付けを保存する
+- **work:** PR #6794 の関連付けを記録する
+- **work:** Issue #5082のPR参照履歴を保存する
+- **work:** 候補照合ガイダンスPRの関連付けを保存する
+
+### Refactor
+
+- **project:** Simplify stop and view conditions
+
+### Testing
+
+- **gui:** Locate status contract by helper name
+- **ui:** 非表示窓で両面の共同状態版を検証する
+- **update:** HTTP fixtureの受信バイト数を検証する
+- **web:** Snapshot復旧の埋め込み契約を整合する
+- **runtime:** 未送信回答の失敗診断を補強
+- **execution:** Host拒否テストのHOMEを隔離
+- **project:** Use a bound source for daemon browser checks
+- **project:** Align fixtures with explicit view admission
+- **runtime:** Observe provider and creator lease completion
+- **runtime:** Await native lifecycle and census observations
+- **mobile:** Isolate credential rejection reasons
+- **verify:** Windows CPU fixtureの観測値と取得エラーを記録する
+- **index:** Remove timing race from reserved search fixture
+
 ## [9.150.0] - 2026-11-05
 
 ### Bug Fixes

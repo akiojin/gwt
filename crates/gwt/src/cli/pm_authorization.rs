@@ -126,6 +126,9 @@ fn validate(intent: &OperationIntent) -> io::Result<()> {
         | "actions.diagnostic.policy.rollback" => {
             super::actions::release_policy::validate(intent)?;
         }
+        "project.execution.choose" => {
+            super::project_execution_policy::validate(&intent.params)?;
+        }
         "pr.auto_merge.enable" => {
             let p: AutoMergeInput = decode(&intent.params)?;
             if p.number == 0
@@ -288,6 +291,7 @@ fn request_with(
     }
     let effect = match intent.operation.as_str() {
         "update.settings.set" => "This preference affects automatic updates for the entire app.",
+        "project.execution.choose" => "Continue preserves this project's admitted work. Stop blocks new admission and gracefully drains this project while preserving its work and history.",
         "board.config.set" | "discussion.create" => "Board synchronization can publish this project's Board entries to its repository Discussion.",
         "repository.required_checks.update" => "This changes required check contexts on the selected develop/main branch.",
         "actions.release_policy.add" | "actions.release_policy.rollback" => "This changes only prepare-release.yml permission for the current repository. It does not dispatch a workflow. Rollback requires the original successful add receipt and unchanged post-state.",
@@ -295,7 +299,9 @@ fn request_with(
         "pr.auto_merge.enable" => "Enables GitHub auto-merge for this reviewed external fork head. It can merge immediately when GitHub's gates pass. Remembered approval remains fixed to this PR and reviewed SHA.",
         _ => "The existing operation's ownership and safety checks still apply.",
     };
-    let approval_scope = if intent.operation == "pr.auto_merge.enable" {
+    let approval_scope = if intent.operation == "project.execution.choose" {
+        "Permission is fixed to this exact operation_id, revision, generation and choice. Remembered approval never authorizes another choice."
+    } else if intent.operation == "pr.auto_merge.enable" {
         "Permission applies only to this PR number and reviewed head SHA, including remembered approval. A changed head requires another review and authorization."
     } else if matches!(
         intent.operation.as_str(),
@@ -577,6 +583,9 @@ fn execute<E: CliEnv>(
             | "actions.diagnostic.policy.rollback"
     ) {
         return super::actions::release_policy::execute(env, repo, intent, authorization);
+    }
+    if intent.operation == "project.execution.choose" {
+        return super::project_execution_policy::choose(repo, intent, authorization);
     }
     // Read-only preflight precedes one-off consumption. No request may select
     // another repository; production env verifies the project's origin identity.

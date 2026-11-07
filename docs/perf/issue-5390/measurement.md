@@ -718,3 +718,26 @@ marker and an owned stopping stack on recurrence. Passing replays do not justify
 a timeout extension or a speculative product change. This slice changes only
 the investigation record; parent AC-1/2/3, installed-runtime and real-fleet
 CPU/RSS acceptance remain unproven.
+
+### Delivered child acceptance reconciliation (2026-11-06)
+
+A fresh read found both children CLOSED with all three child AC checked, while
+the parent tasks still listed their delivered work as incomplete. Independent
+read-only review and four ancestry checks against fetched `origin/develop`
+(`957e4c7fc3e94399ca0b131f3986a9572da3809e`) confirmed the following delivery:
+
+| Child | Parent tasks reconciled | Merged PR | Producing source | Merge commit |
+| --- | --- | --- | --- | --- |
+| [Issue #5500](https://github.com/akiojin/gwt/issues/5500) | T-5500-1 through T-5500-5 | [PR #5548](https://github.com/akiojin/gwt/pull/5548) | `2d1cc738c247` | `c065348e45cd` |
+| [Issue #5597](https://github.com/akiojin/gwt/issues/5597) | T-5597-1 through T-5597-3 | [PR #5635](https://github.com/akiojin/gwt/pull/5635) | `0beb14986077` | `2c59f8e86803` |
+
+The [capacity measurement](../issue-5500/measurement.md) retains the single
+sampler-thread comparison and its workload limits. The
+[periodic notification evidence](../issue-5597/README.md) distinguishes the
+deployed baseline from the isolated headed after run; it is not a matched-fleet
+comparison. Their PRs retain the original canonical and dark/light evidence.
+This reconciliation adds no current-runtime measurement or implementation.
+
+Only those eight parent task checkboxes change. Parent AC-1/2/3, LF6's original
+timeout cause, installed-runtime, Mac, real-fleet and whole-GUI CPU/RSS
+acceptance remain unproven. Active child investigations retain their owners.

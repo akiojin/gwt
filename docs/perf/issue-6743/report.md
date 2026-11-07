@@ -439,3 +439,21 @@ budget を要求しない Light の短い診断は保持する。変更は既存
 runtime、閾値、監査・IPC・入力・エラー・cleanup の assertion は維持する。
 既存の canonical failure を RED 証跡とし、修正後の fresh full matrix で GREEN を確認する。
 配送はその後の Ready PR / 必須 CI / auto-merge / develop 包含確認で確定する。
+
+## 2026-11-07 canonical CI integration repair
+
+`d7c4d1a14` の fresh canonical は22/22成功し、Release両テーマ各600秒の
+GUI/daemon基準も満たした。ただしPR #6836のLinux coverageはテスト失敗で
+未集計となった。閾値未達とは判定しない。
+
+- fleet fixtureの`coreutils: unknown program codex` / EOFは、既にdevelopへ
+  配信された`d6009d7ee`のRust handshake fixtureを取り込み、重複修正を避ける。
+- `transport_direct_dispatch_inventory_stays_explicit`は、今回のusage counterが
+  production sourceより前にある最初の`#[cfg(test)]`となり、dispatchを数える
+  既存inventoryを短縮した。既存テストで0対期待1のREDを再現した。
+- 同じcounter blockをproduction関数の後へ移し、inventoryと既存usage3件の
+  計4件でGREENを確認した。runtimeの処理・counterのscope・assertionは維持する。
+
+上記の旧記録と数値は旧HEADの証拠として保持する。取り込み後のHEADについて
+新しい全canonical matrix・実headed両テーマ・Release各600秒を完走し、必須CIと
+fetched develop包含を確認するまで配信完了とは扱わない。

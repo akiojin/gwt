@@ -101,6 +101,27 @@ fn codex_uses_response_items_only_and_deduplicates_item_ids() {
 }
 
 #[test]
+fn codex_excludes_explicit_nonhuman_origins() {
+    let row = json!({"type":"response_item","payload":{"type":"message","id":"human",
+        "role":"user","origin":{"kind":"human"},"content":[{"type":"input_text","text":"A real question"}]}});
+    let mut outer = row.clone();
+    outer["payload"]["id"] = json!("outer-automation");
+    outer["origin"] = json!({"kind":"task-notification"});
+    let mut inner = row.clone();
+    inner["payload"]["id"] = json!("inner-automation");
+    inner["payload"]["origin"] = json!({"kind":"task-notification"});
+    let result = parse(AgentId::Codex, &[codex_meta(), row, outer, inner]);
+    assert_eq!(
+        result
+            .messages
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect::<Vec<_>>(),
+        ["human"]
+    );
+}
+
+#[test]
 fn metadata_identity_is_required_before_text_is_disclosed() {
     let mut wrong = codex_meta();
     wrong["payload"]["id"] = json!("foreign");

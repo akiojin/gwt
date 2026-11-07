@@ -960,6 +960,7 @@ fn project_event_isolation_full_sync_filters_each_project_payload() {
         tab
     });
     let mut runtime = sample_runtime(temp.path(), tabs.into(), Some("a"));
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
     for tab_id in ["a", "b"] {
         let id = combined_window_id(tab_id, "agent");
         insert_test_pane_runtime(&mut runtime, &id);
@@ -980,7 +981,7 @@ fn project_event_isolation_full_sync_filters_each_project_payload() {
         let context = runtime.project_context(tab_id).unwrap();
         let client = format!("client-{tab_id}");
         let id = combined_window_id(tab_id, "agent");
-        let events = runtime.handle_frontend_event_in_scope(
+        let mut events = runtime.handle_frontend_event_in_scope(
             client.clone(),
             FrontendEvent::FrontendReady,
             &super::ClientScope::Project(context.project_key),
@@ -1001,6 +1002,10 @@ fn project_event_isolation_full_sync_filters_each_project_payload() {
             statuses,
             vec![(id.clone(), Some(format!("detail-{tab_id}")))]
         );
+        events.extend(drain_owner_snapshot_completions(&mut runtime));
+        assert!(events
+            .iter()
+            .all(|event| event.target == DispatchTarget::Client(client.clone())));
         let snapshots: Vec<_> = events
             .iter()
             .filter_map(|event| match &event.event {
@@ -1738,6 +1743,7 @@ pub(crate) fn owner_browser_input_fixture(
         },
     ))
     .unwrap();
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
     runtime.install_remote_owner_projection(
         &context,
         &id,
@@ -1745,7 +1751,7 @@ pub(crate) fn owner_browser_input_fixture(
         serde_json::from_value(snapshot).unwrap(),
         probe.session.clone(),
     );
-    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
+    drain_owner_snapshot_completions(&mut runtime);
     (runtime, probe, id)
 }
 
@@ -1778,6 +1784,40 @@ pub(crate) fn drain_browser_owner_input(runtime: &mut AppRuntime) -> Vec<Outboun
         }
         if !had_tasks && !had_completions {
             break;
+        }
+    }
+    events
+}
+
+fn drain_owner_snapshot_completions(runtime: &mut AppRuntime) -> Vec<OutboundEvent> {
+    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+        panic!("queued owner snapshot workers");
+    };
+    let tasks = Arc::clone(tasks);
+    let AppEventProxy::Stub(completions) = &runtime.proxy else {
+        panic!("owner snapshot event sink");
+    };
+    let completions = Arc::clone(completions);
+    drain_queued_blocking_tasks(&tasks);
+    let mut events = Vec::new();
+    loop {
+        let event = {
+            let mut completions = completions.lock().unwrap();
+            completions
+                .iter()
+                .position(|event| {
+                    matches!(
+                        recorded_project_payload(event),
+                        UserEvent::ProjectOwnerSnapshot(_)
+                    )
+                })
+                .map(|index| completions.remove(index))
+        };
+        let Some(event) = event else { break };
+        if let Some(UserEvent::ProjectOwnerSnapshot(completion)) =
+            runtime.accept_project_completion(event)
+        {
+            events.extend(runtime.handle_project_owner_snapshot(*completion));
         }
     }
     events
@@ -1840,6 +1880,13 @@ fn insert_test_pane_runtime_with_command(
         .identity()
         .expect("authenticated owner identity")
         .clone();
+    let context = runtime
+        .project_context(&runtime.window_lookup[window_id].tab_id)
+        .expect("fixture project context");
+    runtime
+        .project_state_mut(&context)
+        .unwrap()
+        .project_owner_identity = Some(identity.clone());
     let mut projection = WindowRuntime::remote(
         id,
         reply["incarnation"].as_u64().expect("owner incarnation"),
@@ -1872,7 +1919,7 @@ fn process_test_owner_output(runtime: &mut AppRuntime, window_id: &str, bytes: &
         pane.process_bytes(bytes);
         (
             pane.screen().contents(),
-            pane.snapshot_bytes(),
+            pane.screen().contents_formatted(),
             pane.output_seq(),
         )
     };
@@ -1890,7 +1937,7 @@ fn process_test_owner_output(runtime: &mut AppRuntime, window_id: &str, bytes: &
             data: bytes.to_vec(),
             seq,
             screen: Some(screen.clone()),
-            screen_ansi: None,
+            screen_ansi: Some(screen_ansi.clone()),
         }),
     )
     .expect("production owner consumes fixture output");
@@ -1930,8 +1977,17 @@ fn sample_runtime_with_events(
     let persist_dispatcher = Arc::new(super::persist_dispatcher::PersistDispatcher::new(
         &blocking_tasks,
     ));
-    let (project_tab_incarnations, next_project_incarnation) =
-        initial_project_tab_incarnations(&tabs);
+    let (mut project_tab_incarnations, _) = initial_project_tab_incarnations(&tabs);
+    // Runtime fixtures keep stable local generations; the production boot
+    // allocator has its own cross-boot grant regression.
+    let mut next_project_incarnation = 1;
+    for tab in &tabs {
+        project_tab_incarnations
+            .get_mut(&tab.id)
+            .unwrap()
+            .generation = next_project_incarnation;
+        next_project_incarnation += 1;
+    }
     let mut runtime = AppRuntime {
         test_project_owners: HashMap::new(),
         _runtime_namespace_gc: None,
@@ -2076,7 +2132,57 @@ fn sample_runtime_with_events(
     };
     runtime.rebuild_window_lookup();
     runtime.seed_window_pty_statuses();
+    runtime.seed_fixture_project_views();
     (runtime, _events)
+}
+
+impl AppRuntime {
+    /// These UI fixtures represent Projects already open to a user. Cold-start
+    /// policy tests explicitly remove this accepted fixture receipt.
+    pub(crate) fn seed_fixture_project_views(&mut self) {
+        // Legacy layout aliases share one canonical state per ProjectKey.
+        let contexts: Vec<_> = self
+            .project_states
+            .values()
+            .map(|state| state.context.clone())
+            .collect();
+        for context in contexts {
+            assert!(self.project_context_is_current(&context));
+            let receipt = gwt::project_execution_policy::ActualViewReceipt {
+                receipt_id: uuid::Uuid::new_v4().to_string(),
+                accepted_at: chrono::Utc::now(),
+                admitted_policy_revision: gwt_core::project_execution_policy::load(
+                    &context.project_root,
+                )
+                .map_or(0, |policy| policy.revision),
+            };
+            self.project_state_mut(&context)
+                .expect("current canonical Project fixture state")
+                .project_views
+                .seed_fixture_view(receipt.clone());
+            gwt::project_execution_policy::write_observation(
+                &context.project_root,
+                &gwt::project_execution_policy::RuntimeObservation {
+                    schema_version: 1,
+                    project_key: context.project_key.to_string(),
+                    project_root: context.project_root.clone(),
+                    generation: context.generation,
+                    host_pid: std::process::id(),
+                    host_started_at: gwt::process::host_process_start_time(std::process::id())
+                        .unwrap(),
+                    view_set_revision: 0,
+                    views: std::collections::BTreeMap::from([(
+                        "fixture-visible-view".into(),
+                        receipt.clone(),
+                    )]),
+                    last_open_receipt: Some(receipt),
+                    close_intents: Default::default(),
+                    observed_at: chrono::Utc::now(),
+                },
+            )
+            .expect("accepted visible Project fixture receipt");
+        }
+    }
 }
 
 /// Seed the window-keyed maps that an ordinary close used to leave behind.
@@ -3721,6 +3827,7 @@ fn issue_monitor_final_spawn_rejects_a_saturated_cap_without_delivery() {
         "tab-1".to_string(),
         runtime.project_tab_incarnations["tab-1"].clone(),
     )]));
+    runtime.seed_fixture_project_views();
     runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
     runtime.launch_wizard_cache = LaunchWizardMemoryCache::load(&runtime.sessions_dir);
     // Both layout aliases share the one current project owner context.
@@ -10757,14 +10864,30 @@ fn native_pm_hook_runner() {
             env.stdin =
                 serde_json::json!({"prompt":gwt::pm_registry::PM_PERIODIC_WAKE_INSTRUCTION})
                     .to_string();
-            gwt::cli::hook::run_daemon_hook(&mut env, "event", &["UserPromptSubmit".into()])
-                .unwrap();
-            for _ in 0..16 {
+            let code = {
+                // This fixture checks native lifecycle, not foreground hook latency.
+                let _clock =
+                    gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
+                gwt::cli::hook::run_daemon_hook(&mut env, "event", &["UserPromptSubmit".into()])
+                    .unwrap()
+            };
+            assert_eq!(
+                code,
+                0,
+                "native PM UserPromptSubmit: stdout={}; stderr={}",
+                String::from_utf8_lossy(&env.stdout),
+                String::from_utf8_lossy(&env.stderr)
+            );
+            for turn in 0..16 {
                 env.stdin = "{}".into();
                 env.stdout.clear();
+                env.stderr.clear();
                 assert_eq!(
                     gwt::cli::hook::run_daemon_hook(&mut env, "event", &["Stop".into()]).unwrap(),
-                    0
+                    0,
+                    "native PM Stop turn {turn}: stdout={}; stderr={}",
+                    String::from_utf8_lossy(&env.stdout),
+                    String::from_utf8_lossy(&env.stderr)
                 );
                 if !serde_json::from_slice::<serde_json::Value>(&env.stdout)
                     .is_ok_and(|output| output["decision"] == "block")
@@ -10795,13 +10918,32 @@ fn native_pm_hook_runner() {
     }
 }
 
-fn native_pm_fixture_result(path: &Path) -> Vec<u8> {
+fn native_pm_fixture_result(
+    path: &Path,
+    probe: &gwt::project_runtime::test_support::OwnerRuntimeProbe,
+    stage: &str,
+) -> Vec<u8> {
+    let pty = probe.pty.clone();
+    let pane = probe.pane.clone();
+    eprintln!("native PM fixture: waiting for {stage}");
     owner_fixture_block_on(async {
         // test-hygiene: allow-wall-clock-deadline Wait for native provider observation; PM interval assertions inject their explicit clock.
         tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
             loop {
                 if let Ok(bytes) = fs::read(path) {
+                    eprintln!("native PM fixture: observed {stage}");
                     break bytes;
+                }
+                match pty.try_wait() {
+                    Ok(None) => {}
+                    result => {
+                        let (status, last_exit, screen) = {
+                            let pane = pane.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                            (pane.status().clone(), pane.last_exit().cloned(), pane.screen().contents())
+                        };
+                        panic!("native PM provider unavailable during {stage}: child={:?}; exit={result:?}; pane_status={:?}; pane_exit={:?}; screen={}",
+                            pty.process_id(), status, last_exit, screen);
+                    }
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
@@ -10811,8 +10953,142 @@ fn native_pm_fixture_result(path: &Path) -> Vec<u8> {
     })
 }
 
-fn assert_native_pm_received_periodic_wake(repo: &Path, result_path: &Path) {
-    let received = native_pm_fixture_result(&result_path.with_extension("wake"));
+fn require_native_pm_wake_acknowledgement(
+    receipt: &gwt::pm_registry::PmDeliveryReceipt,
+) -> Result<(), String> {
+    // The native runner attempts its exact ACK before writing the observation
+    // file. A completed but unconfirmed delivery is an acceptance failure,
+    // not evidence that another file will eventually arrive. It may still
+    // receive a late ACK; do not change or reinterpret its durable outcome.
+    if receipt.status == gwt::pm_registry::PmDeliveryReceiptStatus::Verified {
+        Ok(())
+    } else {
+        Err(format!(
+            "native PM wake lacks a verified acknowledgement; do not wait for a provider file: {receipt:?}"
+        ))
+    }
+}
+
+#[test]
+fn native_pm_wake_expiry_requires_ack_before_provider_file_wait() {
+    use gwt::pm_registry::{self, PmDeliveryReceiptStatus as Status};
+    use std::cell::Cell;
+
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let path = temp.path().join("receipts.jsonl");
+    // The same expiry can precede the first CR or a later retry. Neither
+    // history proves acknowledgement; the latter can still receive a late ACK.
+    for submits_before_expiry in [0, 1] {
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let prepared = pm_registry::PmDeliveryReceipt {
+            operation_id: operation_id.clone(),
+            recorded_at: "2026-11-06T00:00:00Z".into(),
+            status: Status::Prepared,
+            principal_session_id: format!("gwt-wake:{operation_id}"),
+            target_window_id: "pm-pane".into(),
+            target_session_id: "pm-session".into(),
+            body_sha256: pm_registry::pm_delivery_prompt_sha256("protected wake"),
+            reason: None,
+        };
+        pm_registry::prepare_pm_delivery_receipt(&path, &prepared).unwrap();
+        let bodies = Cell::new(0);
+        let submits = Cell::new(0);
+        let expired = Cell::new(false);
+        let result = gwt::project_runtime::agent_dispatch::drive_verified_pane_submit(
+            "protected wake\r",
+            false,
+            2,
+            |bytes| {
+                if expired.get() {
+                    return Err(
+                        "PTY I/O error: PM wake deadline expired before physical commit".into(),
+                    );
+                }
+                if bytes == b"\r" {
+                    submits.set(submits.get() + 1);
+                } else {
+                    bodies.set(bodies.get() + 1);
+                }
+                Ok(())
+            },
+            |_| expired.set(submits.get() == submits_before_expiry),
+            || Ok(false),
+        );
+        assert_eq!(bodies.get(), 1);
+        assert_eq!(submits.get(), submits_before_expiry);
+        let reason = result.unwrap_err();
+        assert!(reason.contains("deadline expired before physical commit"));
+        pm_registry::finish_pm_delivery_receipt(
+            &path,
+            &operation_id,
+            &prepared.target_session_id,
+            &prepared.body_sha256,
+            Status::Unconfirmed,
+            Some(&reason),
+        )
+        .unwrap();
+        let receipt = pm_registry::pm_delivery_receipt_for_operation(&path, &operation_id)
+            .unwrap()
+            .unwrap();
+        let error = require_native_pm_wake_acknowledgement(&receipt)
+            .expect_err("Unconfirmed must fail acceptance before waiting for a provider file");
+        assert!(error.contains(&operation_id) && error.contains(&reason));
+        assert_eq!(receipt.status, Status::Unconfirmed);
+        if submits_before_expiry == 1 {
+            // Domain transition control only; the existing native tests below
+            // require the real provider to own its ACK, operation and digest.
+            pm_registry::finish_pm_delivery_receipt(
+                &path,
+                &operation_id,
+                &prepared.target_session_id,
+                &prepared.body_sha256,
+                Status::Verified,
+                None,
+            )
+            .unwrap();
+            let latest = pm_registry::pm_delivery_receipt_for_operation(&path, &operation_id)
+                .unwrap()
+                .unwrap();
+            require_native_pm_wake_acknowledgement(&latest).unwrap();
+        }
+    }
+}
+
+fn assert_native_pm_received_periodic_wake(
+    repo: &Path,
+    result_path: &Path,
+    probe: &gwt::project_runtime::test_support::OwnerRuntimeProbe,
+) {
+    let state = gwt::pm_registry::load_pm_loop_state(
+        &gwt::pm_registry::pm_loop_state_path_for_repo_path(repo),
+    )
+    .unwrap();
+    let operation_id = state
+        .last_wake_id
+        .as_deref()
+        .expect("periodic wake must select an operation before waiting for its native provider");
+    let receipts = gwt::pm_registry::load_pm_delivery_receipts(
+        &gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(repo),
+    )
+    .unwrap();
+    let receipt = receipts.iter().rev().find(|receipt| receipt.operation_id == operation_id)
+        .unwrap_or_else(|| panic!("selected periodic wake has no physical delivery receipt: loop={state:?}; receipts={receipts:?}"));
+    require_native_pm_wake_acknowledgement(receipt).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(receipt.target_window_id, probe.id);
+    assert_eq!(
+        receipt.target_session_id,
+        probe.session.as_ref().unwrap().id
+    );
+    eprintln!(
+        "native PM fixture: selected {operation_id}, receipt={:?}, reason={:?}",
+        receipt.status, receipt.reason
+    );
+    let received = native_pm_fixture_result(
+        &result_path.with_extension("wake"),
+        probe,
+        "periodic wake acknowledgement",
+    );
     assert!(
         String::from_utf8_lossy(&received).contains(gwt::pm_registry::PM_PERIODIC_WAKE_INSTRUCTION)
     );
@@ -10820,7 +11096,15 @@ fn assert_native_pm_received_periodic_wake(repo: &Path, result_path: &Path) {
         &gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(repo),
     )
     .unwrap();
-    let receipt = receipts.last().expect("physical wake delivery receipt");
+    let receipt = receipts
+        .iter()
+        .rev()
+        .find(|receipt| receipt.operation_id == operation_id)
+        .expect("same-operation physical wake delivery receipt");
+    assert_eq!(
+        gwt::pm_registry::parse_protected_pm_delivery_prompt(&String::from_utf8_lossy(&received)),
+        Some((operation_id.to_string(), receipt.body_sha256.clone()))
+    );
     assert_eq!(
         receipt.status,
         gwt::pm_registry::PmDeliveryReceiptStatus::Verified
@@ -10849,9 +11133,15 @@ fn issue_6722_periodic_wake_delivers_with_monitor_off_and_no_queue() {
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
     gwt::save_issue_monitor_prefs(&prefs_path, &gwt::IssueMonitorPrefs::default()).unwrap();
     let _pane = attach_live_pm_pane(&mut runtime, &window_id);
+    let pm = owner_runtime_probe(&runtime, &window_id);
+    assert_eq!(
+        pm.status,
+        WindowProcessStatus::Idle,
+        "the native PM starts its periodic wake from Idle"
+    );
     runtime.pm_periodic_wake_events_at(&repo, "2026-11-04T01:00:00Z");
     drain_pm_wake_delivery_tasks(&mut runtime);
-    assert_native_pm_received_periodic_wake(&repo, &result);
+    assert_native_pm_received_periodic_wake(&repo, &result, &pm);
     assert!(runtime
         .pm_periodic_wake_decision_at(&repo, "2026-11-04T01:00:59Z")
         .is_none());
@@ -10884,8 +11174,10 @@ fn issue_6722_periodic_wake_delivers_after_automatic_turn_and_interval() {
     pm.pty
         .write_machine_input(b"GWT_PM_FIXTURE_COMPLETE_AUTOMATIC\r")
         .unwrap();
-    let observed: gwt_agent::SessionRuntimeState =
-        serde_json::from_slice(&native_pm_fixture_result(&result)).unwrap();
+    let observed: gwt_agent::SessionRuntimeState = serde_json::from_slice(
+        &native_pm_fixture_result(&result, &pm, "automatic turn completion"),
+    )
+    .unwrap();
     let owner = project_owner_fixture(&mut runtime, &window_id);
     let snapshot = owner_fixture_block_on(owner.command(
         gwt::project_runtime::events::OwnerCommand::Snapshot {
@@ -10894,6 +11186,16 @@ fn issue_6722_periodic_wake_delivers_after_automatic_turn_and_interval() {
         },
     ))
     .unwrap();
+    assert_eq!(
+        snapshot["status"],
+        serde_json::json!(WindowProcessStatus::Idle),
+        "the completed native Stop must reach the owner before selecting its next wake: {snapshot}"
+    );
+    assert_eq!(
+        snapshot["input_observation"]["revision"].as_u64(),
+        pm.pty.ordinary_input_revision(),
+        "the periodic wake must capture the current physical input revision: {snapshot}"
+    );
     assert_eq!(observed.status, gwt_agent::AgentStatus::Idle);
     assert_eq!(observed.source_event.as_deref(), Some("Stop"));
     assert!(
@@ -10921,10 +11223,14 @@ fn issue_6722_periodic_wake_delivers_after_automatic_turn_and_interval() {
         .is_none());
     runtime.pm_periodic_wake_events_at(&repo, &(now + chrono::Duration::seconds(61)).to_rfc3339());
     drain_pm_wake_delivery_tasks(&mut runtime);
-    assert_native_pm_received_periodic_wake(&repo, &result);
+    assert_native_pm_received_periodic_wake(&repo, &result, &pm);
 }
 
-fn assert_pm_ensure_spawns_from_default_branch(default_branch: &str, cached_default: bool) {
+fn assert_pm_ensure_spawns_from_default_branch(
+    default_branch: &str,
+    cached_default: bool,
+    supersede_before_completion: bool,
+) {
     let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
     // FR-001/FR-002: no registration + auto_start default ON => silent spawn
     // with a pending PM marker so launch completion can register the session.
@@ -11004,7 +11310,62 @@ fn assert_pm_ensure_spawns_from_default_branch(default_branch: &str, cached_defa
         "actual PM launch: {:?}",
         completion.result.as_ref().err()
     );
-    runtime.handle_remote_owner_launch_complete(completion);
+    if supersede_before_completion {
+        let (spawner, tasks) = BlockingTaskSpawner::queued();
+        runtime.blocking_tasks = spawner;
+        let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+        gwt::pm_registry::mutate_pm_prefs(&prefs_path, |prefs| {
+            prefs.registration = None;
+            let mut profile = prefs.settings.launch_profile_or_default();
+            profile.agent_id = "codex".into();
+            prefs.settings.launch_profile = Some(profile);
+        })
+        .unwrap();
+        runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Restart);
+        tasks.lock().unwrap().pop().unwrap()();
+        drain_pm_worktree_preparation(&mut runtime, &recorded_events);
+        let successor = runtime.tab("tab-1").unwrap().workspace.persisted().windows[1].clone();
+        let successor_id = combined_window_id("tab-1", &successor.id);
+        assert!(runtime
+            .pending_launch_completions
+            .contains_key(&successor_id));
+        // Only the old callback is an actual native completion. The successor
+        // request is queued; seed its later projection without a second child.
+        let projected = pm_registration_fixture("successor-pm", &repo);
+        runtime.sync_pm_session_cache(&repo, Some(&projected));
+        runtime
+            .tab_mut("tab-1")
+            .unwrap()
+            .workspace
+            .set_session_id(&successor.id, Some(projected.session_id.clone()));
+        let late_events = runtime.handle_remote_owner_launch_complete(completion);
+        let cached = runtime.pm_session_for_root(&repo).cloned();
+        let wire = runtime.workspace_view_for_tab(runtime.tab("tab-1").unwrap());
+        close_test_owner_runtime(&mut runtime, &window_id);
+        assert_eq!(
+            cached.as_deref(),
+            Some(projected.session_id.as_str()),
+            "an older native completion cannot replace the latest requested PM projection"
+        );
+        assert_eq!(
+            wire.windows
+                .iter()
+                .filter(|window| window.is_pm)
+                .map(|window| window.id.as_str())
+                .collect::<Vec<_>>(),
+            [successor_id.as_str()]
+        );
+        assert!(late_events.iter().all(|event| match &event.event {
+            BackendEvent::WorkspaceState { workspace } => workspace
+                .tabs
+                .iter()
+                .flat_map(|tab| &tab.workspace.windows)
+                .all(|window| !window.is_pm || window.id == successor_id),
+            _ => true,
+        }));
+        return;
+    }
+    let completion_events = runtime.handle_remote_owner_launch_complete(completion);
     assert!(
         runtime
             .tab("tab-1")
@@ -11086,6 +11447,25 @@ fn assert_pm_ensure_spawns_from_default_branch(default_branch: &str, cached_defa
     )
     .unwrap();
     assert!(physical.pty.tree_exit_confirmed());
+    let workspace = completion_events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::WorkspaceState { workspace } => Some(workspace),
+            _ => None,
+        })
+        .expect("the completed PM launch publishes its workspace");
+    let pm_windows: Vec<_> = workspace
+        .tabs
+        .iter()
+        .flat_map(|tab| &tab.workspace.windows)
+        .filter(|window| window.is_pm)
+        .map(|window| window.id.as_str())
+        .collect();
+    assert_eq!(
+        pm_windows,
+        [window_id.as_str()],
+        "the first completed workspace marks the durably registered PM"
+    );
 }
 
 /// Issue #4375: run the completion of the PM worktree preparation the runtime
@@ -11327,7 +11707,14 @@ pub(crate) fn drain_pm_wake_delivery_tasks(runtime: &mut AppRuntime) {
         for event in completed {
             match runtime.accept_project_completion(event) {
                 Some(UserEvent::PmWakeDeliveryComplete(delivery)) => {
-                    if matches!(
+                    let native_provider = std::env::var_os("GWT_TEST_PM_HOOK_RUNNER").is_some();
+                    if native_provider {
+                        eprintln!("native PM fixture completion: result={:?}", delivery.result);
+                        assert!(matches!(delivery.result,
+                            Ok(gwt::project_runtime::pm_delivery::PmWakeWrite::Injected
+                            | gwt::project_runtime::pm_delivery::PmWakeWrite::Unconfirmed)),
+                            "native PM wake was not submitted; do not wait for a provider file: {delivery:?}");
+                    } else if matches!(
                         delivery.result,
                         Ok(gwt::project_runtime::pm_delivery::PmWakeWrite::Unconfirmed)
                     ) {
@@ -11361,7 +11748,11 @@ pub(crate) fn drain_pm_wake_delivery_tasks(runtime: &mut AppRuntime) {
                     }
                     let window_id = delivery.decision.window_id.clone();
                     runtime.pm_wake_delivery_complete(delivery);
-                    runtime.flush_pending_pm_wake(&window_id);
+                    // Native providers own their ACK. As in production, wait
+                    // for an external observation instead of requeueing here.
+                    if !native_provider {
+                        runtime.flush_pending_pm_wake(&window_id);
+                    }
                 }
                 Some(UserEvent::RemoteRuntimeCommandComplete(completion)) => {
                     runtime.handle_remote_runtime_command_complete(*completion);

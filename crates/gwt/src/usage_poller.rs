@@ -44,11 +44,6 @@ const TICK_SECS: u64 = 30;
 /// this often (or immediately on a forced refresh).
 const CONSUMPTION_CACHE_SECS: i64 = 300;
 
-#[cfg(test)]
-thread_local! {
-    static CONFIRMED_IDENTITY_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
 /// Called when the account rows meaningfully change, alongside the client broadcast.
 ///
 /// Issue #3616: the quota classifier lives in `AppRuntime`, which only the tao
@@ -713,6 +708,11 @@ fn collect_sessions_with_clock(
             usage
         })
         .collect()
+}
+
+#[cfg(test)]
+thread_local! {
+    static CONFIRMED_IDENTITY_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]

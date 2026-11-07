@@ -19,6 +19,10 @@ path = "src/main.rs"
 name = "gwtd"
 path = "src/bin/gwtd.rs"
 
+[[bin]]
+name = "gwt-mobile-coordinator"
+path = "src/bin/gwt-mobile-coordinator.rs"
+
 [[test]]
 name = "ci_contracts"
 path = "tests/suites/ci_contracts_test.rs"
@@ -77,7 +81,7 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 thiserror.workspace = true
-uuid.workspace = true
+uuid = { workspace = true, features = ["serde"] }
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 futures-util.workspace = true
@@ -101,6 +105,7 @@ rfd = "0.17"
 reqwest.workspace = true
 sha2.workspace = true
 ring = "0.17"
+subtle = "2.6"
 hex.workspace = true
 zip.workspace = true
 notify.workspace = true
@@ -142,7 +147,7 @@ winresource.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 rfd = { version = "0.17", features = ["common-controls-v6"] }
-windows = { version = "0.62.2", features = ["Data_Xml_Dom", "UI_Notifications", "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Performance", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_System_Com", "Win32_System_Ole", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.62.2", features = ["Data_Xml_Dom", "UI_Notifications", "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Performance", "Win32_System_Pipes", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_System_Com", "Win32_System_Ole", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 windows-registry = "0.100"
 windows-result = "0.100"
 

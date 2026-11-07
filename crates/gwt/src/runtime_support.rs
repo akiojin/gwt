@@ -116,6 +116,7 @@ pub fn app_state_view_from_parts(
                     workspace: workspace_view_for_tab(tab),
                     running_agent_count: running_agents.len() as u32,
                     running_agents,
+                    execution: None,
                 }
             })
             .collect(),

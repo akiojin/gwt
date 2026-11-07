@@ -621,6 +621,54 @@ fn startup_restore_summary_includes_missing_worktrees_before_queue_and_before_sp
 }
 
 #[test]
+fn startup_restore_summary_waits_for_policy_requeued_sessions() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let tab = restore_fixture_tab("tab-1", &repo, &[("agent".into(), "saved".into())]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let worktree = temp.path().join("restored-worktree");
+    save_restore_fixture_session(
+        &runtime.sessions_dir,
+        "saved",
+        &worktree,
+        Some("native"),
+        None,
+    );
+    runtime.queue_startup_auto_resume_sessions(&HashSet::new());
+    let context = runtime.test_context();
+    runtime
+        .project_state_mut(&context)
+        .unwrap()
+        .project_views
+        .clear_fixture_views();
+    fs::remove_file(gwt::project_execution_policy::observation_path(&repo)).unwrap();
+    let first = capture_tracing_events(|| {
+        runtime.startup_auto_resume_ready_events();
+    });
+    assert_eq!(runtime.pending_startup_auto_resume_sessions.len(), 1);
+    assert!(
+        first
+            .iter()
+            .all(|event| event.fields.get("message").map(String::as_str)
+                != Some("session restore admission summary")),
+        "a policy-deferred sweep is unfinished"
+    );
+    runtime.seed_fixture_project_views();
+    fs::remove_dir(&worktree).unwrap();
+    let completed = capture_tracing_events(|| {
+        runtime.startup_auto_resume_ready_events();
+        runtime.startup_auto_resume_ready_events();
+    });
+    let summary = restore_admission_summary(&completed);
+    assert_eq!(
+        summary.fields.get("reasons").map(String::as_str),
+        Some("worktree_missing=1")
+    );
+}
+
+#[test]
 fn open_project_restore_reports_a_missing_worktree_in_its_summary() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());

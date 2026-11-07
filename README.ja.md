@@ -234,7 +234,8 @@ ephemeral port を選ぶ `--port 0` を含め、保存済みの暗黙ポート�
 `--bind 0.0.0.0` を指定してください。運用者が選んだ既知のポートを使う場合は
 `--port` を併用できます。`--no-tray` はトレイを登録しない一時サーバーを起動します。
 起動元の親プロセスが終了するか、最後のブラウザセッションが閉じて5秒経つと終了します
-（この猶予中は再読み込み・再接続できます）。ブラウザが一度も接続していない場合は
+（この猶予中は再読み込み・再接続できます）。明示的に Continue を選んだプロジェクトの
+依頼済み仕事が未完了の間は稼働を保持します。ブラウザが一度も接続していない場合は
 親プロセスの寿命に従います。`--no-open` はブラウザの自動起動を明示的に抑止します。
 フラグなしの起動も、既定でブラウザを自動では開きません。
 
@@ -275,6 +276,46 @@ iOS Safari / Android Chrome から安全に操作する接続機能を
 実行可能なモバイル設定手順は transport 統合と検証後に案内します。
 既存の LAN 向け bind の例は、その設定手順ではありません。
 
+#### 停止中の Host 資格管理（Unix・ソースからビルド）
+
+`cargo build -p gwt --bin gwt-mobile-coordinator` で停止中の台帳管理コマンドを
+ビルドできます。待受やスマートフォン接続は提供しません。祖先が信頼でき、置換されない、
+repository 外のユーザー home を使ってください。`$HOME/.gwt`、`$HOME/.gwt/mobile`、
+`$HOME/.gwt/mobile/coordinator` は、OS ユーザーが所有する mode `0700` の directory として
+事前に用意します。symlink と macOS の拡張 ACL entry は拒否します。既存の権限を確認し、
+必要な場合だけ明示的に修復してください。コマンドは directory 作成や権限変更を行いません。
+Windows の私有保存には未対応です。
+
+最大 16 KiB の JSON request を一つ、標準入力へ渡します。
+
+```sh
+printf '%s\n' '{"schema_version":1,"command":{"operation":"initialize"}}' |
+  target/debug/gwt-mobile-coordinator
+printf '%s\n' '{"schema_version":1,"command":{"operation":"status"}}' |
+  target/debug/gwt-mobile-coordinator
+```
+
+`initialize` は台帳を一度だけ作成し、既存台帳を置換しません。`status` は公開 identity、
+Project scope、期限、失効記録を表示します。他の操作も同じ envelope の `command` に
+次の field を指定します。
+
+| `operation` | 必須 field |
+| --- | --- |
+| `issue` | `origin`（HTTPS origin）、`host_id`（nil でない UUID）、`projects`（重複しない正規 Project key 1〜16 件）、`expires_at`（未来の Unix 秒） |
+| `rotate` | `origin`、`credential_id`（nil でない UUID）、`expires_at` |
+| `revoke` | `credential_id` |
+
+Project key は小文字 16 進数 16 文字の正規識別子です。未知 field・操作は拒否します。
+path・secret・時計上書きは request field にありません。発行成功時の応答は公開 identity と
+私有資格 file の path だけで、bearer は file 内に保持します。Git・log・URL・shell 引数へ
+秘密を載せないでください。この資格は将来の Host 登録用であり、端末承認や terminal 入力の
+権限ではありません。Host import とオンライン登録はまだ利用できません。
+
+管理中は台帳と別の lock を保持します。`busy` なら coordinator または他の管理 process を
+停止して再試行します。`commit_uncertain` なら `status` で現在の記録を確認してから判断し、
+自動再発行しないでください。私有保存や時計の error は表示された前提条件を修復して
+再試行し、台帳や失効記録は削除しないでください。`--help` でも field と保存条件を確認できます。
+
 ### `gwt serve` 廃止について
 
 `gwt serve` / `gwt --headless` 経路は v10.0.0 で削除されました (SPEC #2920 Q9)。
@@ -301,13 +342,19 @@ server (X11 / Wayland) を要求します。macOS / Windows のブラウザサ�
 されているか」を即時に確認できます。`/healthz` は `debug!` に降格されており、
 ヘルスチェックでログが埋まりません。
 
-Lifecycle: 起動中の `gwt` プロセスが agent / PTY の寿命を所有します。既定のトレイ常駐
-モードでは、ブラウザのタブを閉じてもプロジェクトと実行中の agent は継続し、
-プロジェクト URL を開き直すと同じワークスペースに戻れます。プロジェクトを停止するには、そのページのヘッダーか
-Hub の開いているプロジェクト一覧にある **Close Project** を選びます。実行中の agent が
-ある場合は、対象を列挙した確認ダイアログが表示されます。**Cancel** なら実行を継続し、
-**Close Project** ならそのプロジェクトの runtime と agent を停止します。他のプロジェクトは
-継続し、閉じたプロジェクトを表示していたすべてのブラウザタブは Hub に戻ります。
+Lifecycle: 新しいプロジェクトの仕事は、その Project 画面を表示してから起動します。
+保存タブの復元やバックグラウンド接続だけでは起動しません。ページヘッダーの
+**Close Project** はその画面を閉じ、同じプロジェクトの画面が残っていれば仕事を継続します。
+最後の画面を閉じる場合や Hub の Close では、**Continue**・**Stop**・**Cancel** を選べます。
+Continue は、そのプロジェクトで依頼済みの仕事を再起動後も継続する選択を保存します。
+Stop は新規起動を止め、稼働中の仕事を排出し、Work・会話・履歴を保持します。
+Cancel は画面を開いたままにします。他のプロジェクトには影響しません。
+
+ブラウザ自身の閉じるボタンや接続断から Continue・Stop を推定しません。
+選択未確認の場合は Hub に戻って解決できます。一覧とプロジェクト対象の PM 設定には、
+稼働状態・理由・観測時刻・取得不能を表示します。停止結果が不確かな場合は、runtime の
+確認まで Stopping または Unknown のままです。Agent は `project.execution.status` で照会でき、
+登録 PM は対象を特定した人間の指示または承認により `project.execution.choose` を使用できます。
 
 サーバー全体を停止するには、トレイの **Quit**、または `Ctrl-C` / `SIGTERM` を使います。
 gwt は PTY をドレインしてから graceful shutdown を実行します。tray 常駐プロセスは
@@ -447,7 +494,8 @@ managed hook とプロジェクト runtime の委譲は `gwtd` を使います�
 開くと共有 daemon が起動、または既存 daemon に再接続します。daemon は agent pane
 と Issue Monitor を所有します。接続障害はそのプロジェクトだけに影響し、Hub と
 他のプロジェクトは引き続き利用できます。GUI が起動した daemon は最後の GUI が
-切断し、再接続の猶予期間を過ぎると終了処理へ進みます。GUI を一つ閉じても共有
+切断し、再接続の猶予期間を過ぎると終了処理へ進みます。ただし、明示 Continue の
+未完了仕事がある間は、そのプロジェクトの runtime を保持します。GUI を一つ閉じても共有
 daemon を強制終了しません。明示的な JSON `daemon.start` は停止するまで常駐し、
 既存の GUI 管理 daemon に対しても常駐へ切り替えます。`daemon.status` で現在の
 endpoint を確認できます。
@@ -955,6 +1003,79 @@ source ID、`{"selector":{"kind":"tasks","limit":50}}` は完了・取消を含�
 `id` / `operation_id` を指定して 1 件ずつ取得します。対象 project の登録済み PM
 だけが使用でき、Issue・Monitor・CI・承認の権限は付与しません。この参照 API に
 自動受付や Tasks UI は接続されていません。
+
+生成される PM skill は、起動時・新しい人間の入力時・各 resident cycle に保存済みの
+依頼を照合します。概要の revision に両 ID 一覧を固定し、必要な詳細を読み、現在の
+完了条件・再評価世代・revision を確認して、根拠のある追跡変更だけを
+`pm.request_tasks.apply` へ送ります。未初期化・読取不能・途中までの取得は degraded
+として保持し、依頼が残っていない根拠にはしません。一時復旧や Monitor の空キューで
+元の依頼を完了扱いにしません。この手順の対象は保存済みの追跡と選択した native 入力の
+受付です。自動受付・過去の依頼の取込み・他のユーザー操作・Tasks UI は別の作業として
+残ります。追跡自体は Issue の起動や配信ゲートの変更を行いません。
+
+project に紐づくブラウザ protocol の `load_pm_request_task` は、1 件の `task_id` と
+任意の `receipt_operation_id` を読み取ります。`reopen_pm_request_task` は
+`request` 内の `operation_id`・`expected_revision`・`reason`・`task_id` で Task を
+未完了＋再評価待ちへ戻します。応答は `pm_request_task` で要求の `request_id` を返し、
+変更者はサーバーがブラウザ接続から確定します。PM 停止中も保存済みの Task を扱えます。
+`cancel_pm_request_task` は同じ `request` 項目で依頼を取り消し、完了とは別の取消状態と
+ユーザーの監査記録を保存します。対象と祖先の過去の完了根拠は無効になります。
+応答を失ったら、現在の Task と元の receipt を読み直してください。新しい接続は別の
+actor になるため、旧 operation の再実行は競合になります。現在の Task と receipt 内の
+過去状態は、それぞれの revision を保持します。欠測・読取不能は診断と回復用の参照を
+返します。receipt の参照は記録済みの結果の観測であり、新たな永続書込の成功確認では
+ありません。この transport adapter は利用できますが、Tasks 画面と checkbox 操作は
+引き続き未提供です。
+
+選択した native 入力を受け付けるには、登録済み PM が `pm.request_tasks.read` の
+`selector:{kind:"native_turns"}` を読みます。現在の `provider`・`conversation_id` と、
+対象 turn の ID・`prompt_sha256` を原文なしで返します。`window_only:true` と `detail`
+が示すのは件数・容量を制限した会話の範囲であり、履歴全件や永続 cursor ではありません。
+`selector:{kind:"native_turn",provider:"<provider>",conversation_id:"<conversation>",id:"<id>"}`
+で原文を 1 件取得します。両 native selector は Task 追跡の読取不能とは独立して
+利用できます。選択した turn を未分類の pending source として保存するには、
+`pm.request_tasks.capture` に `operation_id`・現在の `expected_revision`・`reason` と、
+`provider`・`conversation_id`・`id`・`prompt_sha256` を指定します。原文・source・actor は
+サーバーが確定し、caller による原文・source・actor・authority の指定は拒否します。
+resume/replay でも native source identity を保ち、同文で native ID が異なれば
+区別します。native データの取得不能、ID の欠落・未到着、選択範囲や digest の変更時は
+capture せず degraded として保持します。読取不能の Task ストアを初期化し直したり、
+Task を作成したり、指示権限・実行権限を付与したりする操作ではありません。
+PM は pending source を読んでから既存の `decompose` / `classify_non_task` を使い、
+質問を実行 Task にしません。
+
+登録済み PM への入力は、最新の Q&A receipt を置き換える前に保存されます。同じ本文の
+再入力や質問も保持しますが、未認証の入力候補であり、人間の source・Task・指示権限
+とは区別されます。reporting 診断には現在の候補 ID を表示します。後続入力や PM の
+交代で以前の候補を消さず、保存に失敗した場合はエラーを返します。
+登録済み PM は `pm.request_tasks.read` の `selector:{kind:"candidates",limit:50}` で、
+保存済みの全 PM session の候補を発見できます。ページは昇順 ID、`inventory_sha256`、
+`next_after` だけを返します。続きはその `after` と `expected_inventory_sha256` を指定し、
+ID 集合が変わって `conflict` になったら先頭から再取得します。各 cycle も先頭から
+照合して新しい観測を発見します。token は観測した ID 集合を表し、同時 snapshot や
+認証の証明ではありません。`selector:{kind:"candidate",id:"<session digest>/<observation UUID>"}`
+で原文・未認証の観測 identity・本文 hash を 1 件取得します。保存先未作成・読取不能・
+候補欠落は区別されます。既 PM 権限確認を維持し、Task 追跡が読めない場合も取得でき、
+候補の消費や保存状態の変更は行いません。取得した原文は引き続き信頼できない入力です。
+候補と native identity の照合・自動 Task 受付は別の作業として残ります。capture の
+native identity を候補本文や一致する hash から推測してはいけません。
+
+生成される PM skill は、起動時・新しい人間の入力時・各 resident cycle に、Task 追跡が
+読めない場合も候補を発見します。必要な原文だけを取得し、発見・回収が未完なら degraded
+として保持します。候補本文や一致する hash から、人間の指示権限や Task 変更の権限を
+作ることはありません。
+
+候補の通常取得は、PM native 会話 record と同じ 4 MiB の serialized JSON
+（エスケープを含む）までです。超過時は `candidate_too_large` と `limit_bytes`、
+回収用 selector を返します。
+`selector:{kind:"candidate_chunk",id:"<session digest>/<observation UUID>",offset:0}`
+は raw JSON bytes を最大 48 KiB ずつ `bytes_base64` で返します。`next_offset` が
+null になるまで続けます。観測したファイル長を超える offset は `invalid_request`
+と先頭からの再取得 selector を返します。状態は `unverified_raw` です。全 bytes を
+再構成し、schema・identity・本文 hash を検証してから利用してください。
+`observed_total_bytes` は長さの観測であり snapshot ではありません。回収中に
+保存ファイルが変わったら先頭から再取得します。既登録 PM 権限確認を維持し、
+保存原文の変更や Task の作成は行いません。
 
 `policy.dependency_observations` は供給された Monitor inbox の全行を、同じ Issue の
 重複も含めて保持し、状態と正本の blocker・cycle・bundle 参照を返します。

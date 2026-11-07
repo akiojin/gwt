@@ -6319,6 +6319,7 @@ fn verify_runtime_not_revoked(worktree: &Path, session_id: &str) -> io::Result<(
     if requests.is_empty() {
         return Ok(());
     }
+    let recovery_source = crate::process::windows_recovery::capture_source();
     gwt_agent::validate_session_id_path_component(session_id).map_err(|_| denied())?;
     let path = std::env::var_os(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV)
         .map(PathBuf::from)
@@ -6355,16 +6356,23 @@ fn verify_runtime_not_revoked(worktree: &Path, session_id: &str) -> io::Result<(
         || runtime.host_started_at != crate::process::host_process_start_time(host_pid)
         || runtime.child_started_at.is_none()
         || runtime.child_started_at != crate::process::host_process_start_time(child_pid)
-        || (child_pid != std::process::id()
-            && !crate::process::is_descendant_of(std::process::id(), child_pid).unwrap_or(false))
+        || !crate::process::checked_runtime_descendant_of(
+            std::process::id(),
+            child_pid,
+            recovery_source,
+        )
+        .unwrap_or(false)
         || requests.iter().any(|request| {
             // A writable sidecar cannot revive the stopped OS process or
             // its callers. The child can outlive its original GUI host.
             crate::process::host_process_start_time(request.child_pid)
                 == Some(request.child_started_at)
-                && (request.child_pid == std::process::id()
-                    || crate::process::is_descendant_of(std::process::id(), request.child_pid)
-                        .unwrap_or(true))
+                && crate::process::checked_runtime_descendant_of(
+                    std::process::id(),
+                    request.child_pid,
+                    recovery_source,
+                )
+                .unwrap_or(true)
         })
     {
         return Err(denied());

@@ -10,10 +10,7 @@ const DEFAULT_MAX_TERMINAL_FITS_PER_FRAME = 4;
 const DEFAULT_MAX_TERMINAL_REFRESHES_PER_FRAME = 4;
 
 function defaultScheduleFrame(callback) {
-  if (typeof requestAnimationFrame === "function") {
-    return requestAnimationFrame(callback);
-  }
-  return setTimeout(callback, 0);
+  return scheduleTerminalTask(callback, globalThis);
 }
 
 // Initial readiness must advance even when an inactive window receives no
@@ -53,24 +50,6 @@ export function decodeTerminalSnapshotBoundary(
     snapshotText: nextLiveDecoder.decode(snapshotBytes, { stream: true }),
     nextLiveDecoder,
   };
-}
-
-/**
- * Mark receipt of a terminal snapshot by discarding every live-output queue
- * that predates it. Output arriving after this synchronous boundary is left
- * alone and will therefore be replayed after the snapshot is applied.
- */
-export function clearTerminalOutputBeforeSnapshot({
-  windowId,
-  runtime,
-  pendingOutputMap,
-  clearBatchedOutput,
-}) {
-  clearBatchedOutput(windowId);
-  pendingOutputMap.delete(windowId);
-  if (runtime) {
-    runtime.deferredWrites = [];
-  }
 }
 
 /**
