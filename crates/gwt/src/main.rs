@@ -406,6 +406,42 @@ fn update_download_failure(stage: &str, reason: String, log_path: String) -> Out
     })
 }
 
+fn failed_update_reset_events(app: &mut AppRuntime, version: &str) -> Vec<OutboundEvent> {
+    let mut events = app.release_update_auto_apply_events(
+        version,
+        app_runtime::UpdateAutoApplyRelease::PreviousFailure,
+    );
+    let replacement = gwt_core::update::load_pending_update_manifest().filter(|manifest| {
+        manifest.version != version
+            && gwt_core::update::pending_version_is_newer(
+                &manifest.version,
+                env!("CARGO_PKG_VERSION"),
+            )
+    });
+    let state = match &replacement {
+        Some(manifest) => gwt_core::update::UpdateState::Available {
+            current: env!("CARGO_PKG_VERSION").into(),
+            latest: manifest.version.clone(),
+            release_url: manifest.asset_url.clone(),
+            asset_url: Some(manifest.asset_url.clone()),
+            checked_at: chrono::Utc::now(),
+        },
+        None => gwt_core::update::UpdateState::UpToDate {
+            checked_at: Some(chrono::Utc::now()),
+        },
+    };
+    app.pending_update = Some(state.clone());
+    events.push(OutboundEvent::broadcast(BackendEvent::UpdateState(state)));
+    if let Some(manifest) = replacement {
+        events.push(OutboundEvent::broadcast(
+            BackendEvent::UpdateApplyPendingPersisted {
+                version: manifest.version,
+            },
+        ));
+    }
+    events
+}
+
 fn board_projection_watch_key(project_root: &Path) -> PathBuf {
     dunce::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf())
 }
@@ -5891,6 +5927,42 @@ mod tests {
                 ..
             }] if latest == "9.20.2"
         ));
+    }
+
+    #[test]
+    fn issue_6757_failed_update_reset_preserves_a_replacement_staged_release() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+        let events = super::failed_update_reset_events(&mut runtime, "999.0.0");
+        assert!(events.iter().any(|event| matches!(
+            event.event,
+            BackendEvent::UpdateState(gwt_core::update::UpdateState::UpToDate { .. })
+        )));
+
+        let payload = gwt_core::paths::gwt_updates_dir()
+            .join("v999.0.1")
+            .join("gwt");
+        fs::create_dir_all(payload.parent().unwrap()).unwrap();
+        fs::write(&payload, "replacement").unwrap();
+        let replacement = gwt_core::update::PendingUpdateManifest {
+            version: "999.0.1".into(),
+            asset_url: "https://example.invalid/update.zip".into(),
+            payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
+            downloaded_at: Utc::now().to_rfc3339(),
+            origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
+            auto_apply_deferred: false,
+        };
+        gwt_core::update::persist_pending_update_manifest(&replacement).unwrap();
+        let events = super::failed_update_reset_events(&mut runtime, "999.0.0");
+        assert!(matches!(&runtime.pending_update,
+            Some(gwt_core::update::UpdateState::Available { latest, .. }) if latest == "999.0.1"));
+        assert!(events.iter().any(|event| matches!(&event.event,
+            BackendEvent::UpdateApplyPendingPersisted { version } if version == "999.0.1")));
+        assert_eq!(
+            gwt_core::update::load_pending_update_manifest(),
+            Some(replacement)
+        );
     }
 
     #[test]
@@ -11939,13 +12011,22 @@ fn main() -> std::io::Result<()> {
                         } else {
                             OutboundEvent::reply(client_id, failure)
                         };
-                        clients.dispatch(vec![
+                        let mut events = Vec::new();
+                        if gwt_core::update::load_update_apply_result().is_some_and(|result| {
+                            result.outcome == gwt_core::update::UpdateApplyOutcome::Failure
+                                && result.to_version == marker.to_version
+                                && result.message.as_deref() == Some(message.as_str())
+                        }) {
+                            events.extend(failed_update_reset_events(app, &marker.to_version));
+                        }
+                        events.extend([
                             OutboundEvent::global_update_notice(
                                 "error",
                                 format!("Update v{} could not be applied: {message}", marker.to_version),
                             ),
                             failure,
                         ]);
+                        clients.dispatch(events);
                     }
                 }
             }

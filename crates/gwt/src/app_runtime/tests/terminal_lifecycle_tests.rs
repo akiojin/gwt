@@ -2880,14 +2880,20 @@ fn client_pane_snapshot_repair_replies_with_snapshots_for_known_panes_only() {
         &[WindowPreset::Shell],
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
     let shell_id = combined_window_id("tab-1", "shell-1");
     insert_test_pane_runtime(&mut runtime, &shell_id);
     process_test_owner_output(&mut runtime, &shell_id, b"hello-repair");
 
-    let events = runtime.client_pane_snapshot_repair_events(
+    let mut events = runtime.client_pane_snapshot_repair_events(
         "client-9",
         &[shell_id.clone(), "tab-1::missing-pane".to_string()],
     );
+    events.extend(drain_owner_snapshot_completions(&mut runtime));
+    let events = events
+        .into_iter()
+        .filter(|event| matches!(event.event, BackendEvent::TerminalSnapshot { .. }))
+        .collect::<Vec<_>>();
 
     assert_eq!(events.len(), 1, "unknown panes produce no repair events");
     assert!(
@@ -2939,6 +2945,7 @@ fn pane_snapshot_never_replays_spinner_redraw_chunks_it_already_contains() {
         .next()
         .expect("agent window");
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
     insert_test_pane_runtime(&mut runtime, &window_id);
     let (incarnation, pane) = {
         let window_runtime = runtime.runtimes.get(&window_id).expect("runtime");
@@ -2963,13 +2970,20 @@ fn pane_snapshot_never_replays_spinner_redraw_chunks_it_already_contains() {
         // The event loop lags behind the reader for chunks 8..=19.
         let reader_ahead = (8..=19).contains(&index);
         if index == 19 {
-            for event in runtime
-                .client_pane_snapshot_repair_events("client-1", std::slice::from_ref(&window_id))
-            {
-                repair_queue.enqueue(&prepare_outbound_event(&event));
-            }
-            for event in runtime.frontend_sync_events("client-2") {
-                resync_queue.enqueue(&prepare_outbound_event(&event));
+            let mut events = runtime
+                .client_pane_snapshot_repair_events("client-1", std::slice::from_ref(&window_id));
+            events.extend(runtime.frontend_sync_events("client-2"));
+            events.extend(drain_owner_snapshot_completions(&mut runtime));
+            for event in events {
+                match &event.target {
+                    DispatchTarget::Client(client) if client == "client-1" => {
+                        repair_queue.enqueue(&prepare_outbound_event(&event))
+                    }
+                    DispatchTarget::Client(client) if client == "client-2" => {
+                        resync_queue.enqueue(&prepare_outbound_event(&event))
+                    }
+                    _ => false,
+                };
             }
             resync_connected = true;
         }

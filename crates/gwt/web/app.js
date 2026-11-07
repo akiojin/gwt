@@ -1185,14 +1185,14 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         },
       });
 
-      function setConnectionState(connected) {
+      function setConnectionState(connected, recoverSnapshots = false) {
         if (!connected) { clearAgentActivity(); clearAgentSchedule(); clearAgentSwitch(); clearAgentRosterRename(); }
         connectionOverlay.setConnected(connected);
         handleLaunchWizardTransportChange(connected);
         // SPEC #3170 AS-17.2: disconnect invalidates every silent semantic
         // retry owner; reconnect restarts degraded open windows at 5s.
         if (typeof handleKnowledgeTransportChange === "function") {
-          handleKnowledgeTransportChange(connected);
+          handleKnowledgeTransportChange(connected, recoverSnapshots);
         }
         // SPEC-3038 US-4: the Status Strip (plus the SPEC-2359 W-17 full-
         // screen overlay above) is the home for connection state. The class
@@ -1326,7 +1326,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         projectViewReadiness.connectionLost();
         // A restarted backend has its own restore gate, even when this page survives.
         startupAutoResumeReadySent = false;
-        setConnectionState(true);
+        setConnectionState(true, recoverSnapshots);
         send({ kind: "frontend_ready" });
         closeProjectController.reconnect();
         if (socketProjectKey) projectPageMetadata.reportAttention();
@@ -1345,12 +1345,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         // operations it still shows as running.
         if (recoverSnapshots === true) resyncSocketSurfaces();
         else if (socketProjectKey) {
-          send({ kind: "get_system_settings" });
-          resyncHookDoctor();
+          resyncSettings();
           // frontend_ready omits these snapshots; release reads lost with the old client.
           const ids = (activeWorkspace()?.windows || []).map(entry => entry.id);
           resyncBoardLogs(ids);
           resyncProfile(ids);
+          resyncProjectIndexSearch(ids);
         }
         syncRunningBranchCleanups();
         requestVisiblePmReports(true);
@@ -5311,7 +5311,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             }));
             break;
           case "update_state":
-            if (event.state === "available") {
+            if (event.state === "available" || event.state === "up_to_date") {
               applyUpdateState(event);
             }
             break;

@@ -1336,6 +1336,229 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       }
     }
   });
+
+  test('T-UTASK-USER-REOPEN, T-UTASK-USER-CANCEL and T-UTASK-USER-UPDATE persist browser authority and reconcile receipts after reconnect', async ({ page }, info) => {
+    const theme = info.project.name.includes('light') ? 'light' : 'dark';
+    const windowId = 'pm-request-task-fixture';
+    const taskId = 'synthetic-fixture-task';
+    const original = 'Keep this exact fixture request.\n再開しても原文を保存する。';
+    const fixturePm = { kind: 'pm', id: 'synthetic-fixture-pm' };
+    const draft = { id: taskId, title: 'Synthetic completed task', purpose: 'Verify the browser reopen adapter',
+      completion_conditions: ['The original fixture outcome is verified'], issue_numbers: [3431], goal_ids: [], assignee: null };
+    const pendingTask = { draft, source_id: 'synthetic-fixture-source', parent_id: null, status: 'pending',
+      condition_revision: 1, review_generation: 1, review_required: false, next_action: null, wait_reason: null, completion: null };
+    const completedTask = { ...pendingTask, status: 'completed',
+      completion: { condition_revision: 1, review_generation: 1, evidence: ['synthetic-fixture: verified outcome'] } };
+    let statePath = '';
+    let seed: any;
+    const target = await startExactRelaunchFixture(info, {
+      async beforeStart({ home, project, preferences }) {
+        const projectKey = basename(join(preferences, '..'));
+        const at = '2026-11-06T00:00:00Z';
+        const source = { id: pendingTask.source_id, project_key: projectKey, original,
+          authority: { session_id: 'synthetic-fixture-intake', turn_id: 'synthetic-fixture-turn',
+            prompt_sha256: createHash('sha256').update(original).digest('hex') } };
+        const receipt = (actor: { kind: string; id: string }, operation_id: string, expected_revision: number,
+          action: Record<string, unknown>, tasks: unknown[]) => {
+          const request = { operation_id, expected_revision, reason: 'Synthetic fixture seed only', action };
+          return { operation_id, action: action.kind, request_digest: createHash('sha256')
+            .update(JSON.stringify([actor, request])).digest('hex'), revision: expected_revision + 1,
+          actor, at, reason: request.reason, source_id: source.id, tasks };
+        };
+        // This is receipt-consistent TaskStore scaffolding, not native-intake proof.
+        seed = { schema_version: 1, project_key: projectKey, revision: 3, sources: { [source.id]: source }, pending: [],
+          tasks: { [taskId]: completedTask }, receipts: [
+            receipt({ kind: 'intake', id: 'synthetic-fixture-intake' }, 'synthetic-capture', 0,
+              { kind: 'capture', source }, []),
+            receipt(fixturePm, 'synthetic-decompose', 1,
+              { kind: 'decompose', source_id: source.id, root: draft, children: [] }, [pendingTask]),
+            receipt(fixturePm, 'synthetic-complete', 2,
+              { kind: 'complete', task_id: taskId, condition_revision: 1, review_generation: 1,
+                evidence: completedTask.completion.evidence }, [completedTask]),
+          ] };
+        const taskDirectory = join(preferences, 'request-tasks');
+        mkdirSync(taskDirectory, { recursive: true, mode: 0o700 });
+        statePath = join(taskDirectory, 'state.json');
+        writeFileSync(join(taskDirectory, 'state.initialized'), projectKey, { mode: 0o600 });
+        writeFileSync(statePath, JSON.stringify(seed), { mode: 0o600 });
+        writeFileSync(join(preferences, 'pm.json'), JSON.stringify({ settings: { auto_start: false }, registration: {
+          session_id: SESSION, agent_id: 'codex', worktree_path: project, created_at: at,
+        } }));
+        writeFileSync(join(preferences, '../workspace.json'), JSON.stringify({ viewport: { x: 0, y: 0, zoom: 1 },
+          windows: [{ id: windowId, title: 'PM', preset: 'agent', geometry: { x: 30, y: 30, width: 1050, height: 720 },
+            z_index: 1, status: 'stopped', session_id: SESSION, agent_id: 'codex', persist: true }], next_z_index: 2 }));
+        mkdirSync(join(home, '.gwt/sessions'), { recursive: true });
+        writeFileSync(join(home, '.gwt/sessions', `${SESSION}.toml`), `id = "${SESSION}"\nworktree_path = ${JSON.stringify(project)}\nbranch = "main"\nagent_id = { type = "Codex" }\nstatus = "Stopped"\ncreated_at = "${at}"\nupdated_at = "${at}"\nlast_activity_at = "${at}"\n`);
+        writeFileSync(join(home, '.gwt/config.toml'), '[pr_inventory]\ncache_ttl_secs = 3600\nchecks_refresh_secs = 3600\n');
+        writeFileSync(join(preferences, '../pr-inventory-cache.json'), JSON.stringify({ fetched_at: at, rows: [] }));
+      },
+    });
+    const errors: string[] = [];
+    const exchanges: unknown[] = [];
+    const primaryErrors: unknown[] = [];
+    const cleanupErrors: unknown[] = [];
+    page.on('pageerror', error => errors.push(error.message));
+    page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+    try {
+      await page.addInitScript(value => localStorage.setItem('gwt:ui:theme', value), theme);
+      await gotoPmReports(page, undefined, target.url);
+      await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+      let requestId = 0;
+      const exchange = async (kind: string, body: Record<string, unknown>) => {
+        await page.waitForFunction(() => (window as any).__gwtPlaywrightSockets?.some((socket: WebSocket) =>
+          socket.readyState === WebSocket.OPEN && new URL(socket.url).searchParams.has('repo_hash')));
+        const pane = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
+        await expect(pane).toHaveCount(1);
+        const id = await pane.getAttribute('data-id');
+        expect(id).toBeTruthy();
+        const event = { kind, id, request_id: ++requestId, ...body };
+        const after = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
+        await sendLiveGwtEvent(page, event);
+        const reply = await page.waitForFunction(({ after, id, requestId }) =>
+          (window as any).__gwtPlaywrightMessages?.findLast((entry: any) => entry.sequence > after
+            && entry.payload.kind === 'pm_request_task' && entry.payload.id === id
+            && entry.payload.request_id === requestId)?.payload,
+        { after, id, requestId }).then(handle => handle.jsonValue());
+        exchanges.push({ request: event, response: reply });
+        return reply.result;
+      };
+      const loaded = await exchange('load_pm_request_task', { task_id: taskId });
+      expect(loaded).toMatchObject({ state: 'ready', revision: 3, task: completedTask });
+      expect(loaded.receipt ?? null).toBeNull();
+      const request = { operation_id: `browser-reopen-${theme}`, expected_revision: 3,
+        reason: 'The original outcome needs another review.\nPlease reopen this task.', task_id: taskId };
+      const reopened = await exchange('reopen_pm_request_task', { request });
+      expect(reopened).toMatchObject({ state: 'ready', revision: 4, task: {
+        ...pendingTask, review_generation: 2, review_required: true,
+      }, receipt: { operation_id: request.operation_id, action: 'reopen', revision: 4,
+        reason: request.reason, actor: { kind: 'user' } } });
+      expect(reopened.receipt.actor.id).toMatch(/^browser:[0-9a-f-]{36}$/i);
+      expect(reopened.receipt.actor.id).not.toBe(fixturePm.id);
+      const savedBytes = readFileSync(statePath, 'utf8');
+      const saved = JSON.parse(savedBytes);
+      expect(saved.revision).toBe(4);
+      expect(saved.receipts).toEqual([...seed.receipts, reopened.receipt]);
+      expect(saved.tasks[taskId]).toEqual(reopened.task);
+      expect(saved.sources).toEqual(seed.sources);
+      expect(saved.sources[pendingTask.source_id].original).toBe(original);
+      expect(await exchange('reopen_pm_request_task', { request })).toEqual(reopened);
+      expect(readFileSync(statePath, 'utf8')).toBe(savedBytes);
+      expect(await exchange('reopen_pm_request_task', { request: { ...request,
+        operation_id: `${request.operation_id}-stale` } })).toMatchObject({ state: 'error', code: 'conflict',
+        current_revision: 4, recovery_operation: 'load_pm_request_task' });
+      expect(readFileSync(statePath, 'utf8')).toBe(savedBytes);
+
+      // Reload creates a fresh server-generated browser actor. Reconcile by read;
+      // never supply the old actor or reinterpret its operation as a new mutation.
+      await page.reload();
+      await page.waitForFunction(() => (window as any).__gwtPlaywrightTestBridgeInstalled === true);
+      await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+      expect(await exchange('reopen_pm_request_task', { request })).toMatchObject({ state: 'error',
+        code: 'operation_conflict', recovery_operation: 'load_pm_request_task' });
+      expect(await exchange('load_pm_request_task', { task_id: taskId,
+        receipt_operation_id: request.operation_id })).toEqual(reopened);
+      expect(readFileSync(statePath, 'utf8')).toBe(savedBytes);
+      const cancelRequest = { operation_id: `browser-cancel-${theme}`, expected_revision: 4,
+        reason: 'Withdraw the original request without claiming it was achieved.', task_id: taskId };
+      const cancelled = await exchange('cancel_pm_request_task', { request: cancelRequest });
+      expect(cancelled).toMatchObject({ state: 'ready', revision: 5, task: {
+        ...pendingTask, status: 'cancelled', review_generation: 3, review_required: true, completion: null,
+      }, receipt: { operation_id: cancelRequest.operation_id, action: 'cancel', revision: 5,
+        reason: cancelRequest.reason, actor: { kind: 'user' } } });
+      expect(cancelled.receipt.actor.id).toMatch(/^browser:[0-9a-f-]{36}$/i);
+      expect(cancelled.receipt.actor.id).not.toBe(reopened.receipt.actor.id);
+      const cancelledBytes = readFileSync(statePath, 'utf8');
+      const cancelledState = JSON.parse(cancelledBytes);
+      expect(cancelledState.receipts).toEqual([...seed.receipts, reopened.receipt, cancelled.receipt]);
+      expect(cancelledState.tasks[taskId]).toEqual(cancelled.task);
+      expect(cancelledState.sources).toEqual(seed.sources);
+      expect(await exchange('cancel_pm_request_task', { request: cancelRequest })).toEqual(cancelled);
+      expect(await exchange('cancel_pm_request_task', { request: { ...cancelRequest,
+        operation_id: `${cancelRequest.operation_id}-stale` } })).toMatchObject({ state: 'error', code: 'conflict',
+        current_revision: 5, recovery_operation: 'load_pm_request_task' });
+      await page.reload();
+      await page.waitForFunction(() => (window as any).__gwtPlaywrightTestBridgeInstalled === true);
+      await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+      expect(await exchange('cancel_pm_request_task', { request: cancelRequest })).toMatchObject({ state: 'error',
+        code: 'operation_conflict', recovery_operation: 'load_pm_request_task' });
+      expect(await exchange('load_pm_request_task', { task_id: taskId,
+        receipt_operation_id: cancelRequest.operation_id })).toEqual(cancelled);
+      const historical = await exchange('load_pm_request_task', { task_id: taskId,
+        receipt_operation_id: request.operation_id });
+      expect(historical).toEqual({ ...cancelled, receipt: reopened.receipt });
+      expect(readFileSync(statePath, 'utf8')).toBe(cancelledBytes);
+
+      const noopRequest = { operation_id: `browser-update-noop-${theme}`, expected_revision: 5,
+        reason: 'Confirm this saved task without changing its draft.', task: draft };
+      const noop = await exchange('update_pm_request_task', { request: noopRequest });
+      expect(noop).toMatchObject({ state: 'ready', revision: 6, task: cancelled.task,
+        receipt: { operation_id: noopRequest.operation_id, action: 'update', revision: 6,
+          reason: noopRequest.reason, actor: { kind: 'user' }, tasks: [] } });
+      expect(noop.receipt.actor.id).toMatch(/^browser:[0-9a-f-]{36}$/i);
+      expect(noop.receipt.actor.id).not.toBe(cancelled.receipt.actor.id);
+      const noopBytes = readFileSync(statePath, 'utf8');
+      const noopState = JSON.parse(noopBytes);
+      expect(noopState.revision).toBe(6);
+      expect(noopState.receipts).toEqual([...cancelledState.receipts, noop.receipt]);
+      expect(noopState.tasks[taskId]).toEqual(cancelled.task);
+      expect(noopState.sources).toEqual(seed.sources);
+      expect(await exchange('update_pm_request_task', { request: noopRequest })).toEqual(noop);
+      expect(readFileSync(statePath, 'utf8')).toBe(noopBytes);
+
+      const correctedDraft = { ...draft, purpose: 'Verify the corrected original fixture outcome',
+        completion_conditions: ['Verify the corrected outcome before claiming completion'] };
+      const updateRequest = { operation_id: `browser-update-${theme}`, expected_revision: 6,
+        reason: 'Correct the purpose and completion conditions while retaining the original request.', task: correctedDraft };
+      const updated = await exchange('update_pm_request_task', { request: updateRequest });
+      expect(updated).toMatchObject({ state: 'ready', revision: 7, task: { ...cancelled.task,
+        draft: correctedDraft, condition_revision: 2, review_generation: 4, review_required: true,
+      }, receipt: { operation_id: updateRequest.operation_id, action: 'update', revision: 7,
+        reason: updateRequest.reason, actor: noop.receipt.actor } });
+      expect(updated.receipt.tasks).toEqual([updated.task]);
+      const updatedBytes = readFileSync(statePath, 'utf8');
+      const updatedState = JSON.parse(updatedBytes);
+      expect(updatedState.revision).toBe(7);
+      expect(updatedState.receipts).toEqual([...noopState.receipts, updated.receipt]);
+      expect(updatedState.tasks[taskId]).toEqual(updated.task);
+      expect(updatedState.sources).toEqual(seed.sources);
+      expect(updatedState.sources[pendingTask.source_id].original).toBe(original);
+      expect(await exchange('update_pm_request_task', { request: noopRequest }))
+        .toEqual({ ...updated, receipt: noop.receipt });
+      expect(readFileSync(statePath, 'utf8')).toBe(updatedBytes);
+
+      await page.reload();
+      await page.waitForFunction(() => (window as any).__gwtPlaywrightTestBridgeInstalled === true);
+      await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+      expect(await exchange('update_pm_request_task', { request: noopRequest })).toMatchObject({ state: 'error',
+        code: 'operation_conflict', recovery_operation: 'load_pm_request_task' });
+      expect(await exchange('load_pm_request_task', { task_id: taskId,
+        receipt_operation_id: noopRequest.operation_id })).toEqual({ ...updated, receipt: noop.receipt });
+      expect(readFileSync(statePath, 'utf8')).toBe(updatedBytes);
+      expect(errors).toEqual([]);
+    } catch (error) {
+      primaryErrors.push(error);
+      throw error;
+    } finally {
+      try {
+        await info.attach(`T-UTASK-USER-REOPEN/CANCEL/UPDATE ${theme} transport and persistence`, {
+          body: JSON.stringify({ synthetic_fixture_seed: true, native_intake_proof: false,
+            production_task_ui: false, theme, seed, exchanges, console_page_errors: errors,
+            persisted: JSON.parse(readFileSync(statePath, 'utf8')) }), contentType: 'application/json',
+        });
+        const screenshot = info.outputPath(`task-reopen-transport-${theme}.png`);
+        await page.screenshot({ path: screenshot });
+        await info.attach(`T-UTASK-USER-REOPEN/CANCEL/UPDATE ${theme} browser`, { path: screenshot, contentType: 'image/png' });
+      } catch (error) { cleanupErrors.push(error); }
+      try { await page.close(); } catch (error) { cleanupErrors.push(error); }
+      try { await target.stop(); } catch (error) { cleanupErrors.push(error); }
+      try { expect(errors).toEqual([]); } catch (error) { cleanupErrors.push(error); }
+      if (cleanupErrors.length) {
+        const failures = [...primaryErrors, ...cleanupErrors];
+        throw new AggregateError(failures, 'Task reopen target evidence/cleanup failed:\n' + failures.map(String).join('\n'),
+          { cause: primaryErrors[0] });
+      }
+    }
+  });
 });
 
 test('typed model content selects the renderer across surfaces', async ({ page }, info) => {

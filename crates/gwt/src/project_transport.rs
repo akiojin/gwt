@@ -4060,10 +4060,35 @@ mod tests {
             },
         )
         .expect("bound agent principal");
-        let bound_scope = super::AgentPaneSessionScope::new(super::AgentCapabilityGrant::new(
+        let mut bound_scope = super::AgentPaneSessionScope::new(super::AgentCapabilityGrant::new(
             "bound-capability".to_string(),
             bound_principal.clone(),
         ));
+        bound_scope.filter_outbound(workspace.to_string()).unwrap();
+        for agent in [&scope, &bound_scope] {
+            assert!(agent.allowed_window_ids.contains("tab-owned::agent-1"));
+            for wire in [
+                serde_json::json!({"kind":"load_pm_request_task","id":"tab-owned::agent-1",
+                    "request_id":1,"task_id":"task"}),
+                serde_json::json!({"kind":"reopen_pm_request_task","id":"tab-owned::agent-1",
+                    "request_id":2,"request":{"operation_id":"reopen","expected_revision":3,
+                        "reason":"needs another review","task_id":"task"}}),
+                serde_json::json!({"kind":"cancel_pm_request_task","id":"tab-owned::agent-1",
+                    "request_id":3,"request":{"operation_id":"cancel","expected_revision":3,
+                        "reason":"withdraw this request","task_id":"task"}}),
+                serde_json::json!({"kind":"update_pm_request_task","id":"tab-owned::agent-1",
+                    "request_id":4,"request":{"operation_id":"update","expected_revision":3,
+                        "reason":"correct this request","task":{"id":"task","title":"Changed","purpose":"Changed",
+                            "completion_conditions":["Outcome"],"issue_numbers":[],"goal_ids":[],"assignee":null}}}),
+            ] {
+                assert!(
+                    agent
+                        .filter_inbound(serde_json::from_value(wire).unwrap())
+                        .is_none(),
+                    "inspection and producing agents cannot claim the browser user task adapter"
+                );
+            }
+        }
         assert!(matches!(
             bound_scope.filter_inbound(FrontendEvent::PaneSendInput {
                 session_id: "session-1".to_string(),
@@ -5205,6 +5230,32 @@ mod tests {
         assert_eq!(payloads.len(), 2, "distinct windows must both be delivered");
         assert!(payloads.iter().any(|payload| payload.contains("window-1")));
         assert!(payloads.iter().any(|payload| payload.contains("window-2")));
+        for request_id in [41, 42] {
+            queue.enqueue(&prepare_outbound(&BackendEvent::PmRequestTask {
+                id: "same-window".into(),
+                request_id,
+                result: crate::protocol::PmRequestTaskResult::Error {
+                    code: "conflict".into(),
+                    message: "reread task".into(),
+                    current_revision: Some(3),
+                    recovery_operation: "load_pm_request_task".into(),
+                },
+            }));
+        }
+        let (payloads, _) = drain_all(&queue);
+        let request_ids: Vec<_> = payloads
+            .iter()
+            .map(|payload| {
+                serde_json::from_str::<serde_json::Value>(payload).unwrap()["request_id"]
+                    .as_u64()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            request_ids,
+            [41, 42],
+            "correlated task replies must not coalesce"
+        );
     }
 
     /// Issue #3755 AC-2: pane hydration finishes with one lossless receipt.

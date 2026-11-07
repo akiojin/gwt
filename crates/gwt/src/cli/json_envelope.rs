@@ -558,6 +558,21 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 ids: optional_string_vec(params, "ids")?,
             })
         }
+        "workspace.project_scan" => {
+            reject_unknown_params(params, &[], "workspace.project_scan")?;
+            CliCommand::Workspace(WorkspaceCommand::ProjectScan)
+        }
+        "workspace.project_prune" => {
+            reject_unknown_params(
+                params,
+                &["dry_run", "manifest_hash"],
+                "workspace.project_prune",
+            )?;
+            CliCommand::Workspace(WorkspaceCommand::ProjectPrune {
+                dry_run: optional_bool(params, "dry_run")?.unwrap_or(true),
+                manifest_hash: optional_string(params, "manifest_hash")?,
+            })
+        }
         "workspace.work_repair" => {
             reject_unknown_params(params, &["work_id", "dry_run"], "workspace.work_repair")?;
             CliCommand::Workspace(WorkspaceCommand::WorkRepair {
@@ -1900,6 +1915,30 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 .validate()
                 .map_err(|error| CliParseError::InvalidJson(error.into()))?;
             CliCommand::Pm(crate::cli::pm::PmCommand::RequestTasksRead { selector })
+        }
+        "pm.request_tasks.capture" => {
+            reject_unknown_params(
+                params,
+                &[
+                    "operation_id",
+                    "expected_revision",
+                    "reason",
+                    "provider",
+                    "conversation_id",
+                    "id",
+                    "prompt_sha256",
+                ],
+                "pm.request_tasks.capture",
+            )?;
+            let request: crate::cli::pm::NativeCaptureRequest =
+                serde_json::from_value(Value::Object(params.clone()))
+                    .map_err(|error| CliParseError::InvalidJson(error.to_string()))?;
+            request
+                .validate()
+                .map_err(|error| CliParseError::InvalidJson(error.into()))?;
+            CliCommand::Pm(crate::cli::pm::PmCommand::RequestTasksCapture {
+                request: Box::new(request),
+            })
         }
         "pm.request_tasks.apply" => {
             reject_unknown_params(
@@ -5202,6 +5241,26 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn project_store_maintenance_json_defaults_to_dry_run_and_rejects_unknown_scope() {
+        assert!(matches!(
+            ok("workspace.project_prune", json!({})),
+            CliCommand::Workspace(WorkspaceCommand::ProjectPrune {
+                dry_run: true,
+                manifest_hash: None
+            })
+        ));
+        assert!(matches!(
+            ok("workspace.project_scan", json!({})),
+            CliCommand::Workspace(WorkspaceCommand::ProjectScan)
+        ));
+        assert!(
+            err("workspace.project_prune", json!({"ids": ["unexpected"]}))
+                .to_string()
+                .contains("ids")
+        );
+    }
+
     /// Issue #4465 AC-8: `workspace.work_prune` mutates durable Work state, so
     /// an unqualified call only reports candidates. The first call used to be
     /// an immediate `APPLIED` across every Work on the machine (1100 rows,
@@ -8187,6 +8246,68 @@ mod tests {
                 .capabilities
                 .iter()
                 .any(|row| row.operation == operation && row.executable));
+        }
+    }
+
+    #[test]
+    fn pm_request_tasks_native_selection_cannot_supply_provenance() {
+        let selection = json!({"provider":"codex", "conversation_id":"conversation", "id":"turn"});
+        ok(
+            "pm.request_tasks.read",
+            json!({"selector":{"kind":"native_turns"}}),
+        );
+        let mut detail = selection.clone();
+        detail["kind"] = json!("native_turn");
+        ok("pm.request_tasks.read", json!({"selector":detail}));
+        let mut capture = selection;
+        capture["operation_id"] = json!("capture-1");
+        capture["expected_revision"] = json!(0);
+        capture["reason"] = json!("Preserve this native request for classification");
+        capture["prompt_sha256"] = json!("a".repeat(64));
+        ok("pm.request_tasks.capture", capture.clone());
+        for field in [
+            "actor",
+            "authority",
+            "source",
+            "original",
+            "project_root",
+            "path",
+        ] {
+            let mut forged = capture.clone();
+            forged[field] = json!("forged");
+            assert!(matches!(
+                err("pm.request_tasks.capture", forged),
+                CliParseError::InvalidJson(_)
+            ));
+        }
+        for field in [
+            "provider",
+            "conversation_id",
+            "id",
+            "prompt_sha256",
+            "operation_id",
+            "reason",
+        ] {
+            let mut invalid = capture.clone();
+            invalid[field] = json!(" ");
+            assert!(matches!(
+                err("pm.request_tasks.capture", invalid),
+                CliParseError::InvalidJson(_)
+            ));
+        }
+        for field in [
+            "provider",
+            "conversation_id",
+            "id",
+            "prompt_sha256",
+            "expected_revision",
+        ] {
+            let mut missing = capture.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(matches!(
+                err("pm.request_tasks.capture", missing),
+                CliParseError::InvalidJson(_)
+            ));
         }
     }
 

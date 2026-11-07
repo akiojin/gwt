@@ -659,6 +659,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "pm.request_tasks.capture",
+        aliases: &[],
+    },
+    Operation {
         name: "pm.status",
         aliases: &[],
     },
@@ -884,6 +888,14 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "workspace.join",
+        aliases: &[],
+    },
+    Operation {
+        name: "workspace.project_prune",
+        aliases: &[],
+    },
+    Operation {
+        name: "workspace.project_scan",
         aliases: &[],
     },
     Operation {

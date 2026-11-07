@@ -1,5 +1,9 @@
 import { expect, test, type Page } from "@playwright/test";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { gotoLiveGwt, openLiveGwtProject, withLiveGwtBackendLock } from "./_helpers/live-gwt";
 
 const configuredUrl = process.env.GWT_PLAYWRIGHT_BASE_URL;
 const appUrl = configuredUrl
@@ -7,6 +11,91 @@ const appUrl = configuredUrl
   : APP_URL;
 const errors = new WeakMap<Page, string[]>();
 const slowMessage = "Loading cache-backed work items (taking longer than usual)";
+
+test("ordinary reconnect recovers a lost Knowledge cache reply in the mounted window", async ({ page }, info) => {
+  const home = process.env.GWT_PLAYWRIGHT_CHECK_HOME;
+  test.skip(!configuredUrl || !home, "requires browser-check checkout and fresh HOME");
+  test.setTimeout(120_000);
+  await withLiveGwtBackendLock(configuredUrl!, info, async () => {
+    expect(home).not.toBe(homedir());
+    const identity = JSON.parse(await readFile(join(home!, "issue-4925-isolated.json"), "utf8"));
+    const cache = join(home!, ".gwt/cache/issues", identity.repo_hash, "50160001");
+    await mkdir(cache, { recursive: true });
+    await writeFile(join(cache, "meta.json"), JSON.stringify({ number: 50160001, author_login: "akiojin",
+      title: "KLC recovered cache row", state: "open", labels: ["bug"], updated_at: new Date().toISOString(), comment_ids: [] }));
+    await writeFile(join(cache, "body.md"), "Knowledge reconnect fixture.\n");
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    const captured: string[] = [];
+    const requests: any[] = [];
+    let lostRequestId: number | undefined;
+    let droppedReplies = 0;
+    let reconnecting = false;
+    let replacement: { reads: any[]; reply?: any } | undefined;
+    page.on("pageerror", error => captured.push(error.message));
+    page.on("console", message => { if (message.type() === "error") captured.push(message.text()); });
+    await page.setViewportSize({ width: 1600, height: 1000 });
+    await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
+    await page.routeWebSocket(/\/ws\?.*repo_hash=/, socket => {
+      const connection: { reads: any[]; reply?: any } = { reads: [] };
+      if (reconnecting && !replacement) replacement = connection;
+      const server = socket.connectToServer();
+      socket.onMessage(message => {
+        const request = typeof message === "string" ? JSON.parse(message) : null;
+        if (request?.kind) requests.push(request);
+        if (request?.kind === "open_pm_agent") return;
+        if (request?.kind === "load_knowledge_bridge") {
+          connection.reads.push(request);
+          if (lostRequestId === undefined) lostRequestId = request.request_id;
+        }
+        server.send(message);
+      });
+      server.onMessage(message => {
+        const reply = typeof message === "string" ? JSON.parse(message) : null;
+        if (reply?.kind === "knowledge_entries") {
+          if (reply.request_id === lostRequestId) { droppedReplies++; return; }
+          connection.reply = reply;
+        }
+        socket.send(message);
+      });
+    });
+    await gotoLiveGwt(page, configuredUrl!, { enableTestBridge: true });
+    await openLiveGwtProject(page, identity.project);
+    await page.bringToFront();
+    await page.locator('.op-rail [data-surface="issues"]').click();
+    const surface = page.locator(".surface-knowledge").first();
+    const input = surface.locator(".knowledge-search");
+    await expect(surface).toBeVisible();
+    await expect.poll(() => droppedReplies).toBeGreaterThan(0);
+    await input.fill("KLC");
+    await input.evaluate(element => { (window as any).__knowledgeReconnectInput = element; });
+    await expect(surface.locator(".knowledge-row")).toHaveCount(0);
+    reconnecting = true;
+    await page.evaluate(() => {
+      (window as any).__knowledgeReconnectDocument = document;
+      const socket = (window as any).__gwtPlaywrightSockets.findLast((socket: WebSocket) =>
+        socket.readyState === WebSocket.OPEN && new URL(socket.url).searchParams.has("repo_hash"));
+      if (!socket) throw new Error("missing owning project socket");
+      socket.close();
+    });
+    await expect.poll(() => replacement?.reply, { timeout: 20_000 }).toBeDefined();
+    expect(replacement!.reads).toHaveLength(1);
+    expect(replacement!.reads[0].request_id).toBeGreaterThan(lostRequestId!);
+    expect(replacement!.reply.request_id).toBe(replacement!.reads[0].request_id);
+    expect(replacement!.reply.entries.some((row: any) => row.number === 50160001)).toBe(true);
+    await expect(surface.locator('.knowledge-row[data-issue-number="50160001"]')).toBeVisible();
+    await expect(input).toHaveValue("KLC");
+    expect(await input.evaluate(element => element.isConnected && element === (window as any).__knowledgeReconnectInput)).toBe(true);
+    expect(await page.evaluate(() => document === (window as any).__knowledgeReconnectDocument)).toBe(true);
+    await expect(surface.getByRole("button", { name: /^Issue load failed/ })).toHaveCount(0);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    expect(requests.filter(request => /^(update_|save_|set_knowledge|run_branch|start_issue|launch_)/.test(request.kind))).toEqual([]);
+    const screenshot = info.outputPath(`knowledge-reconnect-${theme}.png`);
+    await page.screenshot({ path: screenshot });
+    await info.attach("knowledge reconnect", { path: screenshot, contentType: "image/png" });
+    await info.attach("knowledge reconnect requests", { body: JSON.stringify({ requests, droppedReplies, lostRequestId, replacement }), contentType: "application/json" });
+    expect(captured, "zero console/page errors").toEqual([]);
+  });
+});
 
 test.describe("Issue #5413: cache-backed load recovery", () => {
   test.use({ viewport: { width: 1600, height: 1000 } });

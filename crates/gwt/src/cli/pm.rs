@@ -37,6 +37,9 @@ pub enum PmCommand {
     RequestTasksApply {
         request: Box<gwt_core::pm_request_tasks::Request>,
     },
+    RequestTasksCapture {
+        request: Box<NativeCaptureRequest>,
+    },
     ProjectExecutionStatus {
         operation_id: Option<String>,
     },
@@ -102,6 +105,12 @@ pub enum PmCommand {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RequestTaskSelector {
     Summary {},
+    NativeTurns {},
+    NativeTurn {
+        provider: String,
+        conversation_id: String,
+        id: String,
+    },
     Candidates {
         limit: Option<usize>,
         after: Option<String>,
@@ -135,10 +144,59 @@ pub enum RequestTaskSelector {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeCaptureRequest {
+    pub operation_id: String,
+    pub expected_revision: u64,
+    pub reason: String,
+    pub provider: String,
+    pub conversation_id: String,
+    pub id: String,
+    pub prompt_sha256: String,
+}
+
+fn validate_native_selection(
+    provider: &str,
+    conversation_id: &str,
+    id: &str,
+) -> Result<(), &'static str> {
+    if [provider, conversation_id, id]
+        .iter()
+        .any(|value| value.trim().is_empty())
+    {
+        return Err("native provider, conversation and message identities are required");
+    }
+    Ok(())
+}
+
+impl NativeCaptureRequest {
+    pub(super) fn validate(&self) -> Result<(), &'static str> {
+        validate_native_selection(&self.provider, &self.conversation_id, &self.id)?;
+        if self.operation_id.trim().is_empty()
+            || self.reason.trim().is_empty()
+            || !super::hook::pm_reporting::candidate_digest_valid(&self.prompt_sha256)
+        {
+            return Err(
+                "native capture requires an operation ID, reason and canonical prompt SHA256",
+            );
+        }
+        Ok(())
+    }
+}
+
 impl RequestTaskSelector {
     pub(super) fn validate(&self) -> Result<(), &'static str> {
         let id = match self {
             Self::Summary {} => return Ok(()),
+            Self::NativeTurns {} => return Ok(()),
+            Self::NativeTurn {
+                provider,
+                conversation_id,
+                id,
+            } => {
+                return validate_native_selection(provider, conversation_id, id);
+            }
             Self::Candidates {
                 limit,
                 after,
@@ -387,10 +445,13 @@ pub(super) fn run<E: CliEnv>(
 ) -> Result<i32, SpecOpsError> {
     match command {
         PmCommand::RequestTasksRead { selector } => {
-            request_tasks(env.repo_path(), Some(selector), None, out)
+            request_tasks(env.repo_path(), Some(selector), None, None, out)
         }
         PmCommand::RequestTasksApply { request } => {
-            request_tasks(env.repo_path(), None, Some(&request), out)
+            request_tasks(env.repo_path(), None, Some(&request), None, out)
+        }
+        PmCommand::RequestTasksCapture { request } => {
+            request_tasks(env.repo_path(), None, None, Some(&request), out)
         }
         PmCommand::ProjectExecutionStatus { operation_id } => {
             let status =
@@ -829,6 +890,7 @@ fn request_tasks(
     repo: &Path,
     selector: Option<RequestTaskSelector>,
     request: Option<&gwt_core::pm_request_tasks::Request>,
+    capture: Option<&NativeCaptureRequest>,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     use gwt_core::pm_request_tasks::{Actor, ActorKind, TaskError, TaskStore};
@@ -852,6 +914,21 @@ fn request_tasks(
         .map_err(|error| TaskError::PersistenceUnconfirmed(error.to_string()))?;
         if !pm_registry::session_is_registered_pm(&record.prefs_path, &actor) {
             return Err(TaskError::Unauthorized);
+        }
+        if capture.is_some()
+            || matches!(
+                selector,
+                Some(RequestTaskSelector::NativeTurns {} | RequestTaskSelector::NativeTurn { .. })
+            )
+        {
+            let result = native_request_tasks(&actor, &record, &store, selector.as_ref(), capture);
+            if capture.is_some() {
+                current_revision = store
+                    .read()
+                    .ok()
+                    .map(|state| state.map_or(0, |state| state.revision));
+            }
+            return result;
         }
         if let Some(
             selector @ (RequestTaskSelector::Candidates { .. }
@@ -950,10 +1027,12 @@ fn request_tasks(
         }
         let Some(state) = state else {
             return match selector {
-                RequestTaskSelector::Candidates { .. }
+                RequestTaskSelector::NativeTurns {}
+                | RequestTaskSelector::NativeTurn { .. }
+                | RequestTaskSelector::Candidates { .. }
                 | RequestTaskSelector::Candidate { .. }
                 | RequestTaskSelector::CandidateChunk { .. } => {
-                    unreachable!("candidate reads precede TaskStore")
+                    unreachable!("private native/candidate reads precede TaskStore")
                 }
                 RequestTaskSelector::Pending { .. } | RequestTaskSelector::Tasks { .. } => {
                     unreachable!("ID pages handled above")
@@ -970,10 +1049,12 @@ fn request_tasks(
         };
         let mut value = json!({"schema_version":1,"ok":true,"state":"ready","project_key":state.project_key,"revision":state.revision});
         match selector {
-            RequestTaskSelector::Candidates { .. }
+            RequestTaskSelector::NativeTurns {}
+            | RequestTaskSelector::NativeTurn { .. }
+            | RequestTaskSelector::Candidates { .. }
             | RequestTaskSelector::Candidate { .. }
             | RequestTaskSelector::CandidateChunk { .. } => {
-                unreachable!("candidate reads precede TaskStore")
+                unreachable!("private native/candidate reads precede TaskStore")
             }
             RequestTaskSelector::Pending { .. } | RequestTaskSelector::Tasks { .. } => {
                 unreachable!("ID pages handled above")
@@ -1037,6 +1118,151 @@ fn request_tasks(
     out.push_str(&value.to_string());
     out.push('\n');
     Ok(code)
+}
+
+/// Native selection never consumes a hook observation or accepts authored text.
+fn native_request_tasks(
+    actor: &str,
+    record: &pm_registry::PmStoreRegistration,
+    store: &gwt_core::pm_request_tasks::TaskStore,
+    selector: Option<&RequestTaskSelector>,
+    capture: Option<&NativeCaptureRequest>,
+) -> Result<serde_json::Value, gwt_core::pm_request_tasks::TaskError> {
+    use crate::pm_conversation::{PmConversationAvailability, PmConversationRole};
+    use gwt_core::pm_request_tasks::{Action, Actor, ActorKind, IntakeSource, Request, TaskError};
+    use serde_json::json;
+
+    gwt_agent::validate_session_id_path_component(actor).map_err(|_| TaskError::Unauthorized)?;
+    let session = gwt_agent::Session::load(&gwt_sessions_dir().join(format!("{actor}.toml")))
+        .map_err(|error| TaskError::Unreadable(error.to_string()))?;
+    if session.id != actor
+        || session.agent_id.command() != record.registration.agent_id
+        || peer_project_dir(&session.worktree_path) != record.project_dir
+        || session.worktree_path != Path::new(&record.registration.worktree_path)
+    {
+        return Err(TaskError::Unauthorized);
+    }
+    let native = crate::pm_conversation::read_for_session(&session);
+    if native.availability != PmConversationAvailability::Ready {
+        return Err(TaskError::Unreadable(format!(
+            "native conversation is {:?}: {}",
+            native.availability,
+            native
+                .detail
+                .as_deref()
+                .unwrap_or("retry native_turns after the native store becomes ready")
+        )));
+    }
+    let conversation_id = native.conversation_id.as_deref().ok_or_else(|| {
+        TaskError::Unreadable("native conversation identity is unavailable".into())
+    })?;
+    let provider = session.agent_id.command();
+    let turns: Vec<_> = native
+        .messages
+        .iter()
+        .filter(|message| {
+            message.role == PmConversationRole::User
+                && !crate::pm_conversation::internal_prompt(&message.text)
+        })
+        .collect();
+    let mut value = json!({"schema_version":1,"ok":true,"provider":provider,
+        "conversation_id":conversation_id,"window_only":true,"detail":native.detail});
+    let (expected_provider, expected_conversation, id) = if let Some(request) = capture {
+        request
+            .validate()
+            .map_err(|error| TaskError::Invalid(error.into()))?;
+        (&request.provider, &request.conversation_id, &request.id)
+    } else {
+        match selector.expect("native read has a selector") {
+            RequestTaskSelector::NativeTurns {} => {
+                value["turns"] = json!(turns
+                    .iter()
+                    .map(|message| json!({"id":message.id,
+                    "prompt_sha256":gwt_core::pm_authorization::digest(message.text.as_bytes())}))
+                    .collect::<Vec<_>>());
+                return Ok(value);
+            }
+            RequestTaskSelector::NativeTurn {
+                provider,
+                conversation_id,
+                id,
+            } => {
+                validate_native_selection(provider, conversation_id, id)
+                    .map_err(|error| TaskError::Invalid(error.into()))?;
+                (provider, conversation_id, id)
+            }
+            _ => unreachable!("native selector only"),
+        }
+    };
+    if expected_provider != provider || expected_conversation != conversation_id {
+        return Err(TaskError::Invalid(
+            "native selection changed; reread native_turns".into(),
+        ));
+    }
+    let message = turns.into_iter().find(|message| &message.id == id)
+        .ok_or_else(|| TaskError::Invalid("native turn is not in the current human window; retry native_turns; absence does not prove no request".into()))?;
+    let prompt_sha256 = gwt_core::pm_authorization::digest(message.text.as_bytes());
+    if let Some(request) = capture {
+        if request.prompt_sha256 != prompt_sha256 {
+            return Err(TaskError::Invalid(
+                "native text changed; reread the selected native_turn".into(),
+            ));
+        }
+        let current = gwt_agent::Session::load(&gwt_sessions_dir().join(format!("{actor}.toml")))
+            .map_err(|error| TaskError::Unreadable(error.to_string()))?;
+        if current.id != session.id
+            || current.agent_id != session.agent_id
+            || current.worktree_path != session.worktree_path
+            || current.exact_resume_session_id() != Some(conversation_id)
+        {
+            return Err(TaskError::Invalid(
+                "native session changed; reread native_turns".into(),
+            ));
+        }
+        // Both source and intake actor survive replacement of the GWT Session.
+        // Native provenance is tracking data, never instruction authority.
+        let native_session = serde_json::to_string(&(provider, conversation_id))
+            .map_err(|error| TaskError::Invalid(error.to_string()))?;
+        let source_id = format!(
+            "native:{}",
+            gwt_core::pm_authorization::digest(
+                &serde_json::to_vec(&(provider, conversation_id, &message.id))
+                    .map_err(|error| TaskError::Invalid(error.to_string()))?
+            )
+        );
+        let source = IntakeSource {
+            id: source_id,
+            project_key: record
+                .project_dir
+                .file_name()
+                .and_then(|key| key.to_str())
+                .ok_or(TaskError::ForeignProject)?
+                .into(),
+            original: message.text.clone(),
+            authority: gwt_core::user_instruction::InstructionAuthority {
+                session_id: native_session.clone(),
+                turn_id: message.id.clone(),
+                prompt_sha256,
+            },
+        };
+        let receipt = store.apply(
+            &Actor {
+                kind: ActorKind::Intake,
+                id: native_session,
+            },
+            &Request {
+                operation_id: request.operation_id.clone(),
+                expected_revision: request.expected_revision,
+                reason: request.reason.clone(),
+                action: Action::Capture { source },
+            },
+        )?;
+        value["receipt"] = json!(receipt);
+    } else {
+        value["turn"] =
+            json!({"id":message.id,"original":message.text,"prompt_sha256":prompt_sha256});
+    }
+    Ok(value)
 }
 
 fn read_candidates(
@@ -1332,6 +1558,164 @@ mod tests {
     use super::*;
     use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
     use std::fs;
+
+    #[test]
+    fn pm_request_tasks_native_capture_preserves_exact_turns_across_resume() {
+        use serde_json::{json, Value};
+        let _lock = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let _claude = ScopedEnvVar::set("CLAUDE_CONFIG_DIR", home.path().join("claude"));
+        let _codex = ScopedEnvVar::set("CODEX_HOME", home.path().join("codex"));
+        let _pm = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-a");
+        let invoke = |repo: &Path, operation: &str, params: Value| {
+            let command = crate::cli::json_envelope::parse_operation(operation, &params)
+                .expect("native selection must have a canonical operation");
+            let (code, output) = crate::cli::run_collect(
+                &mut crate::cli::env::TestEnv::new(repo.to_path_buf()),
+                command,
+            )
+            .unwrap();
+            (code, serde_json::from_str::<Value>(&output).unwrap())
+        };
+        for agent in [gwt_agent::AgentId::ClaudeCode, gwt_agent::AgentId::Codex] {
+            let repo = home.path().join(agent.command());
+            fs::create_dir_all(&repo).unwrap();
+            let worktree = pm_registry::pm_worktree_path_for_repo_path(&repo);
+            fs::create_dir_all(&worktree).unwrap();
+            let prefs = pm_registry::pm_prefs_path_for_repo_path(&repo);
+            let register = |id: &str| {
+                pm_registry::save_pm_prefs(
+                    &prefs,
+                    &pm_registry::PmPrefs {
+                        registration: Some(pm_registry::PmRegistration {
+                            session_id: id.into(),
+                            agent_id: agent.command().into(),
+                            worktree_path: worktree.display().to_string(),
+                            created_at: None,
+                            consecutive_crashes: 0,
+                            next_not_before: None,
+                        }),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                let mut session = gwt_agent::Session::new(&worktree, "pm", agent.clone());
+                session.id = id.into();
+                session.agent_session_id = Some("native-conversation".into());
+                fs::create_dir_all(gwt_core::paths::gwt_sessions_dir()).unwrap();
+                session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+            };
+            register("pm-a");
+            let original = "Keep this request.\nPreserve its exact original.";
+            let row = |id: &str| match agent {
+                gwt_agent::AgentId::ClaudeCode => json!({"type":"user","uuid":id,
+                    "sessionId":"native-conversation","cwd":worktree,
+                    "message":{"role":"user","content":original}}),
+                _ => json!({"type":"response_item","payload":{"type":"message","id":id,
+                    "role":"user","content":[{"type":"input_text","text":original}]}}),
+            };
+            let (path, mut rows) = if agent == gwt_agent::AgentId::ClaudeCode {
+                (
+                    home.path()
+                        .join("claude/projects/project/native-conversation.jsonl"),
+                    vec![],
+                )
+            } else {
+                (
+                    home.path()
+                        .join("codex/sessions/rollout-native-conversation.jsonl"),
+                    vec![
+                        json!({"type":"session_meta","payload":{"id":"native-conversation","cwd":worktree}}),
+                    ],
+                )
+            };
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            rows.push(row("native-1"));
+            let write = |rows: &[Value]| {
+                fs::write(
+                    &path,
+                    rows.iter()
+                        .map(|row| format!("{row}\n"))
+                        .collect::<String>(),
+                )
+                .unwrap()
+            };
+            write(&rows);
+            let read = |selector: Value| {
+                invoke(&repo, "pm.request_tasks.read", json!({"selector":selector}))
+            };
+            let inventory = read(json!({"kind":"native_turns"}));
+            assert_eq!(inventory.0, 0, "{}", inventory.1);
+            assert_eq!(inventory.1["window_only"], true);
+            assert_eq!(inventory.1["turns"].as_array().unwrap().len(), 1);
+            let selector = json!({"kind":"native_turn","provider":agent.command(),
+                "conversation_id":"native-conversation","id":"native-1"});
+            let detail = read(selector.clone());
+            assert_eq!(detail.0, 0, "{}", detail.1);
+            assert_eq!(detail.1["turn"]["original"], original);
+            let request = json!({"operation_id":"capture-1","expected_revision":0,"reason":"Unclassified native request",
+                "provider":agent.command(),"conversation_id":"native-conversation","id":"native-1",
+                "prompt_sha256":detail.1["turn"]["prompt_sha256"]});
+            let capture = |request: Value| invoke(&repo, "pm.request_tasks.capture", request);
+            let state_path = peer_project_dir(&repo).join("project-state/request-tasks/state.json");
+            for (field, value) in [
+                ("id", json!("native-2")),
+                ("conversation_id", json!("another")),
+                ("provider", json!("another")),
+                ("prompt_sha256", json!("b".repeat(64))),
+            ] {
+                let mut bad = request.clone();
+                bad[field] = value;
+                assert_eq!(capture(bad).0, 1);
+                assert!(!state_path.exists());
+            }
+            let first = capture(request.clone());
+            assert_eq!(first.0, 0, "{}", first.1);
+            let source = first.1["receipt"]["source_id"].as_str().unwrap().to_owned();
+            let saved = fs::read(&state_path).unwrap();
+            assert_eq!(capture(request.clone()), first);
+            assert_eq!(fs::read(&state_path).unwrap(), saved);
+            let mut second = request.clone();
+            second["operation_id"] = json!("capture-2");
+            second["expected_revision"] = json!(1);
+            second["id"] = json!("native-2");
+            assert_eq!(capture(second.clone()).0, 1);
+            assert_eq!(fs::read(&state_path).unwrap(), saved);
+            rows.push(row("native-2"));
+            write(&rows);
+            assert_eq!(capture(second).0, 0);
+            let classified = invoke(
+                &repo,
+                "pm.request_tasks.apply",
+                json!({"operation_id":"classify-1",
+                "expected_revision":2,"reason":"This turn was a question","action":{"kind":"classify_non_task","source_id":source}}),
+            );
+            assert_eq!(classified.0, 0, "{}", classified.1);
+            register("pm-b");
+            let _resumed = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-b");
+            assert_eq!(capture(request.clone()), first);
+            let mut again = request.clone();
+            again["operation_id"] = json!("capture-again");
+            again["expected_revision"] = json!(3);
+            assert_eq!(capture(again).0, 0);
+            let state = gwt_core::pm_request_tasks::TaskStore::for_repo(&repo)
+                .read()
+                .unwrap()
+                .unwrap();
+            assert_eq!(state.sources.len(), 2);
+            assert_eq!(state.pending.len(), 1);
+            assert!(state.tasks.is_empty());
+            assert_eq!(state.sources[&source].original, original);
+            let saved = fs::read(&state_path).unwrap();
+            for caller in ["pm-a", "foreign-agent"] {
+                let _caller = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, caller);
+                assert_eq!(read(selector.clone()).0, 1);
+                assert_eq!(capture(request.clone()).0, 1);
+            }
+            assert_eq!(fs::read(&state_path).unwrap(), saved);
+        }
+    }
 
     #[test]
     fn pm_request_tasks_candidates_survive_replacement_and_stay_unverified() {

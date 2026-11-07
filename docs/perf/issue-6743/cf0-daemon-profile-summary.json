@@ -1,0 +1,79 @@
+{
+  "file": "docs/perf/issue-6743/cf0-daemon-profile.json",
+  "seconds": 60.4572872,
+  "samples": 31,
+  "failures": 0,
+  "top_product": [
+    {
+      "Count": 9,
+      "Name": "gwt::protocol::_::impl$0::serialize<ref_mut$<serde_json::ser::Serializer<ref_mut$<alloc::vec::Vec<u8,alloc::alloc::Global> >,serde_json::ser::CompactFormatter> > >"
+    },
+    {
+      "Count": 5,
+      "Name": "gwt_agent::session::Session::load"
+    },
+    {
+      "Count": 3,
+      "Name": "gwt_core::repo_hash::read_git_config_chain"
+    },
+    {
+      "Count": 2,
+      "Name": "gwt_agent::runtime_gc::eligible_files<enum2$<core::option::Option<bool> > (*)(u32)>"
+    },
+    {
+      "Count": 2,
+      "Name": "gwt_agent::runtime_gc::sidecar_is_disposable<enum2$<core::option::Option<bool> > (*)(u32)>"
+    },
+    {
+      "Count": 2,
+      "Name": "gwt::project_execution_policy::_::impl$0::deserialize::impl$2::visit_map<serde_json::de::MapAccess<serde_json::read::SliceRead> >"
+    },
+    {
+      "Count": 1,
+      "Name": "gwt_agent::session::_::impl$0::deserialize::impl$2::visit_map<serde_json::de::MapAccess<serde_json::read::StrRead> >"
+    }
+  ],
+  "inclusive": [
+    {
+      "pattern": "local_status",
+      "samples": 3
+    },
+    {
+      "pattern": "actual_open",
+      "samples": 1
+    },
+    {
+      "pattern": "reconcile_project_execution_stop",
+      "samples": 0
+    },
+    {
+      "pattern": "has_unfinished_project_continue",
+      "samples": 2
+    },
+    {
+      "pattern": "project_execution_policy",
+      "samples": 5
+    },
+    {
+      "pattern": "pm_peer::project_dir",
+      "samples": 3
+    },
+    {
+      "pattern": "origin_url_from_git_config",
+      "samples": 3
+    },
+    {
+      "pattern": "session_inventory",
+      "samples": 0
+    },
+    {
+      "pattern": "poll_registered_project_index_sources",
+      "samples": 0
+    }
+  ],
+  "head": "cf0211c2b2d60fb621c3033c99c9a32b42af88d1",
+  "original_raw_sha256": "06ad723fbd139fafbfe58b4a1b5884ae8ec2166a95958b8757966a7ccff3cfd9",
+  "saved_raw_sha256": "363f48e5ee0a3264d458f194f96533c32fd84b4eaaf120f091e493305e495d8e",
+  "source_project_execution_policy_sha256": "485966f3ea0e298b49fffbbdb3eba6cf1c82c48ec94b9cedcf17cd783259eab2",
+  "purpose": "Attribution only: Debug running-thread snapshots, not CPU percentages or Release acceptance. Only the binary path was made repository-relative; original local raw hash is preserved."
+}

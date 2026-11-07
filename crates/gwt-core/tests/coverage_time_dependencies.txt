@@ -31,8 +31,6 @@ crates/gwt-core/src/index_coordinator.rs|background_defers_while_higher_priority
 crates/gwt-core/src/index_coordinator.rs|background_defers_while_higher_priority_claimant_is_pending|letdeadline=Instant::now()+Duration::from_secs(30)|1
 crates/gwt-core/src/index_coordinator.rs|wait_until|assert!(Instant::now()<deadline,)|1
 crates/gwt-core/src/index_coordinator.rs|wait_until|letdeadline=Instant::now()+Duration::from_secs(30)|1
-crates/gwt-core/src/operation_deadline.rs|contended_file_lock_notifies_the_call_scoped_observer|let_deadline=ScopedOperationDeadline::enter(Instant::now()+Duration::from_millis(40))|1
-crates/gwt-core/src/operation_deadline.rs|contended_file_lock_stops_at_the_shared_deadline|assert!(started.elapsed()<Duration::from_secs(1))|1
 crates/gwt-core/src/operation_deadline.rs|expired_deadline_rejects_an_available_file_lock|let_deadline=ScopedOperationDeadline::enter(Instant::now()-Duration::from_millis(1))|1
 crates/gwt-core/src/operation_deadline.rs|fixed_operation_clock_controls_expiry_without_spending_wall_time|letstart=Instant::now()-Duration::from_secs(1)|1
 crates/gwt-core/src/operation_deadline.rs|nested_deadlines_keep_the_earliest_expiry|letouter_expiry=Instant::now()+Duration::from_secs(1)|1
