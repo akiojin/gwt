@@ -61,14 +61,29 @@ impl ProjectRuntimeClient {
         use gwt_core::daemon::{DaemonBootstrapAction, RuntimeScope, RuntimeTarget};
         let scope = RuntimeScope::from_project_root(project_root, RuntimeTarget::Host)
             .map_err(|error| error.to_string())?;
-        let action = gwt_core::daemon::resolve_bootstrap_action_for_version(
+        // One project owner can serve several worktrees. Prefer its authority
+        // endpoint before the caller's exact descriptor, as the subscriber does.
+        let action = match crate::daemon_publisher::resolve_live_project_authority(
             gwt_home,
             &scope,
-            gwt_core::daemon::DAEMON_PROTOCOL_VERSION,
-            env!("CARGO_PKG_VERSION"),
-            crate::process::is_process_alive,
-        )
-        .map_err(|error| error.to_string())?;
+            &crate::process::is_process_alive,
+        )? {
+            Some(endpoint)
+                if endpoint.daemon_version.trim().trim_start_matches('v')
+                    == env!("CARGO_PKG_VERSION").trim().trim_start_matches('v') =>
+            {
+                DaemonBootstrapAction::Reuse(endpoint)
+            }
+            Some(endpoint) => DaemonBootstrapAction::RetireStaleVersion { endpoint },
+            None => gwt_core::daemon::resolve_bootstrap_action_for_version(
+                gwt_home,
+                &scope,
+                gwt_core::daemon::DAEMON_PROTOCOL_VERSION,
+                env!("CARGO_PKG_VERSION"),
+                crate::process::is_process_alive,
+            )
+            .map_err(|error| error.to_string())?,
+        };
         let DaemonBootstrapAction::Reuse(endpoint) = action else {
             return Err("Project execution owner is not ready".into());
         };
