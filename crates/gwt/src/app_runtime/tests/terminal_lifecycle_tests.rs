@@ -3319,11 +3319,12 @@ fn issue_5351_update_drain_host_hold_requires_pending_update_and_supports_host_w
     fs::create_dir_all(&project).unwrap();
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project);
     let prefs = gwt::IssueMonitorPrefs {
+        enabled: true,
         update_drain: Some(gwt::IssueMonitorUpdateDrain {
             version: "99.0.0".into(),
             since: "2026-10-13T00:00:00Z".into(),
             reason: gwt::IssueMonitorUpdateDrainReason::Auto,
-            automatic: None,
+            automatic: Some(true),
             blocking: Vec::new(),
         }),
         ..Default::default()
