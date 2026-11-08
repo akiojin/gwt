@@ -269,7 +269,16 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             return;
           }
           runtime.hasOutput = true;
-          runtime.terminal.write(text, onWritten);
+          runtime.outputWrites++;
+          try {
+            runtime.terminal.write(text, () => {
+              runtime.outputWrites--;
+              onWritten();
+            });
+          } catch (error) {
+            runtime.outputWrites--;
+            throw error;
+          }
         },
         onError: (error, windowId, projectKey) => {
           if (!socketProjectKey || projectKey !== socketProjectKey
@@ -3221,6 +3230,27 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           isReady: false,
           snapshotWriteCoordinator: null,
           hasOutput: false,
+          outputWrites: 0,
+          fitBarrierPending: false,
+          prepareFit: () => {
+            // Initial fit establishes the grid before any output can drain.
+            if (runtime.isReady !== true) return true;
+            if (runtime.fitBarrierPending) return false;
+            if (terminalOutputBatcher.pendingCount(windowId) === 0
+              && runtime.outputWrites === 0
+              && runtime.snapshotWriteCoordinator?.shouldDeferOutput() !== true) return true;
+            runtime.fitBarrierPending = true;
+            terminalOutputBatcher.flushNow(windowId);
+            terminal.write("", () => {
+              runtime.fitBarrierPending = false;
+              if (terminalMap.get(windowId) !== runtime) return;
+              scheduleTerminalFocusActivation(windowId, {
+                shouldPersistGeometry: true,
+                reason: "output_drained",
+              });
+            });
+            return false;
+          },
           // Issue #2937: bounds the focus-path reflow retry in
           // scheduleTerminalFocusActivation when the revealed container's
           // layout box has not settled yet (mirrors handshakeAttempts).
