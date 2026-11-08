@@ -611,7 +611,7 @@ fn run_after_quarantine_precheck<E: CliEnv>(
             return Ok(1);
         }
     }
-    match abort_blocked_done_build(env, &action, out) {
+    match abort_done_build(env, &action, out) {
         Ok(Some(code)) => return Ok(code),
         Ok(None) => {}
         Err(error) => {
@@ -745,9 +745,9 @@ fn run_after_quarantine_precheck<E: CliEnv>(
     Ok(code)
 }
 
-/// A Blocked execution may retain delivered Work. End only its own exact build
+/// An Active or Blocked execution may retain Done Work. End only its exact build
 /// lifecycle, keeping the normal global -> owner -> Session leases through save.
-fn abort_blocked_done_build<E: CliEnv>(
+fn abort_done_build<E: CliEnv>(
     env: &mut E,
     action: &SkillStateAction,
     out: &mut String,
@@ -769,7 +769,7 @@ fn abort_blocked_done_build<E: CliEnv>(
     {
         return Ok(None);
     }
-    let Some(authority) = crate::agent_project_state::snapshot_blocked_done_build_abort_authority(
+    let Some(authority) = crate::agent_project_state::snapshot_done_build_abort_authority(
         env.repo_path(),
         session_id,
         *spec,
@@ -782,17 +782,17 @@ fn abort_blocked_done_build<E: CliEnv>(
         .as_deref()
         .is_none_or(|reason| reason.trim().is_empty())
     {
-        return Err("Blocked Done Work build cleanup requires a non-empty reason".into());
+        return Err("Done Work build cleanup requires a non-empty reason".into());
     }
-    finalize_blocked_done_build(env, action, out, &state, &authority).map(Some)
+    finalize_done_build(env, action, out, &state, &authority).map(Some)
 }
 
-fn finalize_blocked_done_build<E: CliEnv>(
+fn finalize_done_build<E: CliEnv>(
     env: &mut E,
     action: &SkillStateAction,
     out: &mut String,
     snapshot: &gwt_core::skill_state::SkillState,
-    authority: &crate::agent_project_state::BlockedDoneBuildAbortAuthority,
+    authority: &crate::agent_project_state::DoneBuildAbortAuthority,
 ) -> Result<i32, String> {
     let SkillStateAction::Abort {
         spec,
@@ -804,58 +804,79 @@ fn finalize_blocked_done_build<E: CliEnv>(
     if reason.trim().is_empty() {
         return Err("Done Work cleanup requires a non-empty reason".into());
     }
-    let finalized = crate::cli::execution_state::with_blocked_build_abort_session_execution_identity_global_lease(
-        &gwt_core::paths::gwt_sessions_dir(),
-        &authority.identity,
-        |_| {
-            let current_state = gwt_core::skill_state::load(env.repo_path(), SKILL_NAME)
-                .map_err(|error| error.to_string())?;
-            if current_state.as_ref() != Some(snapshot) {
-                return Err("build lifecycle changed before cleanup; inspect execution.status".to_string());
-            }
-            // Recheck runtime fields omitted from SessionExecutionIdentity as
-            // well as the exact Work while all identity leases remain held.
-            let current = crate::agent_project_state::snapshot_blocked_done_build_abort_authority(
-                env.repo_path(),
-                &authority.identity.session_id,
-                *spec,
-            ).map_err(|error| error.to_string())?;
-            if current.as_ref() != Some(authority) {
-                return Err("Done Work authority changed before build cleanup".to_string());
-            }
-            let finalize = || {
-                let mut result = String::new();
-                let code = skill_state_runtime::run(
-                    env, action.clone(), SKILL_NAME, SKILL_DISPLAY, VERB, &mut result,
-                ).map_err(|error| error.to_string())?;
-                if code != 0 {
-                    out.push_str(&result);
-                    out.push_str("build: cleanup result is unconfirmed; inspect JSON operation `execution.status` and the build lifecycle state before deciding whether to retry\n");
-                    return Ok(code);
-                }
-                let expected = gwt_core::skill_state::SkillState {
-                    active: false,
-                    phase: Some(format!("aborted: {reason}")),
-                    ..snapshot.clone()
-                };
-                let saved = gwt_core::skill_state::load(env.repo_path(), SKILL_NAME)
-                    .map_err(|error| format!("build cleanup result is unconfirmed: {error}; inspect execution.status before retrying"))?;
-                if saved.as_ref() != Some(&expected) {
-                    return Err("build cleanup result is unconfirmed; inspect execution.status before retrying".to_string());
-                }
+    let finalize = |_: &std::path::Path| {
+        let current_state = gwt_core::skill_state::load(env.repo_path(), SKILL_NAME)
+            .map_err(|error| error.to_string())?;
+        if current_state.as_ref() != Some(snapshot) {
+            return Err(
+                "build lifecycle changed before cleanup; inspect execution.status".to_string(),
+            );
+        }
+        // Recheck runtime fields omitted from SessionExecutionIdentity as
+        // well as the exact Work while all identity leases remain held.
+        let current = crate::agent_project_state::snapshot_done_build_abort_authority(
+            env.repo_path(),
+            &authority.identity.session_id,
+            *spec,
+        )
+        .map_err(|error| error.to_string())?;
+        if current.as_ref() != Some(authority) {
+            return Err("Done Work authority changed before build cleanup".to_string());
+        }
+        let finalize = || {
+            let mut result = String::new();
+            let code = skill_state_runtime::run(
+                env,
+                action.clone(),
+                SKILL_NAME,
+                SKILL_DISPLAY,
+                VERB,
+                &mut result,
+            )
+            .map_err(|error| error.to_string())?;
+            if code != 0 {
                 out.push_str(&result);
-                out.push_str("build: canonical Work remains Done; execution and verification history preserved\n");
-                Ok(code)
+                out.push_str("build: cleanup result is unconfirmed; inspect JSON operation `execution.status` and the build lifecycle state before deciding whether to retry\n");
+                return Ok(code);
+            }
+            let expected = gwt_core::skill_state::SkillState {
+                active: false,
+                phase: Some(format!("aborted: {reason}")),
+                ..snapshot.clone()
             };
-            gwt_core::workspace_projection::with_exact_workspace_done_read_only(
-                &authority.target,
-                &authority.work_id,
-                finalize,
-            ).map_err(|error| error.to_string())?
-        },
-    ).map_err(|error| error.to_string())?;
+            let saved = gwt_core::skill_state::load(env.repo_path(), SKILL_NAME)
+                .map_err(|error| format!("build cleanup result is unconfirmed: {error}; inspect execution.status before retrying"))?;
+            if saved.as_ref() != Some(&expected) {
+                return Err(
+                    "build cleanup result is unconfirmed; inspect execution.status before retrying"
+                        .to_string(),
+                );
+            }
+            out.push_str(&result);
+            out.push_str("build: canonical Work remains Done; execution and verification history preserved\n");
+            Ok(code)
+        };
+        gwt_core::workspace_projection::with_exact_workspace_done_read_only(
+            &authority.target,
+            &authority.work_id,
+            finalize,
+        )
+        .map_err(|error| error.to_string())?
+    };
+    let finalized = match authority.execution_status {
+        crate::cli::execution_state::ExecutionControlStatus::Active =>
+            crate::cli::execution_state::with_current_active_session_execution_identity_global_lease(
+                &gwt_core::paths::gwt_sessions_dir(), &authority.identity, finalize,
+            ),
+        crate::cli::execution_state::ExecutionControlStatus::Blocked =>
+            crate::cli::execution_state::with_blocked_build_abort_session_execution_identity_global_lease(
+                &gwt_core::paths::gwt_sessions_dir(), &authority.identity, finalize,
+            ),
+        crate::cli::execution_state::ExecutionControlStatus::Completed =>
+            return Err("Done Work cleanup cannot settle a Completed execution".into()),
+    }.map_err(|error| error.to_string())?;
     finalized.ok_or_else(|| {
-        "Blocked build cleanup authority changed; inspect execution.status".to_string()
+        "Done Work build cleanup authority changed; inspect execution.status".to_string()
     })?
 }
 
@@ -3403,6 +3424,54 @@ format_version: Some(1),
     }
 
     #[test]
+    fn active_done_build_abort_finalizes_only_build_before_execution_blocked() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = BoundTerminalFixture::new();
+        fixture.terminalize_canonical_done();
+        let work_before =
+            gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&fixture.git.repo);
+        let work_before = std::fs::read(work_before).unwrap();
+        let execution_before =
+            crate::cli::execution_state::record_contents(&fixture.git.repo).unwrap();
+        let server = TerminalBridgeServer::start(
+            StatusCode::OK,
+            terminal_receipt(crate::AgentWorkTerminalizationOutcome::AlreadyMatching),
+        );
+
+        with_terminal_bridge_env(&fixture, &server, |_| {
+            let mut env = crate::cli::TestEnv::new(fixture.git.repo.clone());
+            let (code, output) = crate::cli::run_collect(
+                &mut env,
+                crate::cli::CliCommand::Build(SkillStateAction::Abort {
+                    spec: 3327,
+                    reason: Some("verification failed".into()),
+                }),
+            )
+            .unwrap();
+            assert_eq!(code, 0, "{output}");
+            let ended = gwt_core::skill_state::load(&fixture.git.repo, SKILL_NAME)
+                .unwrap()
+                .unwrap();
+            assert!(!ended.active);
+            assert_eq!(ended.phase.as_deref(), Some("aborted: verification failed"));
+        });
+        let work_path =
+            gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&fixture.git.repo);
+        assert_eq!(std::fs::read(work_path).unwrap(), work_before);
+        assert_eq!(
+            crate::cli::execution_state::record_contents(&fixture.git.repo).unwrap(),
+            execution_before
+        );
+        server.assert_no_request();
+        server.assert_no_abort_request();
+    }
+
+    #[test]
     fn blocked_done_build_abort_finalizes_only_skill_and_preserves_history() {
         let _env_lock = crate::env_test_lock()
             .lock()
@@ -3570,7 +3639,6 @@ format_version: Some(1),
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         for invalid in [
-            "active_done",
             "completed_done",
             "blank_reason",
             "ambiguous",
@@ -3584,22 +3652,20 @@ format_version: Some(1),
             "unprojected_discard",
             "pending_transaction",
         ] {
-            let fixture = if matches!(invalid, "active_done" | "completed_done") {
+            let fixture = if invalid == "completed_done" {
                 let fixture = BoundTerminalFixture::new();
                 fixture.terminalize_canonical_done();
-                if invalid == "completed_done" {
-                    let active = gwt_core::skill_state::load(&fixture.git.repo, SKILL_NAME)
-                        .unwrap()
-                        .unwrap();
-                    crate::cli::execution_state::settle(
-                        &fixture.git.repo,
-                        &fixture.session.id,
-                        crate::cli::execution_state::ExecutionSettlement::Completed,
-                    )
+                let active = gwt_core::skill_state::load(&fixture.git.repo, SKILL_NAME)
+                    .unwrap()
                     .unwrap();
-                    // Model stranded active bookkeeping after completion.
-                    gwt_core::skill_state::save(&fixture.git.repo, SKILL_NAME, &active).unwrap();
-                }
+                crate::cli::execution_state::settle(
+                    &fixture.git.repo,
+                    &fixture.session.id,
+                    crate::cli::execution_state::ExecutionSettlement::Completed,
+                )
+                .unwrap();
+                // Model stranded active bookkeeping after completion.
+                gwt_core::skill_state::save(&fixture.git.repo, SKILL_NAME, &active).unwrap();
                 fixture
             } else {
                 BoundTerminalFixture::blocked_with_done_work()
@@ -3791,7 +3857,7 @@ format_version: Some(1),
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let fixture = BoundTerminalFixture::blocked_with_done_work();
-        let authority = crate::agent_project_state::snapshot_blocked_done_build_abort_authority(
+        let authority = crate::agent_project_state::snapshot_done_build_abort_authority(
             &fixture.git.repo,
             &fixture.session.id,
             3327,
@@ -3810,7 +3876,7 @@ format_version: Some(1),
         gwt_core::skill_state::save(&fixture.git.repo, SKILL_NAME, &next).unwrap();
         let execution = crate::cli::execution_state::record_contents(&fixture.git.repo).unwrap();
         let mut env = crate::cli::TestEnv::new(fixture.git.repo.clone());
-        let result = finalize_blocked_done_build(
+        let result = finalize_done_build(
             &mut env,
             &SkillStateAction::Abort {
                 spec: 3327,

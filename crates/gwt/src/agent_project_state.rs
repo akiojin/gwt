@@ -3271,24 +3271,28 @@ pub(crate) enum BoundTerminalCompatibilityDisposition {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-pub(crate) struct BlockedDoneBuildAbortAuthority {
+pub(crate) struct DoneBuildAbortAuthority {
     pub(crate) identity: gwt_agent::SessionExecutionIdentity,
     pub(crate) target: gwt_core::workspace_projection::SessionBoundWorkspaceTerminalTarget,
     pub(crate) work_id: String,
+    pub(crate) execution_status: crate::cli::execution_state::ExecutionControlStatus,
 }
 
 /// Read-only proof for ending build bookkeeping while retaining an exact Done
 /// Work. This grants no terminalization authority and never requests Discarded.
-pub(crate) fn snapshot_blocked_done_build_abort_authority(
+pub(crate) fn snapshot_done_build_abort_authority(
     invocation_cwd: &Path,
     session_id: &str,
     owner_number: u64,
-) -> Result<Option<BlockedDoneBuildAbortAuthority>> {
+) -> Result<Option<DoneBuildAbortAuthority>> {
     use crate::cli::execution_state::{self, ExecutionControlStatus};
     let Some(record) = execution_state::load(invocation_cwd)? else {
         return Ok(None);
     };
-    if record.status != ExecutionControlStatus::Blocked {
+    if !matches!(
+        record.status,
+        ExecutionControlStatus::Active | ExecutionControlStatus::Blocked
+    ) {
         return Ok(None);
     }
     if !execution_state::integrity_ok(&record)
@@ -3296,7 +3300,7 @@ pub(crate) fn snapshot_blocked_done_build_abort_authority(
         || record.primary_session_id != session_id
     {
         return Err(mutation_error(
-            "Blocked build cleanup requires the exact current execution owner and Session",
+            "Done Work build cleanup requires the exact current execution owner and Session",
         ));
     }
     let Some(ValidatedWorkspaceEnsureSession::Host(recovery)) =
@@ -3307,33 +3311,45 @@ pub(crate) fn snapshot_blocked_done_build_abort_authority(
         )?
     else {
         return Err(mutation_error(
-            "Blocked build cleanup requires an exact bound Host Session",
+            "Done Work build cleanup requires an exact bound Host Session",
         ));
     };
     if recovery.session.runtime_target != LaunchRuntimeTarget::Host
         || recovery.session.docker_runtime_binding.is_some()
     {
         return Err(mutation_error(
-            "Blocked build cleanup has a foreign runtime binding",
+            "Done Work build cleanup has a foreign runtime binding",
         ));
     }
     let identity = gwt_agent::SessionExecutionIdentity::from_session(&recovery.session)
         .map_err(mutation_error)?
         .ok_or_else(|| {
-            mutation_error("Blocked build cleanup requires a durable execution binding")
+            mutation_error("Done Work build cleanup requires a durable execution binding")
         })?;
     let owner = execution_owner_from_session_binding(&identity.execution_binding)
         .map_err(mutation_error)?;
-    if owner.number != owner_number
-        || !execution_state::blocked_build_abort_execution_binding_matches(
-            &identity.worktree_path,
-            owner,
-            session_id,
-            &identity.execution_binding.identity,
-        )?
-    {
+    let binding_matches = match record.status {
+        ExecutionControlStatus::Active => {
+            execution_state::current_active_execution_binding_matches(
+                &identity.worktree_path,
+                owner,
+                session_id,
+                &identity.execution_binding.identity,
+            )?
+        }
+        ExecutionControlStatus::Blocked => {
+            execution_state::blocked_build_abort_execution_binding_matches(
+                &identity.worktree_path,
+                owner,
+                session_id,
+                &identity.execution_binding.identity,
+            )?
+        }
+        ExecutionControlStatus::Completed => false,
+    };
+    if owner.number != owner_number || !binding_matches {
         return Err(mutation_error(
-            "Blocked build cleanup requires the current generation and same active build",
+            "Done Work build cleanup requires the current generation and same active build",
         ));
     }
     let (owner, agent_id) =
@@ -3374,10 +3390,11 @@ pub(crate) fn snapshot_blocked_done_build_abort_authority(
         &work.work_id,
         || (),
     )?;
-    Ok(Some(BlockedDoneBuildAbortAuthority {
+    Ok(Some(DoneBuildAbortAuthority {
         identity,
         target,
         work_id: work.work_id,
+        execution_status: record.status,
     }))
 }
 
