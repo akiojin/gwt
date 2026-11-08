@@ -250,7 +250,7 @@ pub enum UpdateAutoApplyStep {
 pub struct UpdateAutoApplyPlanner {
     tracker: UpdateQuiescenceTracker,
     last_notice_at_secs: Option<u64>,
-    scheduled_at_secs: Option<u64>,
+    scheduled: Option<(String, u64)>,
     cancelled_version: Option<String>,
 }
 
@@ -261,7 +261,7 @@ impl UpdateAutoApplyPlanner {
         }
         match self.tracker.observe(observation.outcome) {
             UpdateQuiescenceVerdict::Blocked(blockers) => {
-                if self.scheduled_at_secs.take().is_some() {
+                if self.scheduled.take().is_some() {
                     return UpdateAutoApplyStep::Postponed(blockers);
                 }
                 if update_drain_notice_due(
@@ -275,14 +275,14 @@ impl UpdateAutoApplyPlanner {
                 UpdateAutoApplyStep::Idle
             }
             UpdateQuiescenceVerdict::Settling { .. } => UpdateAutoApplyStep::Idle,
-            UpdateQuiescenceVerdict::Quiesced => match self.scheduled_at_secs {
+            UpdateQuiescenceVerdict::Quiesced => match self.scheduled.as_ref() {
                 None => {
-                    self.scheduled_at_secs = Some(observation.now_secs);
+                    self.scheduled = Some((observation.version.to_string(), observation.now_secs));
                     UpdateAutoApplyStep::Scheduled {
                         apply_at_secs: observation.now_secs.saturating_add(observation.grace_secs),
                     }
                 }
-                Some(scheduled_at)
+                Some((_, scheduled_at))
                     if observation.now_secs
                         >= scheduled_at.saturating_add(observation.grace_secs) =>
                 {
@@ -304,12 +304,19 @@ impl UpdateAutoApplyPlanner {
         self.cancelled_version.as_deref() == Some(version)
     }
 
+    /// Whether this version still has an announced apply grace.
+    pub fn is_scheduled_for(&self, version: &str) -> bool {
+        self.scheduled
+            .as_ref()
+            .is_some_and(|(scheduled_version, _)| scheduled_version == version)
+    }
+
     /// The drain is gone (cleared, applied, or never raised): forget the
     /// streak, the notice cadence and the grace. Keeps the cancellation.
     pub fn reset(&mut self) {
         self.tracker.reset();
         self.last_notice_at_secs = None;
-        self.scheduled_at_secs = None;
+        self.scheduled = None;
     }
 }
 

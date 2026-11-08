@@ -10699,8 +10699,12 @@ impl AppRuntime {
             .filter(|manifest| manifest.auto_apply_deferred)
         {
             if !self.project_contexts().iter().any(|context| {
-                self.project_auto_update_drain(context)
-                    .is_some_and(|(_, drain)| drain.version == manifest.version)
+                match self.project_auto_update_drain(context) {
+                    Some((_, drain)) => drain.version == manifest.version,
+                    None => self.project_state(context).is_some_and(|state| {
+                        state.update_auto_apply.is_scheduled_for(&manifest.version)
+                    }),
+                }
             }) {
                 return Vec::new();
             }
@@ -11043,24 +11047,33 @@ impl AppRuntime {
     ) -> Result<Vec<OutboundEvent>, (String, Vec<OutboundEvent>)> {
         let mut events = Vec::new();
         for context in self.project_contexts() {
-            if self
-                .project_auto_update_drain(&context)
-                .is_some_and(|(_, drain)| drain.version == version)
-            {
-                match self.release_update_auto_apply_for_project(&context, version) {
-                    Ok(released) => events.extend(released),
-                    Err(error) => {
-                        let message = error.to_string();
-                        events.extend(self.issue_monitor_control_error_events(
-                            Some(&context.project_root),
-                            None,
-                            error,
-                            "update-drain",
-                            None,
-                        ));
-                        return Err((message, events));
+            match self.project_auto_update_drain(&context) {
+                Some((_, drain)) if drain.version == version => {
+                    match self.release_update_auto_apply_for_project(&context, version) {
+                        Ok(released) => events.extend(released),
+                        Err(error) => {
+                            let message = error.to_string();
+                            events.extend(self.issue_monitor_control_error_events(
+                                Some(&context.project_root),
+                                None,
+                                error,
+                                "update-drain",
+                                None,
+                            ));
+                            return Err((message, events));
+                        }
                     }
                 }
+                None => {
+                    // A config clear can remove the hold before the runtime
+                    // observes the matching manifest's deferral.
+                    if let Some(state) = self.project_state_mut(&context) {
+                        if state.update_auto_apply.is_scheduled_for(version) {
+                            state.update_auto_apply.cancel(version);
+                        }
+                    }
+                }
+                Some(_) => {}
             }
         }
         let (level, message) = match release {

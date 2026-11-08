@@ -343,7 +343,7 @@ mod tests {
         let status = super::status(&project_root).unwrap();
         assert_eq!(status.auto_apply_updates, None);
         assert!(!status.auto_apply_updates_effective);
-        let mut expected_drain = monitor.update_drain().unwrap().clone();
+        let mut expected_drain = monitor.prefs().update_drain.unwrap();
         expected_drain.blocking =
             vec![crate::update_drain::UpdateBlocker::PendingAcquireClaim { issue_number: 4271 }];
         assert_eq!(status.update_drain, Some(expected_drain));
