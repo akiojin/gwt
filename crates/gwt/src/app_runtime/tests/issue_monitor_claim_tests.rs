@@ -5503,7 +5503,12 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
     assert_eq!(before_ready["acknowledged"], false);
     assert_eq!(before_ready["id"], pane.id);
     assert_eq!(before_ready["incarnation"], pane.incarnation);
-    drain_queued_blocking_tasks(&launch_tasks);
+    // Accepted replay now observes readiness too. Consume its negative GUI
+    // completion before asserting a separate ACK worker can be scheduled.
+    runtime.finish_queued_delivery_acks(&launch_tasks);
+    assert!(!runtime
+        .pending_launch_delivery_acks
+        .contains_key(&window_id));
     let (ack_spawner, ack_tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = ack_spawner;
     let census_host_pid = std::process::id();
