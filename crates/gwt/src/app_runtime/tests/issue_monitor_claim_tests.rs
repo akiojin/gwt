@@ -2224,7 +2224,40 @@ fn issue_5062_deferred_update_releases_drain_on_the_next_observation() {
     )
     .unwrap();
     let tab = sample_project_tab("active", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("active"));
+    let mut tabs = vec![tab];
+    let mut retained_drains = Vec::new();
+    for (id, enabled, automatic) in [("inactive", false, true), ("manual", true, false)] {
+        let retained_repo = temp.path().join(id);
+        fs::create_dir_all(&retained_repo).unwrap();
+        init_repo_with_initial_commit(&retained_repo);
+        let drain = gwt::IssueMonitorUpdateDrain {
+            version: "99.0.0".into(),
+            since: "2026-10-10T00:00:00Z".into(),
+            reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+            automatic: Some(automatic),
+            blocking: Vec::new(),
+        };
+        let path = gwt::issue_monitor_prefs_path_for_repo_path(&retained_repo);
+        gwt::save_issue_monitor_prefs(
+            &path,
+            &gwt::IssueMonitorPrefs {
+                enabled,
+                autonomous_mode: true,
+                update_drain: Some(drain.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        retained_drains.push((path, drain));
+        tabs.push(sample_project_tab(
+            id,
+            "Repo",
+            retained_repo,
+            ProjectKind::Git,
+            &[],
+        ));
+    }
+    let mut runtime = sample_runtime(temp.path(), tabs, Some("active"));
     let mut monitor = test_monitor(gwt::IssueMonitorConfig {
         enabled: true,
         ..Default::default()
@@ -2256,6 +2289,13 @@ fn issue_5062_deferred_update_releases_drain_on_the_next_observation() {
         prefs.update_drain.is_none(),
         "defer must release admission on the next evaluation"
     );
+    for (path, expected) in retained_drains {
+        assert_eq!(
+            gwt::load_issue_monitor_prefs(&path).unwrap().update_drain,
+            Some(expected),
+            "deferred cleanup must preserve inactive and manual-origin raw drains"
+        );
+    }
     assert!(payload.exists() && gwt_core::update::load_pending_update_manifest().is_some());
     assert!(events.iter().any(|event| matches!(
         &event.event,
@@ -2281,6 +2321,114 @@ fn issue_5062_deferred_update_releases_drain_on_the_next_observation() {
             .is_empty(),
         "a deferred manifest with no matching drain must not emit another cancellation"
     );
+}
+
+#[test]
+fn app_runtime_inactive_automatic_drain_does_not_schedule_or_apply() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    gwt::update_settings::set(Some(true)).unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let since = chrono::DateTime::parse_from_rfc3339("2026-09-07T00:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let drain = gwt::IssueMonitorUpdateDrain {
+        version: "99.0.0".into(),
+        since: since.to_rfc3339(),
+        reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+        automatic: Some(true),
+        blocking: Vec::new(),
+    };
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: false,
+            autonomous_mode: true,
+            update_drain: Some(drain.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let tab = sample_project_tab("active", "Repo", repo, ProjectKind::Git, &[]);
+    let (mut runtime, user_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("active"));
+    for secs in [15, 30, 90] {
+        let events =
+            runtime.update_drain_tick_events_and_drain_at(since + chrono::Duration::seconds(secs));
+        assert!(
+            !events.iter().any(|event| matches!(
+                event.event,
+                BackendEvent::UpdateAutoApply {
+                    phase: gwt::protocol::UpdateAutoApplyPhase::Scheduled
+                        | gwt::protocol::UpdateAutoApplyPhase::Applying,
+                    ..
+                }
+            )),
+            "an inactive automatic drain cannot schedule or apply: {events:?}"
+        );
+    }
+    assert!(user_events.lock().unwrap().is_empty());
+    assert_eq!(
+        gwt::load_issue_monitor_prefs(&prefs_path)
+            .unwrap()
+            .update_drain,
+        Some(drain)
+    );
+}
+
+#[test]
+fn app_runtime_update_drain_clear_rejects_a_replaced_config_snapshot() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    gwt::update_settings::set(Some(false)).unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let drain = gwt::IssueMonitorUpdateDrain {
+        version: "99.0.0".into(),
+        since: "2026-09-07T00:00:00Z".into(),
+        reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+        automatic: Some(true),
+        blocking: Vec::new(),
+    };
+    let captured = gwt::IssueMonitorPrefs {
+        enabled: true,
+        autonomous_mode: true,
+        update_drain: Some(drain.clone()),
+        ..Default::default()
+    };
+    gwt::save_issue_monitor_prefs(&prefs_path, &captured).unwrap();
+    let tab = sample_project_tab("active", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("active"));
+    let context = runtime.project_context("active").unwrap();
+    let mut replacement = captured.clone();
+    replacement.update_drain.as_mut().unwrap().automatic = Some(false);
+    gwt::save_issue_monitor_prefs(&prefs_path, &replacement).unwrap();
+
+    runtime.update_drain_tick_events_for_project(
+        UpdateDrainObservation {
+            context: context.clone(),
+            drain: Some((captured, drain)),
+            snapshot: Default::default(),
+        },
+        chrono::Utc::now(),
+    );
+    assert_eq!(
+        gwt::load_issue_monitor_prefs(&prefs_path)
+            .unwrap()
+            .update_drain,
+        replacement.update_drain,
+        "a captured automatic clear cannot remove a newer manual-origin drain"
+    );
+    assert!(!runtime
+        .project_state(&context)
+        .unwrap()
+        .update_auto_apply
+        .is_cancelled("99.0.0"));
 }
 
 #[test]
@@ -3302,7 +3450,7 @@ fn app_runtime_manual_drain_applies_gracefully_once_quiescent() {
     gwt::save_issue_monitor_prefs(
         &prefs_path,
         &gwt::IssueMonitorPrefs {
-            enabled: true,
+            enabled: false,
             autonomous_mode: true,
             update_drain: Some(gwt::IssueMonitorUpdateDrain {
                 version: "99.0.0".to_string(),

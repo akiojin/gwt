@@ -496,6 +496,8 @@ pub(crate) const UPDATE_MANUAL_DRAIN_CLIENT_ID: &str = "update-manual-drain";
 pub(crate) enum UpdateAutoApplyRelease {
     /// The user cancelled during the grace (AC-7).
     Cancelled,
+    /// Automatic apply was refused or deferred; manual and inactive holds remain.
+    Deferred,
     /// The persisted manifest for the drained version is gone.
     PayloadMissing,
     /// A newer release invalidated this staged version.
@@ -10390,7 +10392,7 @@ impl AppRuntime {
             .is_some_and(|manifest| manifest.version == version && manifest.auto_apply_deferred)
         {
             return self
-                .release_update_auto_apply_events(version, UpdateAutoApplyRelease::Cancelled);
+                .release_update_auto_apply_events(version, UpdateAutoApplyRelease::Deferred);
         }
         if automatic && !self.automatic_updates_enabled() {
             return Vec::new();
@@ -10698,19 +10700,9 @@ impl AppRuntime {
         if let Some(manifest) = gwt_core::update::load_pending_update_manifest()
             .filter(|manifest| manifest.auto_apply_deferred)
         {
-            if !self.project_contexts().iter().any(|context| {
-                match self.project_auto_update_drain(context) {
-                    Some((_, drain)) => drain.version == manifest.version,
-                    None => self.project_state(context).is_some_and(|state| {
-                        state.update_auto_apply.is_scheduled_for(&manifest.version)
-                    }),
-                }
-            }) {
-                return Vec::new();
-            }
             return self.release_update_auto_apply_events(
                 &manifest.version,
-                UpdateAutoApplyRelease::Cancelled,
+                UpdateAutoApplyRelease::Deferred,
             );
         }
         if let Some(observation) = observations
@@ -10780,9 +10772,20 @@ impl AppRuntime {
             }
             return Vec::new();
         };
-        if drain.automatic.unwrap_or(prefs.autonomous_mode) && !self.automatic_updates_enabled() {
+        let automatic = drain.automatic.unwrap_or(prefs.autonomous_mode);
+        if automatic && !prefs.enabled {
+            if let Some(state) = self.project_state_mut(context) {
+                state.update_auto_apply.reset();
+            }
+            return Vec::new();
+        }
+        if automatic && !self.automatic_updates_enabled() {
             return self
-                .release_update_auto_apply_for_project(context, &drain.version)
+                .release_update_auto_apply_for_project(
+                    context,
+                    &drain.version,
+                    &prefs.config_token(),
+                )
                 .unwrap_or_else(|error| {
                     self.issue_monitor_control_error_events(
                         Some(&context.project_root),
@@ -11046,11 +11049,40 @@ impl AppRuntime {
         release: UpdateAutoApplyRelease,
     ) -> Result<Vec<OutboundEvent>, (String, Vec<OutboundEvent>)> {
         let mut events = Vec::new();
+        let mut released = false;
         for context in self.project_contexts() {
+            if release == UpdateAutoApplyRelease::Deferred
+                && self
+                    .project_state(&context)
+                    .is_some_and(|state| state.update_auto_apply.is_cancelled(version))
+            {
+                continue;
+            }
             match self.project_auto_update_drain(&context) {
-                Some((_, drain)) if drain.version == version => {
-                    match self.release_update_auto_apply_for_project(&context, version) {
-                        Ok(released) => events.extend(released),
+                Some((prefs, drain)) if drain.version == version => {
+                    if release == UpdateAutoApplyRelease::Deferred {
+                        if !drain.automatic.unwrap_or(prefs.autonomous_mode) {
+                            continue;
+                        }
+                        if !prefs.enabled {
+                            if let Some(state) = self.project_state_mut(&context) {
+                                if state.update_auto_apply.is_scheduled_for(version) {
+                                    state.update_auto_apply.cancel(version);
+                                    released = true;
+                                }
+                            }
+                            continue;
+                        }
+                    }
+                    match self.release_update_auto_apply_for_project(
+                        &context,
+                        version,
+                        &prefs.config_token(),
+                    ) {
+                        Ok(project_events) => {
+                            events.extend(project_events);
+                            released = true;
+                        }
                         Err(error) => {
                             let message = error.to_string();
                             events.extend(self.issue_monitor_control_error_events(
@@ -11070,14 +11102,18 @@ impl AppRuntime {
                     if let Some(state) = self.project_state_mut(&context) {
                         if state.update_auto_apply.is_scheduled_for(version) {
                             state.update_auto_apply.cancel(version);
+                            released = true;
                         }
                     }
                 }
                 Some(_) => {}
             }
         }
+        if release == UpdateAutoApplyRelease::Deferred && !released {
+            return Ok(events);
+        }
         let (level, message) = match release {
-            UpdateAutoApplyRelease::Cancelled => (
+            UpdateAutoApplyRelease::Cancelled | UpdateAutoApplyRelease::Deferred => (
                 "info",
                 format!(
                     "Update v{version} automatic apply cancelled — the update stays staged; use the update button when ready."
@@ -11111,7 +11147,9 @@ impl AppRuntime {
         self.record_update_apply_observation(
             version,
             match release {
-                UpdateAutoApplyRelease::Cancelled => "pending_refused",
+                UpdateAutoApplyRelease::Cancelled | UpdateAutoApplyRelease::Deferred => {
+                    "pending_refused"
+                }
                 UpdateAutoApplyRelease::PayloadMissing => "pending_failed",
                 UpdateAutoApplyRelease::Superseded => "pending_superseded",
                 UpdateAutoApplyRelease::RequiresElevation => "pending_refused",
@@ -11136,6 +11174,7 @@ impl AppRuntime {
         &mut self,
         context: &ProjectContext,
         version: &str,
+        expected_config_token: &str,
     ) -> Result<Vec<OutboundEvent>, gwt::runtime_daemon_events::IssueMonitorControlPublishError>
     {
         if self.project_state(context).is_none() {
@@ -11143,15 +11182,28 @@ impl AppRuntime {
         }
         let publication = self.publish_project_issue_monitor_control(
             context,
-            serde_json::json!({ "config_set": { "update_drain": false } }),
+            serde_json::json!({ "config_set_if_matches": {
+                "update_drain": false,
+                "expected_config_token": expected_config_token,
+            } }),
         );
         let events = match publication {
             Ok(()) => Vec::new(),
             Err(error) if error.allows_local_fallback() => {
-                let (monitor, ()) = self
-                    .commit_local_issue_monitor_control(context, |monitor| {
-                        monitor.clear_update_drain()
-                    })?;
+                let (monitor, ()) = Self::try_commit_local_issue_monitor_control_with_timeout(
+                    &context.project_root,
+                    self.issue_monitor_fallback_commit_timeout,
+                    |monitor| {
+                        if monitor.prefs().config_token() != expected_config_token {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::WouldBlock,
+                                "Issue Monitor configuration changed before update drain release; read the latest status and retry.",
+                            ));
+                        }
+                        monitor.clear_update_drain();
+                        Ok(())
+                    },
+                )?;
                 self.issue_monitor_snapshot_events_for(None, Some(&context.project_root), monitor)
             }
             Err(error) => return Err(error),

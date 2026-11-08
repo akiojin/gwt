@@ -14,16 +14,16 @@ use crate::issue_monitor::{
 pub struct Status {
     pub auto_apply_updates: Option<bool>,
     pub auto_apply_updates_effective: bool,
+    /// The project's current admission hold, rather than saved inactive metadata.
     pub update_drain: Option<IssueMonitorUpdateDrain>,
 }
 
-/// The global preference and this project's drain are independent of monitor
-/// admission settings. Status reads never migrate or write either source.
+/// Read the global preference and this project's effective admission hold.
+/// Status reads preserve raw drain metadata and never migrate or write either source.
 pub fn status(project_root: &Path) -> io::Result<Status> {
     let auto_apply_updates = configured()?;
-    let mut update_drain =
-        load_issue_monitor_prefs(&issue_monitor_prefs_path_for_repo_path(project_root))?
-            .update_drain;
+    let prefs = load_issue_monitor_prefs(&issue_monitor_prefs_path_for_repo_path(project_root))?;
+    let mut update_drain = prefs.effective_update_drain().cloned();
     if let Some(drain) = update_drain.as_mut() {
         let wait = gwt_core::update::load_update_wait_observation(project_root).filter(|wait| {
             wait.version == drain.version
@@ -318,7 +318,12 @@ mod tests {
         fs::create_dir_all(&project_root).unwrap();
         let prefs_path =
             crate::issue_monitor::issue_monitor_prefs_path_for_repo_path(&project_root);
-        let mut monitor = crate::issue_monitor::IssueMonitorState::new(Default::default());
+        let mut monitor = crate::issue_monitor::IssueMonitorState::new(
+            crate::issue_monitor::IssueMonitorConfig {
+                enabled: true,
+                ..Default::default()
+            },
+        );
         monitor.set_update_drain_with_origin(
             crate::issue_monitor::IssueMonitorUpdateDrainReason::Auto,
             "9.110.0",
@@ -358,6 +363,41 @@ mod tests {
         let status = super::status(&project_root).unwrap();
         assert_eq!(status.auto_apply_updates, Some(false));
         assert!(!status.auto_apply_updates_effective);
+
+        let payload = home.path().join("staged-gwt");
+        fs::write(&payload, b"staged payload").unwrap();
+        let mut prefs = monitor.prefs();
+        for (enabled, deferred) in [(false, false), (true, true)] {
+            prefs.enabled = enabled;
+            crate::issue_monitor::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+            gwt_core::update::persist_pending_update_manifest(
+                &gwt_core::update::PendingUpdateManifest {
+                    version: "9.110.0".into(),
+                    asset_url: "https://example.invalid/update".into(),
+                    payload: gwt_core::update::PreparedPayload::PortableBinary {
+                        path: payload.clone(),
+                    },
+                    downloaded_at: "2026-10-05T19:10:00Z".into(),
+                    origin: gwt_core::update::PendingUpdateOrigin::Automatic,
+                    auto_apply_deferred: deferred,
+                },
+            )
+            .unwrap();
+            let before = fs::read(&prefs_path).unwrap();
+            assert!(super::status(&project_root).unwrap().update_drain.is_none(),
+                "inactive automatic drain must not appear pending (enabled={enabled}, deferred={deferred})");
+            assert_eq!(
+                fs::read(&prefs_path).unwrap(),
+                before,
+                "status must preserve raw prefs"
+            );
+            assert_eq!(
+                crate::issue_monitor::load_issue_monitor_prefs(&prefs_path)
+                    .unwrap()
+                    .update_drain,
+                prefs.update_drain
+            );
+        }
     }
 
     #[cfg(unix)]

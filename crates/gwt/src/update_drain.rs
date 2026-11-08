@@ -256,6 +256,13 @@ pub struct UpdateAutoApplyPlanner {
 
 impl UpdateAutoApplyPlanner {
     pub fn tick(&mut self, observation: UpdateAutoApplyObservation<'_>) -> UpdateAutoApplyStep {
+        if self
+            .scheduled
+            .as_ref()
+            .is_some_and(|(version, _)| version != observation.version)
+        {
+            self.reset();
+        }
         if self.is_cancelled(observation.version) {
             return UpdateAutoApplyStep::Idle;
         }
@@ -647,6 +654,34 @@ mod tests {
         );
         assert_eq!(
             planner.tick(observation("9.99.0", 1_075, 105, Ok(()))),
+            UpdateAutoApplyStep::Apply
+        );
+    }
+
+    #[test]
+    fn planner_starts_a_new_grace_when_the_observed_version_changes() {
+        let mut planner = UpdateAutoApplyPlanner::default();
+        planner.tick(observation("9.99.0", 1_000, 30, Ok(())));
+        planner.tick(observation("9.99.0", 1_015, 45, Ok(())));
+        assert_eq!(
+            planner.tick(observation("9.99.1", 1_030, 15, Ok(()))),
+            UpdateAutoApplyStep::Idle
+        );
+        assert_eq!(
+            planner.tick(observation("9.99.1", 1_045, 30, Ok(()))),
+            UpdateAutoApplyStep::Scheduled {
+                apply_at_secs: 1_105
+            }
+        );
+        assert!(!planner.is_scheduled_for("9.99.0"));
+        assert!(planner.is_scheduled_for("9.99.1"));
+        assert_eq!(
+            planner.tick(observation("9.99.1", 1_075, 60, Ok(()))),
+            UpdateAutoApplyStep::Idle,
+            "the previous version's grace cannot authorize this version"
+        );
+        assert_eq!(
+            planner.tick(observation("9.99.1", 1_105, 90, Ok(()))),
             UpdateAutoApplyStep::Apply
         );
     }
