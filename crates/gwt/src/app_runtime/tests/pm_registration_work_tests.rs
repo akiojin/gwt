@@ -421,6 +421,24 @@ fn restore_still_resumes_the_stores_own_pm_worktree() {
     )
     .unwrap();
 
+    // Issue #6890: unrelated finished Work must not prevent the registered PM's restore.
+    session.linked_issue_number = Some(5286);
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save stale PM link");
+    gwt::mutate_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        |prefs| prefs.merged_issues.push(5286),
+    )
+    .unwrap();
+    assert_eq!(
+        gwt::project_runtime::installation::restore_saved_session_work_terminality(
+            &session, &repo, None,
+        ),
+        gwt::project_runtime::installation::RestoreAdmission::Admit,
+        "the registered PM owns no implementation Work despite its stale Issue link"
+    );
+
     runtime.restore_open_project_windows("tab-current");
     runtime.ensure_pm_agent_for_tab("tab-current", super::super::pm::PmEnsureTrigger::Automatic);
 
@@ -456,6 +474,12 @@ fn restore_still_resumes_the_stores_own_pm_worktree() {
         probe.session.as_ref().unwrap().agent_session_id.as_deref(),
         Some("native-own-pm")
     );
+    assert_eq!(
+        probe.session.as_ref().unwrap().launch_origin,
+        gwt_agent::SessionLaunchOrigin::AutomaticRestore,
+        "the automatic restore must succeed without a manual restart fallback"
+    );
+    assert_eq!(probe.session.as_ref().unwrap().linked_issue_number, None);
     assert!(
         probe.pty.try_wait().unwrap().is_none(),
         "the admitted PM must be physically live"

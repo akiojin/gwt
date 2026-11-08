@@ -1,6 +1,27 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.155.2] - 2026-11-08
+
+### Bug Fixes
+
+- **launch:** Converge accepted owner delivery observations
+- **build:** Settle active build when canonical Work is Done
+- **build:** Preserve missing Work abort recovery
+- **monitor:** Artifact 再投稿後の readiness を自動再評価する
+- **board:** PM復元後の古いIssue帰属とstatus投稿を修正
+- **completion:** Merge 済み PR の receipt 承継を fresh HEAD からの settlement で受理する
+- **launch:** Pass hermes initial tasks with query flag
+
+### Miscellaneous Tasks
+
+- **work:** PR #6898 の配信メタデータを記録
+
+### Testing
+
+- **launch:** Consume replay ack before delivery phase assertions
+- **launch:** Seed owner fixtures with supported monitor profile
+
 ## [9.155.1] - 2026-11-08
 
 ### Bug Fixes

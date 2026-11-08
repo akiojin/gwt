@@ -5503,7 +5503,12 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
     assert_eq!(before_ready["acknowledged"], false);
     assert_eq!(before_ready["id"], pane.id);
     assert_eq!(before_ready["incarnation"], pane.incarnation);
-    drain_queued_blocking_tasks(&launch_tasks);
+    // Accepted replay now observes readiness too. Consume its negative GUI
+    // completion before asserting a separate ACK worker can be scheduled.
+    runtime.finish_queued_delivery_acks(&launch_tasks);
+    assert!(!runtime
+        .pending_launch_delivery_acks
+        .contains_key(&window_id));
     let (ack_spawner, ack_tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = ack_spawner;
     let census_host_pid = std::process::id();
@@ -7541,6 +7546,7 @@ fn durable_issue_monitor_delivery_preserves_live_materializer_and_replays_after_
                 window_id: "tab-1::missing-materializer".into(),
                 started_at: Instant::now(),
                 accepted_owner: None,
+                observation_error_reported: false,
             },
         );
         let mut replay = prepare_monitor_relaunch(
@@ -7762,7 +7768,15 @@ fn durable_issue_monitor_delivery_preserves_live_materializer_and_replays_after_
     fixture
         .runtime
         .apply_owner_window_removed_projection(&context, &live_window_id);
-    let delivery_before = fixture.runtime.issue_monitor_launch_deliveries[&delivery_id].clone();
+    let mut delivery_before = fixture.runtime.issue_monitor_launch_deliveries[&delivery_id].clone();
+    if let super::super::IssueMonitorLaunchDeliveryState::Materializing {
+        observation_error_reported,
+        ..
+    } = &mut delivery_before
+    {
+        // Expired GUI observation may report once without changing owner authority.
+        *observation_error_reported = true;
+    }
     let rows_before: Vec<_> = fixture.runtime.tabs[0]
         .workspace
         .persisted()

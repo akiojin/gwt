@@ -4173,6 +4173,67 @@ impl AppRuntime {
         events
     }
 
+    fn observe_accepted_issue_monitor_materialization(
+        &mut self,
+        context: &super::ProjectContext,
+        request: &super::DeferredIssueMonitorLaunch,
+        window_id: &str,
+        started_at: std::time::Instant,
+        accepted_owner: &gwt::daemon_subscriber::ProjectOwnerIdentity,
+    ) -> Vec<OutboundEvent> {
+        let delivery_id = request.delivery_id.as_deref().expect("accepted delivery");
+        if self
+            .runtimes
+            .get(window_id)
+            .is_some_and(|runtime| &runtime.owner_identity == accepted_owner)
+        {
+            // The owner may already have committed readiness while the GUI
+            // retained its placeholder. Ask that exact owner, without adopting
+            // a different pane or creating a second launch.
+            return self.issue_monitor_launch_completed_delivery_events(
+                &request.project_root,
+                request.issue_number,
+                window_id,
+                Some(delivery_id),
+            );
+        }
+        if self.has_pending_agent_launch_worker(window_id) {
+            return Vec::new();
+        }
+        let elapsed = started_at.elapsed();
+        if elapsed < super::ISSUE_MONITOR_MATERIALIZING_TTL {
+            tracing::debug!(target: "gwt.launch.timing", issue_number = request.issue_number,
+                %delivery_id, %window_id, elapsed_ms = elapsed.as_millis(),
+                reason = "accepted owner projection pending", "Issue Monitor observation deferred");
+            return Vec::new();
+        }
+        let Some(super::IssueMonitorLaunchDeliveryState::Materializing {
+            observation_error_reported,
+            ..
+        }) = self.issue_monitor_launch_deliveries.get_mut(delivery_id)
+        else {
+            return Vec::new();
+        };
+        if std::mem::replace(observation_error_reported, true) {
+            return Vec::new();
+        }
+        tracing::error!(target: "gwt.launch.timing", issue_number = request.issue_number,
+            %delivery_id, %window_id, elapsed_ms = elapsed.as_millis(),
+            ?accepted_owner, current_owner = ?self.project_state(context)
+                .and_then(|state| state.project_owner_identity.as_ref()),
+            window_exists = self.tracked_window_exists(window_id),
+            reason = "accepted owner projection unavailable within materialization budget",
+            "Issue Monitor owner observation failed; accepted launch retained");
+        self.issue_monitor_control_error_events(
+            Some(&request.project_root), None,
+            gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(format!(
+                "Issue #{}: accepted owner projection is unavailable after the {}s materialization budget; observation failed, the owner launch is retained",
+                request.issue_number, super::ISSUE_MONITOR_MATERIALIZING_TTL.as_secs(),
+            )),
+            "owner-materialization-observation", Some(request.issue_number),
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn auto_launch_issue_monitor_delivery_events_for_project_with_reusable(
         &mut self,
@@ -4223,6 +4284,7 @@ impl AppRuntime {
                     window_id,
                     started_at,
                     accepted_owner,
+                    ..
                 }) => {
                     // A missing GUI row does not retire the owner's immutable operation.
                     // Unknown health is not evidence of a replacement owner either.
@@ -4231,9 +4293,13 @@ impl AppRuntime {
                             .and_then(|state| state.project_owner_identity.as_ref())
                             .is_none_or(|current| current == accepted)
                     }) {
-                        tracing::warn!(target: "gwt.launch.timing", issue_number, %delivery_id, %window_id,
-                            reason = "accepted owner materialization pending", "Issue Monitor preparation deferred");
-                        return Vec::new();
+                        return self.observe_accepted_issue_monitor_materialization(
+                            &context,
+                            &request,
+                            &window_id,
+                            started_at,
+                            accepted_owner.as_ref().expect("accepted owner"),
+                        );
                     }
                     let live_runtime = self.runtimes.contains_key(&window_id)
                         && self.window_status(&window_id).is_some_and(|status| {
@@ -5105,15 +5171,26 @@ impl AppRuntime {
                     window_id,
                     started_at,
                     accepted_owner,
+                    ..
                 }) => {
                     if accepted_owner.as_ref().is_some_and(|accepted| {
                         self.project_state(&context)
                             .and_then(|state| state.project_owner_identity.as_ref())
                             .is_none_or(|current| current == accepted)
                     }) {
-                        tracing::warn!(target: "gwt.launch.timing", issue_number, %delivery_id, %window_id,
-                            reason = "accepted owner materialization pending", "Issue Monitor launch deferred before spawn");
-                        return Vec::new();
+                        return self.observe_accepted_issue_monitor_materialization(
+                            &context,
+                            &super::DeferredIssueMonitorLaunch {
+                                project_root: project_root.to_path_buf(),
+                                issue_number,
+                                linked_issue_kind,
+                                delivery_id: Some(delivery_id.to_string()),
+                                launch_session_strategy,
+                            },
+                            &window_id,
+                            started_at,
+                            accepted_owner.as_ref().expect("accepted owner"),
+                        );
                     }
                     let window_exists = self.tracked_window_exists(&window_id);
                     // A live preparation or its queued completion still owns
@@ -6233,6 +6310,7 @@ impl AppRuntime {
                     window_id: holder_window_id.clone(),
                     started_at: std::time::Instant::now(),
                     accepted_owner: None,
+                    observation_error_reported: false,
                 },
             );
             let proxy = self.proxy.clone();

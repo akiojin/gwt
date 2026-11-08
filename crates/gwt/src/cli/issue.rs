@@ -4948,6 +4948,18 @@ fn monitor_profiles_projection(prefs: &crate::IssueMonitorPrefs) -> serde_json::
             if let Some(object) = value.as_object_mut() {
                 object.insert("index".to_string(), serde_json::json!(candidate.index));
                 object.insert("summary".to_string(), serde_json::json!(candidate.summary));
+                let initial_prompt_supported = gwt_agent::resolve_agent_id(&profile.agent_id)
+                    .is_some_and(|agent| agent.supports_monitor_initial_prompt());
+                object.insert(
+                    "initial_prompt_supported".to_string(),
+                    serde_json::json!(initial_prompt_supported),
+                );
+                if !initial_prompt_supported {
+                    object.insert(
+                        "initial_prompt_recovery".to_string(),
+                        serde_json::json!("Use issue.monitor.profiles.set to select Claude Code, Codex, Grok Build, or Hermes for initial prompt delivery"),
+                    );
+                }
                 object.insert(
                     "prefer_for".to_string(),
                     serde_json::json!(candidate.prefer_for),
@@ -14680,8 +14692,8 @@ mod tests {
                 .iter()
                 .map(|delivery| delivery.issue_number)
                 .collect::<Vec<_>>(),
-            vec![43, 44],
-            "cancel only the unowned unsupported Issue; keep the cold SPEC and owned delivery"
+            vec![42, 43, 44],
+            "skip the unsupported candidate and keep deliveries with a supported fallback"
         );
         assert_eq!(
             prefs
@@ -14689,12 +14701,9 @@ mod tests {
                 .iter()
                 .map(|launch| launch.issue_number)
                 .collect::<Vec<_>>(),
-            vec![43, 44]
+            vec![42, 43, 44]
         );
-        assert_eq!(prefs.pending_effects.len(), 1);
-        assert!(matches!(&prefs.pending_effects[0].payload,
-            crate::issue_monitor::IssueMonitorEffectPayload::ReleaseClaim { issue_number: 42, claim_id, owner }
-                if claim_id == "claim-42" && owner == "host:1"));
+        assert!(prefs.pending_effects.is_empty());
         let mut restored = crate::IssueMonitorState::with_prefs(
             crate::IssueMonitorConfig::default(),
             prefs.clone(),
@@ -14729,8 +14738,8 @@ mod tests {
         assert!(prefs.launch_tiers.is_empty());
         assert_eq!(prefs.tier_overrides[&4774], 1);
 
-        // An Issue-only override can change the effective provider too.
-        // Reuse the same cold deliveries, keeping the SPEC on a supported tier.
+        // An Issue-only override skips an unsupported tier and keeps the
+        // delivery when a later tier provides a supported fallback.
         let mut override_prefs = initial_prefs.clone();
         override_prefs.launch_auto = true;
         override_prefs.launch_tiers = vec![
@@ -14747,14 +14756,10 @@ mod tests {
         assert_eq!(override_prefs.tier_overrides[&42], 1);
         assert_eq!(
             override_prefs.pending_launch_deliveries, prefs.pending_launch_deliveries,
-            "the Issue override must cancel only its unowned unsupported delivery"
+            "the Issue override must keep deliveries with a supported later tier"
         );
         assert_eq!(override_prefs.launching_issues, prefs.launching_issues);
-        assert_eq!(override_prefs.pending_effects.len(), 1);
-        assert_eq!(
-            override_prefs.pending_effects[0].payload,
-            prefs.pending_effects[0].payload
-        );
+        assert!(override_prefs.pending_effects.is_empty());
         let mut restored = crate::IssueMonitorState::with_prefs(
             crate::IssueMonitorConfig::default(),
             override_prefs,
@@ -14818,15 +14823,18 @@ mod tests {
             }
             let saved = crate::load_issue_monitor_prefs(&path).unwrap();
             assert_eq!(
-                saved.pending_launch_deliveries, prefs.pending_launch_deliveries,
+                saved.pending_launch_deliveries,
+                initial_prefs.pending_launch_deliveries[1..].to_vec(),
                 "release only the unowned delivery with no eligible candidate"
             );
-            assert_eq!(saved.launching_issues, prefs.launching_issues);
-            assert_eq!(saved.pending_effects.len(), 1);
             assert_eq!(
-                saved.pending_effects[0].payload,
-                prefs.pending_effects[0].payload
+                saved.launching_issues,
+                initial_prefs.launching_issues[1..].to_vec()
             );
+            assert_eq!(saved.pending_effects.len(), 1);
+            assert!(matches!(&saved.pending_effects[0].payload,
+                crate::IssueMonitorEffectPayload::ReleaseClaim { issue_number: 42, claim_id, owner }
+                    if claim_id == "claim-42" && owner == "host:1"));
             assert_eq!(
                 saved.queued_launch_session_strategies[&42],
                 crate::issue_monitor::IssueMonitorLaunchSessionStrategy::FreshRequired
@@ -14931,6 +14939,13 @@ mod tests {
         assert_eq!(payload["launch_profiles"].as_array().map(Vec::len), Some(2));
         assert_eq!(payload["launch_profiles"][0]["index"], 0);
         assert_eq!(payload["launch_profiles"][0]["agent_id"], "codex");
+        assert_eq!(
+            payload["launch_profiles"][0]["initial_prompt_supported"],
+            true
+        );
+        assert!(payload["launch_profiles"][0]
+            .get("initial_prompt_recovery")
+            .is_none());
         assert_eq!(payload["launch_profiles"][0]["model"], "gpt-6-sol");
         assert_eq!(
             payload["launch_profiles"][0]["held_until"],
@@ -14966,15 +14981,24 @@ command = "my-agent-cli"
         let repo = tmp.path().join("repo");
         fs::create_dir_all(&repo).expect("repo dir");
         let env = crate::cli::TestEnv::new(repo.clone());
+        let mut out = String::new();
         run_monitor_profiles_set(
             &env,
             Some(&repo),
             None,
             vec![pool_patch("codex", &[]), pool_patch(" my-agent ", &[])],
             None,
-            &mut String::new(),
+            &mut out,
         )
         .expect("save registered custom candidate");
+        let payload: serde_json::Value = serde_json::from_str(out.trim()).expect("profiles json");
+        assert_eq!(
+            payload["launch_profiles"][1]["initial_prompt_supported"],
+            false
+        );
+        assert!(payload["launch_profiles"][1]["initial_prompt_recovery"]
+            .as_str()
+            .is_some_and(|recovery| recovery.contains("issue.monitor.profiles.set")));
         let prefs =
             crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(&repo))
                 .expect("read saved candidates");
