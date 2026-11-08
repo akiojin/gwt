@@ -81,10 +81,36 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
             return 1;
         }
     };
-    let parsed = match parse(&input) {
+    dispatch_input(env, prog, &input, None)
+}
+
+pub(super) fn parse_operation(
+    operation: &str,
+    params: &Value,
+) -> Result<CliCommand, CliParseError> {
+    parse(
+        &serde_json::json!({"schema_version":1,"operation":operation,"params":params}).to_string(),
+    )
+    .map(|parsed| parsed.command)
+}
+
+/// The same dispatcher with an explicit input/output sink for bounded delegation.
+pub(super) fn dispatch_input<E: CliEnv>(
+    env: &mut E,
+    prog: &str,
+    input: &str,
+    mut captured: Option<&mut Vec<u8>>,
+) -> i32 {
+    let parsed = match parse(input) {
         Ok(parsed) => parsed,
         Err(err) => {
-            let _ = writeln!(env.stderr(), "{prog}: {err}");
+            if super::feedback::safe_intake_required(env.repo_path()) {
+                // A malformed envelope cannot reliably identify its operation.
+                // Never echo serde's caller-controlled keys/values in Auto.
+                let _ = writeln!(env.stderr(), "{prog}: invalid JSON envelope");
+            } else {
+                let _ = writeln!(env.stderr(), "{prog}: {err}");
+            }
             return 2;
         }
     };
@@ -159,6 +185,13 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
                 "exit_code": code,
                 "output": output,
             });
+            if code == 0 {
+                match operation.as_str() {
+                    "issue.view" | "issue.monitor.status" => payload["kind"] = "issue".into(),
+                    "pr.view" | "pr.list" => payload["kind"] = "pull_request".into(),
+                    _ => {}
+                }
+            }
             if let Some(data) = pr_checks_data {
                 payload["data"] = data;
             }
@@ -179,7 +212,7 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
                     serde_json::to_value(&warnings).expect("operation warnings must serialize");
             }
             attach_project_store(&mut payload);
-            if let Err(err) = write_response(env.stdout(), &payload) {
+            if let Err(err) = write_dispatch_response(env, &mut captured, &payload) {
                 return report_undelivered_response(env, prog, &operation, &err);
             }
             match (code, declared_block) {
@@ -222,6 +255,9 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
                 "exit_code": 1,
                 "error": message,
             });
+            if matches!(failure.error, gwt_github::SpecOpsError::CacheConflict(_)) {
+                payload["error_code"] = "ISSUE_CACHE_CONFLICT".into();
+            }
             if operation == "verify.run" {
                 attach_verification_error(&mut payload, &message);
             }
@@ -230,7 +266,7 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
                     .expect("operation refusal metadata must serialize");
             }
             attach_project_store(&mut payload);
-            if let Err(err) = write_response(env.stdout(), &payload) {
+            if let Err(err) = write_dispatch_response(env, &mut captured, &payload) {
                 return report_undelivered_response(env, prog, &operation, &err);
             }
             let _ = writeln!(env.stderr(), "{prog} {operation}: {message}");
@@ -248,6 +284,17 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
             }
             1
         }
+    }
+}
+
+fn write_dispatch_response<E: CliEnv>(
+    env: &mut E,
+    captured: &mut Option<&mut Vec<u8>>,
+    payload: &Value,
+) -> Result<(), String> {
+    match captured {
+        Some(output) => write_response(*output, payload),
+        None => write_response(env.stdout(), payload),
     }
 }
 
@@ -352,14 +399,16 @@ mod param_audit {
         static CONSULTED: RefCell<Option<BTreeSet<String>>> = const { RefCell::new(None) };
     }
 
-    /// Records consulted keys for as long as it is alive. Parsing is
-    /// synchronous and non-reentrant, so one recording per thread is enough.
-    pub(super) struct Recording;
+    /// Records consulted keys for as long as it is alive, restoring the
+    /// enclosing operation's recording after synchronous nested parsing.
+    pub(super) struct Recording {
+        previous: Option<BTreeSet<String>>,
+    }
 
     impl Recording {
         pub(super) fn start() -> Self {
-            CONSULTED.with(|consulted| *consulted.borrow_mut() = Some(BTreeSet::new()));
-            Recording
+            let previous = CONSULTED.with(|consulted| consulted.replace(Some(BTreeSet::new())));
+            Recording { previous }
         }
 
         pub(super) fn consulted(&self) -> BTreeSet<String> {
@@ -369,7 +418,7 @@ mod param_audit {
 
     impl Drop for Recording {
         fn drop(&mut self) {
-            CONSULTED.with(|consulted| *consulted.borrow_mut() = None);
+            CONSULTED.with(|consulted| *consulted.borrow_mut() = self.previous.take());
         }
     }
 
@@ -437,6 +486,22 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
     let params = params_object(&envelope.params)?;
     let recording = param_audit::Recording::start();
     let command = match envelope.operation.as_str() {
+        "feedback.create" => {
+            params.keys().for_each(|key| param_audit::note(key));
+            let input = serde_json::from_value(Value::Object(params.clone()))
+                .map_err(|err| CliParseError::InvalidJson(err.to_string()))?;
+            CliCommand::Feedback(super::feedback::FeedbackCommand::Create(Box::new(input)))
+        }
+        "feedback.status" | "feedback.retry" | "feedback.process" => {
+            reject_unknown_params(params, &["id"], &envelope.operation)?;
+            let id = required_string(params, "id")?;
+            let command = match envelope.operation.as_str() {
+                "feedback.status" => super::feedback::FeedbackCommand::Status { id },
+                "feedback.retry" => super::feedback::FeedbackCommand::Retry { id },
+                _ => super::feedback::FeedbackCommand::Process { id },
+            };
+            CliCommand::Feedback(command)
+        }
         "concern.create" | "concern.update" | "concern.list" | "concern.measure"
         | "concern.resolve" => {
             // These decode the whole `params` object through serde with
@@ -449,6 +514,20 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             )?))
         }
         "workspace.update" => workspace_update(params)?,
+        "workspace.close" => {
+            reject_unknown_params(params, &["work_id", "close_kind"], "workspace.close")?;
+            let close_kind = required_string(params, "close_kind")?;
+            if !matches!(close_kind.as_str(), "done" | "discarded" | "superseded") {
+                return Err(CliParseError::InvalidValue {
+                    flag: "close_kind",
+                    reason: "expected done, discarded, or superseded",
+                });
+            }
+            CliCommand::Workspace(WorkspaceCommand::Close {
+                work_id: required_string(params, "work_id")?,
+                close_kind,
+            })
+        }
         "workspace.receipt" => CliCommand::Workspace(WorkspaceCommand::Receipt {
             operation_id: required_string(params, "operation_id")?,
         }),
@@ -456,6 +535,17 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "workspace.join" => workspace_join(params)?,
         "workspace.create" => workspace_create(params)?,
         "workspace.ensure" => workspace_ensure(params)?,
+        "workspace.events_reconcile" => {
+            reject_unknown_params(
+                params,
+                &["reference", "dry_run"],
+                "workspace.events_reconcile",
+            )?;
+            CliCommand::Workspace(WorkspaceCommand::EventsReconcile {
+                reference: required_string(params, "reference")?,
+                dry_run: optional_bool(params, "dry_run")?.unwrap_or(true),
+            })
+        }
         "workspace.projection_list" | "workspace.projection-list" => {
             CliCommand::Workspace(WorkspaceCommand::ProjectionList {
                 stale: optional_bool(params, "stale")?.unwrap_or(false),
@@ -466,6 +556,28 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             CliCommand::Workspace(WorkspaceCommand::ProjectionPrune {
                 dry_run: optional_bool(params, "dry_run")?.unwrap_or(false),
                 ids: optional_string_vec(params, "ids")?,
+            })
+        }
+        "workspace.project_scan" => {
+            reject_unknown_params(params, &[], "workspace.project_scan")?;
+            CliCommand::Workspace(WorkspaceCommand::ProjectScan)
+        }
+        "workspace.project_prune" => {
+            reject_unknown_params(
+                params,
+                &["dry_run", "manifest_hash"],
+                "workspace.project_prune",
+            )?;
+            CliCommand::Workspace(WorkspaceCommand::ProjectPrune {
+                dry_run: optional_bool(params, "dry_run")?.unwrap_or(true),
+                manifest_hash: optional_string(params, "manifest_hash")?,
+            })
+        }
+        "workspace.work_repair" => {
+            reject_unknown_params(params, &["work_id", "dry_run"], "workspace.work_repair")?;
+            CliCommand::Workspace(WorkspaceCommand::WorkRepair {
+                work_id: required_string(params, "work_id")?,
+                dry_run: optional_bool(params, "dry_run")?.unwrap_or(true),
             })
         }
         "workspace.work_prune" | "workspace.work-prune" => {
@@ -590,6 +702,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }),
         "issue.spec.repair" => CliCommand::Issue(IssueCommand::SpecRepair {
             number: required_u64(params, "number")?,
+            archive_comments: optional_u64_vec(params, "archive_comments")?,
         }),
         "issue.cache.repair" => CliCommand::Issue(IssueCommand::CacheRepair {
             number: required_u64(params, "number")?,
@@ -616,6 +729,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             title: required_string(params, "title")?,
             body: required_string(params, "body")?,
             labels: optional_string_vec(params, "labels")?,
+            owner_check: issue_owner_check(params)?,
         }),
         "issue.edit" => CliCommand::Issue(IssueCommand::Edit {
             number: required_u64(params, "number")?,
@@ -649,9 +763,57 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 verdict_raw: required_string(params, "verdict_raw")?,
             })
         }
+        "update.settings.status" => CliCommand::Update(super::UpdateCommand::SettingsStatus {
+            project_root: optional_path(params, "project_root")?,
+        }),
         "issue.monitor.status" => CliCommand::Issue(IssueCommand::MonitorStatus {
             project_root: optional_path(params, "project_root")?,
         }),
+        "issue.monitor.recovery.record" => {
+            let number = required_u64(params, "number")?;
+            let recovery_id = required_string(params, "recovery_id")?;
+            let body = required_string(params, "body")?;
+            let recovered_at = required_string(params, "recovered_at")?;
+            let recovered_at = chrono::DateTime::parse_from_rfc3339(&recovered_at)
+                .map_err(|_| {
+                    CliParseError::InvalidJson(
+                        "recovered_at must be an RFC3339 timestamp of the actual intervention"
+                            .into(),
+                    )
+                })?
+                .with_timezone(&chrono::Utc)
+                .to_rfc3339();
+            if number == 0
+                || body.trim().is_empty()
+                || recovery_id.is_empty()
+                || recovery_id.len() > 128
+                || !recovery_id.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
+                })
+            {
+                return Err(CliParseError::InvalidJson(
+                    "recovery.record requires a positive Issue number, a nonempty body and a stable ASCII recovery_id (1–128 letters, digits, -, _, . or :)".into(),
+                ));
+            }
+            let key = format!("{number}:{recovery_id}");
+            CliCommand::Board(BoardCommand::RecoveryPost {
+                intent_id: format!("manual-recovery:{key}"),
+                command: Box::new(BoardPostCommand {
+                    kind: "decision".into(),
+                    body: Some(body),
+                    topics: vec![
+                        format!("{}{key}", super::reliability::MANUAL_RECOVERY_TOPIC),
+                        format!(
+                            "{}{recovered_at}",
+                            super::reliability::MANUAL_RECOVERY_AT_TOPIC
+                        ),
+                    ],
+                    owners: vec![number.to_string()],
+                    broadcast: true,
+                    ..Default::default()
+                }),
+            })
+        }
         "issue.monitor.questions" => CliCommand::Issue(IssueCommand::MonitorQuestions {
             project_root: optional_path(params, "project_root")?,
         }),
@@ -664,6 +826,12 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "issue.monitor.priority.move" | "issue.monitor.priority-move" => {
             CliCommand::Issue(IssueCommand::MonitorPriorityMove {
+                reason: lookup(params, "reason")
+                    .map(|_| required_string(params, "reason"))
+                    .transpose()?,
+                expected_priority_order: lookup(params, "expected_priority_order")
+                    .map(|_| required_u64_vec(params, "expected_priority_order"))
+                    .transpose()?,
                 project_root: optional_path(params, "project_root")?,
                 number: required_u64(params, "number")?,
                 position: issue_monitor_priority_position(params)?,
@@ -671,8 +839,14 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "issue.monitor.launch_now" | "issue.monitor.launch-now" => {
             CliCommand::Issue(IssueCommand::MonitorLaunchNow {
+                expected_queue_order: lookup(params, "expected_queue_order")
+                    .map(|_| required_u64_vec(params, "expected_queue_order"))
+                    .transpose()?,
                 project_root: optional_path(params, "project_root")?,
                 number: required_u64(params, "number")?,
+                expected_priority_order: lookup(params, "expected_priority_order")
+                    .map(|_| required_u64_vec(params, "expected_priority_order"))
+                    .transpose()?,
             })
         }
         "issue.monitor.stop" => CliCommand::Issue(IssueCommand::MonitorStop {
@@ -680,6 +854,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             number: required_u64(params, "number")?,
             // FR-031: an unexplained stop is not auditable.
             reason: required_string(params, "reason")?,
+            remove_from_queue: optional_bool(params, "remove_from_queue")?.unwrap_or(true),
             // Which identity components are required is a property of the live
             // launch, not of the request shape, so the state layer decides.
             claim_id: optional_string(params, "claim_id")?,
@@ -699,6 +874,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             number: required_u64(params, "number")?,
             // An unexplained release of a recorded failure is not auditable.
             reason: required_string(params, "reason")?,
+            force: optional_bool(params, "force")?.unwrap_or(false),
         }),
         "issue.monitor.quota_hold.list" | "issue.monitor.quota-hold.list" => {
             CliCommand::Issue(IssueCommand::MonitorQuotaHoldList {
@@ -757,10 +933,56 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "issue.monitor.priority.set" | "issue.monitor.priority-set" => {
             CliCommand::Issue(IssueCommand::MonitorPrioritySet {
+                reason: lookup(params, "reason")
+                    .map(|_| required_string(params, "reason"))
+                    .transpose()?,
+                expected_priority_order: lookup(params, "expected_priority_order")
+                    .map(|_| required_u64_vec(params, "expected_priority_order"))
+                    .transpose()?,
                 project_root: optional_path(params, "project_root")?,
                 issue_numbers: required_u64_vec(params, "issue_numbers")?,
             })
         }
+        "issue.monitor.switch.read" => CliCommand::Issue(IssueCommand::MonitorSwitch {
+            project_root: optional_path(params, "project_root")?,
+            action: crate::issue_monitor::AgentSwitchAction::Read { request_id: None },
+        }),
+        "issue.monitor.switch.request" => CliCommand::Issue(IssueCommand::MonitorSwitch {
+            project_root: optional_path(params, "project_root")?,
+            action: crate::issue_monitor::AgentSwitchAction::Request {
+                operation_id: required_string(params, "operation_id")?,
+                member_id: required_string(params, "member_id")?,
+                expected_roster_revision: required_u64(params, "expected_roster_revision")?,
+                target_issue_number: required_u64(params, "target_issue_number")?,
+            },
+        }),
+        "issue.monitor.switch.cancel" => CliCommand::Issue(IssueCommand::MonitorSwitch {
+            project_root: optional_path(params, "project_root")?,
+            action: crate::issue_monitor::AgentSwitchAction::Cancel {
+                operation_id: required_string(params, "operation_id")?,
+            },
+        }),
+        "issue.monitor.switch.ack" => CliCommand::Issue(IssueCommand::MonitorSwitchAck {
+            operation_id: required_string(params, "operation_id")?,
+            head: required_string(params, "head")?,
+            work_id: required_string(params, "work_id")?,
+            board_entry_id: required_string(params, "board_entry_id")?,
+        }),
+        "issue.monitor.schedule.read" => CliCommand::Issue(IssueCommand::MonitorSchedule {
+            project_root: optional_path(params, "project_root")?,
+            action: crate::issue_monitor::AgentScheduleAction::Read,
+        }),
+        "issue.monitor.schedule.reassign" => CliCommand::Issue(IssueCommand::MonitorSchedule {
+            project_root: optional_path(params, "project_root")?,
+            action: crate::issue_monitor::AgentScheduleAction::Reassign {
+                issue_number: required_u64(params, "issue_number")?,
+                source_member_id: required_string(params, "source_member_id")?,
+                target_member_id: required_string(params, "target_member_id")?,
+                expected_roster_revision: required_u64(params, "expected_roster_revision")?,
+                expected_queue_revision: required_string(params, "expected_queue_revision")?,
+                expected_schedule_revision: required_u64(params, "expected_schedule_revision")?,
+            },
+        }),
         "issue.monitor.queue.list" => CliCommand::Issue(IssueCommand::MonitorQueueList {
             project_root: optional_path(params, "project_root")?,
             terminal: optional_string(params, "terminal")?,
@@ -773,16 +995,26 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }),
         "issue.monitor.queue.remove" => CliCommand::Issue(IssueCommand::MonitorQueueRemove {
             project_root: optional_path(params, "project_root")?,
+            expected_queue_order: lookup(params, "expected_queue_order")
+                .map(|_| required_u64_vec(params, "expected_queue_order"))
+                .transpose()?,
             issue_numbers: required_u64_vec(params, "numbers")?,
+            all_terminals: optional_bool(params, "all_terminals")?.unwrap_or(false),
         }),
         "issue.monitor.queue.move" => CliCommand::Issue(IssueCommand::MonitorQueueMove {
             project_root: optional_path(params, "project_root")?,
+            expected_queue_order: lookup(params, "expected_queue_order")
+                .map(|_| required_u64_vec(params, "expected_queue_order"))
+                .transpose()?,
             number: required_u64(params, "number")?,
             position: required_usize(params, "position")?,
         }),
         "issue.monitor.queue.auto_refill" => {
             CliCommand::Issue(IssueCommand::MonitorQueueAutoRefill {
                 project_root: optional_path(params, "project_root")?,
+                expected_config_token: lookup(params, "expected_config_token")
+                    .map(|_| required_string(params, "expected_config_token"))
+                    .transpose()?,
                 enabled: optional_bool(params, "enabled")?
                     .ok_or(CliParseError::MissingFlag("enabled"))?,
                 limit: required_usize(params, "limit")?,
@@ -791,14 +1023,53 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "issue.monitor.queue.urgent_limit" => {
             CliCommand::Issue(IssueCommand::MonitorQueueUrgentLimit {
                 project_root: optional_path(params, "project_root")?,
+                expected_config_token: lookup(params, "expected_config_token")
+                    .map(|_| required_string(params, "expected_config_token"))
+                    .transpose()?,
                 limit: required_usize(params, "limit")?,
             })
         }
         "issue.monitor.queue.demote" => CliCommand::Issue(IssueCommand::MonitorQueueDemote {
             project_root: optional_path(params, "project_root")?,
+            expected_urgent_queue_token: lookup(params, "expected_urgent_queue_token")
+                .map(|_| required_string(params, "expected_urgent_queue_token"))
+                .transpose()?,
             number: required_u64(params, "number")?,
         }),
+        "discussion.create"
+        | "actions.release_policy.add"
+        | "actions.release_policy.rollback"
+        | "actions.diagnostic.policy.add"
+        | "actions.diagnostic.policy.rollback"
+        | "board.config.set"
+        | "repository.required_checks.update"
+        | "repository.settings.set"
+        | "release.metadata.set"
+        | "pr.reopen"
+        | "pr.review.submit"
+        | "pr.auto_merge.enable"
+        | "update.settings.set"
+        | "project.execution.choose"
+        | "pm.approval.request"
+        | "pm.approval.status"
+        | "pm.approval.revoke"
+        | "pm.operation.execute" => {
+            params.keys().for_each(|key| param_audit::note(key));
+            CliCommand::PmAuthorization(super::pm_authorization::parse(
+                &envelope.operation,
+                &envelope.params,
+            )?)
+        }
         "issue.monitor.config.set" | "issue.monitor.config-set" => {
+            let expected_config_token = lookup(params, "expected_config_token")
+                .map(|_| required_string(params, "expected_config_token"))
+                .transpose()?;
+            if lookup(params, "auto_apply_updates").is_some() {
+                return Err(CliParseError::InvalidJson(
+                    "unknown parameter auto_apply_updates; use JSON operation update.settings.set with instruction_id or approval_id (also available in Settings > System)"
+                        .to_string(),
+                ));
+            }
             let allowed_labels = match lookup(params, "allowed_labels") {
                 None | Some(Value::Null) => None,
                 Some(value) => Some(
@@ -822,7 +1093,6 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 )),
             };
             let auto_close_merged_issues = optional_bool(params, "auto_close_merged_issues")?;
-            let auto_apply_updates = optional_bool(params, "auto_apply_updates")?;
             // Issue #3923 AC-5: the PM's CLI route off a held provider.
             let launch_agent = optional_string(params, "launch_agent")?;
             // Issue #4037 AC-5: the non-destructive update drain.
@@ -833,15 +1103,14 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 && max_active.is_none()
                 && !max_active_auto
                 && auto_close_merged_issues.is_none()
-                && auto_apply_updates.is_none()
                 && launch_agent.is_none()
                 && update_drain.is_none()
             {
                 return Err(CliParseError::MissingFlag(
-                    "allowed_labels|enabled|autonomous_mode|max_active|auto_close_merged_issues|auto_apply_updates|launch_agent|update_drain",
+                    "allowed_labels|enabled|autonomous_mode|max_active|auto_close_merged_issues|launch_agent|update_drain",
                 ));
             }
-            // The handler owns the GUI-only ON policy so dispatch can return
+            // The handler owns the resident-PM caller policy so dispatch can return
             // the normal structured `ok:false` operation envelope. This layer
             // only rejects malformed config values.
             if max_active == Some(0) {
@@ -850,6 +1119,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 ));
             }
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                expected_config_token,
                 project_root: optional_path(params, "project_root")?,
                 allowed_labels,
                 enabled,
@@ -857,7 +1127,6 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 max_active,
                 max_active_auto,
                 auto_close_merged_issues,
-                auto_apply_updates,
                 launch_agent,
                 update_drain,
             })
@@ -881,6 +1150,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 })?;
             CliCommand::Issue(IssueCommand::MonitorTiersSet {
                 project_root: optional_path(params, "project_root")?,
+                expected_config_token: lookup(params, "expected_config_token")
+                    .map(|_| required_string(params, "expected_config_token"))
+                    .transpose()?,
                 auto,
                 tiers,
             })
@@ -891,6 +1163,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             })?;
             CliCommand::Issue(IssueCommand::MonitorTierSet {
                 project_root: optional_path(params, "project_root")?,
+                expected_config_token: lookup(params, "expected_config_token")
+                    .map(|_| required_string(params, "expected_config_token"))
+                    .transpose()?,
                 number: required_u64(params, "number")?,
                 tier,
             })
@@ -899,6 +1174,12 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             project_root: optional_path(params, "project_root")?,
         }),
         "issue.monitor.profiles.set" | "issue.monitor.profiles-set" => {
+            if lookup(params, "usage_threshold_percent").is_some() {
+                return Err(CliParseError::InvalidJson(
+                    "usage_threshold_percent is retired because usage percentages no longer control launch selection; omit this parameter"
+                        .to_string(),
+                ));
+            }
             let Some(profiles) = lookup(params, "profiles") else {
                 return Err(CliParseError::MissingFlag("profiles"));
             };
@@ -913,19 +1194,13 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                     "profiles must be an array of launch profiles with agent_id: {error}"
                 ))
             })?;
-            let usage_threshold_percent = optional_u64(params, "usage_threshold_percent")?
-                .map(|value| {
-                    u8::try_from(value).map_err(|_| {
-                        CliParseError::InvalidJson(
-                            "usage_threshold_percent must be between 1 and 100".to_string(),
-                        )
-                    })
-                })
-                .transpose()?;
             CliCommand::Issue(IssueCommand::MonitorProfilesSet {
                 project_root: optional_path(params, "project_root")?,
+                expected_profiles_token: lookup(params, "expected_profiles_token")
+                    .map(|_| required_string(params, "expected_profiles_token"))
+                    .transpose()?,
                 profiles,
-                usage_threshold_percent,
+                usage_threshold_percent: None,
             })
         }
         "pr.current" => CliCommand::Pr(PrCommand::Current),
@@ -978,14 +1253,47 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 version: required_string(params, "version")?,
             })
         }
-        "pr.create" => CliCommand::Pr(PrCommand::CreateBody {
-            base: required_string(params, "base")?,
-            head: optional_string(params, "head")?,
-            title: required_string(params, "title")?,
-            body: required_string(params, "body")?,
-            labels: optional_string_vec(params, "labels")?,
-            draft: optional_bool(params, "draft")?.unwrap_or(false),
-        }),
+        "pr.create_from_ci" => {
+            reject_unknown_params(
+                params,
+                &["base", "head", "head_sha", "title", "body", "labels"],
+                "pr.create_from_ci",
+            )?;
+            let head_sha = required_string(params, "head_sha")?;
+            if !matches!(head_sha.len(), 40 | 64)
+                || !head_sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                return Err(CliParseError::InvalidJson(
+                    "head_sha must be a full commit SHA".into(),
+                ));
+            }
+            CliCommand::Pr(PrCommand::CreateFromCi(
+                super::pr::ci_delivery::CiCreateRequest {
+                    base: required_string(params, "base")?,
+                    head: required_string(params, "head")?,
+                    head_sha,
+                    title: required_string(params, "title")?,
+                    body: required_string(params, "body")?,
+                    labels: optional_string_vec(params, "labels")?,
+                },
+            ))
+        }
+        "pr.create" => {
+            if optional_bool(params, "draft")?.unwrap_or(false) {
+                return Err(CliParseError::InvalidValue {
+                    flag: "draft",
+                    reason: crate::cli::pr::DRAFT_PR_REFUSAL,
+                });
+            }
+            CliCommand::Pr(PrCommand::CreateBody {
+                base: required_string(params, "base")?,
+                head: optional_string(params, "head")?,
+                title: required_string(params, "title")?,
+                body: required_string(params, "body")?,
+                labels: optional_string_vec(params, "labels")?,
+                draft: false,
+            })
+        }
         "pr.edit" => {
             let number = required_u64(params, "number")?;
             let base = optional_string(params, "base")?;
@@ -1018,9 +1326,6 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "pr.ready" => CliCommand::Pr(PrCommand::Ready {
             number: required_u64(params, "number")?,
         }),
-        "pr.draft" => CliCommand::Pr(PrCommand::Draft {
-            number: required_u64(params, "number")?,
-        }),
         "pr.close" => CliCommand::Pr(PrCommand::Close {
             number: required_u64(params, "number")?,
             comment: optional_string(params, "comment")?,
@@ -1047,7 +1352,68 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             CliCommand::Pr(PrCommand::ReviewThreadsReplyAndResolveBody {
                 number: required_u64(params, "number")?,
                 body: required_string(params, "body")?,
+                thread_id: lookup(params, "thread_id")
+                    .map(|_| required_string(params, "thread_id"))
+                    .transpose()?,
             })
+        }
+        "actions.diagnostic.request"
+        | "actions.diagnostic.observe"
+        | "actions.diagnostic.cancel" => {
+            // Decode the closed contract before the general key audit so a
+            // private caller-controlled key is never copied into diagnostics.
+            let command = super::actions::diagnostic::parse(&envelope.operation, &envelope.params)?;
+            let keys: &[&str] = match envelope.operation.as_str() {
+                "actions.diagnostic.request" => &[
+                    "request_id",
+                    "profile_id",
+                    "expected_profile_digest",
+                    "preexecution_of",
+                    "expected_predecessor_revision",
+                ],
+                "actions.diagnostic.observe" => &["request_id", "profile_id"],
+                _ => &["request_id", "expected_run_id", "expected_revision"],
+            };
+            reject_unknown_params(params, keys, &envelope.operation)?;
+            CliCommand::Actions(ActionsCommand::Diagnostic(command))
+        }
+        "actions.diagnostic.policy.status" => {
+            super::actions::release_policy::parse_status(&envelope.params)?;
+            CliCommand::Actions(ActionsCommand::DiagnosticPolicyStatus)
+        }
+        "actions.release_policy.status" => {
+            super::actions::release_policy::parse_status(&envelope.params)?;
+            CliCommand::Actions(ActionsCommand::ReleasePolicyStatus)
+        }
+        "actions.dispatch" => {
+            reject_unknown_params(params, &["workflow", "ref", "inputs"], "actions.dispatch")?;
+            let workflow = match lookup(params, "workflow") {
+                Some(Value::String(name)) => name.clone(),
+                Some(Value::Number(id)) if id.as_u64().is_some() => id.to_string(),
+                _ => {
+                    return Err(CliParseError::InvalidValue {
+                        flag: "workflow",
+                        reason: "must be a workflow filename or positive ID",
+                    })
+                }
+            };
+            let inputs = match lookup(params, "inputs") {
+                None => Map::new(),
+                Some(Value::Object(inputs)) => inputs.clone(),
+                _ => {
+                    return Err(CliParseError::InvalidValue {
+                        flag: "inputs",
+                        reason: "must be a JSON object",
+                    })
+                }
+            };
+            let call = super::ActionsDispatchCall {
+                workflow,
+                git_ref: required_string(params, "ref")?,
+                inputs,
+            };
+            super::actions::validate_dispatch_call(&call)?;
+            CliCommand::Actions(ActionsCommand::Dispatch { call })
         }
         "actions.logs" => CliCommand::Actions(ActionsCommand::Logs {
             run_id: required_u64(params, "run_id")?,
@@ -1097,7 +1463,17 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 .unwrap_or(IndexScope::All),
         }),
         "diagnostics.cpu" => CliCommand::Diagnostics(DiagnosticsCommand::Cpu { json: true }),
-        "daemon.start" => CliCommand::Daemon(DaemonCommand::Start),
+        "daemon.start" => CliCommand::Daemon(DaemonCommand::Start {
+            startup_intent: match optional_string(params, "startup_intent")?.as_deref() {
+                None | Some("standalone") => gwt_core::daemon::DaemonStartIntent::Standalone,
+                Some("gui_managed") => gwt_core::daemon::DaemonStartIntent::GuiManaged,
+                Some(_) => {
+                    return Err(CliParseError::InvalidJson(
+                        "daemon.start startup_intent must be standalone or gui_managed".into(),
+                    ))
+                }
+            },
+        }),
         "daemon.status" => CliCommand::Daemon(DaemonCommand::Status),
         "daemon.subscribe" => daemon_subscribe(params)?,
         "hook.register_codex_managed_hook_trust" | "hook.register-codex-managed-hook-trust" => {
@@ -1256,13 +1632,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             // diagnosis; `issue` or `spec` asks about any owner in this
             // repository, which is how an operator finds out who holds a
             // generation that keeps refusing the queue.
+            reject_unknown_params(params, &["issue", "spec"], "execution.status")?;
             let issue = optional_u64(params, "issue")?;
             let spec = optional_u64(params, "spec")?;
-            if params.len() > usize::from(issue.is_some()) + usize::from(spec.is_some()) {
-                return Err(CliParseError::InvalidJson(
-                    "execution.status accepts only issue or spec".to_string(),
-                ));
-            }
             match (issue, spec) {
                 (Some(_), Some(_)) => {
                     return Err(CliParseError::InvalidJson(
@@ -1337,6 +1709,13 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 reason,
             })
         }
+        "execution.settle_delivered" => {
+            let reason = required_string(params, "reason")?;
+            reject_unknown_params(params, &["reason"], "execution.settle_delivered")?;
+            CliCommand::Execution(
+                crate::cli::execution_state::ExecutionCommand::SettleDelivered { reason },
+            )
+        }
         "execution.release_prepared" => {
             // Issue #4161: owner-addressed like `execution.status`, because the
             // Session that left the Prepared fence behind is gone and the
@@ -1387,9 +1766,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "build.start" => skill_state(params, SkillActionKind::Start).map(CliCommand::Build)?,
         "build.phase" => skill_state(params, SkillActionKind::Phase).map(CliCommand::Build)?,
-        "build.complete" => {
-            skill_state(params, SkillActionKind::Complete).map(CliCommand::Build)?
-        }
+        "build.complete" => CliCommand::Build(SkillStateAction::Complete {
+            spec: required_u64(params, "spec")?,
+            pr: optional_u64(params, "pr")?,
+        }),
         "build.abort" => skill_state(params, SkillActionKind::Abort).map(CliCommand::Build)?,
         "plan.start" => skill_state(params, SkillActionKind::Start).map(CliCommand::Plan)?,
         "plan.phase" => skill_state(params, SkillActionKind::Phase).map(CliCommand::Plan)?,
@@ -1420,7 +1800,48 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 min_reset_wait_secs: optional_u64(params, "min_reset_wait_secs")?.unwrap_or(86400),
             })
         }
+        "fleet.inventory" | "fleet.orphans" => {
+            reject_unknown_params(params, &[], &envelope.operation)?;
+            CliCommand::Fleet(if envelope.operation == "fleet.orphans" {
+                super::fleet_disposition::FleetCommand::Orphans
+            } else {
+                super::fleet_disposition::FleetCommand::Inventory
+            })
+        }
+        "fleet.disposition" | "fleet.orphan.terminate" => {
+            reject_unknown_params(params, &["targets", "allow_unknown"], &envelope.operation)?;
+            let targets =
+                super::fleet_disposition::parse_targets(lookup(params, "targets").ok_or_else(
+                    || CliParseError::InvalidJson("fleet targets are required".into()),
+                )?)?;
+            if envelope.operation == "fleet.orphan.terminate"
+                && targets
+                    .iter()
+                    .any(|target| !target.id.starts_with("process:"))
+            {
+                return Err(CliParseError::InvalidJson(
+                    "orphan termination accepts only explicit process targets".into(),
+                ));
+            }
+            CliCommand::Fleet(super::fleet_disposition::FleetCommand::Disposition {
+                targets,
+                allow_unknown: optional_bool(params, "allow_unknown")?.unwrap_or(false),
+                orphan_only: envelope.operation == "fleet.orphan.terminate",
+            })
+        }
         "pane.list" => CliCommand::Pane(PaneCommand::List),
+        "pane.health" => {
+            reject_unknown_params(params, &["id"], "pane.health")?;
+            CliCommand::Pane(PaneCommand::Health {
+                id: optional_string(params, "id")?,
+            })
+        }
+        "pane.name" => {
+            reject_unknown_params(params, &["candidate"], "pane.name")?;
+            CliCommand::Pane(PaneCommand::Name {
+                candidate: optional_string(params, "candidate")?.unwrap_or_default(),
+            })
+        }
         "pane.read" => CliCommand::Pane(PaneCommand::Read {
             id: required_string(params, "id")?,
             lines: optional_usize(params, "lines")?.unwrap_or(200),
@@ -1448,24 +1869,195 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             id: optional_string(params, "id")?,
             text: required_string(params, "text")?,
         }),
-        "pm.message.send" | "pm.pane.send" => CliCommand::Pane(PaneCommand::PmSend {
-            project_root: optional_string(params, "project_root")?,
-            id: required_string(params, "id")?,
-            text: required_string(params, "text")?,
-        }),
-        "pm.capabilities" => CliCommand::Pm(crate::cli::pm::PmCommand::Capabilities),
-        "pm.report.post" => {
-            let kind = required_string(params, "kind")?;
-            CliCommand::Pm(crate::cli::pm::PmCommand::ReportPost {
+        "pm.message.send" | "pm.pane.send" => {
+            // An explicitly supplied identity must never become a fresh delivery.
+            let operation_id = match lookup(params, "operation_id") {
+                None => None,
+                Some(Value::String(value))
+                    if uuid::Uuid::parse_str(value)
+                        .is_ok_and(|id| id.hyphenated().to_string() == value.as_str()) =>
+                {
+                    Some(value.clone())
+                }
+                Some(_) => return Err(CliParseError::InvalidValue {
+                    flag: "operation_id",
+                    reason:
+                        "must be a canonical hyphenated UUID exactly as reported by pm.message.send",
+                }),
+            };
+            CliCommand::Pane(PaneCommand::PmSend {
                 project_root: optional_string(params, "project_root")?,
-                kind: serde_json::from_value(Value::String(kind)).map_err(|_| {
-                    CliParseError::InvalidValue {
-                        flag: "kind",
-                        reason: "expected one of: progress, decision, blocker",
-                    }
-                })?,
-                body: required_string(params, "body")?,
+                id: required_string(params, "id")?,
+                text: required_string(params, "text")?,
+                operation_id,
             })
+        }
+        "project.execution.status" => {
+            let operation_id = optional_string(params, "operation_id")?;
+            if operation_id.as_ref().is_some_and(|id| {
+                !uuid::Uuid::parse_str(id).is_ok_and(|parsed| parsed.to_string() == *id)
+            }) {
+                return Err(CliParseError::InvalidJson(
+                    "operation_id must be a canonical lowercase UUID".into(),
+                ));
+            }
+            CliCommand::Pm(crate::cli::pm::PmCommand::ProjectExecutionStatus { operation_id })
+        }
+        "pm.capabilities" => CliCommand::Pm(crate::cli::pm::PmCommand::Capabilities),
+        "pm.request_tasks.read" => {
+            reject_unknown_params(params, &["selector"], "pm.request_tasks.read")?;
+            let selector: crate::cli::pm::RequestTaskSelector = lookup(params, "selector")
+                .map(|value| serde_json::from_value(value.clone()))
+                .transpose()
+                .map_err(|error| CliParseError::InvalidJson(error.to_string()))?
+                .unwrap_or(crate::cli::pm::RequestTaskSelector::Summary {});
+            selector
+                .validate()
+                .map_err(|error| CliParseError::InvalidJson(error.into()))?;
+            CliCommand::Pm(crate::cli::pm::PmCommand::RequestTasksRead { selector })
+        }
+        "pm.request_tasks.capture" => {
+            reject_unknown_params(
+                params,
+                &[
+                    "operation_id",
+                    "expected_revision",
+                    "reason",
+                    "provider",
+                    "conversation_id",
+                    "id",
+                    "prompt_sha256",
+                ],
+                "pm.request_tasks.capture",
+            )?;
+            let request: crate::cli::pm::NativeCaptureRequest =
+                serde_json::from_value(Value::Object(params.clone()))
+                    .map_err(|error| CliParseError::InvalidJson(error.to_string()))?;
+            request
+                .validate()
+                .map_err(|error| CliParseError::InvalidJson(error.into()))?;
+            CliCommand::Pm(crate::cli::pm::PmCommand::RequestTasksCapture {
+                request: Box::new(request),
+            })
+        }
+        "pm.request_tasks.apply" => {
+            reject_unknown_params(
+                params,
+                &["operation_id", "expected_revision", "reason", "action"],
+                "pm.request_tasks.apply",
+            )?;
+            let request: gwt_core::pm_request_tasks::Request =
+                serde_json::from_value(Value::Object(params.clone()))
+                    .map_err(|error| CliParseError::InvalidJson(error.to_string()))?;
+            if matches!(
+                request.action,
+                gwt_core::pm_request_tasks::Action::Capture { .. }
+            ) {
+                return Err(CliParseError::InvalidJson("Capture requires authenticated native intake; pm.request_tasks.apply only changes tracking state".into()));
+            }
+            CliCommand::Pm(crate::cli::pm::PmCommand::RequestTasksApply {
+                request: Box::new(request),
+            })
+        }
+        "pm.plan.status" => {
+            reject_unknown_params(params, &[], "pm.plan.status")?;
+            CliCommand::Pm(crate::cli::pm::PmCommand::PlanStatus)
+        }
+        "pm.plan.apply" => {
+            reject_unknown_params(
+                params,
+                &["action", "expected_revision", "reason", "idempotency_key"],
+                "pm.plan.apply",
+            )?;
+            let request: crate::pm_planning::PlanningApplyRequest =
+                serde_json::from_value(Value::Object(params.clone()))
+                    .map_err(|error| CliParseError::InvalidJson(error.to_string()))?;
+            request
+                .validate()
+                .map_err(|error| CliParseError::InvalidJson(error.to_string()))?;
+            CliCommand::Pm(crate::cli::pm::PmCommand::PlanApply {
+                request: Box::new(request),
+            })
+        }
+        "pm.peer.send" => {
+            reject_unknown_params(
+                params,
+                &["project", "kind", "text", "reply_to", "timeout_seconds"],
+                "pm.peer.send",
+            )?;
+            let project = required_string(params, "project")?;
+            let kind = serde_json::from_value::<gwt_core::pm_peer::PeerKind>(Value::String(
+                required_string(params, "kind")?,
+            ))
+            .map_err(|_| {
+                CliParseError::InvalidJson("PM peer kind must be request, reply, or notice".into())
+            })?;
+            let text = required_string(params, "text")?;
+            let reply_to = optional_string(params, "reply_to")?;
+            let timeout_seconds = optional_u64(params, "timeout_seconds")?.unwrap_or(900);
+            gwt_core::pm_peer::validate(kind, &text, reply_to.as_deref(), timeout_seconds)
+                .map_err(|error| CliParseError::InvalidJson(error.to_string()))?;
+            CliCommand::Pm(crate::cli::pm::PmCommand::PeerSend {
+                project,
+                kind,
+                text,
+                reply_to,
+                timeout_seconds,
+            })
+        }
+        "pm.report.post" => {
+            if let Some(value) = lookup(params, "submission") {
+                reject_unknown_params(params, &["submission", "project_root"], "pm.report.post")?;
+                let submission: gwt_core::pm_report::Submission =
+                    serde_json::from_value(value.clone()).map_err(|error| {
+                        CliParseError::InvalidJson(format!("invalid report submission: {error}"))
+                    })?;
+                submission
+                    .validate()
+                    .map_err(|error| CliParseError::InvalidJson(error.to_string()))?;
+                CliCommand::Pm(crate::cli::pm::PmCommand::ReportBatch {
+                    project_root: optional_string(params, "project_root")?,
+                    submission: Box::new(submission),
+                })
+            } else {
+                let kind: gwt_core::pm_report::PmReportKind =
+                    serde_json::from_value(Value::String(required_string(params, "kind")?))
+                        .map_err(|_| CliParseError::InvalidValue {
+                            flag: "kind",
+                            reason: "expected one of: progress, decision, blocker, qa",
+                        })?;
+                let question = if kind == gwt_core::pm_report::PmReportKind::Qa {
+                    Some(required_string(params, "question")?)
+                } else {
+                    optional_string(params, "question")?
+                };
+                let instruction = lookup(params, "instruction")
+                    .map(|value| {
+                        serde_json::from_value::<gwt_core::user_instruction::UserInstructionInput>(
+                            value.clone(),
+                        )
+                        .map(Box::new)
+                        .map_err(|error| {
+                            CliParseError::InvalidJson(format!(
+                                "invalid instruction capture: {error}"
+                            ))
+                        })
+                    })
+                    .transpose()?;
+                if instruction.is_some() && kind != gwt_core::pm_report::PmReportKind::Qa {
+                    return Err(CliParseError::InvalidValue {
+                        flag: "instruction",
+                        reason: "requires kind: qa",
+                    });
+                }
+                CliCommand::Pm(crate::cli::pm::PmCommand::ReportPost {
+                    project_root: optional_string(params, "project_root")?,
+                    kind,
+                    question,
+                    body: required_string(params, "body")?,
+                    instruction,
+                })
+            }
         }
         "pm.report.list" => CliCommand::Pm(crate::cli::pm::PmCommand::ReportList {
             project_root: optional_string(params, "project_root")?,
@@ -1473,6 +2065,31 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "pm.status" => CliCommand::Pm(crate::cli::pm::PmCommand::Status {
             project_root: optional_string(params, "project_root")?,
         }),
+        "pm.status.set" => {
+            reject_unknown_params(
+                params,
+                &[
+                    "project_root",
+                    "items",
+                    "next_trigger",
+                    "user_action",
+                    "stale_after_minutes",
+                ],
+                "pm.status.set",
+            )?;
+            let mut content = params.clone();
+            content.remove("project_root");
+            let input: gwt_core::pm_status::PmStatusInput =
+                serde_json::from_value(Value::Object(content))
+                    .map_err(|error| CliParseError::InvalidJson(error.to_string()))?;
+            input
+                .validate()
+                .map_err(|error| CliParseError::InvalidJson(error.to_string()))?;
+            CliCommand::Pm(crate::cli::pm::PmCommand::StatusSet {
+                project_root: optional_string(params, "project_root")?,
+                input,
+            })
+        }
         "pm.pause" | "pm.resume" => CliCommand::Pm(crate::cli::pm::PmCommand::SetPaused {
             project_root: optional_string(params, "project_root")?,
             paused: envelope.operation == "pm.pause",
@@ -1837,8 +2454,22 @@ fn hook_health(params: &Map<String, Value>) -> Result<CliCommand, CliParseError>
 }
 
 fn hook_doctor(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
+    let purpose = match optional_string(params, "purpose")?.as_deref() {
+        None => None,
+        Some("managed_browser") => Some(super::hook::health::HookDoctorPurpose::ManagedBrowser),
+        Some(_) => {
+            return Err(CliParseError::InvalidJson(
+                "unknown hook.doctor purpose".to_string(),
+            ))
+        }
+    };
+    let runtime_state_path = optional_path(params, "runtime_state_path")?;
+    if purpose.is_some() && runtime_state_path.is_some() {
+        return Err(CliParseError::InvalidJson("managed_browser resolves the current source internally; runtime_state_path is not accepted".to_string()));
+    }
     Ok(CliCommand::Hook(HookCommand::Doctor {
-        runtime_state_path: optional_path(params, "runtime_state_path")?,
+        purpose,
+        runtime_state_path,
         profile_path: optional_path(params, "profile_path")?,
         expected_hook_bin: optional_string(params, "expected_hook_bin")?,
         repair: optional_bool(params, "repair")?.unwrap_or(false),
@@ -1950,7 +2581,7 @@ fn skill_state(
             spec,
             label: required_string(params, "label")?,
         }),
-        SkillActionKind::Complete => Ok(SkillStateAction::Complete { spec }),
+        SkillActionKind::Complete => Ok(SkillStateAction::Complete { spec, pr: None }),
         SkillActionKind::Abort => Ok(SkillStateAction::Abort {
             spec,
             reason: optional_string(params, "reason")?,
@@ -2017,6 +2648,7 @@ fn search(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
             "board" => Ok(IndexSearchScope::Board),
             "discussions" => Ok(IndexSearchScope::Discussions),
             "works" => Ok(IndexSearchScope::Works),
+            "reports" => Ok(IndexSearchScope::Reports),
             _ => Err(CliParseError::InvalidJson(format!(
                 "unknown search scope: {scope}"
             ))),
@@ -2052,6 +2684,7 @@ fn index_scope(value: &str) -> Result<IndexScope, CliParseError> {
         "discussions" => Ok(IndexScope::Discussions),
         "board" => Ok(IndexScope::Board),
         "works" => Ok(IndexScope::Works),
+        "reports" => Ok(IndexScope::Reports),
         "files" => Ok(IndexScope::Files),
         "files_docs" | "files-docs" => Ok(IndexScope::FilesDocs),
         other => Err(CliParseError::InvalidJson(format!(
@@ -2064,6 +2697,23 @@ fn params_object(value: &Value) -> Result<&Map<String, Value>, CliParseError> {
     value
         .as_object()
         .ok_or_else(|| CliParseError::InvalidJson("params must be an object".to_string()))
+}
+
+fn issue_owner_check(
+    params: &Map<String, Value>,
+) -> Result<Option<super::hook::pm_spec_survey::IssueOwnerCheck>, CliParseError> {
+    let Some(value) = lookup(params, "owner_check").filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let evidence: super::hook::pm_spec_survey::IssueOwnerCheck =
+        serde_json::from_value(value.clone()).map_err(|error| {
+            CliParseError::InvalidJson(format!(
+                "invalid owner_check: {error}. {}",
+                super::hook::pm_spec_survey::OWNER_CHECK_RECOVERY
+            ))
+        })?;
+    evidence.validate().map_err(CliParseError::InvalidJson)?;
+    Ok(Some(evidence))
 }
 
 fn agent_session_or_env(params: &Map<String, Value>) -> Result<Option<String>, CliParseError> {
@@ -2479,6 +3129,79 @@ fn verification_quarantine_requests(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn auto_feedback_parse_diagnostics_do_not_echo_unknown_secrets() {
+        let _guard = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = tempfile::tempdir().unwrap();
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(repo.path()),
+            &crate::IssueMonitorPrefs {
+                autonomous_mode: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let base = serde_json::json!({"operation":"feedback.create","params":{
+            "title":"ignored", "kind":"bug", "operation":"workspace.update",
+            "refusal":"ignored", "reproduction":"ignored"
+        }});
+        for scenario in ["unknown_key", "unknown_kind", "wrong_type", "broken_json"] {
+            let mut observations = Vec::new();
+            for secret in ["unmarked confidential phrase", "未知の情報えひも"] {
+                let mut input = base.clone();
+                match scenario {
+                    "unknown_key" => input["params"][secret] = serde_json::json!(secret),
+                    "unknown_kind" => input["params"]["kind"] = serde_json::json!(secret),
+                    "wrong_type" => input["params"]["labels"] = serde_json::json!(secret),
+                    _ => {}
+                }
+                let input = if scenario == "broken_json" {
+                    format!("{{\"operation\":\"feedback.create\",\"params\":{{\"{secret}\"")
+                } else {
+                    input.to_string()
+                };
+                let mut env = crate::cli::TestEnv::new(repo.path().join("cache"));
+                env.repo_path = repo.path().to_path_buf();
+                assert_ne!(crate::cli::dispatch_json_input(&mut env, "gwtd", &input), 0);
+                let output = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&env.stdout),
+                    String::from_utf8_lossy(&env.stderr)
+                );
+                assert!(
+                    !output.contains(secret),
+                    "{scenario}: diagnostic exposed raw input"
+                );
+                observations.push(output);
+            }
+            assert_eq!(
+                observations[0], observations[1],
+                "{scenario}: secret changed diagnostics"
+            );
+        }
+    }
+
+    #[test]
+    fn feedback_create_accepts_structured_evidence() {
+        let input = serde_json::json!({"schema_version":1,"operation":"feedback.create","params":{
+            "title":"Host bridge refusal", "kind":"bug", "operation":"workspace.update",
+            "refusal":"  exact\r\nrefusal  ", "reproduction":"unconfirmed", "workaround":null
+        }});
+        assert!(
+            super::parse(&input.to_string()).is_ok(),
+            "feedback.create must accept a structured report"
+        );
+        for forbidden in ["approved", "repo", "project_root"] {
+            let mut forged = input.clone();
+            forged["params"][forbidden] = serde_json::json!(true);
+            assert!(super::parse(&forged.to_string()).is_err());
+        }
+    }
+
     use super::{
         parse, report_undelivered_response, write_response, ActionsCommand, CliCommand,
         CliParseError, DaemonCommand, DiagnosticsCommand, HookCommand, IndexCommand, IndexScope,
@@ -2486,10 +3209,44 @@ mod tests {
         WorkflowCommand, WorkspaceCommand, RESPONSE_NOT_DELIVERED_EXIT,
     };
     use crate::cli::verification_lease::VerificationLeaseCommand;
-    use crate::cli::TestEnv;
+    use crate::cli::{dispatch_json_input, TestEnv};
     use crate::cli::{BoardCommand, IssueMonitorPriorityPosition};
     use crate::protocol::{IndexSearchMatchMode, IndexSearchScope};
     use serde_json::{json, Value};
+
+    #[test]
+    fn provided_json_input_keeps_envelope_validation_and_response_without_rereading_stdin() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new(temp.path().to_path_buf());
+        env.stdin = "stdin was already read".to_string();
+
+        for input in [
+            "{",
+            r#"{"schema_version":1,"operation":"search","params":{"query":"admission","project_root":"/elsewhere"}}"#,
+        ] {
+            assert_eq!(dispatch_json_input(&mut env, "gwtd", input), 2);
+            assert!(env.stdout.is_empty());
+            assert!(String::from_utf8_lossy(&env.stderr).starts_with("gwtd: "));
+            env.stderr.clear();
+        }
+
+        env.seed_run_log(273, "run log from provided JSON");
+        assert_eq!(
+            dispatch_json_input(
+                &mut env,
+                "gwtd",
+                r#"{"schema_version":1,"operation":"actions.logs","params":{"run_id":273}}"#,
+            ),
+            0
+        );
+        let payload: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
+        assert_eq!(payload["operation"], "actions.logs");
+        assert_eq!(payload["ok"], true);
+        assert_eq!(payload["exit_code"], 0);
+        assert_eq!(payload["output"], "run log from provided JSON\n");
+        assert_eq!(env.run_log_call_log, vec![273]);
+        assert_eq!(env.stdin, "stdin was already read");
+    }
 
     #[test]
     fn provider_reset_operations_never_accept_caller_supplied_approval() {
@@ -2518,6 +3275,183 @@ mod tests {
             "params": params,
         })
         .to_string()
+    }
+
+    #[test]
+    fn pm_delegated_operation_executes_authorized_cleanup_dry_run() {
+        use gwt_core::pm_authorization::{self, OperationIntent};
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let _session = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_ID_ENV,
+            "pm-delegated-test",
+        );
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(repo.join("target")).unwrap();
+        std::fs::write(repo.join("target/keep"), "build cache").unwrap();
+        assert!(gwt_core::process::hidden_command("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        let prefs = serde_json::from_value(json!({"registration":{
+            "session_id":"pm-delegated-test", "agent_id":"codex", "worktree_path":repo,
+        }}))
+        .unwrap();
+        crate::pm_registry::save_pm_prefs(
+            &crate::pm_registry::pm_prefs_path_for_repo_path(&repo),
+            &prefs,
+        )
+        .unwrap();
+        let intent = OperationIntent {
+            operation: "worktree.gc_build_artifacts".into(),
+            params: json!({"dry_run":true,"include_unmerged":true}),
+        };
+        let approval = pm_authorization::record_approval(
+            &repo,
+            &intent,
+            "Inspect build caches",
+            "No deletion in dry run",
+            false,
+        )
+        .unwrap();
+        let mut env = TestEnv::new(repo.clone());
+        env.stdin = envelope(
+            "pm.operation.execute",
+            json!({
+                "operation":intent.operation,"params":intent.params,"approval_id":approval.id,
+            }),
+        );
+        assert_eq!(
+            super::dispatch(&mut env, "gwtd"),
+            0,
+            "{}",
+            String::from_utf8_lossy(&env.stderr)
+        );
+        let reply: Value = serde_json::from_slice(&env.stdout).unwrap();
+        let result: Value = serde_json::from_str(reply["output"].as_str().unwrap()).unwrap();
+        assert_eq!(result["after"]["operation"], "worktree.gc_build_artifacts");
+        assert_eq!(result["after"]["ok"], true);
+        let report: Value =
+            serde_json::from_str(result["after"]["output"].as_str().unwrap()).unwrap();
+        assert_eq!(report["dry_run"], true);
+        assert!(repo.join("target/keep").exists());
+        assert!(pm_authorization::approvals(&repo).unwrap()[0].consumed);
+        assert!(std::fs::read_to_string(pm_authorization::audit_path(&repo))
+            .unwrap()
+            .contains("succeeded"));
+    }
+
+    #[test]
+    fn pm_delegated_operation_propagates_inner_refusal() {
+        use gwt_core::pm_authorization::{self, OperationIntent};
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let _session = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_ID_ENV,
+            "pm-delegated-test",
+        );
+        let _pane = gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_PANE_WS_URL_ENV);
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let prefs = serde_json::from_value(json!({"registration":{
+            "session_id":"pm-delegated-test", "agent_id":"codex", "worktree_path":repo,
+        }}))
+        .unwrap();
+        crate::pm_registry::save_pm_prefs(
+            &crate::pm_registry::pm_prefs_path_for_repo_path(&repo),
+            &prefs,
+        )
+        .unwrap();
+        let intent = OperationIntent {
+            operation: "pm.message.send".into(),
+            params: json!({"id":"fixture-agent","text":"Approved exact action"}),
+        };
+        let approval = pm_authorization::record_approval(
+            &repo,
+            &intent,
+            "Forward approved action",
+            "No input if target is unavailable",
+            false,
+        )
+        .unwrap();
+        let mut env = TestEnv::new(repo.clone());
+        env.stdin = envelope(
+            "pm.operation.execute",
+            json!({
+                "operation":intent.operation,"params":intent.params,"approval_id":approval.id,
+            }),
+        );
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 1);
+        let reply: Value = serde_json::from_slice(&env.stdout).unwrap();
+        assert_eq!(reply["ok"], false);
+        let result: Value = serde_json::from_str(reply["output"].as_str().unwrap()).unwrap();
+        assert_eq!(result["after"]["ok"], false);
+        assert_eq!(result["after"]["exit_code"], 1);
+        assert!(result["after"]["error"]
+            .as_str()
+            .unwrap()
+            .contains(gwt_agent::GWT_PANE_WS_URL_ENV));
+        assert!(std::fs::read_to_string(pm_authorization::audit_path(&repo))
+            .unwrap()
+            .contains("failed"));
+    }
+
+    #[test]
+    fn pm_delegated_operation_rejects_other_operations_and_foreign_targets() {
+        for params in [
+            json!({"operation":"actions.dispatch","params":{"workflow":"release.yml"}}),
+            json!({"operation":"pm.operation.execute","params":{}}),
+            json!({"operation":"pm.message.send","params":{"id":"agent","text":"yes","project_root":"/other"}}),
+            json!({"operation":"pr.close","params":{"number":7,"repo":"other/repo"}}),
+        ] {
+            assert!(parse(&envelope("pm.operation.execute", params)).is_err());
+        }
+        assert!(parse(&envelope(
+            "pm.operation.execute",
+            json!({
+                "operation":"pr.close","params":{"number":7},"approval_id":"scoped-id"
+            })
+        ))
+        .is_ok());
+    }
+
+    #[test]
+    fn issue_4323_view_envelopes_identify_the_resource_kind() {
+        let repo = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new(repo.path().to_path_buf());
+        env.client.seed(gwt_github::client::IssueSnapshot {
+            author_login: None,
+            number: gwt_github::client::IssueNumber(42),
+            title: "typed resource".into(),
+            body: "".into(),
+            labels: vec![],
+            state: gwt_github::client::IssueState::Open,
+            updated_at: gwt_github::client::UpdatedAt::new("2026-10-15T00:00:00Z"),
+            comments: vec![],
+        });
+        env.seed_pr(7, gwt_git::pr_status::parse_pr_status_json(
+            r#"{"number":7,"title":"typed resource","url":"https://github.com/octo/gwt/pull/7","state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}"#
+        ).unwrap());
+        for (operation, number, kind, header) in [
+            ("issue.view", 42, "issue", "Issue #42"),
+            ("pr.view", 7, "pull_request", "PR #7"),
+        ] {
+            env.stdin = envelope(operation, json!({"number":number}));
+            env.stdout.clear();
+            assert_eq!(super::dispatch(&mut env, "gwtd"), 0);
+            let response: Value = serde_json::from_slice(&env.stdout).unwrap();
+            assert_eq!(response["kind"], kind);
+            assert!(response["output"].as_str().unwrap().starts_with(header));
+        }
     }
 
     #[test]
@@ -2878,6 +3812,8 @@ mod tests {
                 url: "https://example.com/pr/4139".to_string(),
                 is_draft,
                 head_ref_name: "work/issue-4131".to_string(),
+                head_sha: None,
+                is_cross_repository: None,
                 updated_at: Some(now),
                 mergeable: mergeable.to_string(),
                 merge_state_status: merge_state_status.to_string(),
@@ -3053,9 +3989,9 @@ mod tests {
         #[test]
         fn guidance_operation_names_flag_an_operation_that_does_not_exist() {
             let operations = dispatched_operations();
-            assert!(operations.contains("pr.draft"), "{operations:?}");
+            assert!(operations.contains("pr.ready"), "{operations:?}");
             let text = "Disable auto-merge through `pr.merge`, or run workspace.prune. \
-                Keep `pr.draft`, `params.body`, `plan.md`, `issue.spec.*`, a `verify.lease` \
+                Keep `pr.ready`, `params.body`, `plan.md`, `issue.spec.*`, a `verify.lease` \
                 holder, and github.com.";
             assert_eq!(
                 unresolved_operation_names(text, &operations),
@@ -3290,6 +4226,45 @@ mod tests {
     }
 
     #[test]
+    fn issue_cache_conflict_has_a_machine_readable_error_code() {
+        fn replace_after_fetch(
+            client: gwt_github::client::fake::FakeIssueClient,
+            root: std::path::PathBuf,
+            snapshot: gwt_github::IssueSnapshot,
+            remaining: usize,
+        ) {
+            if remaining == 0 {
+                return;
+            }
+            let next = client.clone();
+            client.after_next_fetch(move || {
+                gwt_github::Cache::new(root.clone())
+                    .write_snapshot(&snapshot)
+                    .unwrap();
+                replace_after_fetch(next, root, snapshot, remaining - 1);
+            });
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new(temp.path().to_path_buf());
+        // The fake's create supplies a complete, ordinary Issue fixture.
+        let snapshot =
+            gwt_github::IssueClient::create_issue(&env.client, "title", "body", &[]).unwrap();
+        replace_after_fetch(
+            env.client.clone(),
+            env.cache_root.clone(),
+            snapshot.clone(),
+            3,
+        );
+        env.stdin = envelope("issue.view", json!({"number": snapshot.number.0}));
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 1);
+        let payload: Value = serde_json::from_slice(&env.stdout).unwrap();
+        assert_eq!(payload["ok"], false);
+        assert_eq!(payload["error_code"], "ISSUE_CACHE_CONFLICT", "{payload}");
+        assert!(!payload["error"].as_str().unwrap().contains("network error"));
+    }
+
+    #[test]
     fn verify_run_operation_error_has_actionable_diagnostic() {
         let _lock = crate::env_test_lock()
             .lock()
@@ -3369,6 +4344,7 @@ mod tests {
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _profile = ScopedEnvVar::set("USERPROFILE", temp.path());
         // Confirmation authority is independent of the host's free disk space.
+        let _gwt_home = ScopedGwtHome::set(temp.path().join("gwt-home"));
         gwt_config::Settings::update_global(|settings| {
             settings.verification.disk_budget_bytes = Some(0);
             settings.build_artifact_gc.below_bytes = 0;
@@ -3376,7 +4352,13 @@ mod tests {
             Ok(())
         })
         .expect("fixture disk admission");
-        let _gwt_home = ScopedGwtHome::set(temp.path().join("gwt-home"));
+        assert_eq!(
+            gwt_config::Settings::load()
+                .unwrap()
+                .verification
+                .disk_budget_bytes,
+            Some(0)
+        );
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "session-4237");
         let _legacy = ScopedEnvVar::unset("GWT_AUTONOMOUS_EXECUTION");
         let repo = temp.path().join("repo");
@@ -3482,6 +4464,79 @@ mod tests {
             }),
             "operation refusal must land in the error ledger: {listed:?}"
         );
+    }
+
+    /// Issue #4171 AC-1/3/4: a failed read after a successful POST must not
+    /// invite a duplicate POST or classify it as an operation refusal.
+    #[test]
+    fn issue_comment_preserves_success_when_postprocessing_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("gwt-home"));
+        let mut env = TestEnv::new(temp.path().join("cache"));
+        let issue =
+            gwt_github::IssueClient::create_issue(&env.client, "title", "body", &[]).unwrap();
+        env.client.fail_next_fetch(gwt_github::ApiError::Parse {
+            operation: "graphql query".into(),
+            message: "GitHub GraphQL returned an unclassified error".into(),
+        });
+        env.stdin = envelope(
+            "issue.comment",
+            json!({"number": issue.number.0, "body": "evidence"}),
+        );
+
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 0);
+        let payload: Value = serde_json::from_slice(&env.stdout).unwrap();
+        assert_eq!(payload["ok"], true, "{payload}");
+        let comments = env.client.comments(issue.number);
+        assert_eq!(comments.len(), 1);
+        assert!(payload["output"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("created comment {} ", comments[0].id.0)));
+        assert_eq!(
+            payload["warnings"][0]["code"],
+            "issue_comment_postprocessing_failed"
+        );
+        assert!(payload["warnings"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("GitHub GraphQL"));
+        let rows = gwt_core::error_ledger::list_since(None).unwrap();
+        assert!(rows.iter().any(|row| row.kind
+            == gwt_core::error_ledger::ErrorKind::CacheRefreshFailure
+            && row.target.issue == Some(issue.number.0)));
+        assert!(!rows
+            .iter()
+            .any(|row| row.kind == gwt_core::error_ledger::ErrorKind::OperationRefusal));
+    }
+
+    #[test]
+    fn issue_comment_creation_failure_stays_an_operation_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("gwt-home"));
+        let mut env = TestEnv::new(temp.path().join("cache"));
+        let issue =
+            gwt_github::IssueClient::create_issue(&env.client, "title", "body", &[]).unwrap();
+        env.client.fail_create_comment_after(0);
+        env.stdin = envelope(
+            "issue.comment",
+            json!({"number": issue.number.0, "body": "evidence"}),
+        );
+
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 1);
+        let payload: Value = serde_json::from_slice(&env.stdout).unwrap();
+        assert_eq!(payload["ok"], false, "{payload}");
+        assert!(payload["error"]
+            .as_str()
+            .unwrap()
+            .contains("injected create_comment failure"));
+        assert!(env.client.comments(issue.number).is_empty());
+        assert!(!env
+            .client
+            .call_log()
+            .iter()
+            .any(|call| call.starts_with("fetch:")));
+        assert!(payload.get("warnings").is_none());
     }
 
     #[test]
@@ -4102,6 +5157,29 @@ mod tests {
     }
 
     #[test]
+    fn workspace_close_requires_an_exact_target_and_close_kind() {
+        assert!(matches!(
+            ok("workspace.close", json!({"work_id":"work-1","close_kind":"done"})),
+            CliCommand::Workspace(WorkspaceCommand::Close { work_id, close_kind })
+                if work_id == "work-1" && close_kind == "done"
+        ));
+        assert!(matches!(
+            ok("workspace.close", json!({"work_id":"work-1","close_kind":"superseded"})),
+            CliCommand::Workspace(WorkspaceCommand::Close { work_id, close_kind })
+                if work_id == "work-1" && close_kind == "superseded"
+        ));
+        for params in [
+            json!({"close_kind":"done"}),
+            json!({"work_id":"work-1"}),
+            json!({"work_id":"work-1","close_kind":"delete"}),
+            json!({"work_id":"work-1","close_kind":"done","manual_close_allowed":true}),
+            json!({"work_id":"work-1","close_kind":"done","project_root":"/other"}),
+        ] {
+            assert!(parse(&envelope("workspace.close", params)).is_err());
+        }
+    }
+
+    #[test]
     fn workspace_lifecycle_operations_parse() {
         assert!(matches!(
             ok("workspace.candidates", json!({"agent_session": "s"})),
@@ -4163,6 +5241,26 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn project_store_maintenance_json_defaults_to_dry_run_and_rejects_unknown_scope() {
+        assert!(matches!(
+            ok("workspace.project_prune", json!({})),
+            CliCommand::Workspace(WorkspaceCommand::ProjectPrune {
+                dry_run: true,
+                manifest_hash: None
+            })
+        ));
+        assert!(matches!(
+            ok("workspace.project_scan", json!({})),
+            CliCommand::Workspace(WorkspaceCommand::ProjectScan)
+        ));
+        assert!(
+            err("workspace.project_prune", json!({"ids": ["unexpected"]}))
+                .to_string()
+                .contains("ids")
+        );
+    }
+
     /// Issue #4465 AC-8: `workspace.work_prune` mutates durable Work state, so
     /// an unqualified call only reports candidates. The first call used to be
     /// an immediate `APPLIED` across every Work on the machine (1100 rows,
@@ -4176,6 +5274,61 @@ mod tests {
         assert!(matches!(
             ok("workspace.work-prune", json!({"dry_run": false})),
             CliCommand::Workspace(WorkspaceCommand::WorkPrune { dry_run: false, .. })
+        ));
+    }
+
+    #[test]
+    fn workspace_work_repair_requires_work_and_defaults_to_dry_run() {
+        assert!(matches!(
+            ok("workspace.work_repair", json!({"work_id":"work-test"})),
+            CliCommand::Workspace(WorkspaceCommand::WorkRepair { dry_run: true, .. })
+        ));
+        assert!(matches!(
+            ok(
+                "workspace.work_repair",
+                json!({"work_id":"work-test", "dry_run":false})
+            ),
+            CliCommand::Workspace(WorkspaceCommand::WorkRepair { dry_run: false, .. })
+        ));
+        assert!(matches!(
+            err("workspace.work_repair", json!({})),
+            CliParseError::MissingFlag("work_id")
+        ));
+        assert!(matches!(
+            err(
+                "workspace.work_repair",
+                json!({"work_id":"work-test", "project_root":"/foreign"})
+            ),
+            CliParseError::InvalidJson(_)
+        ));
+    }
+
+    #[test]
+    fn workspace_events_reconcile_requires_reference_and_defaults_to_dry_run() {
+        assert!(matches!(
+            ok(
+                "workspace.events_reconcile",
+                json!({"reference":"origin/develop"})
+            ),
+            CliCommand::Workspace(WorkspaceCommand::EventsReconcile { dry_run: true, .. })
+        ));
+        assert!(matches!(
+            ok(
+                "workspace.events_reconcile",
+                json!({"reference":"origin/develop", "dry_run":false})
+            ),
+            CliCommand::Workspace(WorkspaceCommand::EventsReconcile { dry_run: false, .. })
+        ));
+        assert!(matches!(
+            err("workspace.events_reconcile", json!({})),
+            CliParseError::MissingFlag("reference")
+        ));
+        assert!(matches!(
+            err(
+                "workspace.events_reconcile",
+                json!({"reference":"origin/develop", "force":true})
+            ),
+            CliParseError::InvalidJson(_)
         ));
     }
 
@@ -4246,12 +5399,288 @@ mod tests {
             "issue.monitor.tiers.set",
             json!({"auto": true, "tiers": [[{"agent_id":"codex"}]]}),
         );
+        ok(
+            "issue.monitor.tiers.set",
+            json!({"auto": true, "expected_config_token": "observed-config"}),
+        );
+        for invalid in [
+            json!(null),
+            json!(false),
+            json!(2),
+            json!([]),
+            json!(""),
+            json!(" "),
+        ] {
+            err(
+                "issue.monitor.tiers.set",
+                json!({"auto": true, "expected_config_token": invalid}),
+            );
+        }
         ok("issue.monitor.tier.set", json!({"number":4774, "tier":1}));
+        ok(
+            "issue.monitor.tier.set",
+            json!({"number":4774, "tier":1, "expected_config_token":"observed-config"}),
+        );
+        for invalid in [
+            json!(null),
+            json!(false),
+            json!(2),
+            json!([]),
+            json!(""),
+            json!(" "),
+        ] {
+            err(
+                "issue.monitor.tier.set",
+                json!({"number":4774, "tier":1, "expected_config_token":invalid}),
+            );
+        }
         assert!(
             !err("issue.monitor.tier.set", json!({"number":4774, "tier":256}))
                 .to_string()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn issue_monitor_tiers_set_refuses_stale_config_and_returns_saved_observation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(&path, &crate::IssueMonitorPrefs::default()).unwrap();
+        let mut env = TestEnv::new(repo);
+        let mut invoke = |operation, params| {
+            let CliCommand::Issue(command) = ok(operation, params) else {
+                panic!("issue command")
+            };
+            let mut out = String::new();
+            crate::cli::issue::run(&mut env, command, &mut out).map(|_| out)
+        };
+        let observed: Value =
+            serde_json::from_str(&invoke("issue.monitor.tiers", json!({})).unwrap()).unwrap();
+        let initial = crate::load_issue_monitor_prefs(&path).unwrap();
+        assert_eq!(observed["saved_config"], initial.config_observation());
+        assert_eq!(observed["config_token"], initial.config_token());
+        invoke("issue.monitor.tiers.set", json!({"auto": true})).unwrap();
+        let auto_token = crate::load_issue_monitor_prefs(&path)
+            .unwrap()
+            .config_token();
+        assert_ne!(auto_token, initial.config_token());
+        invoke(
+            "issue.monitor.tiers.set",
+            json!({"auto": true, "tiers": [[{"agent_id":"codex"}]]}),
+        )
+        .unwrap();
+        let changed = crate::load_issue_monitor_prefs(&path).unwrap();
+        assert_ne!(changed.config_token(), auto_token);
+        let before = std::fs::read(&path).unwrap();
+        let error = invoke(
+            "issue.monitor.tiers.set",
+            json!({
+                "auto": false, "expected_config_token": observed["config_token"]
+            }),
+        )
+        .expect_err("stale tier configuration must be refused");
+        assert!(error.to_string().contains("config changed"), "{error}");
+        assert!(
+            error.to_string().contains("issue.monitor.status"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let fresh: Value =
+            serde_json::from_str(&invoke("issue.monitor.tiers", json!({})).unwrap()).unwrap();
+        let reply: Value = serde_json::from_str(
+            &invoke(
+                "issue.monitor.tiers.set",
+                json!({
+                    "auto": false, "expected_config_token": fresh["config_token"]
+                }),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let saved = crate::load_issue_monitor_prefs(&path).unwrap();
+        assert!(!saved.launch_auto);
+        assert!(
+            saved.launch_tiers.is_empty(),
+            "omitted tiers restore defaults"
+        );
+        assert_eq!(
+            saved.effect_authority_epoch,
+            changed.effect_authority_epoch + 1
+        );
+        assert_eq!(reply["auto"], false);
+        assert_eq!(reply["configured_tiers"], json!([]));
+        assert_eq!(reply["tiers"], json!(saved.effective_launch_tiers()));
+        assert_eq!(reply["saved_config"], saved.config_observation());
+        assert_eq!(reply["config_token"], saved.config_token());
+        assert_ne!(reply["config_token"], fresh["config_token"]);
+    }
+
+    #[test]
+    fn issue_monitor_tier_set_refuses_unobserved_configuration() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let mut prefs = crate::IssueMonitorPrefs::default();
+        prefs.tier_overrides.insert(777, 1);
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        let mut env = TestEnv::new(repo);
+        let mut invoke = |operation, params| {
+            let CliCommand::Issue(command) = ok(operation, params) else {
+                panic!("issue command")
+            };
+            let mut out = String::new();
+            crate::cli::issue::run(&mut env, command, &mut out).map(|_| out)
+        };
+        let observed: Value =
+            serde_json::from_str(&invoke("issue.monitor.tiers", json!({})).unwrap()).unwrap();
+        invoke(
+            "issue.monitor.tiers.set",
+            json!({"auto":true, "tiers":[[{"agent_id":"claude"}],[{"agent_id":"codex"}]]}),
+        )
+        .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let error = invoke(
+            "issue.monitor.tier.set",
+            json!({"number":4774, "tier":1, "expected_config_token":observed["config_token"]}),
+        )
+        .expect_err("unobserved tier configuration must be refused");
+        assert!(error.to_string().contains("config changed"), "{error}");
+        assert!(
+            error.to_string().contains("issue.monitor.status"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let changed = crate::load_issue_monitor_prefs(&path).unwrap();
+        let fresh: Value =
+            serde_json::from_str(&invoke("issue.monitor.tiers", json!({})).unwrap()).unwrap();
+        let reply: Value = serde_json::from_str(
+            &invoke(
+                "issue.monitor.tier.set",
+                json!({"number":4774, "tier":1, "expected_config_token":fresh["config_token"]}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let saved = crate::load_issue_monitor_prefs(&path).unwrap();
+        assert_eq!(
+            saved.effect_authority_epoch,
+            changed.effect_authority_epoch + 1
+        );
+        assert_eq!(reply["tier_overrides"]["4774"], 1);
+        assert_eq!(reply["tier_overrides"]["777"], 1);
+        assert_eq!(reply["tiers"], json!(saved.effective_launch_tiers()));
+        assert_eq!(reply["saved_config"], saved.config_observation());
+        assert_eq!(reply["config_token"], saved.config_token());
+        // Configuration CAS does not version overrides; merging stays monotonic.
+        invoke(
+            "issue.monitor.tier.set",
+            json!({"number":4774, "tier":0, "expected_config_token":fresh["config_token"]}),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&path)
+                .unwrap()
+                .tier_overrides[&4774],
+            1
+        );
+    }
+
+    #[test]
+    fn issue_monitor_profiles_set_accepts_only_nonblank_supplied_observation_guards() {
+        for operation in ["issue.monitor.profiles.set", "issue.monitor.profiles-set"] {
+            ok(
+                operation,
+                json!({"profiles":[{"agent_id":"codex"}], "expected_profiles_token":"observed-pool"}),
+            );
+            for invalid in [json!(null), json!(""), json!(" "), json!(2), json!(false)] {
+                err(
+                    operation,
+                    json!({"profiles":[{"agent_id":"codex"}], "expected_profiles_token":invalid}),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn issue_monitor_profiles_set_refuses_unobserved_pool_and_recovers_from_fresh_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let mut prefs = crate::IssueMonitorPrefs::default();
+        prefs.set_launch_profile_pool(vec![serde_json::from_value(json!({
+            "agent_id":"codex", "model":"observed-model"
+        }))
+        .unwrap()]);
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        let mut env = TestEnv::new(repo);
+        let mut invoke = |operation, params| {
+            let CliCommand::Issue(command) = ok(operation, params) else {
+                panic!("issue command")
+            };
+            let mut out = String::new();
+            crate::cli::issue::run(&mut env, command, &mut out).map(|_| out)
+        };
+        let observed: Value =
+            serde_json::from_str(&invoke("issue.monitor.profiles", json!({})).unwrap()).unwrap();
+        assert!(observed["profiles_token"]
+            .as_str()
+            .is_some_and(|token| !token.is_empty()));
+        prefs.allowed_labels.push("unrelated-config".into());
+        prefs.last_scan_at = Some("2026-10-23T00:00:00Z".into());
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        let unrelated: Value =
+            serde_json::from_str(&invoke("issue.monitor.profiles", json!({})).unwrap()).unwrap();
+        assert_eq!(unrelated["profiles_token"], observed["profiles_token"]);
+        let fresh: Value = serde_json::from_str(
+            &invoke(
+                "issue.monitor.profiles.set",
+                json!({"profiles":[{"agent_id":"codex", "model":"competing-model"}]}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_ne!(fresh["profiles_token"], observed["profiles_token"]);
+        let before = std::fs::read(&path).unwrap();
+        let error = invoke(
+            "issue.monitor.profiles.set",
+            json!({"profiles":[{"agent_id":"codex"}], "expected_profiles_token":observed["profiles_token"]}),
+        ).expect_err("a pool changed since observation must be refused");
+        assert!(
+            error.to_string().contains("issue.monitor.profiles"),
+            "{error}"
+        );
+        assert!(error.to_string().contains("reconsider"), "{error}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let changed = crate::load_issue_monitor_prefs(&path).unwrap();
+        let reply: Value = serde_json::from_str(&invoke(
+            "issue.monitor.profiles-set",
+            json!({"profiles":[{"agent_id":"codex"}], "expected_profiles_token":fresh["profiles_token"]}),
+        ).unwrap()).unwrap();
+        let saved = crate::load_issue_monitor_prefs(&path).unwrap();
+        assert_eq!(
+            saved.effect_authority_epoch,
+            changed.effect_authority_epoch + 1
+        );
+        assert_eq!(reply["launch_profiles"][0]["model"], "competing-model");
+        assert_eq!(reply["profiles_token"], fresh["profiles_token"]);
+        assert!(reply["changes"]
+            .as_array()
+            .is_some_and(|changes| !changes.is_empty()));
+        // The raw head is part of sparse inheritance even with an explicit pool.
+        let mut head_changed = saved;
+        head_changed.launch_profile.as_mut().unwrap().model = Some("changed-head".into());
+        crate::save_issue_monitor_prefs(&path, &head_changed).unwrap();
+        let head: Value =
+            serde_json::from_str(&invoke("issue.monitor.profiles", json!({})).unwrap()).unwrap();
+        assert_eq!(head["launch_profiles"], reply["launch_profiles"]);
+        assert_ne!(head["profiles_token"], reply["profiles_token"]);
     }
 
     #[test]
@@ -4267,11 +5696,11 @@ mod tests {
                     {"agent_id": "codex"},
                     {"agent_id": "claude", "model": "opus", "prefer_for": ["kind:spec"]},
                 ],
-                "usage_threshold_percent": 70,
             }),
         );
         let CliCommand::Issue(IssueCommand::MonitorProfilesSet {
             project_root,
+            expected_profiles_token,
             profiles,
             usage_threshold_percent,
         }) = parsed
@@ -4279,7 +5708,8 @@ mod tests {
             panic!("expected MonitorProfilesSet, got {parsed:?}");
         };
         assert_eq!(project_root, None);
-        assert_eq!(usage_threshold_percent, Some(70));
+        assert_eq!(expected_profiles_token, None);
+        assert_eq!(usage_threshold_percent, None);
         assert_eq!(profiles.len(), 2);
         assert_eq!(profiles[0].profile.agent_id, "codex");
         assert_eq!(profiles[0].profile.model, None);
@@ -4316,13 +5746,13 @@ mod tests {
             ),
             CliParseError::InvalidJson(_)
         ));
-        assert!(matches!(
-            err(
+        for threshold in [json!(70), json!(null), json!("lots")] {
+            let error = err(
                 "issue.monitor.profiles.set",
-                json!({"profiles": [{"agent_id": "codex"}], "usage_threshold_percent": "lots"})
-            ),
-            CliParseError::InvalidJson(_) | CliParseError::InvalidNumber(_)
-        ));
+                json!({"profiles": [{"agent_id": "codex"}], "usage_threshold_percent": threshold}),
+            );
+            assert!(error.to_string().contains("retired"), "{error}");
+        }
     }
 
     #[test]
@@ -4409,6 +5839,7 @@ mod tests {
                 json!({"enabled": true, "max_active": 7})
             ),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                expected_config_token: None,
                 allowed_labels: None,
                 project_root: None,
                 enabled: Some(true),
@@ -4416,7 +5847,6 @@ mod tests {
                 max_active: Some(7),
                 max_active_auto: false,
                 auto_close_merged_issues: None,
-                auto_apply_updates: None,
                 launch_agent: None,
                 update_drain: None,
             })
@@ -4424,6 +5854,7 @@ mod tests {
         assert_eq!(
             ok("issue.monitor.config.set", json!({"autonomous_mode": true})),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                expected_config_token: None,
                 allowed_labels: None,
                 project_root: None,
                 enabled: None,
@@ -4431,7 +5862,6 @@ mod tests {
                 max_active: None,
                 max_active_auto: false,
                 auto_close_merged_issues: None,
-                auto_apply_updates: None,
                 launch_agent: None,
                 update_drain: None,
             })
@@ -4442,6 +5872,7 @@ mod tests {
                 json!({"auto_close_merged_issues": false})
             ),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                expected_config_token: None,
                 allowed_labels: None,
                 project_root: None,
                 enabled: None,
@@ -4449,31 +5880,170 @@ mod tests {
                 max_active: None,
                 max_active_auto: false,
                 auto_close_merged_issues: Some(false),
-                auto_apply_updates: None,
                 launch_agent: None,
                 update_drain: None,
             }),
             "Issue #3917 AC-5: the auto-close override is settable on its own"
         );
+    }
+
+    #[test]
+    fn issue_monitor_config_set_guard_is_presence_aware() {
+        for operation in ["issue.monitor.config.set", "issue.monitor.config-set"] {
+            ok(operation, json!({"max_active": 3}));
+            let CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                expected_config_token,
+                ..
+            }) = ok(
+                operation,
+                json!({"max_active": 3, "expected_config_token": "observed-config"}),
+            )
+            else {
+                panic!("expected config command")
+            };
+            assert_eq!(expected_config_token.as_deref(), Some("observed-config"));
+            for invalid in [json!(null), json!(false), json!(2), json!([]), json!("")] {
+                err(
+                    operation,
+                    json!({"max_active": 3, "expected_config_token": invalid}),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn issue_monitor_config_set_rejects_auto_apply_updates() {
+        for operation in ["issue.monitor.config.set", "issue.monitor.config-set"] {
+            for enabled in [true, false] {
+                for params in [
+                    json!({"auto_apply_updates": enabled}),
+                    json!({"auto_apply_updates": enabled, "enabled": false}),
+                ] {
+                    let error = err(operation, params).to_string();
+                    assert!(
+                        error.contains("unknown parameter auto_apply_updates"),
+                        "{error}"
+                    );
+                    assert!(error.contains("Settings > System"), "{error}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn release_policy_status_is_read_only_and_has_a_fixed_target() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let mut env = TestEnv::new(repo);
+        env.stdin = envelope("actions.release_policy.status", json!({}));
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 0);
+        let reply: Value = serde_json::from_slice(&env.stdout).unwrap();
+        let status: Value = serde_json::from_str(reply["output"].as_str().unwrap()).unwrap();
+        assert_eq!(status["workflow"], "prepare-release.yml");
+        assert_eq!(status["repository"], "owner/repo");
+        assert_eq!(status["allowed"], false);
         assert_eq!(
-            ok(
-                "issue.monitor.config.set",
-                json!({"auto_apply_updates": true})
-            ),
-            CliCommand::Issue(IssueCommand::MonitorConfigSet {
-                allowed_labels: None,
-                project_root: None,
-                enabled: None,
-                autonomous_mode: None,
-                max_active: None,
-                max_active_auto: false,
-                auto_close_merged_issues: None,
-                auto_apply_updates: Some(true),
-                launch_agent: None,
-                update_drain: None,
-            }),
-            "Issue #3906 AC-1: the auto-apply override is settable on its own"
+            status["requirement"]["permission_stage"],
+            "instruction_or_approval"
         );
+        assert_eq!(status["token"].as_str().unwrap().len(), 64);
+        assert!(!gwt_core::paths::gwt_config_path().exists());
+        assert!(
+            crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "actions.release_policy.status"
+            )
+        );
+        assert!(
+            !crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "actions.release_policy.add"
+            )
+        );
+        assert!(
+            !crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "actions.release_policy.rollback"
+            )
+        );
+        std::fs::create_dir_all(gwt_core::paths::gwt_home()).unwrap();
+        std::fs::write(
+            gwt_core::paths::gwt_config_path(),
+            "private_metadata = 'POLICY_SECRET_SENTINEL'\n",
+        )
+        .unwrap();
+        env.stdin = envelope("actions.release_policy.status", json!({}));
+        env.stdout.clear();
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 0);
+        assert!(!String::from_utf8_lossy(&env.stdout).contains("POLICY_SECRET_SENTINEL"));
+    }
+
+    #[test]
+    fn release_policy_contract_is_fixed_and_strict() {
+        ok("actions.release_policy.status", json!({}));
+        let request = json!({
+            "request_id": "b4ae91f1-98f3-4fa6-929c-8ce5e3510597",
+            "expected_token": "a".repeat(64),
+            "reason": "Enable the release workflow",
+            "approval_id": "recorded-approval"
+        });
+        ok("actions.release_policy.add", request.clone());
+        for (key, value) in [
+            ("repo", json!("another/repository")),
+            ("workflow", json!("other.yml")),
+            ("ref", json!("main")),
+            ("approved", json!(true)),
+            ("request_id", json!("../receipt")),
+            ("expected_token", json!("HEAD")),
+            ("reason", json!("")),
+        ] {
+            let mut invalid = request.clone();
+            invalid[key] = value;
+            err("actions.release_policy.add", invalid);
+        }
+        err(
+            "actions.release_policy.status",
+            json!({"repo":"another/repository"}),
+        );
+        let mut rollback = request;
+        rollback["added_by"] = json!("cbd15e96-bc2b-478c-a354-302baf307de4");
+        ok("actions.release_policy.rollback", rollback);
+    }
+
+    #[test]
+    fn update_settings_status_is_read_only_and_does_not_write_config() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let mut env = TestEnv::new(repo.clone());
+        env.stdin = envelope("update.settings.status", json!({"project_root": repo}));
+
+        assert_eq!(
+            super::dispatch(&mut env, "gwtd"),
+            0,
+            "{}",
+            String::from_utf8_lossy(&env.stderr)
+        );
+        let reply: Value = serde_json::from_slice(&env.stdout).unwrap();
+        let status: Value = serde_json::from_str(reply["output"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            status,
+            json!({
+                "auto_apply_updates": null,
+                "auto_apply_updates_effective": false,
+                "update_drain": null,
+            })
+        );
+        assert!(!gwt_core::paths::gwt_config_path().exists());
+        assert!(
+            crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "update.settings.status"
+            )
+        );
+        assert!(matches!(
+            ok("update.settings.set", json!({"auto_apply_updates": false})),
+            CliCommand::PmAuthorization(_)
+        ));
     }
 
     #[test]
@@ -4505,6 +6075,7 @@ mod tests {
         assert_eq!(
             ok("issue.monitor.config.set", json!({"update_drain": true})),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                expected_config_token: None,
                 allowed_labels: None,
                 project_root: None,
                 enabled: None,
@@ -4514,12 +6085,12 @@ mod tests {
                 auto_close_merged_issues: None,
                 launch_agent: None,
                 update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(true)),
-                auto_apply_updates: None,
             })
         );
         assert_eq!(
             ok("issue.monitor.config.set", json!({"update_drain": false})),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                expected_config_token: None,
                 allowed_labels: None,
                 project_root: None,
                 enabled: None,
@@ -4529,7 +6100,6 @@ mod tests {
                 auto_close_merged_issues: None,
                 launch_agent: None,
                 update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(false)),
-                auto_apply_updates: None,
             })
         );
         assert!(matches!(
@@ -4546,6 +6116,7 @@ mod tests {
                 json!({"launch_agent": "claude"})
             ),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                expected_config_token: None,
                 allowed_labels: None,
                 project_root: None,
                 enabled: None,
@@ -4553,7 +6124,6 @@ mod tests {
                 max_active: None,
                 max_active_auto: false,
                 auto_close_merged_issues: None,
-                auto_apply_updates: None,
                 launch_agent: Some("claude".to_string()),
                 update_drain: None,
             })
@@ -4561,9 +6131,55 @@ mod tests {
         assert!(matches!(
             err("issue.monitor.config.set", json!({})),
             CliParseError::MissingFlag(
-                "allowed_labels|enabled|autonomous_mode|max_active|auto_close_merged_issues|auto_apply_updates|launch_agent|update_drain"
+                "allowed_labels|enabled|autonomous_mode|max_active|auto_close_merged_issues|launch_agent|update_drain"
             )
         ));
+    }
+
+    #[test]
+    fn issue_monitor_queue_demote_guard_parses() {
+        let CliCommand::Issue(IssueCommand::MonitorQueueDemote { .. }) = ok(
+            "issue.monitor.queue.demote",
+            json!({"number": 2, "expected_urgent_queue_token": "observed-urgent"}),
+        ) else {
+            panic!("demote command")
+        };
+        for invalid in [
+            json!(null),
+            json!(false),
+            json!(2),
+            json!([]),
+            json!(""),
+            json!(" "),
+        ] {
+            err(
+                "issue.monitor.queue.demote",
+                json!({"number": 2, "expected_urgent_queue_token": invalid}),
+            );
+        }
+    }
+
+    #[test]
+    fn issue_monitor_queue_urgent_limit_config_guard_parses() {
+        let CliCommand::Issue(IssueCommand::MonitorQueueUrgentLimit { .. }) = ok(
+            "issue.monitor.queue.urgent_limit",
+            json!({"limit": 0, "expected_config_token": "observed-config"}),
+        ) else {
+            panic!("urgent limit command")
+        };
+        for invalid in [
+            json!(null),
+            json!(false),
+            json!(2),
+            json!([]),
+            json!(""),
+            json!(" "),
+        ] {
+            err(
+                "issue.monitor.queue.urgent_limit",
+                json!({"limit": 0, "expected_config_token": invalid}),
+            );
+        }
     }
 
     #[test]
@@ -4597,6 +6213,65 @@ mod tests {
         assert_eq!(prefs.terminal_queue_auto_refill_limit, 3);
         assert!(prefs.enabled);
         assert_eq!(prefs.priority_order, vec![7, 42]);
+
+        let mut invoke = |params| {
+            let CliCommand::Issue(command) = ok("issue.monitor.queue.auto_refill", params) else {
+                panic!("issue command")
+            };
+            let mut out = String::new();
+            crate::cli::issue::run(&mut env, command, &mut out).map(|_| out)
+        };
+        let token = prefs.config_token();
+        // An intervening writer changes only the observed refill limit.
+        crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
+            prefs.terminal_queue_auto_refill_limit = 4;
+            Ok(())
+        })
+        .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let error = invoke(json!({
+            "enabled": false, "limit": 0, "expected_config_token": token
+        }))
+        .expect_err("stale refill configuration must be refused");
+        assert!(error.to_string().contains("config changed"), "{error}");
+        assert!(
+            error.to_string().contains("issue.monitor.status"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let token = crate::load_issue_monitor_prefs(&path)
+            .unwrap()
+            .config_token();
+        let reply: Value = serde_json::from_str(
+            &invoke(json!({
+                "enabled": false, "limit": 0, "expected_config_token": token
+            }))
+            .expect("fresh observation must succeed"),
+        )
+        .unwrap();
+        let saved = crate::load_issue_monitor_prefs(&path).unwrap();
+        assert!(!saved.terminal_queue_auto_refill);
+        assert_eq!(saved.terminal_queue_auto_refill_limit, 0);
+        assert!(saved.enabled);
+        assert_eq!(saved.priority_order, vec![7, 42]);
+        assert_eq!(reply["enabled"], false);
+        assert_eq!(reply["limit"], 0);
+        assert_eq!(reply["saved_config"], saved.config_observation());
+        assert_eq!(reply["config_token"], saved.config_token());
+        assert_ne!(reply["config_token"], token);
+        for invalid in [
+            json!(null),
+            json!(false),
+            json!(2),
+            json!([]),
+            json!(""),
+            json!(" "),
+        ] {
+            err(
+                "issue.monitor.queue.auto_refill",
+                json!({"enabled": true, "limit": 3, "expected_config_token": invalid}),
+            );
+        }
         let _ = err("issue.monitor.queue.auto_refill", json!({"enabled": true}));
         let _ = err("issue.monitor.queue.auto_refill", json!({"limit": 3}));
     }
@@ -4609,6 +6284,8 @@ mod tests {
         assert_eq!(
             ok("issue.monitor.launch_now", json!({"number": 42})),
             CliCommand::Issue(IssueCommand::MonitorLaunchNow {
+                expected_queue_order: None,
+                expected_priority_order: None,
                 project_root: None,
                 number: 42,
             })
@@ -4619,6 +6296,8 @@ mod tests {
                 json!({"project_root": "/tmp/project", "number": 7})
             ),
             CliCommand::Issue(IssueCommand::MonitorLaunchNow {
+                expected_queue_order: None,
+                expected_priority_order: None,
                 project_root: Some(std::path::PathBuf::from("/tmp/project")),
                 number: 7,
             })
@@ -4651,6 +6330,7 @@ mod tests {
                 project_root: None,
                 number: 42,
                 reason: "provider rate limit".to_string(),
+                remove_from_queue: true,
                 claim_id: None,
                 delivery_id: None,
                 window_id: Some("tab-1::agent-1".to_string()),
@@ -4663,6 +6343,7 @@ mod tests {
                     "project_root": "/tmp/project",
                     "number": 7,
                     "reason": "switch provider",
+                    "remove_from_queue": false,
                     "claim_id": "claim-1",
                     "delivery_id": "launch:effect-1",
                 })
@@ -4671,6 +6352,7 @@ mod tests {
                 project_root: Some(std::path::PathBuf::from("/tmp/project")),
                 number: 7,
                 reason: "switch provider".to_string(),
+                remove_from_queue: false,
                 claim_id: Some("claim-1".to_string()),
                 delivery_id: Some("launch:effect-1".to_string()),
                 window_id: None,
@@ -4886,6 +6568,7 @@ mod tests {
                 project_root: None,
                 number: 3624,
                 reason: "manual recovery after the launch-fence outage".to_string(),
+                force: false,
             })
         );
         assert!(matches!(
@@ -4895,6 +6578,13 @@ mod tests {
         assert!(matches!(
             err("issue.monitor.requeue", json!({"reason": "x"})),
             CliParseError::MissingFlag("number")
+        ));
+        assert!(matches!(
+            ok(
+                "issue.monitor.requeue",
+                json!({"number": 42, "reason": "explicit recovery", "force": true})
+            ),
+            CliCommand::Issue(IssueCommand::MonitorRequeue { force: true, .. })
         ));
     }
 
@@ -4911,8 +6601,63 @@ mod tests {
                 project_root: None,
                 id: "tab-1::agent-1".to_string(),
                 text: "please report status".to_string(),
+                operation_id: None,
             })
         );
+        assert_ne!(
+            ok(
+                "pm.message.send",
+                json!({
+                    "id": "tab-1::agent-1",
+                    "text": "please report status",
+                    "operation_id": "72fc3cd4-ad49-43e3-bf3d-d791357643c2"
+                })
+            ),
+            ok(
+                "pm.message.send",
+                json!({"id": "tab-1::agent-1", "text": "please report status"})
+            ),
+            "same-operation recovery must preserve the caller's operation identity"
+        );
+        ok(
+            "pm.operation.execute",
+            json!({
+                "operation": "pm.message.send",
+                "params": {
+                    "id": "tab-1::agent-1",
+                    "text": "please report status",
+                    "operation_id": "72fc3cd4-ad49-43e3-bf3d-d791357643c2"
+                },
+                "approval_id": "scoped-authority"
+            }),
+        );
+        for operation_id in [
+            json!(""),
+            json!("not-a-uuid"),
+            json!("72FC3CD4-AD49-43E3-BF3D-D791357643C2"),
+            json!("72fc3cd4ad4943e3bf3dd791357643c2"),
+            Value::Null,
+        ] {
+            assert!(matches!(
+                err(
+                    "pm.message.send",
+                    json!({"id": "tab-1::agent-1", "text": "status", "operation_id": operation_id})
+                ),
+                CliParseError::InvalidValue {
+                    flag: "operation_id",
+                    ..
+                }
+            ));
+            assert!(parse(&envelope(
+                "pm.operation.execute",
+                json!({
+                    "operation": "pm.message.send",
+                    "params": {"id": "tab-1::agent-1", "text": "status", "operation_id": operation_id},
+                    "approval_id": "scoped-authority"
+                })
+            ))
+            .is_err());
+        }
         assert!(matches!(
             err("pm.message.send", json!({"text": "hello"})),
             CliParseError::MissingFlag("id")
@@ -4982,6 +6727,120 @@ mod tests {
     }
 
     #[test]
+    fn manual_recovery_record_uses_the_exact_board_delivery_path() {
+        let command = ok(
+            "issue.monitor.recovery.record",
+            json!({
+                "number":5876, "recovery_id":"incident-a", "body":"停止窓を再投入した",
+                "recovered_at":"2026-10-20T10:00:00+09:00"
+            }),
+        );
+        assert!(matches!(command,
+            CliCommand::Board(BoardCommand::RecoveryPost { intent_id, command })
+            if intent_id == "manual-recovery:5876:incident-a"
+                && command.kind == "decision"
+                && command.owners == ["5876"]
+                && command.topics == ["gwt-manual-recovery:5876:incident-a", "gwt-manual-recovery-at:2026-10-20T01:00:00+00:00"]
+                && command.body.as_deref() == Some("停止窓を再投入した")
+        ));
+        for mut params in [
+            json!({"number":5876,"body":"recovered"}),
+            json!({"number":5876,"recovery_id":" ","body":"recovered"}),
+            json!({"number":0,"recovery_id":"incident","body":"recovered"}),
+            json!({"number":5876,"recovery_id":"incident","body":" "}),
+            json!({"number":5876,"recovery_id":"incident","body":"recovered","session_id":"fake"}),
+        ] {
+            params["recovered_at"] = json!("2026-10-20T01:00:00Z");
+            let _ = err("issue.monitor.recovery.record", params);
+        }
+    }
+
+    #[test]
+    fn issue_monitor_switch_operations_require_typed_self_acknowledgements() {
+        let read = ok("issue.monitor.switch.read", json!({}));
+        assert!(format!("{read:?}").contains("MonitorSwitch"));
+        let request = json!({"operation_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "member_id":"member", "expected_roster_revision":3, "target_issue_number":42});
+        let parsed = ok("issue.monitor.switch.request", request.clone());
+        assert!(format!("{parsed:?}").contains("expected_roster_revision: 3"));
+        for field in [
+            "operation_id",
+            "member_id",
+            "expected_roster_revision",
+            "target_issue_number",
+        ] {
+            let mut incomplete = request.clone();
+            incomplete.as_object_mut().unwrap().remove(field);
+            let _ = err("issue.monitor.switch.request", incomplete);
+        }
+        let _ = ok(
+            "issue.monitor.switch.cancel",
+            json!({"operation_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}),
+        );
+        let ack = json!({"operation_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "head":"a".repeat(40), "work_id":"work", "board_entry_id":"board"});
+        let parsed = ok("issue.monitor.switch.ack", ack.clone());
+        assert!(format!("{parsed:?}").contains("MonitorSwitchAck"));
+        for field in ["operation_id", "head", "work_id", "board_entry_id"] {
+            let mut incomplete = ack.clone();
+            incomplete.as_object_mut().unwrap().remove(field);
+            let _ = err("issue.monitor.switch.ack", incomplete);
+        }
+        for field in ["project_root", "session_id", "capability", "command"] {
+            let mut forged = ack.clone();
+            forged[field] = json!("untrusted");
+            let _ = err("issue.monitor.switch.ack", forged);
+        }
+    }
+
+    #[test]
+    fn issue_monitor_schedule_operations_require_complete_reassignment_observation() {
+        assert_eq!(
+            ok("issue.monitor.schedule.read", json!({})),
+            CliCommand::Issue(IssueCommand::MonitorSchedule {
+                project_root: None,
+                action: crate::issue_monitor::AgentScheduleAction::Read,
+            })
+        );
+        let reassignment = json!({
+            "project_root": "/tmp/project",
+            "issue_number": 42,
+            "source_member_id": "member-a",
+            "target_member_id": "member-b",
+            "expected_roster_revision": 3,
+            "expected_queue_revision": "observed-queue",
+            "expected_schedule_revision": 2,
+        });
+        assert_eq!(
+            ok("issue.monitor.schedule.reassign", reassignment.clone()),
+            CliCommand::Issue(IssueCommand::MonitorSchedule {
+                project_root: Some(std::path::PathBuf::from("/tmp/project")),
+                action: crate::issue_monitor::AgentScheduleAction::Reassign {
+                    issue_number: 42,
+                    source_member_id: "member-a".into(),
+                    target_member_id: "member-b".into(),
+                    expected_roster_revision: 3,
+                    expected_queue_revision: "observed-queue".into(),
+                    expected_schedule_revision: 2,
+                },
+            })
+        );
+        for required in [
+            "issue_number",
+            "source_member_id",
+            "target_member_id",
+            "expected_roster_revision",
+            "expected_queue_revision",
+            "expected_schedule_revision",
+        ] {
+            let mut incomplete = reassignment.clone();
+            incomplete.as_object_mut().unwrap().remove(required);
+            let _ = err("issue.monitor.schedule.reassign", incomplete);
+        }
+        let mut invalid = reassignment;
+        invalid["expected_schedule_revision"] = Value::Null;
+        let _ = err("issue.monitor.schedule.reassign", invalid);
+    }
+
+    #[test]
     fn issue_monitor_queue_operations_parse() {
         assert_eq!(
             ok("issue.monitor.status", json!({})),
@@ -4999,6 +6858,8 @@ mod tests {
         assert_eq!(
             ok("issue.monitor.priority.move", json!({"number": 42})),
             CliCommand::Issue(IssueCommand::MonitorPriorityMove {
+                reason: None,
+                expected_priority_order: None,
                 project_root: None,
                 number: 42,
                 position: IssueMonitorPriorityPosition::Head,
@@ -5010,6 +6871,8 @@ mod tests {
                 json!({"project_root": "/tmp/project", "number": 42, "position": 3})
             ),
             CliCommand::Issue(IssueCommand::MonitorPriorityMove {
+                reason: None,
+                expected_priority_order: None,
                 project_root: Some(std::path::PathBuf::from("/tmp/project")),
                 number: 42,
                 position: IssueMonitorPriorityPosition::Index(3),
@@ -5021,6 +6884,8 @@ mod tests {
                 json!({"issue_numbers": [9, 4, 7]})
             ),
             CliCommand::Issue(IssueCommand::MonitorPrioritySet {
+                reason: None,
+                expected_priority_order: None,
                 project_root: None,
                 issue_numbers: vec![9, 4, 7],
             })
@@ -5031,6 +6896,7 @@ mod tests {
                 json!({"enabled": false, "autonomous_mode": false, "max_active": 3})
             ),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                expected_config_token: None,
                 allowed_labels: None,
                 project_root: None,
                 enabled: Some(false),
@@ -5038,11 +6904,66 @@ mod tests {
                 max_active: Some(3),
                 max_active_auto: false,
                 auto_close_merged_issues: None,
-                auto_apply_updates: None,
                 launch_agent: None,
                 update_drain: None,
             })
         );
+    }
+
+    #[test]
+    fn issue_monitor_priority_guard_parsing_preserves_presence() {
+        for (operation, mut params) in [
+            ("issue.monitor.priority-move", json!({"number":42})),
+            ("issue.monitor.priority-set", json!({"issue_numbers":[42]})),
+            ("issue.monitor.launch_now", json!({"number":42})),
+            ("issue.monitor.launch-now", json!({"number":42})),
+        ] {
+            let unconditional = ok(operation, params.clone());
+            params["expected_priority_order"] = json!([]);
+            assert_ne!(ok(operation, params.clone()), unconditional);
+            for invalid in [Value::Null, json!("1,2")] {
+                params["expected_priority_order"] = invalid;
+                assert!(matches!(
+                    err(operation, params.clone()),
+                    CliParseError::InvalidJson(_)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn issue_monitor_queue_guard_parsing_preserves_presence() {
+        for (operation, mut params) in [
+            (
+                "issue.monitor.queue.move",
+                json!({"number":42,"position":0}),
+            ),
+            ("issue.monitor.queue.remove", json!({"numbers":[42]})),
+            ("issue.monitor.launch_now", json!({"number":42})),
+            ("issue.monitor.launch-now", json!({"number":42})),
+        ] {
+            let unconditional = ok(operation, params.clone());
+            params["expected_queue_order"] = json!([]);
+            assert_ne!(ok(operation, params.clone()), unconditional);
+            params["expected_queue_order"] = json!([42]);
+            let numeric = ok(operation, params.clone());
+            params["expected_queue_order"] = json!(["42"]);
+            assert_eq!(ok(operation, params.clone()), numeric);
+            for invalid in [
+                Value::Null,
+                json!("1,2"),
+                json!([null]),
+                json!([true]),
+                json!([1.5]),
+                json!([-1]),
+            ] {
+                params["expected_queue_order"] = invalid;
+                assert!(matches!(
+                    err(operation, params.clone()),
+                    CliParseError::InvalidJson(_)
+                ));
+            }
+        }
     }
 
     #[test]
@@ -5064,6 +6985,25 @@ mod tests {
             err("issue.monitor.priority.set", json!({})),
             CliParseError::MissingFlag("issue_numbers")
         ));
+    }
+
+    #[test]
+    fn managed_browser_doctor_accepts_only_internal_current_source_resolution() {
+        assert!(matches!(
+            ok("hook.doctor", json!({"purpose":"managed_browser"})),
+            CliCommand::Hook(HookCommand::Doctor {
+                purpose: Some(super::super::hook::health::HookDoctorPurpose::ManagedBrowser),
+                ..
+            })
+        ));
+        for params in [
+            json!({"purpose":"unknown"}),
+            json!({"purpose":"managed_browser","runtime_state_path":"/arbitrary/runtime.json"}),
+            json!({"purpose":"managed_browser","session_id":"self-reported"}),
+            json!({"purpose":"managed_browser","authority_hash":"self-reported"}),
+        ] {
+            let _ = err("hook.doctor", params);
+        }
     }
 
     #[test]
@@ -5430,6 +7370,18 @@ mod tests {
     }
 
     #[test]
+    fn issue_spec_repair_accepts_explicit_archive_comments() {
+        assert!(matches!(
+            ok(
+                "issue.spec.repair",
+                json!({"number": 3590, "archive_comments": [5565328835u64]})
+            ),
+            CliCommand::Issue(IssueCommand::SpecRepair { number: 3590, archive_comments })
+                if archive_comments == vec![5565328835]
+        ));
+    }
+
+    #[test]
     fn issue_operations_parse() {
         for op in [
             "issue.view",
@@ -5475,6 +7427,22 @@ mod tests {
             ok("issue.comment", json!({"number": 1, "body": "b"})),
             CliCommand::Issue(IssueCommand::CommentBody { .. })
         ));
+    }
+
+    #[test]
+    fn fleet_operations_accept_only_explicit_generation_targets() {
+        let inventory = ok("fleet.inventory", json!({}));
+        assert!(!format!("{inventory:?}").is_empty());
+        let target = json!({"id":"pane:agent-1","session_id":"session-1",
+            "child_pid":123,"child_started_at":456});
+        let disposition = ok("fleet.disposition", json!({"targets":[target]}));
+        assert!(!format!("{disposition:?}").is_empty());
+        assert!(err("fleet.disposition", json!({"state":"delivered"}))
+            .to_string()
+            .contains("state"));
+        assert!(err("fleet.disposition", json!({"targets":[]}))
+            .to_string()
+            .contains("target"));
     }
 
     #[test]
@@ -5642,6 +7610,49 @@ mod tests {
     }
 
     #[test]
+    fn qa_reports_require_a_nonempty_question() {
+        assert!(matches!(
+            ok(
+                "pm.report.post",
+                json!({"kind":"qa", "question":"Can we ship?", "body":"Checks passed."})
+            ),
+            CliCommand::Pm(_)
+        ));
+        for params in [
+            json!({"kind":"qa", "body":"Checks passed."}),
+            json!({"kind":"qa", "question":" \n ", "body":"Checks passed."}),
+        ] {
+            assert!(matches!(
+                err("pm.report.post", params),
+                CliParseError::MissingFlag("question")
+            ));
+        }
+    }
+
+    #[test]
+    fn pm_report_structured_submission_parser_preserves_typed_contract() {
+        let input = json!({"submission": {
+            "schema_version":1,"request_id":"tick-1","events":[{
+                "episode_id":"wait-1","event_id":"worker","expected_revision":0,"kind":"progress",
+                "state":{"status":"waiting","severity":"routine","impact":"project"},
+                "summary":{"result":"Waiting for CI"},"details":"Full failure remains open","refs":[]
+            }]
+        }});
+        assert!(matches!(
+            ok("pm.report.post", input.clone()),
+            CliCommand::Pm(_)
+        ));
+        let mut mixed = input.clone();
+        mixed["body"] = json!("legacy bypass");
+        assert!(parse(&envelope("pm.report.post", mixed)).is_err());
+        for (key, value) in [("schema_version", json!(2)), ("unknown", json!(true))] {
+            let mut bad = input.clone();
+            bad["submission"][key] = value;
+            assert!(parse(&envelope("pm.report.post", bad)).is_err());
+        }
+    }
+
+    #[test]
     fn pm_report_post_requires_pm_authority_except_for_direct_cli() {
         use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
         let _lock = crate::env_test_lock()
@@ -5650,10 +7661,27 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(home.path());
         let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/reports-post.git",
+            ],
+        ] {
+            assert!(gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success());
+        }
         let mut env = TestEnv::new(repo.clone());
         let post = || match ok(
             "pm.report.post",
-            json!({"kind":"progress", "body":"Persisted progress"}),
+            json!({"kind":"qa", "question":"Can we ship?", "body":"Checks passed."}),
         ) {
             CliCommand::Pm(command) => command,
             other => panic!("unexpected report command: {other:?}"),
@@ -5664,7 +7692,21 @@ mod tests {
             crate::cli::pm::run(&mut env, post(), &mut output).unwrap(),
             0
         );
-        assert_eq!(serde_json::from_str::<Value>(&output).unwrap()["ok"], true);
+        let saved: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(saved["ok"], true);
+        assert_eq!(saved["report"]["kind"], "qa");
+        assert_eq!(saved["report"]["question"], "Can we ship?");
+        assert_eq!(saved["report"]["body"], "Checks passed.");
+        let broker = gwt_core::index::broker::RefreshBroker::open_default().unwrap();
+        let scope = serde_json::from_str("\"reports\"").expect("Reports refresh scope");
+        let hash = crate::index_worker::detect_repo_hash(&repo).unwrap();
+        let target = gwt_core::index::broker::RefreshTarget::base(hash.as_str(), [scope]);
+        let posted_epoch = broker
+            .inspect()
+            .unwrap()
+            .target(&target)
+            .expect("post queues Reports")
+            .desired_epoch();
         let _agent = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "registered-pm");
         output.clear();
         let error = crate::cli::pm::run(&mut env, post(), &mut output).unwrap_err();
@@ -5684,10 +7726,43 @@ mod tests {
             },
         )
         .unwrap();
+        let error = crate::cli::pm::run(&mut env, post(), &mut output).unwrap_err();
+        assert!(error.to_string().contains("instruction"), "{error}");
+        // Joined PM capture is tested with real native-message identity in
+        // pm_reporting. This fixture exercises explicit direct-CLI compatibility.
+        drop(_agent);
+        let capture = || match ok(
+            "pm.report.post",
+            json!({"kind":"qa", "question":"Can we ship?", "body":"Checks passed.",
+                "instruction":{"original":"Can we ship? Please explain all results.",
+                    "kind":"question", "actions":["Verified checks: passed"], "issue_numbers":[5342]}}),
+        ) {
+            CliCommand::Pm(command) => command,
+            other => panic!("unexpected report command: {other:?}"),
+        };
+        let peer_path = gwt_core::paths::gwt_home().join("pm-peer-messages.json");
+        std::fs::write(&peer_path, b"{").unwrap();
         assert_eq!(
-            crate::cli::pm::run(&mut env, post(), &mut output).unwrap(),
+            crate::cli::pm::run(&mut env, capture(), &mut output).unwrap(),
             0
         );
+        let saved: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(
+            saved["instruction"]["original"],
+            "Can we ship? Please explain all results."
+        );
+        assert_eq!(saved["instruction"]["id"], saved["report"]["id"]);
+        assert_eq!(gwt_core::user_instruction::load(&repo).unwrap().len(), 1);
+        assert!(
+            broker
+                .inspect()
+                .unwrap()
+                .target(&target)
+                .unwrap()
+                .desired_epoch()
+                > posted_epoch
+        );
+        assert_eq!(std::fs::read(&peer_path).unwrap(), b"{");
         let CliCommand::Pm(list) = ok("pm.report.list", json!({})) else {
             panic!("expected PM list")
         };
@@ -5699,6 +7774,401 @@ mod tests {
                 .unwrap()
                 .len(),
             2
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap()["reports"][1]["question"],
+            "Can we ship?"
+        );
+        let source = gwt_core::user_instruction::instructions_path(&repo);
+        let before = std::fs::read(&source).unwrap();
+        let mut oversized = capture();
+        let crate::cli::pm::PmCommand::ReportPost { question, .. } = &mut oversized else {
+            panic!("expected Q&A capture")
+        };
+        *question = Some("q".repeat(64 * 1024 + 1));
+        output.clear();
+        let error = crate::cli::pm::run(&mut env, oversized, &mut output).unwrap_err();
+        assert!(error.to_string().contains("question"), "{error}");
+        assert_eq!(std::fs::read(&source).unwrap(), before);
+        std::fs::write(gwt_core::pm_report::reports_path(&repo), b"broken\n").unwrap();
+        output.clear();
+        assert!(crate::cli::pm::run(&mut env, capture(), &mut output).is_err());
+        assert_eq!(std::fs::read(&source).unwrap(), before);
+    }
+
+    #[test]
+    fn pm_status_set_parses_typed_content_and_rejects_invalid_cards() {
+        let valid = json!({
+            "items": [{"kind":"working", "text":"Reviewing CI", "started_at":"2026-10-13T00:00:00Z"}],
+            "next_trigger":"CI completes", "project_root":"/tmp/project"
+        });
+        assert!(matches!(
+            ok("pm.status.set", valid.clone()),
+            CliCommand::Pm(_)
+        ));
+        for (key, value) in [
+            ("items", json!([])),
+            (
+                "items",
+                json!([{"kind":"done", "text":"Done", "started_at":"2026-10-13T00:00:00Z"}]),
+            ),
+            (
+                "items",
+                json!([{"kind":"working", "text":" ", "started_at":"2026-10-13T00:00:00Z"}]),
+            ),
+            (
+                "items",
+                json!([{"kind":"working", "text":"Review", "started_at":"yesterday"}]),
+            ),
+            ("next_trigger", json!(" ")),
+            ("stale_after_minutes", json!(0)),
+            ("stale_after_minutes", json!(-1)),
+            ("stale_after_minutes", json!(4_294_967_296_u64)),
+            ("user_action", json!(" ")),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[key] = value;
+            assert!(matches!(
+                err("pm.status.set", invalid),
+                CliParseError::InvalidJson(_)
+            ));
+        }
+        let mut missing = valid;
+        missing.as_object_mut().unwrap().remove("next_trigger");
+        assert!(matches!(
+            err("pm.status.set", missing),
+            CliParseError::InvalidJson(_)
+        ));
+        assert!(
+            !crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "pm.status.set"
+            )
+        );
+        assert!(crate::cli::pm::capabilities_report()
+            .capabilities
+            .iter()
+            .any(|row| row.operation == "pm.status.set" && row.executable));
+    }
+
+    #[test]
+    fn pm_status_set_requires_pm_authority_and_preserves_registration_diagnostics() {
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        let mut env = TestEnv::new(repo.clone());
+        let set = || match ok(
+            "pm.status.set",
+            json!({
+                "items":[{"kind":"waiting", "text":"Waiting for CI", "started_at":"2026-10-13T00:00:00Z"}],
+                "next_trigger":"CI completes"
+            }),
+        ) {
+            CliCommand::Pm(command) => command,
+            other => panic!("unexpected status command: {other:?}"),
+        };
+        let _direct = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let mut output = String::new();
+        assert_eq!(
+            crate::cli::pm::run(&mut env, set(), &mut output).unwrap(),
+            0
+        );
+        let saved: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(saved["status"]["stale_after_minutes"], 15);
+        assert_eq!(saved["status"]["items"][0]["kind"], "waiting");
+        assert_eq!(saved["status"]["next_trigger"], "CI completes");
+        let _agent = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "registered-pm");
+        output.clear();
+        let error = crate::cli::pm::run(&mut env, set(), &mut output).unwrap_err();
+        assert!(error.to_string().contains("registered PM"), "{error}");
+        crate::pm_registry::save_pm_prefs(
+            &crate::pm_registry::pm_prefs_path_for_repo_path(&repo),
+            &crate::pm_registry::PmPrefs {
+                registration: Some(crate::pm_registry::PmRegistration {
+                    session_id: "registered-pm".into(),
+                    agent_id: "codex".into(),
+                    worktree_path: repo.display().to_string(),
+                    created_at: None,
+                    consecutive_crashes: 0,
+                    next_not_before: None,
+                }),
+                ..crate::pm_registry::PmPrefs::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            crate::cli::pm::run(&mut env, set(), &mut output).unwrap(),
+            0
+        );
+        output.clear();
+        let CliCommand::Pm(status) = ok("pm.status", json!({})) else {
+            panic!("expected PM status")
+        };
+        crate::cli::pm::run(&mut env, status, &mut output).unwrap();
+        let diagnostics: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(diagnostics["registered"], true);
+        assert_eq!(diagnostics["caller_is_registered_pm"], true);
+        assert_eq!(diagnostics["registration"]["session_id"], "registered-pm");
+        assert_eq!(diagnostics["current_status"], saved["status"]);
+        assert_eq!(diagnostics["status_history"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn status_store_is_shared_by_originless_repo_pm_checkout_and_nested_cwd() {
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let _direct = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let repo = home.path().join("repo");
+        let git_dir = repo.join(".git");
+        let admin = git_dir.join("worktrees/pm");
+        std::fs::create_dir_all(&admin).unwrap();
+        std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(git_dir.join("config"), "[core]\n\tbare = false\n").unwrap();
+        let project = gwt_core::paths::gwt_project_dir_for_repo_path(&repo);
+        let pm = project.join("pm/worktree");
+        let nested = pm.join("src/nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(admin.join("commondir"), "../..\n").unwrap();
+        std::fs::write(pm.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
+        assert_ne!(
+            gwt_core::pm_status::status_path(&repo),
+            gwt_core::pm_status::status_path(&pm)
+        );
+        assert_eq!(
+            crate::pm_registry::pm_repository_key(&repo),
+            crate::pm_registry::pm_repository_key(&pm)
+        );
+        crate::pm_registry::save_pm_prefs(
+            &project.join("project-state/pm.json"),
+            &crate::pm_registry::PmPrefs {
+                registration: Some(crate::pm_registry::PmRegistration {
+                    session_id: "pm-session".into(),
+                    agent_id: "codex".into(),
+                    worktree_path: pm.display().to_string(),
+                    created_at: None,
+                    consecutive_crashes: 0,
+                    next_not_before: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        {
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-session");
+            crate::cli::hook::pm_reporting::handle_user_prompt_submit(
+                &pm,
+                r#"{"prompt":"What is happening now?"}"#,
+            )
+            .unwrap();
+        }
+        let mut latest = Value::Null;
+        for (cwd, text) in [
+            (&repo, "Original repo"),
+            (&pm, "PM checkout"),
+            (&nested, "Nested PM cwd"),
+        ] {
+            let CliCommand::Pm(command) = ok(
+                "pm.status.set",
+                json!({
+                    "items":[{"kind":"working", "text":text, "started_at":"2026-10-13T00:00:00Z"}],
+                    "next_trigger":"CI completes"
+                }),
+            ) else {
+                panic!("expected status set")
+            };
+            let mut output = String::new();
+            crate::cli::pm::run(&mut TestEnv::new(cwd.clone()), command, &mut output).unwrap();
+            latest = serde_json::from_str::<Value>(&output).unwrap()["status"].clone();
+        }
+        for cwd in [&repo, &pm, &nested] {
+            let current = crate::pm_current::latest_status(cwd).unwrap();
+            assert_eq!(
+                serde_json::to_value(current).unwrap(),
+                latest,
+                "current status from {}",
+                cwd.display()
+            );
+            let CliCommand::Pm(command) = ok("pm.status", json!({})) else {
+                panic!("expected status")
+            };
+            let mut output = String::new();
+            crate::cli::pm::run(&mut TestEnv::new(cwd.clone()), command, &mut output).unwrap();
+            let diagnostics: Value = serde_json::from_str(&output).unwrap();
+            assert_eq!(diagnostics["current_status"], latest);
+            assert_eq!(diagnostics["status_history"].as_array().unwrap().len(), 3);
+            assert_eq!(diagnostics["reporting"]["requires_qa"], true);
+        }
+        assert_eq!(
+            gwt_core::pm_status::load_status_history(&repo)
+                .unwrap()
+                .len(),
+            3
+        );
+        assert!(!gwt_core::pm_status::status_path(&pm).exists());
+    }
+
+    #[test]
+    fn pm_peer_send_strict_boundary() {
+        let valid = json!({"project":"/tmp/peer","kind":"request","text":"Please checkpoint"});
+        assert!(matches!(
+            ok("pm.peer.send", valid.clone()),
+            CliCommand::Pm(_)
+        ));
+        for field in ["project", "kind", "text"] {
+            let mut invalid = valid.clone();
+            invalid.as_object_mut().unwrap().remove(field);
+            assert!(parse(&envelope("pm.peer.send", invalid)).is_err());
+        }
+        for (field, value) in [
+            ("id", json!("foreign-pane")),
+            ("session_id", json!("forged")),
+            ("project_root", json!("/tmp/foreign")),
+            ("kind", json!("stop")),
+            ("text", json!(" ")),
+            ("timeout_seconds", json!(0)),
+            ("timeout_seconds", json!(86401)),
+            ("reply_to", json!("unrelated")),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = value;
+            assert!(parse(&envelope("pm.peer.send", invalid)).is_err());
+        }
+        assert!(crate::cli::pm::capabilities_report()
+            .capabilities
+            .iter()
+            .any(|row| row.operation == "pm.peer.send" && row.executable));
+    }
+
+    #[test]
+    fn pm_peer_two_project_runtime_roundtrip_and_unavailable() {
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let a = home.path().join("a");
+        let b = home.path().join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let register = |repo: &std::path::Path, id: &str| {
+            let worktree = crate::pm_registry::pm_worktree_path_for_repo_path(repo);
+            std::fs::create_dir_all(&worktree).unwrap();
+            std::fs::create_dir_all(worktree.parent().unwrap().join("runtime")).unwrap();
+            let mut session = gwt_agent::Session::new(&worktree, "work", gwt_agent::AgentId::Codex);
+            session.id = id.into();
+            session.project_state_root = Some(repo.to_path_buf());
+            session.status = gwt_agent::AgentStatus::Running;
+            session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+            let mut runtime = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running);
+            runtime.child_pid = Some(std::process::id());
+            runtime.child_started_at = crate::process::host_process_start_time(std::process::id());
+            assert!(runtime.child_started_at.is_some());
+            runtime
+                .save(&gwt_agent::runtime_state_path(
+                    &gwt_core::paths::gwt_sessions_dir(),
+                    id,
+                ))
+                .unwrap();
+            crate::pm_registry::save_pm_prefs(
+                &crate::pm_registry::pm_prefs_path_for_repo_path(repo),
+                &crate::pm_registry::PmPrefs {
+                    registration: Some(crate::pm_registry::PmRegistration {
+                        session_id: id.into(),
+                        agent_id: "codex".into(),
+                        worktree_path: worktree.display().to_string(),
+                        created_at: None,
+                        consecutive_crashes: 0,
+                        next_not_before: None,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        };
+        register(&a, "pm-a");
+        register(&b, "pm-b");
+        let send = |repo: &std::path::Path, params: Value| {
+            let mut env = TestEnv::new(
+                crate::pm_registry::pm_worktree_path_for_repo_path(repo)
+                    .parent()
+                    .unwrap()
+                    .join("runtime"),
+            );
+            let CliCommand::Pm(command) = ok("pm.peer.send", params) else {
+                panic!("expected PM command")
+            };
+            let mut output = String::new();
+            crate::cli::pm::run(&mut env, command, &mut output)
+                .map(|_| serde_json::from_str::<Value>(&output).unwrap())
+        };
+        let request = json!({"project":b,"kind":"request","text":"Please checkpoint"});
+        let _direct = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        assert!(send(&a, request.clone()).is_err());
+        let _agent = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "implementation-agent");
+        assert!(send(&a, request.clone()).is_err());
+        let _pm_a = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-a");
+        let sent = send(&a, request.clone()).unwrap();
+        assert_eq!(sent["status"], "queued");
+        assert!(crate::cli::pm::peer_context(&a).unwrap().is_empty());
+        {
+            let _pm_b = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-b");
+            let context = crate::cli::pm::peer_context(&b).unwrap();
+            assert!(
+                context.contains("Please checkpoint")
+                    && context.contains(sent["message"]["id"].as_str().unwrap())
+            );
+            assert_eq!(crate::cli::pm::peer_context(&b).unwrap(), context);
+            let reply = json!({"project":a,"kind":"reply","text":"Checkpoint saved","reply_to":sent["message"]["id"]});
+            assert_eq!(send(&b, reply).unwrap()["status"], "queued");
+            assert!(!crate::cli::pm::peer_context(&b)
+                .unwrap()
+                .contains("Please checkpoint"));
+        }
+        assert!(crate::cli::pm::peer_context(&a)
+            .unwrap()
+            .contains("Checkpoint saved"));
+        assert_eq!(gwt_core::pm_report::load_reports(&a).unwrap().len(), 2);
+        assert_eq!(gwt_core::pm_report::load_reports(&b).unwrap().len(), 2);
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let mut stopped = gwt_agent::Session::load(&sessions.join("pm-b.toml")).unwrap();
+        stopped.status = gwt_agent::AgentStatus::Stopped;
+        stopped.save(&sessions).unwrap();
+        assert_eq!(send(&a, request.clone()).unwrap()["status"], "unavailable");
+        stopped.status = gwt_agent::AgentStatus::Running;
+        stopped.save(&sessions).unwrap();
+        std::fs::remove_file(gwt_agent::runtime_state_path(
+            &gwt_core::paths::gwt_sessions_dir(),
+            "pm-b",
+        ))
+        .unwrap();
+        assert_eq!(
+            send(&a, request.clone()).unwrap()["status"],
+            "unavailable",
+            "stale Running registration must not count as live"
+        );
+        let missing =
+            json!({"project":home.path().join("absent"),"kind":"notice","text":"Update pending"});
+        assert_eq!(send(&a, missing).unwrap()["status"], "unavailable");
+        let reports = gwt_core::pm_report::load_reports(&a).unwrap();
+        assert!(reports
+            .iter()
+            .any(|r| r.body.contains("Waiting for the peer project")));
+        crate::pm_registry::save_pm_prefs(
+            &crate::pm_registry::pm_prefs_path_for_repo_path(&a),
+            &Default::default(),
+        )
+        .unwrap();
+        assert!(
+            send(&a, request).is_err(),
+            "replaced PM loses send authority"
         );
     }
 
@@ -5713,6 +8183,276 @@ mod tests {
                 assert_eq!(project_root.as_deref(), Some("/tmp/elsewhere"));
             }
             other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pm_request_tasks_operations_parse_only_project_local_typed_requests() {
+        for selector in [
+            json!({"kind":"summary"}),
+            json!({"kind":"pending"}),
+            json!({"kind":"tasks","limit":100}),
+            json!({"kind":"pending","limit":1,"after":"source-1","expected_revision":2}),
+            json!({"kind":"tasks","after":"task-1","expected_revision":2}),
+            json!({"kind":"source","id":"source-1"}),
+            json!({"kind":"task","id":"task-1"}),
+            json!({"kind":"receipt","operation_id":"operation-1"}),
+        ] {
+            ok("pm.request_tasks.read", json!({"selector":selector}));
+        }
+        ok("pm.request_tasks.read", json!({}));
+        let request = json!({"operation_id":"classify-1","expected_revision":1,
+            "reason":"A question, not a work request",
+            "action":{"kind":"classify_non_task","source_id":"source-1"}});
+        ok("pm.request_tasks.apply", request.clone());
+        for field in ["actor", "project_root", "project_key", "path"] {
+            assert!(matches!(
+                err("pm.request_tasks.read", json!({field:"forged"})),
+                CliParseError::InvalidJson(_)
+            ));
+            let mut forged = request.clone();
+            forged[field] = json!("forged");
+            assert!(matches!(
+                err("pm.request_tasks.apply", forged),
+                CliParseError::InvalidJson(_)
+            ));
+        }
+        for selector in [
+            json!({"kind":"source","id":" "}),
+            json!({"kind":"summary","id":"unexpected"}),
+            json!({"kind":"pending","limit":0}),
+            json!({"kind":"tasks","limit":101}),
+            json!({"kind":"pending","limit":-1}),
+            json!({"kind":"tasks","after":"task-1"}),
+            json!({"kind":"pending","after":" ","expected_revision":2}),
+            json!({"kind":"tasks","expected_revision":"2"}),
+            json!({"kind":"pending","actor":"forged"}),
+        ] {
+            assert!(matches!(
+                err("pm.request_tasks.read", json!({"selector":selector})),
+                CliParseError::InvalidJson(_)
+            ));
+        }
+        let mut capture = request;
+        capture["action"] = json!({"kind":"capture","source":{
+            "id":"forged","project_key":"project","original":"forged",
+            "authority":{"session_id":"pm","turn_id":"turn","prompt_sha256":"hash"}}});
+        assert!(matches!(
+            err("pm.request_tasks.apply", capture),
+            CliParseError::InvalidJson(_)
+        ));
+        for operation in ["pm.request_tasks.read", "pm.request_tasks.apply"] {
+            assert!(crate::cli::pm::capabilities_report()
+                .capabilities
+                .iter()
+                .any(|row| row.operation == operation && row.executable));
+        }
+    }
+
+    #[test]
+    fn pm_request_tasks_native_selection_cannot_supply_provenance() {
+        let selection = json!({"provider":"codex", "conversation_id":"conversation", "id":"turn"});
+        ok(
+            "pm.request_tasks.read",
+            json!({"selector":{"kind":"native_turns"}}),
+        );
+        let mut detail = selection.clone();
+        detail["kind"] = json!("native_turn");
+        ok("pm.request_tasks.read", json!({"selector":detail}));
+        let mut capture = selection;
+        capture["operation_id"] = json!("capture-1");
+        capture["expected_revision"] = json!(0);
+        capture["reason"] = json!("Preserve this native request for classification");
+        capture["prompt_sha256"] = json!("a".repeat(64));
+        ok("pm.request_tasks.capture", capture.clone());
+        for field in [
+            "actor",
+            "authority",
+            "source",
+            "original",
+            "project_root",
+            "path",
+        ] {
+            let mut forged = capture.clone();
+            forged[field] = json!("forged");
+            assert!(matches!(
+                err("pm.request_tasks.capture", forged),
+                CliParseError::InvalidJson(_)
+            ));
+        }
+        for field in [
+            "provider",
+            "conversation_id",
+            "id",
+            "prompt_sha256",
+            "operation_id",
+            "reason",
+        ] {
+            let mut invalid = capture.clone();
+            invalid[field] = json!(" ");
+            assert!(matches!(
+                err("pm.request_tasks.capture", invalid),
+                CliParseError::InvalidJson(_)
+            ));
+        }
+        for field in [
+            "provider",
+            "conversation_id",
+            "id",
+            "prompt_sha256",
+            "expected_revision",
+        ] {
+            let mut missing = capture.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(matches!(
+                err("pm.request_tasks.capture", missing),
+                CliParseError::InvalidJson(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn pm_request_tasks_candidate_selectors_are_bounded_and_path_free() {
+        let id = format!(
+            "{}/{}",
+            "a".repeat(64),
+            "12345678-1234-4234-8234-123456789abc"
+        );
+        let digest = "b".repeat(64);
+        for selector in [
+            json!({"kind":"candidates"}),
+            json!({"kind":"candidates","limit":100,"after":id,"expected_inventory_sha256":digest}),
+            json!({"kind":"candidate","id":id}),
+            json!({"kind":"candidate_chunk","id":id}),
+            json!({"kind":"candidate_chunk","id":id,"offset":u64::MAX}),
+        ] {
+            ok("pm.request_tasks.read", json!({"selector":selector}));
+        }
+        for selector in [
+            json!({"kind":"candidates","limit":0}),
+            json!({"kind":"candidates","limit":101}),
+            json!({"kind":"candidates","after":id}),
+            json!({"kind":"candidates","expected_inventory_sha256":"invalid"}),
+            json!({"kind":"candidates","after":"../foreign","expected_inventory_sha256":digest}),
+            json!({"kind":"candidate","id":"../foreign"}),
+            json!({"kind":"candidate","id":id.to_uppercase()}),
+            json!({"kind":"candidate","id":id,"session_id":"forged"}),
+            json!({"kind":"candidate_chunk","id":"../foreign"}),
+            json!({"kind":"candidate_chunk","id":id,"offset":-1}),
+            json!({"kind":"candidate_chunk","id":id,"offset":1.5}),
+            json!({"kind":"candidate_chunk","id":id,"limit":1000000}),
+            json!({"kind":"candidates","path":"/tmp/foreign"}),
+        ] {
+            assert!(matches!(
+                err("pm.request_tasks.read", json!({"selector":selector})),
+                CliParseError::InvalidJson(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn pm_plan_status_accepts_only_empty_params() {
+        assert!(matches!(
+            ok("pm.plan.status", json!({})),
+            CliCommand::Pm(crate::cli::pm::PmCommand::PlanStatus)
+        ));
+        for params in [
+            json!({"project_root": "/tmp/foreign"}),
+            json!({"path": "/tmp/planning.json"}),
+            json!({"actor": "another-pm"}),
+            json!({"unexpected": true}),
+        ] {
+            assert!(matches!(
+                err("pm.plan.status", params),
+                CliParseError::InvalidJson(_)
+            ));
+        }
+        let report = crate::cli::pm::capabilities_report();
+        for operation in ["pm.plan.status", "pm.plan.apply"] {
+            assert!(report
+                .capabilities
+                .iter()
+                .any(|row| row.operation == operation && row.executable));
+        }
+    }
+
+    #[test]
+    fn pm_plan_apply_parses_each_typed_action() {
+        for kind in [
+            "goal",
+            "milestone",
+            "risk",
+            "decision",
+            "policy",
+            "recurring",
+            "link",
+        ] {
+            let params = json!({
+                "action": {"kind": kind, "value": {"id": kind}},
+                "expected_revision": 0,
+                "reason": "Record the approved plan",
+                "idempotency_key": format!("planning-{kind}")
+            });
+            let CliCommand::Pm(crate::cli::pm::PmCommand::PlanApply { request }) =
+                ok("pm.plan.apply", params)
+            else {
+                panic!("expected a typed planning apply command for {kind}");
+            };
+            assert_eq!(request.expected_revision, 0);
+            assert_eq!(request.idempotency_key, format!("planning-{kind}"));
+            let action = serde_json::to_value(request.action).unwrap();
+            assert_eq!(action["kind"], kind);
+            assert_eq!(action["value"]["id"], kind);
+        }
+    }
+
+    #[test]
+    fn pm_plan_apply_rejects_invalid_and_scope_overrides() {
+        let valid = json!({
+            "action": {"kind": "goal", "value": {"id": "goal-1"}},
+            "expected_revision": 0,
+            "reason": "Record the approved plan",
+            "idempotency_key": "planning-1"
+        });
+        for field in ["action", "expected_revision", "reason", "idempotency_key"] {
+            let mut params = valid.clone();
+            params.as_object_mut().unwrap().remove(field);
+            assert!(matches!(
+                err("pm.plan.apply", params),
+                CliParseError::InvalidJson(_)
+            ));
+        }
+        for (field, value) in [
+            ("project_root", json!("/tmp/foreign")),
+            ("path", json!("/tmp/planning.json")),
+            ("actor", json!("another-pm")),
+            ("session_id", json!("another-pm")),
+            ("unexpected", json!(true)),
+            ("expected_revision", json!(-1)),
+            ("expected_revision", json!(1.5)),
+            ("expected_revision", json!("0")),
+            ("reason", json!(" ")),
+            ("idempotency_key", json!("")),
+            (
+                "action",
+                json!({"kind": "delete", "value": {"id": "goal-1"}}),
+            ),
+            (
+                "action",
+                json!({"kind": "goal", "value": {"id": "goal-1", "unknown": true}}),
+            ),
+            (
+                "action",
+                json!({"kind": "goal", "value": {"id": "goal-1"}, "unknown": true}),
+            ),
+            ("action", json!({"kind": "goal", "value": {"id": " "}})),
+        ] {
+            let mut params = valid.clone();
+            params[field] = value;
+            assert!(matches!(
+                err("pm.plan.apply", params),
+                CliParseError::InvalidJson(_)
+            ));
         }
     }
 
@@ -5817,6 +8557,67 @@ mod tests {
         );
     }
 
+    #[test]
+    fn project_execution_policy_operations_are_typed_and_project_fixed() {
+        assert!(matches!(
+            ok("project.execution.status", json!({})),
+            CliCommand::Pm(crate::cli::pm::PmCommand::ProjectExecutionStatus {
+                operation_id: None
+            })
+        ));
+        match ok(
+            "project.execution.status",
+            json!({"operation_id":"00000000-0000-4000-8000-000000000001"}),
+        ) {
+            CliCommand::Pm(crate::cli::pm::PmCommand::ProjectExecutionStatus { operation_id }) => {
+                assert_eq!(
+                    operation_id.as_deref(),
+                    Some("00000000-0000-4000-8000-000000000001")
+                );
+            }
+            _ => panic!("expected typed ProjectExecutionStatus"),
+        }
+        let choice = json!({
+            "operation_id":"00000000-0000-4000-8000-000000000001",
+            "expected_revision":0,"expected_generation":1,"choice":"continue",
+            "instruction_id":"human-instruction"
+        });
+        let _ = ok("project.execution.choose", choice.clone());
+        assert!(
+            crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "project.execution.status"
+            )
+        );
+        assert!(
+            !crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "project.execution.choose"
+            )
+        );
+        for (key, value) in [
+            ("project_root", json!("/other")),
+            ("approved", json!(true)),
+            ("choice", json!("cancel")),
+            ("operation_id", json!("not-a-uuid")),
+        ] {
+            let mut invalid = choice.clone();
+            invalid[key] = value;
+            let _ = err("project.execution.choose", invalid);
+        }
+        for operation_id in [
+            "550E8400-E29B-41D4-A716-446655440000",
+            "550e8400e29b41d4a716446655440000",
+        ] {
+            let _ = err(
+                "project.execution.status",
+                json!({"operation_id": operation_id}),
+            );
+            let mut invalid = choice.clone();
+            invalid["operation_id"] = operation_id.into();
+            let _ = err("project.execution.choose", invalid);
+        }
+        let _ = err("project.execution.status", json!({"project_root":"/other"}));
+    }
+
     // Issue #3607: PM stop/deregister parse variants.
     #[test]
     fn pm_stop_variants() {
@@ -5864,14 +8665,18 @@ mod tests {
             CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Status)
         ));
         assert!(matches!(
-            err("execution.status", json!({"unexpected": true})),
+            ok("execution.status", json!({"issue": null, "spec": null})),
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Status)
+        ));
+        assert!(matches!(
+            err("execution.status", json!({"unexpected": null})),
             CliParseError::InvalidJson(message)
-                if message.contains("accepts only issue or spec")
+                if message.contains("unexpected")
         ));
         // Issue #3934: an operator must be able to ask who holds any owner's
         // generation, not only the one their own session is bound to.
         assert!(matches!(
-            ok("execution.status", json!({"issue": 3934})),
+            ok("execution.status", json!({"issue": 3934, "spec": null})),
             CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::OwnerStatus {
                 owner,
             }) if owner
@@ -5881,7 +8686,7 @@ mod tests {
                 }
         ));
         assert!(matches!(
-            ok("execution.status", json!({"spec": 3885})),
+            ok("execution.status", json!({"issue": null, "spec": 3885})),
             CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::OwnerStatus {
                 owner,
             }) if owner
@@ -5931,6 +8736,26 @@ mod tests {
         assert!(matches!(
             err("execution.reopen", json!({})),
             CliParseError::MissingFlag("reason")
+        ));
+        // Issue #4214 AC-6: terminal delivered owners can settle leftover
+        // obligations without pretending to deliver or re-verify source.
+        assert!(matches!(
+            ok(
+                "execution.settle_delivered",
+                json!({"reason": "already delivered"})
+            ),
+            CliCommand::Execution(_)
+        ));
+        assert!(matches!(
+            err("execution.settle_delivered", json!({})),
+            CliParseError::MissingFlag("reason")
+        ));
+        assert!(matches!(
+            err(
+                "execution.settle_delivered",
+                json!({"reason": "delivered", "issue": 4214})
+            ),
+            CliParseError::InvalidJson(_)
         ));
         // Issue #4545 AC-2: `execution.no_action` takes a non-empty reason and
         // nothing else — an unknown parameter is refused rather than ignored,
@@ -6245,6 +9070,7 @@ mod tests {
                 path: payload_path.clone(),
             },
             downloaded_at: "2026-10-01T00:00:00Z".into(),
+            origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
             auto_apply_deferred: false,
         };
         // Seed the format used before the explicit defer control existed.
@@ -6373,6 +9199,29 @@ mod tests {
     }
 
     #[test]
+    fn issue_3789_review_reply_preserves_thread_id() {
+        let command = ok(
+            "pr.review_threads.reply_and_resolve",
+            json!({"number": 1, "thread_id": "PRRT_target", "body": "Fixed"}),
+        );
+        assert!(format!("{command:?}").contains("PRRT_target"));
+    }
+
+    #[test]
+    fn issue_3789_review_reply_rejects_invalid_thread_selector() {
+        for thread_id in [json!(""), json!("  "), Value::Null, json!(42)] {
+            assert!(
+                super::parse_operation(
+                    "pr.review_threads.reply_and_resolve",
+                    &json!({"number": 1, "thread_id": thread_id, "body": "Fixed"}),
+                )
+                .is_err(),
+                "invalid selector must never fall back to bulk mode"
+            );
+        }
+    }
+
+    #[test]
     fn pr_operations_parse() {
         assert!(matches!(
             ok("pr.current", json!({})),
@@ -6450,10 +9299,18 @@ mod tests {
         assert!(matches!(
             ok(
                 "pr.create",
-                json!({"base": "main", "head": "develop", "title": "t", "body": "b", "labels": ["release"], "draft": true})
+                json!({"base": "main", "head": "develop", "title": "t", "body": "b", "labels": ["release"], "draft": false})
             ),
-            CliCommand::Pr(PrCommand::CreateBody { draft: true, .. })
+            CliCommand::Pr(PrCommand::CreateBody { draft: false, .. })
         ));
+        let refused = err(
+            "pr.create",
+            json!({"base": "develop", "title": "t", "body": "b", "draft": true}),
+        );
+        assert!(
+            refused.to_string().contains("Draft PRs are prohibited"),
+            "{refused}"
+        );
         assert!(matches!(
             ok(
                 "pr.edit",
@@ -6508,8 +9365,8 @@ mod tests {
             CliCommand::Pr(PrCommand::Ready { number: 9 })
         ));
         assert!(matches!(
-            ok("pr.draft", json!({"number": 9})),
-            CliCommand::Pr(PrCommand::Draft { number: 9 })
+            err("pr.draft", json!({"number": 9})),
+            CliParseError::UnknownSubcommand(_)
         ));
         assert!(matches!(
             ok("pr.comment", json!({"number": 1, "body": "b"})),
@@ -6529,6 +9386,122 @@ mod tests {
             ),
             CliCommand::Pr(PrCommand::ReviewThreadsReplyAndResolveBody { .. })
         ));
+    }
+
+    #[test]
+    fn diagnostic_policy_contract_names_only_the_fixed_target() {
+        assert!(matches!(
+            ok("actions.diagnostic.policy.status", json!({})),
+            CliCommand::Actions(_)
+        ));
+        let request = json!({"request_id":"d703dbb3-88e3-4e2d-a5b8-6a5d30a1ad4e","expected_token":"a".repeat(64),"reason":"fixed diagnostic permission","instruction_id":"fixture-scope"});
+        ok("actions.diagnostic.policy.add", request.clone());
+        let mut rollback = request.clone();
+        rollback["added_by"] = json!("d703dbb3-88e3-4e2d-a5b8-6a5d30a1ad4f");
+        ok("actions.diagnostic.policy.rollback", rollback);
+        let mut foreign = request;
+        foreign["workflow"] = json!("foreign.yml");
+        err("actions.diagnostic.policy.add", foreign);
+        err(
+            "actions.diagnostic.policy.status",
+            json!({"repository":"foreign/repo"}),
+        );
+        assert!(
+            super::super::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "actions.diagnostic.policy.status"
+            )
+        );
+        assert!(
+            !super::super::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "actions.diagnostic.policy.add"
+            )
+        );
+    }
+
+    #[test]
+    fn actions_diagnostic_accepts_only_the_fixed_profile_contract() {
+        let id = "d703dbb3-88e3-4e2d-a5b8-6a5d30a1ad4e";
+        let profile = "windows-4777-restore-f351-v1";
+        let digest = "a".repeat(64);
+        for (operation, params) in [
+            (
+                "actions.diagnostic.request",
+                json!({"request_id":id,"profile_id":profile,"expected_profile_digest":digest}),
+            ),
+            ("actions.diagnostic.observe", json!({"profile_id":profile})),
+            ("actions.diagnostic.observe", json!({"request_id":id})),
+            (
+                "actions.diagnostic.cancel",
+                json!({"request_id":id,"expected_run_id":1,"expected_revision":1}),
+            ),
+        ] {
+            assert!(matches!(ok(operation, params), CliCommand::Actions(_)));
+        }
+        for (operation, params) in [
+            (
+                "actions.diagnostic.request",
+                json!({"request_id":id,"profile_id":profile,"expected_profile_digest":digest,"source":"foreign"}),
+            ),
+            (
+                "actions.diagnostic.request",
+                json!({"request_id":id,"profile_id":"unknown","expected_profile_digest":digest}),
+            ),
+            (
+                "actions.diagnostic.request",
+                json!({"request_id":"../foreign","profile_id":profile,"expected_profile_digest":digest}),
+            ),
+            (
+                "actions.diagnostic.request",
+                json!({"request_id":id,"profile_id":profile,"expected_profile_digest":digest,"preexecution_of":id}),
+            ),
+            (
+                "actions.diagnostic.observe",
+                json!({"profile_id":profile,"request_id":id}),
+            ),
+            ("actions.diagnostic.observe", json!({})),
+            (
+                "actions.diagnostic.cancel",
+                json!({"request_id":id,"expected_run_id":0,"expected_revision":1}),
+            ),
+            (
+                "actions.diagnostic.cancel",
+                json!({"request_id":id,"expected_run_id":1,"expected_revision":1,"token":"private-sentinel"}),
+            ),
+            (
+                "actions.diagnostic.observe",
+                json!({"profile_id":profile,"private-sentinel":true}),
+            ),
+        ] {
+            let error = err(operation, params).to_string();
+            assert!(!error.contains("private-sentinel"));
+        }
+    }
+
+    #[test]
+    fn actions_dispatch_accepts_selectors_and_rejects_invalid_contract() {
+        for workflow in [
+            json!("prepare-release.yml"),
+            json!("windows-diagnostic.yml"),
+            json!("日本語 Release.yml"),
+            json!(42),
+        ] {
+            assert!(matches!(
+                ok(
+                    "actions.dispatch",
+                    json!({"workflow":workflow,"ref":"develop","inputs":{"bump":"auto"}})
+                ),
+                CliCommand::Actions(_)
+            ));
+        }
+        for params in [
+            json!({"workflow":"../release.yml","ref":"develop"}),
+            json!({"workflow":0,"ref":"develop"}),
+            json!({"workflow":"release.yml","ref":""}),
+            json!({"workflow":"release.yml","ref":"develop","inputs":[]}),
+            json!({"workflow":"release.yml","ref":"develop","force":true}),
+        ] {
+            let _ = err("actions.dispatch", params);
+        }
     }
 
     #[test]
@@ -6680,7 +9653,15 @@ mod tests {
         ));
         assert!(matches!(
             ok("daemon.start", json!({})),
-            CliCommand::Daemon(DaemonCommand::Start)
+            CliCommand::Daemon(DaemonCommand::Start {
+                startup_intent: gwt_core::daemon::DaemonStartIntent::Standalone
+            })
+        ));
+        assert!(matches!(
+            ok("daemon.start", json!({"startup_intent":"gui_managed"})),
+            CliCommand::Daemon(DaemonCommand::Start {
+                startup_intent: gwt_core::daemon::DaemonStartIntent::GuiManaged
+            })
         ));
         assert!(matches!(
             ok("daemon.status", json!({})),
@@ -6882,6 +9863,23 @@ mod tests {
     }
 
     #[test]
+    fn ci_delivery_creation_requires_exact_head() {
+        let request = json!({"base":"develop","head":"work/issue-4214",
+            "head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "title":"fix: delivery","body":"CI delivery"});
+        assert!(matches!(
+            ok("pr.create_from_ci", request.clone()),
+            CliCommand::Pr(_)
+        ));
+        let mut missing_sha = request.clone();
+        missing_sha.as_object_mut().unwrap().remove("head_sha");
+        let _ = err("pr.create_from_ci", missing_sha);
+        let mut draft = request;
+        draft["draft"] = json!(true);
+        let _ = err("pr.create_from_ci", draft);
+    }
+
+    #[test]
     fn verification_adjudication_requires_exact_board_decision_reference() {
         assert!(parse(&envelope(
             "verify.adjudicate",
@@ -6976,6 +9974,29 @@ mod tests {
     }
 
     #[test]
+    fn build_complete_pr_selector_is_optional_and_typed() {
+        assert!(matches!(
+            ok("build.complete", json!({"spec":5842,"pr":9001})),
+            CliCommand::Build(SkillStateAction::Complete {
+                spec: 5842,
+                pr: Some(9001)
+            })
+        ));
+        assert!(matches!(
+            ok("build.complete", json!({"spec":5842})),
+            CliCommand::Build(SkillStateAction::Complete {
+                spec: 5842,
+                pr: None
+            })
+        ));
+        assert!(parse(&envelope(
+            "build.complete",
+            json!({"spec":5842,"pr":"invalid"})
+        ))
+        .is_err());
+    }
+
+    #[test]
     fn skill_state_operations_parse() {
         for prefix in ["build", "plan", "register"] {
             assert!(parse(&envelope(&format!("{prefix}.start"), json!({"spec": 1}))).is_ok());
@@ -7058,6 +10079,109 @@ mod tests {
     }
 
     #[test]
+    fn pane_name_gets_assigned_identity_with_optional_legacy_candidate() {
+        let command = ok("pane.name", json!({"candidate": "Aster"}));
+        assert!(matches!(command,
+            CliCommand::Pane(PaneCommand::Name { candidate }) if candidate == "Aster"
+        ));
+        assert!(matches!(ok("pane.name", json!({})),
+            CliCommand::Pane(PaneCommand::Name { candidate }) if candidate.is_empty()
+        ));
+        for forbidden in ["id", "window_id", "session_id", "project_root", "name"] {
+            let mut params = json!({"candidate": "Aster"});
+            params[forbidden] = json!("foreign");
+            assert!(
+                matches!(err("pane.name", params), CliParseError::InvalidJson(_)),
+                "pane.name must not accept caller-supplied {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn pane_name_waits_for_its_exact_assigned_result_without_a_target_claim() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let command = ok("pane.name", json!({"candidate": "Aster"}));
+        let CliCommand::Pane(command) = command else {
+            panic!("self-naming must be a pane operation");
+        };
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let runtime_path =
+            gwt_core::paths::gwt_sessions_dir().join("runtime/123/name-session.json");
+        std::fs::create_dir_all(runtime_path.parent().unwrap()).unwrap();
+        std::fs::write(&runtime_path, "{}").unwrap();
+        let _runtime_path = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            &runtime_path,
+        );
+        let _token = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "name-capability",
+        );
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                let (stream, _) =
+                    tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, listener.accept())
+                        .await
+                        .expect("pane.name mock connection")
+                        .unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let message = socket.next().await.unwrap().unwrap();
+                let Message::Text(text) = message else {
+                    panic!("name request must be JSON")
+                };
+                let request: Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(request["kind"], "pane_name");
+                assert_eq!(request["candidate"], "Aster");
+                assert_eq!(request.as_object().unwrap().len(), 3);
+                let request_id = request["request_id"].as_str().unwrap();
+                assert!(uuid::Uuid::parse_str(request_id).is_ok());
+                for (correlation, name) in [("foreign-request", "Wrong"), (request_id, "Aster2")] {
+                    socket
+                        .send(Message::Text(
+                            json!({
+                                "kind": "pane_name_result", "request_id": correlation,
+                                "ok": true, "agent_name": name, "error": null,
+                            })
+                            .to_string()
+                            .into(),
+                        ))
+                        .await
+                        .unwrap();
+                }
+            });
+        });
+        let _ws_url = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_PANE_WS_URL_ENV,
+            format!("ws://{address}/internal/pane-ws"),
+        );
+        let project = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new(project.path().to_path_buf());
+        let mut output = String::new();
+        let result = crate::cli::pane::run(&mut env, command, &mut output);
+        assert!(
+            result.is_ok(),
+            "pane.name CLI failed before its result: {result:?}"
+        );
+        server.join().unwrap();
+        assert_eq!(result.unwrap(), 0);
+        assert_eq!(output.trim(), "Aster2");
+    }
+
+    #[test]
     fn pane_operations_parse() {
         assert!(matches!(
             ok("pane.list", json!({})),
@@ -7128,6 +10252,21 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn reports_search_and_rebuild_routes_parse() {
+        match ok(
+            "search",
+            json!({"query": "過去のPMの回答", "scopes": ["reports"]}),
+        ) {
+            CliCommand::Search(command) => assert_eq!(command.scopes[0].as_str(), "reports"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+        assert!(matches!(
+            ok("index.rebuild", json!({"scope": "reports"})),
+            CliCommand::Index(IndexCommand::Rebuild { .. })
+        ));
     }
 
     #[test]
@@ -7287,10 +10426,72 @@ mod tests {
     }
 
     #[test]
+    fn issue_monitor_priority_reason_parsing_preserves_presence() {
+        for (operation, mut params) in [
+            ("issue.monitor.priority.set", json!({"issue_numbers":[1]})),
+            ("issue.monitor.priority-set", json!({"issue_numbers":[1]})),
+            ("issue.monitor.priority.move", json!({"number":1})),
+            ("issue.monitor.priority-move", json!({"number":1})),
+        ] {
+            assert!(super::parse_operation(operation, &params).is_ok());
+            for invalid in [Value::Null, json!(" "), json!(3)] {
+                params["reason"] = invalid;
+                assert!(super::parse_operation(operation, &params).is_err());
+            }
+            params["reason"] = json!("Unblock the release");
+            assert!(super::parse_operation(operation, &params).is_ok());
+        }
+    }
+
+    #[test]
     fn required_string_missing_is_missing_flag() {
         match err("issue.create", json!({"body": "b"})) {
             CliParseError::MissingFlag(flag) => assert_eq!(flag, "title"),
             other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn issue_create_accepts_explicit_no_owner_or_justified_child_evidence() {
+        for owner_check in [
+            json!({"owner_spec": null, "search_queries": ["PM current state"]}),
+            json!({"owner_spec": 3431, "reason": "Independent current-state implementation"}),
+        ] {
+            assert!(matches!(
+                ok(
+                    "issue.create",
+                    json!({"title": "fix: current state", "body": "body", "owner_check": owner_check})
+                ),
+                CliCommand::Issue(IssueCommand::CreateBody { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn issue_create_rejects_incomplete_or_malformed_owner_check_with_recovery() {
+        for owner_check in [
+            json!({}),
+            json!({"owner_spec": 0, "reason": "child"}),
+            json!({"owner_spec": null}),
+            json!({"owner_spec": null, "search_queries": [" "]}),
+            json!({"owner_spec": 3431}),
+            json!({"owner_spec": 3431, "reason": " "}),
+            json!({"owner_spec": 3431, "reason": "child", "unexpected": true}),
+        ] {
+            let error = err(
+                "issue.create",
+                json!({"title": "fix: current state", "body": "body", "owner_check": owner_check}),
+            )
+            .to_string();
+            assert!(error.contains("owner_check"), "{error}");
+            assert!(
+                error.contains("search_queries"),
+                "recovery must name the evidence payload: {error}"
+            );
+            assert!(
+                error.contains("reason"),
+                "recovery must explain justified children: {error}"
+            );
         }
     }
 

@@ -261,7 +261,7 @@ fn find_ancestor_git_entry(base_dir: &Path) -> Option<(PathBuf, PathBuf)> {
 /// (returns `true`) on any non-absent read/parse ambiguity so nothing is
 /// destroyed; only a genuinely absent file returns `false` (nothing to lose).
 pub fn managed_hook_config_has_user_content(path: &Path) -> bool {
-    let content = match fs::read_to_string(path) {
+    let content = match crate::asset_io::read_to_string(path) {
         Ok(content) => content,
         // Absent: nothing to preserve here.
         Err(error) if error.kind() == io::ErrorKind::NotFound => return false,
@@ -353,12 +353,10 @@ fn atomic_staging_path(path: &Path, fallback_name: &str) -> io::Result<PathBuf> 
 
 /// Publish a fully written staging file as `destination` in one step.
 ///
-/// `fs::rename` replaces an existing destination atomically on every
-/// supported platform (Windows uses `MOVEFILE_REPLACE_EXISTING` /
-/// `FILE_RENAME_FLAG_REPLACE_IF_EXISTS`), so the destination is never
-/// missing between two writes. A former Windows-only remove-then-rename left
-/// exactly that window, and the in-process lock that guarded it could not see
-/// writers in other processes (PR #3520 review).
+/// Atomic rename preserves complete old/new contents. The shared asset reader
+/// and publisher retry transient Windows sharing failures within a bounded budget.
+/// A former remove-then-rename left a missing-file window (PR #3520 review);
+/// Windows' legacy replacement also raced path opens (Issue #5609).
 fn commit_staged_file(staging_path: &Path, destination: &Path) -> io::Result<()> {
     Ok(crate::asset_io::rename(staging_path, destination)?)
 }
@@ -521,7 +519,7 @@ fn event_hook(event: &str, shell: HookShell, bin: &str) -> Value {
 const GWT_HOOK_BIN_ENV: &str = "GWT_HOOK_BIN";
 
 /// The portable fallback every generated runtime selector uses when the
-/// hook config it is written into is shared through git.
+/// hook config is shared across worktrees or through git.
 ///
 /// #3567: a hook config that git tracks is byte-compared against a commit, so
 /// any absolute path baked into it — a worktree-local `target/debug/gwtd`, an
@@ -535,10 +533,9 @@ pub const CANONICAL_HOOK_BIN: &str = "gwtd";
 
 /// Which binary a generated hook config at `path` should fall back to.
 ///
-/// #3567: git-tracked configs get [`CANONICAL_HOOK_BIN`] so materialization
-/// converges on the committed bytes; untracked, machine-local configs keep the
-/// absolute pin resolved for this install (#3810), which is what makes hooks
-/// work for a Codex started outside gwt with no `gwtd` on `PATH`.
+/// Git-tracked configs and shared-root Codex configs get [`CANONICAL_HOOK_BIN`]
+/// so different writers converge on the same identity. Untracked worktree-local
+/// configs keep the absolute pin resolved for this install (#3810).
 pub fn managed_hook_bin_for_config_path(path: &Path) -> String {
     sanitize_hook_bin_for_config_path(path, &gwt_hook_bin_path())
 }
@@ -551,7 +548,15 @@ pub fn managed_hook_bin_for_config_path(path: &Path) -> String {
 /// given the exact command hash for, and stops the launch on
 /// `Hooks need review`.
 pub fn sanitize_hook_bin_for_config_path(path: &Path, bin: &str) -> String {
-    if managed_hook_config_is_git_tracked(path) {
+    // Issue #5270: the main checkout's Codex config is shared by linked
+    // worktrees even when untracked. An install-specific pin would change its
+    // trusted command hash whenever another HOME or updated GUI writes it.
+    let shared_codex_config = path.ends_with(CODEX_HOOKS_PATH)
+        && path.parent().and_then(Path::parent).is_some_and(|root| {
+            linked_worktree_codex_hooks_path(root).is_none()
+                && gwt_core::repo_hash::repository_common_dir(root).is_some()
+        });
+    if shared_codex_config || managed_hook_config_is_git_tracked(path) {
         return CANONICAL_HOOK_BIN.to_string();
     }
     // #3567 (PM ruling): a process-global `GWT_HOOK_BIN` is authority only for
@@ -661,8 +666,8 @@ fn path_is_inside(path: &Path, owner_root: &str) -> bool {
 }
 
 /// Whether git tracks `path`. A path outside a repository, or one git reports
-/// as untracked, answers `false` — those files are machine-local by definition,
-/// so pinning an absolute binary into them harms nobody.
+/// as untracked, answers `false`. Shared-root Codex configs require a canonical
+/// fallback independently of their tracking status.
 pub fn managed_hook_config_is_git_tracked(path: &Path) -> bool {
     let Some(parent) = path.parent() else {
         return false;
@@ -855,7 +860,9 @@ pub(crate) fn codex_self_improvement_stop_hook_commands() -> Vec<String> {
     ]
 }
 
-pub(crate) fn codex_event_hook_commands_with_bin(bin: &str, event: &str) -> Vec<String> {
+/// Complete generated dispatcher forms for configuration audit and Codex trust.
+/// A matching form does not establish executable trust or observed execution.
+pub fn codex_event_hook_commands_with_bin(bin: &str, event: &str) -> Vec<String> {
     vec![
         posix_codex_event_hook_command_with_bin(bin, event),
         powershell_codex_event_hook_command_with_bin(bin, event),
@@ -1142,9 +1149,9 @@ mod tests {
     /// PR #3520 review (PRRT_kwDOPLof2M6YcffP): the in-process mutex cannot
     /// protect writers running in independent processes, and a Windows-only
     /// remove-then-rename left a window in which the destination did not
-    /// exist. `fs::rename` replaces an existing destination atomically on
-    /// every supported platform, so concurrent processes must never observe a
-    /// missing or partially written file.
+    /// exist. Publication must preserve uninterrupted reads on every supported
+    /// platform, including Windows replacement (Issue #5609), so concurrent
+    /// processes must never observe a missing or partially written file.
     #[test]
     fn concurrent_codex_hook_regeneration_from_independent_processes_never_drops_the_destination() {
         const CHILD_ENV: &str = "GWT_SETTINGS_LOCAL_CHILD_WORKTREE";
@@ -1183,7 +1190,7 @@ mod tests {
             let all_done = children
                 .iter_mut()
                 .all(|child| child.try_wait().expect("poll child").is_some());
-            match fs::read_to_string(&hooks_path) {
+            match crate::asset_io::read_to_string(&hooks_path) {
                 Ok(rendered) => {
                     serde_json::from_str::<Value>(&rendered)
                         .expect("destination must always hold a complete hooks.json");
@@ -1425,12 +1432,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn posix_managed_event_command_preserves_existing_binary_block_exit() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("gwtd");
-        fs::write(&bin, "#!/bin/sh\nexit 2\n").unwrap();
-        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        // A sibling test's fork must not inherit a writable fixture descriptor (#5310).
+        gwt_core::test_support::write_executable_script(&bin, "#!/bin/sh\nexit 2\n").unwrap();
         let command =
             event_hook_command_with_bin(&bin.display().to_string(), "PreToolUse", HookShell::Posix);
 
@@ -1446,12 +1451,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn posix_managed_event_command_invokes_brace_paths_for_runtime_and_fallback() {
-        use std::os::unix::fs::PermissionsExt;
-
         fn write_hook_bin(path: &Path, marker: &str) {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, format!("#!/bin/sh\nprintf '%s' '{marker}'\n")).unwrap();
-            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+            gwt_core::test_support::write_executable_script(
+                path,
+                &format!("#!/bin/sh\nprintf '%s' '{marker}'\n"),
+            )
+            .unwrap();
         }
 
         let dir = tempfile::tempdir().unwrap();
@@ -2343,6 +2349,44 @@ mod tests {
                 .any(|command| command.contains("repo-owned-stop-check.sh")),
             "an unmanaged repo-owned Stop hook must be preserved: {stop_commands:?}"
         );
+    }
+
+    #[test]
+    fn shared_root_codex_hooks_keep_the_same_fallback_across_writer_pins() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let git_dir = repo.join(".git/worktrees/linked");
+        let worktree = dir.path().join("linked");
+        fs::create_dir_all(&git_dir).unwrap();
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", git_dir.display()),
+        )
+        .unwrap();
+        let shared_config = repo.join(CODEX_HOOKS_PATH);
+        let local_config = worktree.join(CODEX_HOOKS_PATH);
+        let mut shared_bytes = None;
+        for bin in ["/installed/first/gwtd", "/installed/updated/gwtd"] {
+            let _pin = ScopedHookBin::set(bin);
+            generate_codex_hooks_for_mode(&worktree, CodexHookDiscoveryMode::Both).unwrap();
+            assert_eq!(
+                sanitize_hook_bin_for_config_path(&shared_config, bin),
+                CANONICAL_HOOK_BIN,
+                "shared-root identity must not depend on the writer's pin"
+            );
+            assert_eq!(sanitize_hook_bin_for_config_path(&local_config, bin), bin);
+            assert_eq!(
+                sanitize_hook_bin_for_config_path(&repo.join(CLAUDE_SETTINGS_PATH), bin),
+                bin,
+                "Claude's machine-local pin is unchanged"
+            );
+            let bytes = fs::read(&shared_config).unwrap();
+            if let Some(previous) = &shared_bytes {
+                assert_eq!(&bytes, previous);
+            }
+            shared_bytes = Some(bytes);
+        }
     }
 
     #[test]

@@ -66,11 +66,19 @@ const POLL_INTERVAL_LADDER: &[Duration] = &[
 pub struct PollState {
     failure_count: usize,
     last_seen: Option<String>,
+    retry_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl PollState {
     /// Current sleep interval before the next poll attempt.
     pub fn current_interval(&self) -> Duration {
+        self.interval_at(chrono::Utc::now())
+    }
+
+    fn interval_at(&self, now: chrono::DateTime<chrono::Utc>) -> Duration {
+        if let Some(deadline) = self.retry_at {
+            return (deadline - now).to_std().unwrap_or_default();
+        }
         let idx = self.failure_count.min(POLL_INTERVAL_LADDER.len() - 1);
         POLL_INTERVAL_LADDER[idx]
     }
@@ -86,6 +94,7 @@ impl PollState {
     /// the next sleep duration.
     pub fn on_success_uptodate(&mut self) -> Duration {
         self.failure_count = 0;
+        self.retry_at = None;
         self.current_interval()
     }
 
@@ -99,6 +108,7 @@ impl PollState {
             self.last_seen = Some(latest.to_string());
         }
         self.failure_count = 0;
+        self.retry_at = None;
         (should_broadcast, self.current_interval())
     }
 
@@ -106,6 +116,13 @@ impl PollState {
     /// backoff one step (capped at 60 min) and returns the next sleep duration.
     pub fn on_failure(&mut self) -> Duration {
         self.failure_count = self.failure_count.saturating_add(1);
+        self.retry_at = None;
+        self.current_interval()
+    }
+
+    fn on_rate_limit(&mut self, retry_at: chrono::DateTime<chrono::Utc>) -> Duration {
+        self.failure_count = self.failure_count.saturating_add(1);
+        self.retry_at = Some(retry_at);
         self.current_interval()
     }
 }
@@ -115,6 +132,7 @@ pub enum StartupUpdateAction {
     Publish,
     Stop,
     Retry,
+    RetryAt(chrono::DateTime<chrono::Utc>),
 }
 
 pub fn classify_startup_update_state(state: &gwt_core::update::UpdateState) -> StartupUpdateAction {
@@ -126,6 +144,10 @@ pub fn classify_startup_update_state(state: &gwt_core::update::UpdateState) -> S
             asset_url: None, ..
         }
         | gwt_core::update::UpdateState::UpToDate { .. } => StartupUpdateAction::Stop,
+        gwt_core::update::UpdateState::Failed {
+            retry_at: Some(deadline),
+            ..
+        } => StartupUpdateAction::RetryAt(*deadline),
         gwt_core::update::UpdateState::Failed { .. } => StartupUpdateAction::Retry,
     }
 }
@@ -136,8 +158,10 @@ pub fn spawn_startup_update_check(
     update_proxy: AppEventProxy,
 ) {
     if gwt_core::update::is_ci() {
+        gwt_core::update::log_update_event("poll_skipped", &[("reason", "ci")]);
         return;
     }
+    log_poll_schedule("poll_started", &[], STARTUP_INITIAL_DELAY);
     runtime.spawn(async move {
         tokio::time::sleep(STARTUP_INITIAL_DELAY).await;
         let current_exe = std::env::current_exe().ok();
@@ -153,16 +177,36 @@ pub fn spawn_startup_update_check(
             if attempt > 0 {
                 tokio::time::sleep(STARTUP_RETRY_GAP).await;
             }
+            gwt_core::update::log_update_event(
+                "check_started",
+                &[
+                    ("source", "startup"),
+                    ("attempt", &(attempt + 1).to_string()),
+                ],
+            );
             let exe = current_exe.clone();
             let join = tokio::task::spawn_blocking(move || {
                 gwt_core::update::UpdateManager::new().check_for_executable(true, exe.as_deref())
             })
             .await;
-            let Ok(update_state) = join else {
-                continue;
+            let update_state = match join {
+                Ok(state) => state,
+                Err(error) => gwt_core::update::UpdateState::Failed {
+                    message: format!("update check worker failed: {error}"),
+                    failed_at: chrono::Utc::now(),
+                    retry_at: None,
+                },
             };
             match classify_startup_update_state(&update_state) {
-                StartupUpdateAction::Retry => continue,
+                StartupUpdateAction::Retry => {
+                    let next = if attempt + 1 < STARTUP_RETRY_ATTEMPTS {
+                        STARTUP_RETRY_GAP
+                    } else {
+                        POLL_INTERVAL_LADDER[1]
+                    };
+                    log_poll_outcome(&update_state, "startup_retry", next);
+                    continue;
+                }
                 _ => {
                     handle_poll_outcome(&mut state, update_state, &update_proxy);
                     initial_resolved = true;
@@ -178,6 +222,7 @@ pub fn spawn_startup_update_check(
 
         loop {
             tokio::time::sleep(state.current_interval()).await;
+            gwt_core::update::log_update_event("check_started", &[("source", "periodic")]);
             let exe = current_exe.clone();
             let outcome = tokio::task::spawn_blocking(move || {
                 gwt_core::update::UpdateManager::new().check_for_executable(true, exe.as_deref())
@@ -187,8 +232,17 @@ pub fn spawn_startup_update_check(
                 Ok(update_state) => {
                     handle_poll_outcome(&mut state, update_state, &update_proxy);
                 }
-                Err(_) => {
-                    state.on_failure();
+                Err(error) => {
+                    let next = state.on_failure();
+                    log_poll_outcome(
+                        &gwt_core::update::UpdateState::Failed {
+                            message: format!("update check worker failed: {error}"),
+                            failed_at: chrono::Utc::now(),
+                            retry_at: None,
+                        },
+                        "retry",
+                        next,
+                    );
                 }
             }
         }
@@ -200,21 +254,74 @@ fn handle_poll_outcome(
     outcome: gwt_core::update::UpdateState,
     update_proxy: &AppEventProxy,
 ) -> Duration {
-    match classify_startup_update_state(&outcome) {
+    let (next, decision) = match classify_startup_update_state(&outcome) {
         StartupUpdateAction::Publish => {
             let latest = match &outcome {
                 gwt_core::update::UpdateState::Available { latest, .. } => latest.clone(),
                 _ => return state.on_success_uptodate(),
             };
             let (should_publish, next) = state.on_success_available(&latest);
-            if should_publish && !pending_manifest_covers(&latest) {
-                let _ = update_proxy.send_event(UserEvent::UpdateAvailable(outcome));
-            }
-            next
+            let decision = if !should_publish {
+                "duplicate"
+            } else if pending_manifest_covers(&latest) {
+                "already_staged"
+            } else if update_proxy
+                .send_event(UserEvent::UpdateAvailable(outcome.clone()))
+                .is_ok()
+            {
+                "published"
+            } else {
+                "event_loop_closed"
+            };
+            (next, decision)
         }
-        StartupUpdateAction::Stop => state.on_success_uptodate(),
-        StartupUpdateAction::Retry => state.on_failure(),
+        StartupUpdateAction::Stop => (state.on_success_uptodate(), "no_applicable_update"),
+        StartupUpdateAction::Retry => (state.on_failure(), "retry"),
+        StartupUpdateAction::RetryAt(deadline) => {
+            (state.on_rate_limit(deadline), "rate_limit_retry")
+        }
+    };
+    log_poll_outcome(&outcome, decision, next);
+    next
+}
+
+fn log_poll_schedule(stage: &str, fields: &[(&str, &str)], next: Duration) {
+    let next_check_at =
+        (chrono::Utc::now() + chrono::Duration::seconds(next.as_secs() as i64)).to_rfc3339();
+    let seconds = next.as_secs().to_string();
+    let mut fields = fields.to_vec();
+    fields.extend([
+        ("next_check_in_secs", seconds.as_str()),
+        ("next_check_at", next_check_at.as_str()),
+    ]);
+    gwt_core::update::log_update_event(stage, &fields);
+}
+
+fn log_poll_outcome(outcome: &gwt_core::update::UpdateState, decision: &str, next: Duration) {
+    let mut fields = vec![("decision", decision)];
+    match outcome {
+        gwt_core::update::UpdateState::Available {
+            current,
+            latest,
+            asset_url,
+            ..
+        } => {
+            fields.extend([
+                ("result", "available"),
+                ("current", current.as_str()),
+                ("version", latest.as_str()),
+                (
+                    "applicable_asset",
+                    if asset_url.is_some() { "true" } else { "false" },
+                ),
+            ]);
+        }
+        gwt_core::update::UpdateState::UpToDate { .. } => fields.push(("result", "up_to_date")),
+        gwt_core::update::UpdateState::Failed { message, .. } => {
+            fields.extend([("result", "failed"), ("error", message.as_str())]);
+        }
     }
+    log_poll_schedule("check_completed", &fields, next);
 }
 
 /// SPEC-2041 Phase 19 (T-134): suppress polling broadcasts for versions the
@@ -256,7 +363,12 @@ pub fn discard_superseded_pending_update(latest: &str) -> Result<Option<String>,
 }
 
 trait UpdateApplyOps {
-    fn write_restart_args_file(&mut self, path: &Path, args: Vec<String>) -> Result<(), String>;
+    fn write_restart_args_file(
+        &mut self,
+        path: &Path,
+        args: Vec<String>,
+        allow_elevation: bool,
+    ) -> Result<(), String>;
     fn make_helper_copy(&mut self, current_exe: &Path, latest: &str) -> Result<PathBuf, String>;
     fn spawn_internal_apply_update(
         &mut self,
@@ -290,8 +402,14 @@ impl Default for RealUpdateApplyOps {
 }
 
 impl UpdateApplyOps for RealUpdateApplyOps {
-    fn write_restart_args_file(&mut self, path: &Path, args: Vec<String>) -> Result<(), String> {
-        self.mgr.write_restart_args_file(path, args)
+    fn write_restart_args_file(
+        &mut self,
+        path: &Path,
+        args: Vec<String>,
+        allow_elevation: bool,
+    ) -> Result<(), String> {
+        self.mgr
+            .write_restart_args_file_with_elevation(path, args, allow_elevation)
     }
 
     fn make_helper_copy(&mut self, current_exe: &Path, latest: &str) -> Result<PathBuf, String> {
@@ -339,10 +457,7 @@ impl UpdateApplyOps for RealUpdateApplyOps {
 #[derive(Debug, Clone)]
 pub struct PreparedUpdate {
     pub latest: String,
-    /// Source URL the asset was downloaded from. Retained for diagnostics
-    /// (logs, retry telemetry) so future Phase 19 work can correlate ready
-    /// payloads back to the upstream release without re-walking the cache.
-    #[allow(dead_code)]
+    /// Source URL persisted with the pending update manifest.
     pub asset_url: String,
     pub payload: gwt_core::update::PreparedPayload,
 }
@@ -424,6 +539,7 @@ pub fn prepare_and_persist_pending_update(
         asset_url: prepared.asset_url.clone(),
         payload: prepared.payload.clone(),
         downloaded_at: chrono::Utc::now().to_rfc3339(),
+        origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
         auto_apply_deferred: false,
     };
     gwt_core::update::persist_pending_update_manifest(&manifest)?;
@@ -434,6 +550,7 @@ pub fn prepare_and_persist_pending_update(
 /// the restart-args file, optionally creating a helper copy on Windows, and
 /// spawning the helper subprocess. Caller is responsible for `exit(0)` once
 /// this returns `Ok` so the helper sees the parent close.
+#[allow(clippy::too_many_arguments)]
 fn apply_prepared_payload_with_ops(
     ops: &mut impl UpdateApplyOps,
     latest: &str,
@@ -442,6 +559,7 @@ fn apply_prepared_payload_with_ops(
     restart_args: Vec<String>,
     old_pid: u32,
     use_helper_copy: bool,
+    allow_elevation: bool,
 ) -> Result<(), String> {
     let args_file = (match &payload {
         gwt_core::update::PreparedPayload::PortableBinary { path }
@@ -450,7 +568,7 @@ fn apply_prepared_payload_with_ops(
         }
     })
     .ok_or_else(|| "Failed to determine update restart args path.".to_string())?;
-    ops.write_restart_args_file(&args_file, restart_args)
+    ops.write_restart_args_file(&args_file, restart_args, allow_elevation)
         .map_err(|err| format!("Failed to write update restart args: {err}"))?;
     let helper_exe = if use_helper_copy {
         ops.make_helper_copy(current_exe, latest)
@@ -482,10 +600,7 @@ fn apply_prepared_payload_with_ops(
 /// the manifest the bootstrap path will rely on actually exists, returning
 /// an error so callers can surface it via `update_apply_error`.
 pub fn commit_update_later_pending() -> Result<(), String> {
-    match gwt_core::update::load_pending_update_manifest() {
-        Some(_) => Ok(()),
-        None => Err("Pending update manifest is missing; download did not persist.".to_string()),
-    }
+    gwt_core::update::mark_pending_update_manual_later()
 }
 
 /// SPEC-2041 Phase 19 (FR-058/062) + Issue #4038 (AC-1): commit an
@@ -502,6 +617,7 @@ fn commit_pending_manifest_with_ops(
     use_helper_copy: bool,
 ) -> Result<String, String> {
     let latest = manifest.version.clone();
+    let automatic = manifest.origin == gwt_core::update::PendingUpdateOrigin::Automatic;
     let expected = gwt_core::update::load_pending_update_manifest()
         .filter(|current| {
             current.version == manifest.version && current.payload == manifest.payload
@@ -515,13 +631,19 @@ fn commit_pending_manifest_with_ops(
         restart_args,
         old_pid,
         use_helper_copy,
+        !automatic,
     )?;
     // Keep a newer stage or defer published while this helper starts. The
     // helper has already been spawned so cleanup failures are not fatal.
-    let _ = gwt_core::update::clear_pending_update_manifest_if_unchanged_in(
-        &gwt_core::update::pending_update_dir(),
-        &expected,
-    );
+    // An automatic helper cannot ask for elevation if permissions change
+    // after this preflight. Retain its payload on failure; a successful
+    // restart clears it through the ordinary stale-version bootstrap cleanup.
+    if !automatic {
+        let _ = gwt_core::update::clear_pending_update_manifest_if_unchanged_in(
+            &gwt_core::update::pending_update_dir(),
+            &expected,
+        );
+    }
     Ok(latest)
 }
 
@@ -531,7 +653,7 @@ fn commit_pending_manifest_with_ops(
 /// manifest is cleared. A failed helper spawn rolls the marker back so the
 /// next launch is not mistaken for the tail of an apply. The caller then
 /// sends `UserEvent::QuitApp { reason: ApplyUpdate }`.
-// Keep the helper-copy and automatic-apply choices explicit at this test seam.
+// Keep the helper-copy and defer-guard choices explicit at this test seam.
 #[allow(clippy::too_many_arguments)]
 fn stage_graceful_update_apply_with_ops(
     ops: &mut impl UpdateApplyOps,
@@ -541,7 +663,7 @@ fn stage_graceful_update_apply_with_ops(
     restart_args: Vec<String>,
     old_pid: u32,
     use_helper_copy: bool,
-    automatic: bool,
+    respect_defer: bool,
 ) -> Result<String, String> {
     {
         // Defer and apply-start publish under the same lock. Whichever wins
@@ -549,7 +671,7 @@ fn stage_graceful_update_apply_with_ops(
         let _lock = gwt_core::update::pending_update_manifest_lock(
             &gwt_core::update::pending_update_dir(),
         )?;
-        if automatic {
+        if respect_defer {
             let current = gwt_core::update::load_pending_update_manifest().ok_or_else(|| {
                 "Pending update with a valid payload is no longer staged.".to_string()
             })?;
@@ -581,6 +703,30 @@ fn stage_graceful_update_apply_with_ops(
     ) {
         Ok(version) => Ok(version),
         Err(err) => {
+            // Permission/defer refusals return before this commit boundary.
+            // A helper failure is an actual failed attempt, never a ready retry.
+            let result = gwt_core::update::UpdateApplyResult {
+                outcome: gwt_core::update::UpdateApplyOutcome::Failure,
+                from_version: marker.from_version.clone(),
+                to_version: marker.to_version.clone(),
+                observed_version: marker.from_version.clone(),
+                attempt: marker.attempt,
+                recorded_at: chrono::Utc::now().to_rfc3339(),
+                message: Some(err.clone()),
+            };
+            if let Err(error) = gwt_core::update::persist_update_apply_result(&result) {
+                gwt_core::update::log_update_event(
+                    "fail",
+                    &[("stage", "record_apply_result"), ("reason", &error)],
+                );
+            }
+            if let Err(error) = gwt_core::update::discard_failed_pending_update(&marker.to_version)
+            {
+                gwt_core::update::log_update_event(
+                    "fail",
+                    &[("stage", "discard_failed_pending"), ("reason", &error)],
+                );
+            }
             let _ = gwt_core::update::clear_update_resume_marker();
             Err(err)
         }
@@ -591,13 +737,26 @@ fn stage_graceful_update_apply_with_ops(
 /// Called on the event-loop thread by the `UserEvent::ApplyUpdateGraceful`
 /// handler; returns the committed version so the handler can quit with
 /// `GuiShutdownReason::ApplyUpdate { version }`.
+/// Scheduled drains respect operator defer, including manually requested
+/// drains; only an explicit Restart now bypasses that guard.
 pub fn stage_graceful_update_apply(
-    manifest: gwt_core::update::PendingUpdateManifest,
+    mut manifest: gwt_core::update::PendingUpdateManifest,
     marker: &gwt_core::update::UpdateResumeMarker,
-    automatic: bool,
+    respect_defer: bool,
 ) -> Result<String, String> {
     let current_exe = std::env::current_exe()
         .map_err(|err| format!("Failed to resolve current executable: {err}"))?;
+    if !respect_defer {
+        // Explicit Restart now authorizes the existing interactive installer.
+        manifest.origin = gwt_core::update::PendingUpdateOrigin::ManualLater;
+    } else if manifest.origin == gwt_core::update::PendingUpdateOrigin::Automatic {
+        if let Some(reason) = gwt_core::update::prepared_payload_automatic_apply_refusal(
+            &manifest.payload,
+            &current_exe,
+        ) {
+            return Err(format!("{reason}; update stays staged for manual apply."));
+        }
+    }
     let mut ops = RealUpdateApplyOps::default();
     stage_graceful_update_apply_with_ops(
         &mut ops,
@@ -607,7 +766,7 @@ pub fn stage_graceful_update_apply(
         marker.restart_args.clone(),
         std::process::id(),
         cfg!(windows),
-        automatic,
+        respect_defer,
     )
 }
 
@@ -649,17 +808,27 @@ pub fn try_apply_pending_update_at_bootstrap() -> bool {
         Some(m) => m,
         None => return false,
     };
-    if manifest.auto_apply_deferred {
-        return false;
-    }
     let current_version = env!("CARGO_PKG_VERSION");
     if !should_apply_pending_at_bootstrap(&manifest.version, current_version) {
         // The pending payload is for our current (or older) version. Drop it
-        // unless a newer stage or defer replaced the snapshot we observed.
-        let _ = gwt_core::update::clear_pending_update_manifest_if_unchanged_in(
-            &gwt_core::update::pending_update_dir(),
-            &manifest,
-        );
+        // unless the operator explicitly deferred it. Preserve that existing
+        // hold even for a stale version, and preserve concurrent replacements.
+        if !manifest.auto_apply_deferred {
+            let _ = gwt_core::update::clear_pending_update_manifest_if_unchanged_in(
+                &gwt_core::update::pending_update_dir(),
+                &manifest,
+            );
+        }
+        return false;
+    }
+    let requires_elevation = std::env::current_exe().map_or(true, |exe| {
+        gwt_core::update::prepared_payload_requires_elevation(&manifest.payload, &exe)
+    });
+    if !permits_pending_manifest_at_bootstrap(
+        &manifest,
+        automatic_updates_enabled_at_bootstrap(),
+        requires_elevation,
+    ) {
         return false;
     }
     match apply_pending_manifest_and_exit(manifest) {
@@ -680,6 +849,39 @@ pub fn try_apply_pending_update_at_bootstrap() -> bool {
             false
         }
     }
+}
+
+fn permits_pending_manifest_at_bootstrap(
+    manifest: &gwt_core::update::PendingUpdateManifest,
+    automatic_enabled: bool,
+    requires_elevation: bool,
+) -> bool {
+    if gwt_core::update::load_update_resume_marker()
+        .is_some_and(|marker| marker.to_version == manifest.version)
+    {
+        // Both manual and automatic attempts must settle before another apply.
+        return false;
+    }
+    let attempted = gwt_core::update::load_update_apply_result().is_some_and(|result| {
+        result.to_version == manifest.version
+            && result.outcome == gwt_core::update::UpdateApplyOutcome::Failure
+    });
+    manifest.permits_startup_apply(automatic_enabled && !attempted, requires_elevation)
+}
+
+/// Only tabs restored on this launch count as open projects. A historical
+/// project preference or recent-project entry cannot authorize an update.
+fn automatic_updates_enabled_at_bootstrap() -> bool {
+    gwt::update_settings::enabled()
+        && gwt::persistence::load_session_state(&gwt_core::paths::gwt_session_state_path())
+            .is_ok_and(|session| {
+                session.tabs.iter().any(|tab| {
+                    gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+                        &tab.project_root,
+                    ))
+                    .is_ok_and(|prefs| prefs.autonomous_mode)
+                })
+            })
 }
 
 /// SPEC-2041 Phase 19 (T-127 / FR-062): pure decision predicate the bootstrap
@@ -707,6 +909,36 @@ mod poll_state_tests {
         let state = PollState::default();
         assert_eq!(state.current_interval(), FIVE_MIN);
         assert_eq!(state.last_seen(), None);
+    }
+
+    #[test]
+    fn issue_6001_server_deadline_bypasses_startup_fast_retry() {
+        let outcome = serde_json::from_value(serde_json::json!({
+            "state": "failed", "message": "rate limited",
+            "failed_at": "2026-10-22T00:00:00Z",
+            "retry_at": "2099-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        assert_ne!(
+            super::classify_startup_update_state(&outcome),
+            super::StartupUpdateAction::Retry
+        );
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let (proxy, events) = crate::AppEventProxy::stub();
+        let mut poll = PollState::default();
+        super::handle_poll_outcome(&mut poll, outcome, &proxy);
+        let deadline = chrono::DateTime::parse_from_rfc3339("2099-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            poll.interval_at(deadline - chrono::Duration::seconds(120)),
+            Duration::from_secs(120)
+        );
+        assert_eq!(poll.interval_at(deadline), Duration::ZERO);
+        assert!(events.lock().unwrap().is_empty());
+        assert_eq!(poll.on_success_uptodate(), FIVE_MIN);
+        assert_eq!(poll.on_failure(), TEN_MIN);
     }
 
     #[test]
@@ -769,6 +1001,69 @@ mod poll_state_tests {
         assert_eq!(next, FIVE_MIN);
     }
 
+    #[test]
+    fn polling_records_detection_suppression_and_retry_schedule() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let (proxy, events) = crate::AppEventProxy::stub();
+        let mut poll = PollState::default();
+        let available = gwt_core::update::UpdateState::Available {
+            current: "9.132.0".into(),
+            latest: "9.133.0".into(),
+            release_url: "https://example.invalid/release".into(),
+            asset_url: Some("https://example.invalid/gwt.tar.gz".into()),
+            checked_at: chrono::Utc::now(),
+        };
+        assert_eq!(
+            super::handle_poll_outcome(&mut poll, available.clone(), &proxy),
+            FIVE_MIN
+        );
+        assert_eq!(
+            super::handle_poll_outcome(&mut poll, available, &proxy),
+            FIVE_MIN
+        );
+        assert_eq!(
+            events.lock().unwrap().len(),
+            1,
+            "discovery remains deduplicated"
+        );
+        assert_eq!(
+            super::handle_poll_outcome(
+                &mut poll,
+                gwt_core::update::UpdateState::Failed {
+                    message: "fixture network failure".into(),
+                    failed_at: chrono::Utc::now(),
+                    retry_at: None,
+                },
+                &proxy
+            ),
+            TEN_MIN
+        );
+        let log = std::fs::read_to_string(gwt_core::update::update_log_path())
+            .expect("each check outcome must leave diagnostic evidence");
+        let entries: Vec<serde_json::Value> = log
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0]["result"], "available");
+        assert_eq!(entries[0]["version"], "9.133.0");
+        assert_eq!(entries[0]["decision"], "published");
+        assert_eq!(entries[1]["decision"], "duplicate");
+        assert_eq!(entries[2]["result"], "failed");
+        assert_eq!(entries[2]["error"], "fixture network failure");
+        assert_eq!(entries[2]["next_check_in_secs"], "600");
+        for entry in entries {
+            assert_eq!(entry["stage"], "check_completed");
+            let next =
+                chrono::DateTime::parse_from_rfc3339(entry["next_check_at"].as_str().unwrap())
+                    .unwrap();
+            let observed =
+                chrono::DateTime::parse_from_rfc3339(entry["ts"].as_str().unwrap()).unwrap();
+            assert!(next > observed);
+        }
+    }
+
     #[derive(Debug)]
     struct FakeUpdateApplyOps {
         payload: PathBuf,
@@ -777,10 +1072,11 @@ mod poll_state_tests {
         portable_spawn_result: Result<(), String>,
         installer_spawn_result: Result<(), String>,
         wrote_restart_args: bool,
+        allow_elevation: Option<bool>,
         spawned_portable: bool,
         spawned_installer: bool,
         portable_spawn_count: usize,
-        staged_replacement: Option<PendingUpdateManifest>,
+        staged_replacement: Option<(PathBuf, PendingUpdateManifest)>,
     }
 
     impl FakeUpdateApplyOps {
@@ -792,6 +1088,7 @@ mod poll_state_tests {
                 portable_spawn_result: Ok(()),
                 installer_spawn_result: Ok(()),
                 wrote_restart_args: false,
+                allow_elevation: None,
                 spawned_portable: false,
                 spawned_installer: false,
                 portable_spawn_count: 0,
@@ -810,6 +1107,7 @@ mod poll_state_tests {
                     path: self.payload.clone(),
                 },
                 downloaded_at: "2026-05-10T12:00:00Z".to_string(),
+                origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
                 auto_apply_deferred: false,
             }
         }
@@ -820,8 +1118,10 @@ mod poll_state_tests {
             &mut self,
             _path: &Path,
             _args: Vec<String>,
+            allow_elevation: bool,
         ) -> Result<(), String> {
             self.wrote_restart_args = true;
+            self.allow_elevation = Some(allow_elevation);
             self.restart_args_result.clone()
         }
 
@@ -843,9 +1143,9 @@ mod poll_state_tests {
         ) -> Result<(), String> {
             self.spawned_portable = true;
             self.portable_spawn_count += 1;
-            if let Some(replacement) = self.staged_replacement.take() {
-                gwt_core::update::persist_pending_update_manifest(&replacement)?;
-                gwt_core::update::defer_pending_update(&replacement.version)?;
+            if let Some((dir, replacement)) = self.staged_replacement.take() {
+                gwt_core::update::persist_pending_update_manifest_in(&dir, &replacement)?;
+                gwt_core::update::defer_pending_update_in(&dir, &replacement.version)?;
             }
             self.portable_spawn_result.clone()
         }
@@ -987,6 +1287,7 @@ mod poll_state_tests {
             asset_url: "https://example.invalid/v9.20.0.tar.gz".to_string(),
             payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
             downloaded_at: "2026-05-10T12:00:00Z".to_string(),
+            origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
             auto_apply_deferred: false,
         };
         gwt_core::update::persist_pending_update_manifest_in(tempdir.path(), &manifest)
@@ -1017,6 +1318,7 @@ mod poll_state_tests {
             asset_url: "https://example.invalid/v9.31.0.tar.gz".to_string(),
             payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
             downloaded_at: "2026-09-07T00:00:00Z".to_string(),
+            origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
             auto_apply_deferred: false,
         };
         gwt_core::update::persist_pending_update_manifest(&manifest).expect("persist manifest");
@@ -1035,6 +1337,171 @@ mod poll_state_tests {
             }],
             attempt: 1,
         }
+    }
+
+    #[test]
+    fn issue_5343_restart_reloads_origin_and_current_policy() {
+        use gwt_core::update::PendingUpdateOrigin::{Automatic, ManualLater};
+        if let Ok(home) = std::env::var("GWT_TEST_PENDING_RESTART_HOME") {
+            let _home = gwt_core::test_support::ScopedGwtHome::set(Path::new(&home));
+            let restored = gwt_core::update::load_pending_update_manifest().unwrap();
+            let expected = std::env::var("GWT_TEST_PENDING_RESTART_EXPECTED").unwrap() == "true";
+            assert_eq!(
+                restored.permits_startup_apply(gwt::update_settings::enabled(), false),
+                expected
+            );
+            return;
+        }
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let mut manifest = staged_manifest_in(home.path());
+        for (origin, enabled, expected) in [
+            (ManualLater, false, true),
+            (ManualLater, true, true),
+            (Automatic, false, false),
+            (Automatic, true, true),
+        ] {
+            gwt_core::update::clear_pending_update_manifest().unwrap();
+            manifest.origin = origin;
+            gwt_core::update::persist_pending_update_manifest(&manifest).unwrap();
+            gwt::update_settings::set(Some(enabled)).unwrap();
+            // Read in an actual second process, without sharing stage memory.
+            let child = gwt_core::process::resolved_command(
+                gwt_core::process::ProcessPlanRequest::new(std::env::current_exe().unwrap()),
+            ).unwrap()
+                .args(["--exact", "update_front_door::poll_state_tests::issue_5343_restart_reloads_origin_and_current_policy"])
+                .env("GWT_TEST_PENDING_RESTART_HOME", home.path())
+                .env("GWT_TEST_PENDING_RESTART_EXPECTED", expected.to_string())
+                .output().unwrap();
+            assert!(
+                child.status.success(),
+                "{}",
+                String::from_utf8_lossy(&child.stderr)
+            );
+            assert!(String::from_utf8_lossy(&child.stdout).contains("1 passed"));
+            let restored = gwt_core::update::load_pending_update_manifest().unwrap();
+            assert_eq!(restored.origin, origin);
+            assert_eq!(
+                restored.permits_startup_apply(gwt::update_settings::enabled(), false),
+                expected
+            );
+        }
+        manifest.auto_apply_deferred = true;
+        assert!(!manifest.permits_startup_apply(true, false));
+        manifest.origin = ManualLater;
+        assert!(!manifest.permits_startup_apply(false, false));
+        manifest.origin = Automatic;
+        manifest.auto_apply_deferred = false;
+        assert!(!manifest.permits_startup_apply(true, true));
+        gwt_core::update::persist_pending_update_manifest(&manifest).unwrap();
+        super::commit_update_later_pending().unwrap();
+        assert_eq!(
+            gwt_core::update::load_pending_update_manifest()
+                .unwrap()
+                .origin,
+            ManualLater
+        );
+    }
+
+    #[test]
+    fn issue_5343_bootstrap_keeps_an_attempted_automatic_update_for_manual_retry() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let mut manifest = staged_manifest_in(home.path());
+        manifest.origin = gwt_core::update::PendingUpdateOrigin::Automatic;
+        gwt_core::update::persist_update_resume_marker(&sample_resume_marker()).unwrap();
+        assert!(
+            !super::permits_pending_manifest_at_bootstrap(&manifest, true, false),
+            "an earlier helper attempt must reach startup settlement instead of being retried"
+        );
+        manifest.origin = gwt_core::update::PendingUpdateOrigin::ManualLater;
+        assert!(
+            !super::permits_pending_manifest_at_bootstrap(&manifest, true, false),
+            "a manual attempt must reach mismatch settlement before any bootstrap replay"
+        );
+        manifest.origin = gwt_core::update::PendingUpdateOrigin::Automatic;
+        gwt_core::update::settle_update_resume_marker("9.30.0", chrono::Utc::now()).unwrap();
+        assert!(
+            !super::permits_pending_manifest_at_bootstrap(&manifest, true, false),
+            "the recorded failed version remains a manual retry"
+        );
+        manifest.version = "9.32.0".into();
+        assert!(
+            super::permits_pending_manifest_at_bootstrap(&manifest, true, false),
+            "a failed older release does not block a new update"
+        );
+        manifest.version = "9.31.0".into();
+        manifest.origin = gwt_core::update::PendingUpdateOrigin::ManualLater;
+        assert!(
+            super::permits_pending_manifest_at_bootstrap(&manifest, false, true),
+            "an explicit manual Later preserves its bootstrap behavior"
+        );
+    }
+
+    #[test]
+    fn issue_5343_automatic_commit_forbids_helper_elevation_and_retains_retry_payload() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let mut manifest = staged_manifest_in(home.path());
+        manifest.origin = gwt_core::update::PendingUpdateOrigin::Automatic;
+        gwt_core::update::clear_pending_update_manifest().unwrap();
+        gwt_core::update::persist_pending_update_manifest(&manifest).unwrap();
+        let mut ops = FakeUpdateApplyOps::portable(home.path().join("prepared-binary"));
+        super::stage_graceful_update_apply_with_ops(
+            &mut ops,
+            manifest.clone(),
+            &sample_resume_marker(),
+            &home.path().join("gwt"),
+            Vec::new(),
+            42,
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(ops.allow_elevation, Some(false));
+        assert_eq!(
+            gwt_core::update::load_pending_update_manifest(),
+            Some(manifest)
+        );
+    }
+
+    #[test]
+    fn issue_5343_bootstrap_only_counts_open_autonomous_projects() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let project = home.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        gwt::update_settings::set(Some(true)).unwrap();
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project);
+        gwt::save_issue_monitor_prefs(
+            &prefs_path,
+            &gwt::IssueMonitorPrefs {
+                autonomous_mode: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            !super::automatic_updates_enabled_at_bootstrap(),
+            "saved prefs alone are not an open project"
+        );
+        let session_path = gwt_core::paths::gwt_session_state_path();
+        std::fs::write(
+            &session_path,
+            serde_json::json!({
+                "tabs": [{"id":"one", "title":"Project", "project_root": project, "kind":"git"}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(super::automatic_updates_enabled_at_bootstrap());
+        gwt::update_settings::set(Some(false)).unwrap();
+        assert!(!super::automatic_updates_enabled_at_bootstrap());
+        gwt::update_settings::set(Some(true)).unwrap();
+        gwt::save_issue_monitor_prefs(&prefs_path, &gwt::IssueMonitorPrefs::default()).unwrap();
+        assert!(!super::automatic_updates_enabled_at_bootstrap());
+        std::fs::write(&session_path, "{invalid").unwrap();
+        assert!(!super::automatic_updates_enabled_at_bootstrap());
     }
 
     #[test]
@@ -1106,7 +1573,8 @@ mod poll_state_tests {
             path: replacement_payload.clone(),
         };
         let mut ops = FakeUpdateApplyOps::portable(home.path().join("prepared-binary"));
-        ops.staged_replacement = Some(replacement.clone());
+        ops.staged_replacement =
+            Some((home.path().join(".gwt/pending-update"), replacement.clone()));
         let version = super::stage_graceful_update_apply_with_ops(
             &mut ops,
             manifest,
@@ -1196,9 +1664,16 @@ mod poll_state_tests {
             "a failed commit must not leave a marker that resumes nothing"
         );
         assert!(
-            gwt_core::update::load_pending_update_manifest().is_some(),
-            "the manifest stays so the user can retry"
+            gwt_core::update::load_pending_update_manifest().is_none(),
+            "a failed apply must not reappear as ready"
         );
+        let result = gwt_core::update::load_update_apply_result().expect("failure recorded");
+        assert_eq!(
+            result.outcome,
+            gwt_core::update::UpdateApplyOutcome::Failure
+        );
+        assert_eq!(result.to_version, "9.31.0");
+        assert_eq!(result.message.as_deref(), Some(err.as_str()));
     }
 
     // Issue #4038 (AC-1): the worker-thread `exit(0)` path is gone. Only the

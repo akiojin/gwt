@@ -2,13 +2,8 @@
 //!
 //! Replaces the wry/tao native WebView GUI route with a tray-resident
 //! process that owns the embedded server and exposes an `Open` menu entry
-//! to launch the default browser. This module is the runtime entry point
-//! when `gwt` is invoked with no CLI verb (FrontDoorRoute::Tray).
-//!
-//! Phase 1 ships only the type and module skeletons; the actual event loop
-//! and EmbeddedServer integration land in Phase 4. Until then, `run()`
-//! returns `Err(TrayError::NotYetImplemented)` so we never silently take
-//! over the GUI route.
+//! to launch the default browser. This module supplies argument parsing and
+//! runtime support for the tray process bootstrapped by `main.rs`.
 
 use std::net::{IpAddr, Ipv4Addr};
 
@@ -69,13 +64,6 @@ impl Default for TrayArgs {
     }
 }
 
-/// Errors surfaced by the tray-resident entry point.
-#[derive(Debug, thiserror::Error)]
-pub enum TrayError {
-    #[error("tray-resident process is not yet implemented (SPEC #2920 Phase 4)")]
-    NotYetImplemented,
-}
-
 /// SPEC #2920 Phase 4 partial — argv parse errors for the tray-resident
 /// front door. `main()` renders the `Display` impl to stderr and exits 2,
 /// matching the removed browser-server parser's contract.
@@ -114,11 +102,8 @@ impl std::fmt::Display for TrayArgParseError {
 
 impl std::error::Error for TrayArgParseError {}
 
-/// SPEC #2920 Phase 4 partial — parse the GUI route's argv into a
-/// [`TrayArgs`]. The full Tray route (FrontDoorRoute::Tray) lands later;
-/// for now this powers the existing GUI route so VPN-reachable hosts can
-/// run `gwt --bind 0.0.0.0 --port <n>` without falling back to SSH local
-/// port forwarding.
+/// Parse the tray process's argv into [`TrayArgs`]. Hosts can run
+/// `gwt --bind 0.0.0.0 --port <n>` without SSH local port forwarding.
 ///
 /// Accepted flags:
 /// - `--bind <ip>`: parsed via `IpAddr::from_str`. Defaults to
@@ -174,13 +159,6 @@ pub fn parse_tray_argv(argv: &[String]) -> Result<TrayArgs, TrayArgParseError> {
     Ok(args)
 }
 
-/// Entry point invoked by `main.rs` after `FrontDoorRoute::Tray` is
-/// resolved. Phase 4 will replace the placeholder with the real event
-/// loop + EmbeddedServer bootstrap.
-pub fn run(_args: TrayArgs) -> Result<i32, TrayError> {
-    Err(TrayError::NotYetImplemented)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,14 +170,6 @@ mod tests {
         assert_eq!(args.port, None);
         assert!(!args.no_tray);
         assert!(!args.no_open);
-    }
-
-    #[test]
-    fn tray_run_is_not_yet_implemented_in_phase_1() {
-        // SPEC #2920 Phase 1 only ships skeletons; real bootstrap lands
-        // in Phase 4 alongside the WebView removal.
-        let err = run(TrayArgs::default()).expect_err("placeholder must error");
-        assert!(matches!(err, TrayError::NotYetImplemented));
     }
 
     // Parser coverage; native registration/lifetime is tested separately.

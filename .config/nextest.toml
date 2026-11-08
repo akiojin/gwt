@@ -3,6 +3,18 @@
 fail-fast = false
 slow-timeout = { period = "30s", terminate-after = 4 }
 
+# Issue #5566: coverage has many short fixture tests; overlap their I/O waits.
+# Inherit the complete inventory and timeout policy from the default profile.
+[profile.coverage]
+test-threads = 16
+
+[profile.coverage.junit]
+path = "junit.xml"
+
+# Issue #5564: retain execution identities for the required shard-union check.
+[profile.ci.junit]
+path = "junit.xml"
+
 # Issue #4822: local Windows canonical verification opts into this profile.
 # Bound process pressure while allowing pure units to overlap fixture work.
 [profile.gwt-verify]

@@ -26,6 +26,7 @@ from typing import Optional
 from unittest import mock
 
 import chroma_index_runner as runner
+from tests.git_fixture import git_fixture_env
 
 REPO_HASH = "abc1234567890def"
 SECOND_REPO_HASH = "fedcba0987654321"
@@ -180,26 +181,13 @@ class _IncrementalFixture(unittest.TestCase):
         return project
 
     def _run_git(self, *args: str) -> None:
-        git_env = os.environ.copy()
-        git_env["GIT_CONFIG_NOSYSTEM"] = "1"
-        git_env["GIT_CONFIG_GLOBAL"] = os.devnull
-        git_env["GIT_ATTR_NOSYSTEM"] = "1"
-        git_env.pop("GIT_CONFIG_PARAMETERS", None)
-        git_env.pop("GIT_CONFIG_SYSTEM", None)
-        for key in list(git_env):
-            if (
-                key == "GIT_CONFIG_COUNT"
-                or key.startswith("GIT_CONFIG_KEY_")
-                or key.startswith("GIT_CONFIG_VALUE_")
-            ):
-                git_env.pop(key)
         try:
             completed = subprocess.run(
                 ["git", *args],
                 check=False,
                 capture_output=True,
                 text=True,
-                env=git_env,
+                env=git_fixture_env(),
                 timeout=30,
             )
         except subprocess.TimeoutExpired as error:
@@ -590,6 +578,7 @@ class IncrementalGenerationTests(_IncrementalFixture):
             check=True,
             capture_output=True,
             text=True,
+            env=git_fixture_env(),
         )
         commit_oid = completed.stdout.strip()
         object_path = repo / ".git" / "objects" / commit_oid[:2] / commit_oid[2:]
@@ -1770,6 +1759,46 @@ class IncrementalModeRoutingTests(_IncrementalFixture):
             (db_path / "chroma.sqlite3").exists(),
             "incremental mode must not resurrect the migrated legacy store",
         )
+
+    def test_unchanged_copy_resolves_generation_under_shared_lock(self):
+        self.assertTrue(self._build().get("ok"))
+        db_path = self._db_path()
+        hashes = {
+            entry["path"]: entry["content_hash"]
+            for entry in runner.read_manifest(db_path, scope="files")
+        }
+        real_lock, real_resolve = runner.acquire_lock, runner.resolve_active_store
+        real_manifest = runner.read_manifest
+        held = False
+
+        @contextlib.contextmanager
+        def shared_lock(path, exclusive=True):
+            nonlocal held
+            self.assertEqual((path, exclusive), (db_path, False))
+            with real_lock(path, exclusive=exclusive):
+                held = True
+                yield
+                held = False
+
+        def resolve_locked(path):
+            self.assertTrue(held, "generation selection must follow reader admission")
+            return real_resolve(path)
+
+        def manifest_locked(path, scope):
+            self.assertTrue(held, "manifest and generation must share reader admission")
+            return real_manifest(path, scope)
+
+        with mock.patch.object(
+            runner, "acquire_lock", side_effect=shared_lock
+        ), mock.patch.object(
+            runner, "resolve_active_store", side_effect=resolve_locked
+        ), mock.patch.object(
+            runner, "read_manifest", side_effect=manifest_locked
+        ):
+            copied = runner._copy_unchanged_records(
+                db_path, "files", mock.Mock(), "files_code", hashes
+            )
+        self.assertEqual(copied, len(hashes))
 
 
 class PublishVerificationTests(unittest.TestCase):

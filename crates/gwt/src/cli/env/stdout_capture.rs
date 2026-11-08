@@ -8,11 +8,67 @@ use crate::cli::{LinkedPrSummary, PrChecksSummary, PrReview, PrReviewThread};
 
 pub(crate) struct StdoutCaptureEnv<'a, E: CliEnv> {
     pub(crate) inner: &'a mut E,
-    pub(crate) stdout: &'a mut Vec<u8>,
+    pub(crate) stdout: &'a mut dyn io::Write,
 }
 
 impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
     type Client = E::Client;
+
+    fn github_repository(&self) -> io::Result<(String, String)> {
+        self.inner.github_repository()
+    }
+    fn release_policy_context(&mut self) -> io::Result<crate::cli::ReleasePolicyContext> {
+        self.inner.release_policy_context()
+    }
+    fn diagnostic_workflow_context(&mut self) -> io::Result<serde_json::Value> {
+        self.inner.diagnostic_workflow_context()
+    }
+    fn diagnostic_run_snapshot(&mut self, run_id: u64) -> io::Result<serde_json::Value> {
+        self.inner.diagnostic_run_snapshot(run_id)
+    }
+    fn diagnostic_artifact(&mut self, run_id: u64, artifact_id: u64) -> io::Result<Vec<u8>> {
+        self.inner.diagnostic_artifact(run_id, artifact_id)
+    }
+    fn dispatch_diagnostic_workflow(
+        &mut self,
+        git_ref: &str,
+        inputs: &serde_json::Map<String, serde_json::Value>,
+    ) -> io::Result<gwt_github::client::http::DiagnosticDispatchAck> {
+        self.inner.dispatch_diagnostic_workflow(git_ref, inputs)
+    }
+    fn pm_settings_snapshot(
+        &mut self,
+        operation: &str,
+        params: &serde_json::Value,
+    ) -> io::Result<serde_json::Value> {
+        self.inner.pm_settings_snapshot(operation, params)
+    }
+    fn pm_settings_mutate(
+        &mut self,
+        operation: &str,
+        params: &serde_json::Value,
+        before: &serde_json::Value,
+    ) -> io::Result<serde_json::Value> {
+        self.inner.pm_settings_mutate(operation, params, before)
+    }
+    fn create_github_discussion(
+        &mut self,
+        category: &str,
+        title: &str,
+        body: &str,
+    ) -> io::Result<gwt_github::client::http::CreatedDiscussion> {
+        self.inner.create_github_discussion(category, title, body)
+    }
+    fn required_status_checks(&mut self, branch: &str) -> io::Result<serde_json::Value> {
+        self.inner.required_status_checks(branch)
+    }
+    fn update_required_status_checks(
+        &mut self,
+        branch: &str,
+        settings: &serde_json::Value,
+    ) -> io::Result<serde_json::Value> {
+        self.inner.update_required_status_checks(branch, settings)
+    }
 
     fn client(&self) -> &Self::Client {
         self.inner.client()
@@ -24,6 +80,21 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
 
     fn repo_path(&self) -> &std::path::Path {
         self.inner.repo_path()
+    }
+    fn deliver_feedback(
+        &mut self,
+        record: &gwt_core::feedback::PublicFeedback,
+    ) -> Result<u64, gwt_github::client::OwnerMutationError> {
+        self.inner.deliver_feedback(record)
+    }
+    fn spawn_feedback_worker(&mut self, id: &str) -> io::Result<()> {
+        self.inner.spawn_feedback_worker(id)
+    }
+    fn deliver_auto_feedback(
+        &mut self,
+        snapshot: &gwt_core::feedback::auto_report::SafeAutoSnapshot,
+    ) -> Result<u64, gwt_core::feedback::auto_report::AutoReason> {
+        self.inner.deliver_auto_feedback(snapshot)
     }
 
     fn stdout(&mut self) -> &mut dyn io::Write {
@@ -62,6 +133,13 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
         self.inner.fetch_current_pr()
     }
 
+    fn fetch_completion_pr_candidates(
+        &mut self,
+        number: Option<u64>,
+    ) -> io::Result<Vec<crate::cli::CompletionPrCandidate>> {
+        self.inner.fetch_completion_pr_candidates(number)
+    }
+
     fn create_pr(
         &mut self,
         base: &str,
@@ -93,11 +171,31 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
     fn fetch_pr_head_sha(&mut self, number: u64) -> io::Result<Option<String>> {
         self.inner.fetch_pr_head_sha(number)
     }
+    fn fetch_ci_delivery_snapshot(
+        &mut self,
+        base: &str,
+        head: &str,
+    ) -> io::Result<crate::cli::pr::ci_delivery::CiSnapshot> {
+        self.inner.fetch_ci_delivery_snapshot(base, head)
+    }
     fn fetch_completion_pr(
         &mut self,
         number: u64,
     ) -> io::Result<gwt_git::pr_status::PrCompletionSnapshot> {
         self.inner.fetch_completion_pr(number)
+    }
+    fn enable_pr_auto_merge(
+        &mut self,
+        number: u64,
+        reviewed_head_sha: &str,
+    ) -> io::Result<serde_json::Value> {
+        self.inner.enable_pr_auto_merge(number, reviewed_head_sha)
+    }
+    fn fetch_auto_merge_pr(
+        &mut self,
+        number: u64,
+    ) -> io::Result<gwt_git::pr_status::PrCompletionSnapshot> {
+        self.inner.fetch_auto_merge_pr(number)
     }
     fn edit_pr(
         &mut self,
@@ -166,8 +264,10 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
         &mut self,
         number: u64,
         body: &str,
+        thread_id: Option<&str>,
     ) -> io::Result<usize> {
-        self.inner.reply_and_resolve_pr_review_threads(number, body)
+        self.inner
+            .reply_and_resolve_pr_review_threads(number, body, thread_id)
     }
 
     fn fetch_pr_checks(&mut self, number: u64) -> io::Result<PrChecksSummary> {
@@ -184,6 +284,10 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
 
     fn rerun_actions(&mut self, target: crate::cli::ActionsRerunTarget) -> io::Result<String> {
         self.inner.rerun_actions(target)
+    }
+
+    fn dispatch_actions(&mut self, call: crate::cli::ActionsDispatchCall) -> io::Result<String> {
+        self.inner.dispatch_actions(call)
     }
 
     fn cancel_actions(&mut self, run_id: u64) -> io::Result<String> {

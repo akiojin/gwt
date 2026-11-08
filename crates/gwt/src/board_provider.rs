@@ -106,6 +106,7 @@ pub(crate) mod test_provider_override {
                     repo_hash,
                     PromptBoardReadRequest {
                         diff_since: request.diff_since,
+                        cursor: request.cursor,
                         scope: request.scope,
                         status_author: request.status_author,
                         status_kind: request.status_kind,
@@ -515,19 +516,21 @@ fn after_local_operation<T>(root: &Path, result: Result<T>) -> Result<T> {
 
 /// Append a Board entry through the active provider.
 pub fn post_entry(worktree_root: &Path, entry: BoardEntry) -> Result<CoordinationSnapshot> {
-    after_local_operation(
-        worktree_root,
-        provider_for(worktree_root).post_entry(worktree_root, entry),
-    )
+    let result = provider_for(worktree_root).post_entry(worktree_root, entry.clone());
+    if result.is_ok() {
+        crate::board_discussion_sync::local_post_committed(worktree_root, &entry);
+    }
+    after_local_operation(worktree_root, result)
 }
 
 /// Append a Board entry while distinguishing a committed post from a failed
 /// snapshot refresh.
 pub fn post_entry_outcome(worktree_root: &Path, entry: BoardEntry) -> Result<BoardPostOutcome> {
-    after_local_operation(
-        worktree_root,
-        provider_for(worktree_root).post_entry_outcome(worktree_root, entry),
-    )
+    let result = provider_for(worktree_root).post_entry_outcome(worktree_root, entry.clone());
+    if result.is_ok() {
+        crate::board_discussion_sync::local_post_committed(worktree_root, &entry);
+    }
+    after_local_operation(worktree_root, result)
 }
 
 /// Append a Board entry under a caller-supplied deterministic identity
@@ -540,10 +543,11 @@ pub fn post_entry_deterministic(
     worktree_root: &Path,
     entry: BoardEntry,
 ) -> Result<BoardDeterministicOutcome> {
-    after_local_operation(
-        worktree_root,
-        provider_for(worktree_root).post_entry_deterministic(worktree_root, entry),
-    )
+    let result = provider_for(worktree_root).post_entry_deterministic(worktree_root, entry.clone());
+    if matches!(&result, Ok(BoardDeterministicOutcome::Appended(_))) {
+        crate::board_discussion_sync::local_post_committed(worktree_root, &entry);
+    }
+    after_local_operation(worktree_root, result)
 }
 
 /// Whether this repo's resolved Board provider can preserve a caller-supplied

@@ -14,7 +14,8 @@ const TARGET_TTL_SECS: u64 = 600;
 const RAM_FLOOR_BYTES: u64 = 512 * 1024 * 1024;
 const SCAN_ENTRIES_PER_REFRESH: usize = 2_048;
 const SCAN_TIME_PER_REFRESH: Duration = Duration::from_millis(20);
-const MACHINE_REFRESH_SECS: u64 = 5;
+pub const CAPACITY_TICK_INTERVAL: Duration = Duration::from_secs(5);
+const MACHINE_REFRESH_SECS: u64 = 10;
 const MAX_REASON_CHARS: usize = 512;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -39,6 +40,7 @@ pub struct AgentCapacity {
     pub own_pm_agents: usize,
     pub own_implementation_agents: usize,
     pub own_review_agents: usize,
+    pub own_untracked_workers: usize,
     pub other_live_agents: usize,
     pub other_pm_agents: usize,
     pub other_implementation_agents: usize,
@@ -60,6 +62,183 @@ impl AgentCapacity {
             (Some(observed), Some(expires)) => fresh(observed, expires, epoch_seconds()),
             _ => false,
         }
+    }
+}
+
+/// Worker-prepared capacity overlay. The GUI applies only these three fields;
+/// prefs, repository identity, snapshot reads and reduction reporting stay here.
+#[derive(Clone, Debug)]
+pub struct CapacityUpdate {
+    pub capacity: AgentCapacity,
+    pub limits: Option<(usize, Option<usize>)>,
+    fresh: bool,
+}
+
+impl CapacityUpdate {
+    pub fn from_status(status: &crate::IssueMonitorStatusView) -> Self {
+        Self {
+            capacity: status.agent_capacity.clone(),
+            limits: Some((status.max_active_agents, status.max_active_agents_override)),
+            fresh: status.agent_capacity.is_fresh(),
+        }
+    }
+
+    pub fn read(project_root: &Path, previous: Option<&Self>) -> Self {
+        Self::read_with(project_root, previous, |root| {
+            project_capacity(root, &BTreeSet::new(), 0)
+        })
+    }
+
+    pub fn read_with(
+        project_root: &Path,
+        previous: Option<&Self>,
+        read_capacity: impl FnOnce(&Path) -> AgentCapacity,
+    ) -> Self {
+        let capacity = read_capacity(project_root);
+        let fresh = capacity.is_fresh();
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project_root);
+        let monitor = match crate::load_issue_monitor_prefs(&prefs_path).and_then(|prefs| {
+            let roster_owned = prefs.agent_roster.is_some();
+            let policy = crate::machine_agent_settings::ensure_migrated()?;
+            let mut monitor =
+                crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+            monitor.apply_machine_policy(&policy);
+            Ok((monitor, roster_owned))
+        }) {
+            Ok(monitor) => Some(monitor),
+            Err(error) => {
+                tracing::warn!(%error, "capacity display could not read Monitor prefs; retaining last valid mode");
+                previous.and_then(|value| value.limits).map(|(_, manual)| {
+                    let mut monitor =
+                        crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+                    monitor.set_max_active_agents_override(manual);
+                    (monitor, false)
+                })
+            }
+        };
+        let limits = monitor.map(|(mut monitor, roster_owned)| {
+            if !roster_owned && monitor.max_active_agents_policy().0.is_none() {
+                if let Some((limit, _)) = previous.and_then(|value| value.limits) {
+                    monitor.config.max_active = limit;
+                }
+            }
+            monitor.set_agent_capacity_for_project(project_root, capacity.clone());
+            (
+                monitor.effective_max_active_agents(),
+                monitor.max_active_agents_policy().0,
+            )
+        });
+        Self {
+            capacity,
+            limits,
+            fresh,
+        }
+    }
+
+    /// Sensor renewal alone is not a display change. Compare freshness as
+    /// observed at sampling time, so a renewed sample never creates a false
+    /// expiry transition when the previous timestamp eventually ages out.
+    pub fn changed_from(&self, previous: Option<&Self>) -> bool {
+        let Some(previous) = previous else {
+            return true;
+        };
+        let mut before = previous.capacity.clone();
+        before.observed_at = self.capacity.observed_at;
+        before.expires_at = self.capacity.expires_at;
+        self.fresh != previous.fresh || self.limits != previous.limits || self.capacity != before
+    }
+}
+
+#[cfg(test)]
+mod notification_tests {
+    use super::*;
+
+    #[test]
+    fn capacity_notifications_ignore_renewal_and_publish_expiry_or_mode_changes() {
+        let previous = CapacityUpdate {
+            capacity: AgentCapacity {
+                measurement_complete: true,
+                observed_at: Some(100),
+                expires_at: Some(130),
+                ..Default::default()
+            },
+            limits: Some((3, None)),
+            fresh: true,
+        };
+        let mut renewed = previous.clone();
+        renewed.capacity.observed_at = Some(110);
+        renewed.capacity.expires_at = Some(140);
+        assert!(!renewed.changed_from(Some(&previous)));
+        renewed.fresh = false;
+        assert!(renewed.changed_from(Some(&previous)));
+        renewed.fresh = true;
+        renewed.limits = Some((3, Some(3)));
+        assert!(renewed.changed_from(Some(&previous)));
+        assert!(renewed.changed_from(None));
+    }
+
+    #[test]
+    fn roster_capacity_overlay_follows_machine_auto_and_retains_mode_on_read_failure() {
+        let _env = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let root = home.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let prefs = crate::IssueMonitorPrefs {
+            agent_roster: Some(
+                serde_json::from_value(serde_json::json!({
+                    "schema_version": 1, "revision": 1,
+                    "members": [{
+                        "agent_member_id": "00000000-0000-4000-8000-000000006732",
+                        "name": "Ada", "enabled": true, "agent_id": "codex",
+                        "created_at": "2026-11-04T00:00:00Z"
+                    }, {
+                        "agent_member_id": "00000000-0000-4000-8000-000000006733",
+                        "name": "Bob", "enabled": true, "agent_id": "codex",
+                        "created_at": "2026-11-04T00:00:00Z"
+                    }]
+                }))
+                .unwrap(),
+            ),
+            max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
+            max_active_agents: 2,
+            ..Default::default()
+        };
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&root),
+            &prefs,
+        )
+        .unwrap();
+        let sample = AgentCapacity {
+            measurement_complete: true,
+            recommended_worker_limit: 2,
+            ..Default::default()
+        };
+        let source = crate::issue_monitor::IssueMonitorMaxActiveChangeSource::Gui;
+        crate::machine_agent_settings::set(Some(1), source, "2026-11-04T00:00:00Z").unwrap();
+        let manual = CapacityUpdate::read_with(&root, None, |_| sample.clone());
+        assert_eq!(manual.limits, Some((1, Some(1))));
+        crate::machine_agent_settings::set(None, source, "2026-11-04T00:00:01Z").unwrap();
+        let auto = CapacityUpdate::read_with(&root, Some(&manual), |_| sample.clone());
+        assert_eq!(
+            auto.limits,
+            Some((2, None)),
+            "roster Manual prefs cannot undo machine Auto"
+        );
+
+        std::fs::write(crate::machine_agent_settings::path(), b"corrupt").unwrap();
+        let retained = CapacityUpdate::read_with(&root, Some(&manual), |_| sample.clone());
+        assert_eq!(
+            retained.limits, manual.limits,
+            "an unreadable policy retains the accepted mode"
+        );
+        let unknown = CapacityUpdate::read_with(&root, None, |_| sample);
+        assert_eq!(
+            unknown.limits, None,
+            "an unreadable policy is not confirmed Auto"
+        );
     }
 }
 
@@ -165,14 +344,14 @@ fn calculate(input: &Inputs) -> AgentCapacity {
             .live
             .saturating_add(usize::try_from(bytes / input.ram_per_agent).unwrap_or(usize::MAX))
     });
-    let disk = input
-        .disk
-        .zip(input.target.filter(|bytes| *bytes > 0))
-        .map(|(free, target)| {
-            input
-                .live
-                .saturating_add(usize::try_from(free / target).unwrap_or(usize::MAX))
-        });
+    let disk = input.disk.zip(input.target).map(|(free, target)| {
+        if target == 0 {
+            return usize::MAX;
+        }
+        input
+            .live
+            .saturating_add(usize::try_from(free / target).unwrap_or(usize::MAX))
+    });
     let complete = input.inventory_complete && cpu.is_some() && ram.is_some() && disk.is_some();
     let budget = complete.then(|| cpu.unwrap().min(ram.unwrap()).min(disk.unwrap()));
     let constraints = [
@@ -205,10 +384,15 @@ fn calculate(input: &Inputs) -> AgentCapacity {
             "disk",
             disk,
             format!(
-                "free disk {}; measured target {}; live {}",
+                "free disk {}; measured target {}; live {}{}",
                 format_bytes(input.disk),
                 format_bytes(input.target),
-                input.live
+                input.live,
+                if input.target == Some(0) {
+                    "; no additional target storage required"
+                } else {
+                    ""
+                }
             ),
         ),
     ]
@@ -263,6 +447,7 @@ fn calculate(input: &Inputs) -> AgentCapacity {
         own_live_agents: input.live.saturating_sub(input.other),
         own_pm_agents: input.pm,
         other_live_agents: input.other,
+        own_untracked_workers: input.untracked,
         gui_cpu_millicores: input.gui.unwrap_or(0),
         constraints,
         limiting_constraint,
@@ -305,7 +490,7 @@ fn fresh(observed_at: u64, expires_at: u64, now: u64) -> bool {
 }
 
 /// Read the shared census only. Missing, expired or uncertain observations
-/// produce a zero Auto cap; callers may offer an explicit manual override.
+/// remain incomplete; Monitor admission retains its previously accepted limit.
 pub fn project_capacity(
     project_root: &Path,
     monitored_session_ids: &BTreeSet<String>,
@@ -380,7 +565,6 @@ fn project_capacity_at(
         .iter()
         .filter(|(path, measurement)| {
             own_targets.contains(*path)
-                && measurement.bytes > 0
                 && fresh(
                     measurement.observed_at,
                     measurement.observed_at.saturating_add(TARGET_TTL_SECS),
@@ -390,7 +574,7 @@ fn project_capacity_at(
         .map(|(_, measurement)| measurement.bytes)
         .max();
     // The largest completed fresh target is conservative across the machine;
-    // a requested project still needs its own measured representative first.
+    // a requested project still needs its own measured representative, including zero.
     let target = target.map(|own| {
         snapshot
             .targets
@@ -492,20 +676,28 @@ fn capacity_reason_summary(mut reason: String, diagnostics: &[String]) -> String
 }
 
 /// GUI-independent refresh. CPU baselines and target walks survive ticks;
-/// only complete positive target measurements enter the shared atomic file.
+/// only complete target measurements enter the shared atomic file.
 pub fn refresh_machine_capacity(project_root: &Path) -> io::Result<()> {
+    refresh_machine_capacity_for_projects(&[project_root.to_path_buf()])
+}
+
+/// One host tick shares its machine sample, target-walk budget and atomic write.
+pub fn refresh_machine_capacity_for_projects(project_roots: &[PathBuf]) -> io::Result<()> {
+    if project_roots.is_empty() {
+        return Ok(());
+    }
     static PROBE: OnceLock<Mutex<RuntimeProbe>> = OnceLock::new();
     let mut probe = PROBE
         .get_or_init(|| Mutex::new(RuntimeProbe::default()))
         .lock()
         .map_err(|_| io::Error::other("capacity probe poisoned"))?;
-    probe.refresh(project_root)
+    probe.refresh_projects(project_roots)
 }
 
 #[derive(Default)]
 struct RuntimeProbe {
     runtime_dir: PathBuf,
-    system: sysinfo::System,
+    system: Option<sysinfo::System>,
     last_cpu_sample: Option<Instant>,
     walks: BTreeMap<PathBuf, TargetWalk>,
     gui_identities: BTreeSet<(u32, u64)>,
@@ -514,7 +706,20 @@ struct RuntimeProbe {
 }
 
 impl RuntimeProbe {
+    #[cfg(test)]
     fn refresh(&mut self, project_root: &Path) -> io::Result<()> {
+        self.refresh_projects(&[project_root.to_path_buf()])
+    }
+
+    fn refresh_projects(&mut self, project_roots: &[PathBuf]) -> io::Result<()> {
+        self.refresh_projects_with_scan(project_roots, TargetWalk::advance)
+    }
+
+    fn refresh_projects_with_scan(
+        &mut self,
+        project_roots: &[PathBuf],
+        mut advance: impl FnMut(&mut TargetWalk, &mut usize, Instant) -> io::Result<Option<u64>>,
+    ) -> io::Result<()> {
         use fs2::FileExt;
         let directory = capacity_directory();
         if self.runtime_dir != directory {
@@ -558,11 +763,14 @@ impl RuntimeProbe {
             self.machine_sample_completed_at = Instant::now().checked_sub(completed_age);
             previous.clone()
         } else {
-            self.sample_machine(&previous, now)
+            self.sample_machine(&previous, now)?
         };
         self.machine_sample = Some(machine.clone());
         let inventory = machine.inventory;
-        let mut roots = BTreeSet::from([normalized(project_root)]);
+        let mut roots = project_roots
+            .iter()
+            .map(|root| normalized(root))
+            .collect::<BTreeSet<_>>();
         roots.extend(
             inventory
                 .sessions
@@ -577,7 +785,7 @@ impl RuntimeProbe {
                     Ok(bytes) => Some(bytes),
                     Err(error) => {
                         disk_errors.push(format!(
-                            "disk_measurement_unavailable: {}: {error}; check volume/path access or use Manual",
+                            "disk_measurement_unavailable: {}: {error}; excluded from disk estimate; check volume/path access",
                             root.display()
                         ));
                         None
@@ -587,14 +795,10 @@ impl RuntimeProbe {
             })
             .collect::<BTreeMap<_, _>>();
         let disk_observations = merge_disk_observations(previous.disk_observations, updates, now);
-        let free_disk_bytes = if disk_errors.is_empty() {
-            disk_observations
-                .values()
-                .map(|sample| sample.available_bytes)
-                .min()
-        } else {
-            None
-        };
+        let free_disk_bytes = disk_observations
+            .values()
+            .map(|sample| sample.available_bytes)
+            .min();
         let mut diagnostics = machine.diagnostics;
         diagnostics.extend(disk_errors);
         let mut targets = previous.targets;
@@ -616,10 +820,9 @@ impl RuntimeProbe {
         let deadline = Instant::now() + SCAN_TIME_PER_REFRESH;
         let mut remaining = SCAN_ENTRIES_PER_REFRESH;
         for path in paths {
-            if targets
-                .get(&path)
-                .is_some_and(|sample| now < sample.observed_at.saturating_add(TARGET_TTL_SECS / 2))
-            {
+            if targets.get(&path).is_some_and(|sample| {
+                sample.bytes > 0 && now < sample.observed_at.saturating_add(TARGET_TTL_SECS / 2)
+            }) {
                 continue;
             }
             let walk = self
@@ -627,24 +830,21 @@ impl RuntimeProbe {
                 .entry(path.clone())
                 .or_insert_with(|| TargetWalk::new(path.clone()));
             walk.last_requested_at = now;
-            match walk.advance(&mut remaining, deadline) {
+            let measurement = match advance(walk, &mut remaining, deadline) {
+                // Missing build output is known zero consumption, not a failed sensor.
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Some(0)),
+                result => result,
+            };
+            match measurement {
                 Ok(Some(bytes)) => {
                     self.walks.remove(&path);
-                    if bytes > 0 {
-                        targets.insert(
-                            path,
-                            TargetMeasurement {
-                                bytes,
-                                observed_at: now,
-                            },
-                        );
-                    } else {
-                        targets.remove(&path);
-                        diagnostics.push(format!(
-                            "target_measurement_empty: {}; build the project or use Manual",
-                            path.display()
-                        ));
-                    }
+                    targets.insert(
+                        path,
+                        TargetMeasurement {
+                            bytes,
+                            observed_at: now,
+                        },
+                    );
                 }
                 Ok(None) => diagnostics.push(format!(
                     "target_measurement_in_progress: {}; wait for the scan or use Manual",
@@ -654,7 +854,7 @@ impl RuntimeProbe {
                     self.walks.remove(&path);
                     targets.remove(&path);
                     diagnostics.push(format!(
-                        "target_measurement_unavailable: {}: {error}; check path access, build the project or use Manual",
+                        "target_measurement_unavailable: {}: {error}; excluded from disk estimate; check path access or use Manual",
                         path.display()
                     ));
                 }
@@ -694,10 +894,9 @@ impl RuntimeProbe {
         });
         snapshot.machine_budget = machine.machine_budget;
         snapshot.constraints = machine.constraints;
-        snapshot
-            .projects
-            .entry(normalized(project_root))
-            .or_default();
+        for root in project_roots {
+            snapshot.projects.entry(normalized(root)).or_default();
+        }
         for row in &snapshot.inventory.sessions {
             let count = snapshot
                 .projects
@@ -725,23 +924,38 @@ impl RuntimeProbe {
         &mut self,
         previous: &MachineCapacitySnapshot,
         now: u64,
-    ) -> MachineCapacitySnapshot {
-        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, UpdateKind};
-        self.system.refresh_memory();
-        self.system.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::nothing()
-                .with_cpu()
-                .with_exe(UpdateKind::OnlyIfNotSet),
+    ) -> io::Result<MachineCapacitySnapshot> {
+        let system = match &mut self.system {
+            Some(system) => system,
+            slot @ None => slot.insert(sysinfo::System::new().map_err(io::Error::other)?),
+        };
+        system.refresh_memory();
+        let inventory = crate::session_inventory::observe_machine_sessions_with_system(
+            &gwt_core::paths::gwt_sessions_dir(),
+            system,
         );
-        let gui = self
-            .system
+        let gui_pids = system
             .processes()
             .values()
             .filter(|process| {
                 is_gui_process(process.exe().unwrap_or_else(|| Path::new(process.name())))
             })
+            .map(sysinfo::Process::pid)
+            .collect::<Vec<_>>();
+        #[cfg(windows)]
+        {
+            // Session liveness needs fresh identities for every process; CPU
+            // counters are consumed only for GUI roots. On Windows, sampling
+            // every unrelated process repeats GetSystemTimes for each one.
+            system.refresh_processes_specifics(
+                sysinfo::ProcessesToUpdate::Some(&gui_pids),
+                true,
+                sysinfo::ProcessRefreshKind::nothing().with_cpu(),
+            );
+        }
+        let gui = gui_pids
+            .iter()
+            .filter_map(|pid| system.process(*pid))
             .collect::<Vec<_>>();
         let current_gui = gui
             .iter()
@@ -778,9 +992,6 @@ impl RuntimeProbe {
         };
         self.last_cpu_sample = Some(Instant::now());
         self.gui_identities = current_gui.clone();
-        let inventory = crate::session_inventory::observe_machine_sessions(
-            &gwt_core::paths::gwt_sessions_dir(),
-        );
         let per_agent_ram_bytes = inventory
             .sessions
             .iter()
@@ -804,20 +1015,19 @@ impl RuntimeProbe {
                 .push("per_agent_ram: 0.5 GiB lower-bound estimate (no live PTY RSS)".to_string());
         }
         self.machine_sample_completed_at = Some(Instant::now());
-        MachineCapacitySnapshot {
+        Ok(MachineCapacitySnapshot {
             observed_at: now,
             expires_at: now.saturating_add(SNAPSHOT_TTL_SECS),
             sample_completed_at: epoch_seconds(),
             performance_cores: performance_cores(),
             gui_cpu_millicores: cpu,
             gui_identities: current_gui,
-            available_ram_bytes: (self.system.total_memory() > 0)
-                .then(|| self.system.available_memory()),
+            available_ram_bytes: (system.total_memory() > 0).then(|| system.available_memory()),
             per_agent_ram_bytes,
             inventory,
             diagnostics,
             ..MachineCapacitySnapshot::default()
-        }
+        })
     }
 }
 
@@ -898,8 +1108,16 @@ impl TargetWalk {
     }
 
     fn advance(&mut self, remaining: &mut usize, deadline: Instant) -> io::Result<Option<u64>> {
+        self.advance_with(remaining, || Instant::now() >= deadline)
+    }
+
+    fn advance_with(
+        &mut self,
+        remaining: &mut usize,
+        mut should_yield: impl FnMut() -> bool,
+    ) -> io::Result<Option<u64>> {
         loop {
-            if *remaining == 0 || Instant::now() >= deadline {
+            if *remaining == 0 || should_yield() {
                 return Ok(None);
             }
             if self.current.is_none() {
@@ -1030,13 +1248,15 @@ mod tests {
         assert_eq!(zero.machine_budget, Some(0));
         assert!(zero.measurement_complete);
         assert_eq!(zero.recommended_worker_limit, 0);
+        let empty_target = calculate(&Inputs {
+            target: Some(0),
+            ..measured()
+        });
+        assert!(empty_target.measurement_complete);
+        assert_eq!(empty_target.machine_budget, Some(8));
         for missing in [
             Inputs {
                 target: None,
-                ..measured()
-            },
-            Inputs {
-                target: Some(0),
                 ..measured()
             },
             Inputs {
@@ -1080,6 +1300,24 @@ mod tests {
             }
         }
         None
+    }
+
+    fn refresh_target_measurement(
+        root: &Path,
+        mut refresh: impl FnMut() -> io::Result<()>,
+    ) -> MachineCapacitySnapshot {
+        let pending = format!(
+            "target_measurement_in_progress: {}; wait for the scan or use Manual",
+            root.join("target").display()
+        );
+        for _ in 0..100 {
+            refresh().unwrap();
+            let snapshot = read_snapshot(&snapshot_path()).unwrap();
+            if !snapshot.diagnostics.contains(&pending) {
+                return snapshot;
+            }
+        }
+        panic!("target measurement remained in progress after 100 refreshes: {pending}");
     }
 
     #[test]
@@ -1230,6 +1468,7 @@ mod tests {
                 child_started_at: 3,
                 started_at: "epoch".to_string(),
                 launch_origin: gwt_agent::SessionLaunchOrigin::Unknown,
+                launch_entrypoint: None,
                 restore_source_session_id: None,
             },
         }
@@ -1406,18 +1645,26 @@ mod tests {
         let mut snapshot = snapshot(&root);
         snapshot.inventory.uncertainties = (0..37)
             .map(
-                |_| crate::session_inventory::SessionObservationUncertainty {
-                    runtime_path: PathBuf::new(),
-                    session_id: None,
+                |index| crate::session_inventory::SessionObservationUncertainty {
+                    runtime_path: root.join(format!("runtime/{index}/session.json")),
+                    session_id: Some(format!("session-{index}")),
                     reason: "child_identity_missing".to_string(),
                 },
             )
             .collect();
+        // Exercise the shared snapshot boundary, not only an in-memory list
+        // with identical empty identities (#5284 / #5227 recurrence).
+        let bytes = serde_json::to_vec(&snapshot).unwrap();
+        let mut snapshot: MachineCapacitySnapshot = serde_json::from_slice(&bytes).unwrap();
         let view = project_capacity_at(&snapshot, &root, &BTreeSet::new(), 0, 101);
         assert!(view
             .reason
             .contains("inventory_uncertain: child_identity_missing ×37"));
         assert_eq!(view.reason.matches("child_identity_missing").count(), 1);
+        let wire = serde_json::to_value(&view).unwrap();
+        let reason = wire["reason"].as_str().unwrap();
+        assert_eq!(reason.matches("inventory_uncertain:").count(), 1);
+        assert!(reason.contains("child_identity_missing ×37"));
         snapshot.diagnostics = (0..40)
             .map(|index| format!("cause-{index}: {}", "測".repeat(80)))
             .collect();
@@ -1439,6 +1686,15 @@ mod tests {
         let pending = project_capacity_at(&snapshot, temp.path(), &BTreeSet::new(), 0, 101);
         assert!(!pending.measurement_complete);
         assert!(pending.reason.contains("wait"), "{}", pending.reason);
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                max_active_agents: 7,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_agent_capacity(pending);
+        assert_eq!(monitor.effective_max_active_agents(), 7);
         snapshot.diagnostics.clear();
         let missing = project_capacity_at(&snapshot, temp.path(), &BTreeSet::new(), 0, 101);
         assert!(missing.reason.contains("build"), "{}", missing.reason);
@@ -1450,6 +1706,78 @@ mod tests {
                 .contains(&normalized(temp.path()).join("target").display().to_string()),
             "{}",
             missing.reason
+        );
+        monitor.set_agent_capacity(missing);
+        assert_eq!(monitor.effective_max_active_agents(), 7);
+    }
+
+    #[test]
+    fn agent_capacity_reductions_report_the_limiting_resource_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        use gwt_core::daemon::{DaemonEndpoint, RuntimeScope, RuntimeTarget};
+        let scope = RuntimeScope::from_project_root(temp.path(), RuntimeTarget::Host).unwrap();
+        let endpoint = DaemonEndpoint::new(
+            scope.clone(),
+            std::process::id(),
+            "unavailable-capacity-test-transport".into(),
+            "fixture-only".into(),
+            env!("CARGO_PKG_VERSION").into(),
+        );
+        let endpoint_path = scope.endpoint_path(&gwt_core::paths::gwt_home());
+        std::fs::create_dir_all(endpoint_path.parent().unwrap()).unwrap();
+        std::fs::write(&endpoint_path, serde_json::to_vec(&endpoint).unwrap()).unwrap();
+        let mut sample = snapshot(temp.path());
+        let now = epoch_seconds();
+        sample.observed_at = now;
+        sample.expires_at = now + SNAPSHOT_TTL_SECS;
+        for measurement in sample.targets.values_mut() {
+            measurement.observed_at = now;
+        }
+        for measurement in sample.disk_observations.values_mut() {
+            measurement.observed_at = now;
+        }
+        std::fs::create_dir_all(capacity_directory()).unwrap();
+        std::fs::write(snapshot_path(), serde_json::to_vec(&sample).unwrap()).unwrap();
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                max_active_agents: 9,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        // The daemon refreshes on a Tokio worker; diagnostics must not panic or
+        // close its authoritative control lane even when publication fails.
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async { monitor.refresh_agent_capacity(temp.path()) });
+        crate::error_report::flush_backend_errors();
+        assert_eq!(monitor.agent_status().max_active, 7);
+        assert_eq!(
+            monitor.agent_status().agent_capacity.limiting_constraint,
+            "cpu"
+        );
+        let rows = gwt_core::error_ledger::list_since(None).unwrap();
+        let row = rows
+            .iter()
+            .find(|row| row.message.contains("Auto capacity reduced"))
+            .expect("capacity reduction must be reported");
+        assert_eq!(row.context["previous_limit"], "9");
+        assert_eq!(row.context["effective_limit"], "7");
+        assert_eq!(row.context["limiting_constraint"], "cpu");
+        assert!(row.message.contains("P cores 8"));
+        assert!(row.message.contains("pm_reserve=1"));
+        assert_eq!(row.target.project_root.as_deref(), temp.path().to_str());
+        monitor.refresh_agent_capacity(temp.path());
+        assert_eq!(
+            gwt_core::error_ledger::list_since(None)
+                .unwrap()
+                .iter()
+                .filter(|row| row.message.contains("Auto capacity reduced"))
+                .count(),
+            1
         );
     }
 
@@ -1481,8 +1809,7 @@ mod tests {
         std::fs::create_dir_all(root.join("target")).unwrap();
         std::fs::write(root.join("target/artifact"), [0_u8; 8]).unwrap();
         let root = normalized(&root);
-        refresh_machine_capacity(&root).unwrap();
-        let snapshot = read_snapshot(&snapshot_path()).unwrap();
+        let snapshot = refresh_target_measurement(&root, || refresh_machine_capacity(&root));
         assert_eq!(snapshot.targets[&root.join("target")].bytes, 8);
         assert_eq!(snapshot.per_agent_ram_bytes, RAM_FLOOR_BYTES);
         assert!(snapshot.inventory.sessions.is_empty());
@@ -1514,6 +1841,32 @@ mod tests {
         for name in ["gwtd", "gwt-helper", "codex", "cargo"] {
             assert!(!is_gui_process(Path::new(name)));
         }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn machine_sampling_does_not_initialize_non_gui_cpu_counters() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let mut probe = RuntimeProbe::default();
+        probe
+            .sample_machine(&MachineCapacitySnapshot::default(), epoch_seconds())
+            .unwrap();
+        let current = probe
+            .system
+            .as_ref()
+            .unwrap()
+            .process(sysinfo::Pid::from_u32(std::process::id()))
+            .expect("fresh census includes the test process");
+        assert!(!is_gui_process(current.exe().unwrap()));
+        assert_eq!(
+            current.accumulated_cpu_time(),
+            0,
+            "capacity consumes GUI CPU only; other processes need identity, not CPU sampling"
+        );
     }
 
     #[test]
@@ -1625,7 +1978,11 @@ mod tests {
             reusable_machine_sample(100, Duration::ZERO, 106),
             "a just-completed slow census is reused without resetting its original observed_at"
         );
-        assert!(!reusable_machine_sample(100, Duration::from_secs(5), 105));
+        assert!(
+            reusable_machine_sample(100, Duration::from_secs(5), 105),
+            "the next five-second tick must reuse the machine observation"
+        );
+        assert!(!reusable_machine_sample(100, Duration::from_secs(10), 110));
         assert!(!reusable_machine_sample(105, Duration::from_secs(1), 104));
         assert!(
             !reusable_machine_sample(100, Duration::ZERO, 130),
@@ -1647,9 +2004,11 @@ mod tests {
             std::fs::write(root.join("target/artifact"), [0_u8; 1]).unwrap();
         }
         let mut probe = RuntimeProbe::default();
-        probe.refresh(&first).unwrap();
+        let roots = [normalized(&first), normalized(&second)];
+        for root in &roots {
+            refresh_target_measurement(root, || probe.refresh_projects(&roots));
+        }
         let path = snapshot_path();
-        probe.refresh(&second).unwrap();
         assert_eq!(path, snapshot_path());
         let snapshot = read_snapshot(&path).unwrap();
         assert!(snapshot
@@ -1662,6 +2021,70 @@ mod tests {
         assert!(snapshot
             .disk_observations
             .contains_key(&normalized(&second)));
+    }
+
+    #[test]
+    fn missing_foreign_targets_and_failed_disks_do_not_block_auto_capacity() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let own = temp.path().join("own");
+        let foreign = gwt_core::paths::gwt_projects_dir().join("foreign/pm/worktree");
+        for root in [&own, &foreign] {
+            std::fs::create_dir_all(root).unwrap();
+        }
+        std::fs::create_dir(own.join("target")).unwrap();
+        let own = normalized(&own);
+        let foreign = normalized(&foreign);
+        // Windows resolves missing directories to their volume; an invalid drive
+        // makes the disk probe fail without depending on host drive assignments.
+        #[cfg(windows)]
+        let unavailable = PathBuf::from(r"?:\unavailable");
+        #[cfg(not(windows))]
+        let unavailable = temp.path().join("unavailable");
+        let now = epoch_seconds();
+        let mut machine = snapshot(&own);
+        machine.observed_at = now;
+        machine.expires_at = now + SNAPSHOT_TTL_SECS;
+        machine.inventory.sessions =
+            vec![row(&foreign, "foreign-pm", MachineSessionRole::Pm, false)];
+        let mut probe = RuntimeProbe {
+            runtime_dir: capacity_directory(),
+            machine_sample: Some(machine),
+            machine_sample_completed_at: Some(Instant::now()),
+            ..RuntimeProbe::default()
+        };
+        let sample = refresh_target_measurement(&own, || {
+            probe.refresh_projects(&[own.clone(), foreign.clone(), unavailable.clone()])
+        });
+        assert_eq!(sample.targets[&foreign.join("target")].bytes, 0);
+        assert_eq!(sample.targets[&own.join("target")].bytes, 0);
+        let view = project_capacity(&own, &BTreeSet::new(), 0);
+        assert!(view.measurement_complete, "{}", view.reason);
+        assert_eq!(view.machine_budget, Some(8));
+        assert_eq!(view.recommended_total_count, 7);
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs::default(),
+        );
+        monitor.set_agent_capacity(view.clone());
+        assert_eq!(monitor.effective_max_active_agents(), 6);
+        assert!(view.reason.contains("excluded"), "{}", view.reason);
+        assert!(view.reason.contains(&unavailable.display().to_string()));
+
+        let foreign_target = foreign.join("target");
+        std::fs::write(&foreign_target, b"not a directory").unwrap();
+        std::fs::write(own.join("target/artifact"), [0_u8; 7]).unwrap();
+        let sample = refresh_target_measurement(&own, || probe.refresh(&own));
+        assert_eq!(sample.targets[&own.join("target")].bytes, 7);
+        assert!(!sample.targets.contains_key(&foreign_target));
+        let view = project_capacity(&own, &BTreeSet::new(), 0);
+        assert!(view.measurement_complete, "{}", view.reason);
+        assert_eq!(view.recommended_total_count, 7);
+        assert!(view.reason.contains(&foreign_target.display().to_string()));
+        assert!(view.reason.contains("excluded from disk estimate"));
     }
 
     #[cfg(unix)]
@@ -1715,27 +2138,35 @@ mod tests {
         let root = normalized(&root);
         let target = root.join("target");
         let mut probe = RuntimeProbe::default();
-        probe.refresh(&root).unwrap();
-        let mut snapshot = read_snapshot(&snapshot_path()).unwrap();
+        // Exercise the real filesystem and entry budget without racing the
+        // scheduler against the production scan deadline or retrying a refresh.
+        let mut refresh = || {
+            probe
+                .refresh_projects_with_scan(std::slice::from_ref(&root), |walk, remaining, _| {
+                    walk.advance_with(remaining, || false)
+                })
+                .unwrap();
+            read_snapshot(&snapshot_path()).unwrap()
+        };
+        let mut snapshot = refresh();
+        assert_eq!(snapshot.targets[&target].bytes, 8);
         snapshot.targets.get_mut(&target).unwrap().observed_at =
             epoch_seconds() - TARGET_TTL_SECS / 2 - 1;
         gwt_github::cache::write_atomic(&snapshot_path(), &serde_json::to_vec(&snapshot).unwrap())
             .unwrap();
         std::fs::remove_dir_all(&target).unwrap();
-        probe.refresh(&root).unwrap();
-        let failed = read_snapshot(&snapshot_path()).unwrap();
+        std::fs::write(&target, b"not a directory").unwrap();
+        let failed = refresh();
         assert!(
             !failed.targets.contains_key(&target),
             "I/O failure invalidates a required measured target"
         );
         let view = project_capacity(&root, &BTreeSet::new(), 0);
         assert_eq!(view.recommended_worker_limit, 0);
+        std::fs::remove_file(&target).unwrap();
         std::fs::create_dir(&target).unwrap();
         std::fs::write(target.join("artifact"), [0_u8; 7]).unwrap();
-        probe.refresh(&root).unwrap();
-        assert_eq!(
-            read_snapshot(&snapshot_path()).unwrap().targets[&target].bytes,
-            7
-        );
+        let recovered = refresh();
+        assert_eq!(recovered.targets[&target].bytes, 7);
     }
 }

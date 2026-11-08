@@ -61,6 +61,30 @@ fn main() -> ExitCode {
         writeln!(log, "{args:?}").unwrap();
     }
 
+    if mode == "issue-4323" {
+        match args.as_slice() {
+            [pr, view, number, ..] if pr == "pr" && view == "view" && number != "12" => {
+                eprintln!("Could not resolve to a PullRequest with the number of {number}");
+                return ExitCode::FAILURE;
+            }
+            [api, endpoint] if api == "api" && endpoint.starts_with("repos/akiojin/gwt/issues/") => {
+                match endpoint.rsplit('/').next().unwrap() {
+                    "4323" => println!(r#"{{"number":4323}}"#),
+                    "4122" => println!(r#"{{"number":4122,"pull_request":{{"url":"https://api.github.com/repos/akiojin/gwt/pulls/4122"}}}}"#),
+                    "404" | "403" | "502" => {
+                        eprintln!("GitHub request failed (HTTP {})", endpoint.rsplit('/').next().unwrap());
+                        return ExitCode::FAILURE;
+                    }
+                    "17" => println!("invalid JSON"),
+                    "18" => println!(r#"{{"number":4323}}"#),
+                    _ => println!("{{}}"),
+                }
+                return ExitCode::SUCCESS;
+            }
+            _ => {}
+        }
+    }
+
     if mode == "actions-4188" {
         use std::io::Write;
         let state = std::path::Path::new(state_file.as_deref().expect("Actions fixture state"));
@@ -237,7 +261,7 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         [api, endpoint] if api == "api" && endpoint == "repos/akiojin/gwt/pulls/12" => {
-            // PR node id lookup for pr.ready / pr.draft (read:org-free REST GET).
+            // PR node id lookup for the Ready transition (read:org-free REST GET).
             println!("{{\"number\":12,\"node_id\":\"PR_node_12\",\"draft\":true}}");
             return ExitCode::SUCCESS;
         }
@@ -292,11 +316,23 @@ fn main() -> ExitCode {
                 && allow == "--allow-escape-sequences"
                 && endpoint == "/repos/akiojin/gwt/actions/jobs/91/logs" =>
         {
+            if mode == "job-log-unsupported-escape-flag" {
+                eprintln!("unknown flag: --allow-escape-sequences");
+                return ExitCode::FAILURE;
+            }
             if mode == "job-log-zip" {
                 print!("PKZIP");
             } else {
                 print!("job log 91");
             }
+            return ExitCode::SUCCESS;
+        }
+        [api, endpoint]
+            if mode == "job-log-unsupported-escape-flag"
+                && api == "api"
+                && endpoint == "/repos/akiojin/gwt/actions/jobs/91/logs" =>
+        {
+            print!("unrelated output\n\x1b[31mtest fails ... FAILED\x1b[0m\nthread 'fails' panicked at src/lib.rs:1:1\n");
             return ExitCode::SUCCESS;
         }
         [api, graphql, ..] if api == "api" && graphql == "graphql" => {
@@ -434,6 +470,17 @@ pub fn with_fake_gh<T>(mode: &str, test: impl FnOnce(&Path) -> T) -> T {
     }
 }
 
+/// Capture fake-gh calls without inheriting a managed Session. Both overrides
+/// stay inside `with_fake_gh`'s environment lock for the entire callback.
+pub fn with_fake_gh_capture<T>(mode: &str, test: impl FnOnce(&Path, &Path) -> T) -> T {
+    with_fake_gh(mode, |repo_path| {
+        let argv_file = repo_path.join("gh-argv");
+        let _session = ScopedEnvVar::unset("GWT_SESSION_ID");
+        let _argv = ScopedEnvVar::set("GWT_FAKE_GH_ARGV_FILE", &argv_file);
+        test(repo_path, &argv_file)
+    })
+}
+
 #[test]
 fn fake_gh_helper_restores_process_env_when_callback_panics() {
     let outcome = std::panic::catch_unwind(|| {
@@ -463,6 +510,7 @@ pub fn sample_thread() -> PrReviewThread {
 
 pub fn sample_issue_snapshot() -> IssueSnapshot {
     IssueSnapshot {
+        author_login: None,
         number: IssueNumber(42),
         title: "Coverage gate".to_string(),
         body: "Raise the project coverage gate.\n".to_string(),

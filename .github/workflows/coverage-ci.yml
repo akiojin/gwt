@@ -1,0 +1,25 @@
+name: Coverage
+
+on:
+  push:
+    branches: [develop]
+  pull_request:
+    branches: [develop, main]
+  merge_group:
+    types: [checks_requested]
+
+# Coverage remains required independently of the Lint workflow's wall time.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}
+  cancel-in-progress: true
+
+jobs:
+  coverage:
+    uses: ./.github/workflows/coverage.yml
+
+  report-post-merge-failure:
+    needs: coverage
+    if: ${{ github.event_name == 'push' && failure() }}
+    permissions:
+      issues: write
+    uses: ./.github/workflows/post-merge-ci.yml

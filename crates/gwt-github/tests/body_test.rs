@@ -1,7 +1,7 @@
 //! Contract tests for the `body` module (SPEC-12 tdd.md Layer 2).
 
 use gwt_github::{
-    body::{Comment, ParseError, SectionLocation, SectionsIndex, SpecBody, SpecMeta},
+    body::{Comment, ParseError, SectionLocation, SpecBody, SpecMeta},
     sections::SectionName,
 };
 
@@ -209,12 +209,6 @@ fn red_18_splice_adds_new_section() {
             .map(std::string::String::as_str),
         Some("research body")
     );
-}
-
-// Helper: expose SectionsIndex to silence unused import on minimal tests.
-#[allow(dead_code)]
-fn _touch(idx: &SectionsIndex) -> usize {
-    idx.0.len()
 }
 
 // ---------------------------------------------------------------------------

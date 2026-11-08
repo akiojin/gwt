@@ -1,6 +1,7 @@
 //! SPEC #2920 / #3287 — Tray menu actions and platform-independent model.
 //!
-//! The minimal tray menu is `[Open in browser] / [Copy URL (<url>)] / [About GWT] / [Quit]`.
+//! The tray opens the Hub, its Open Project / Clone intake, and Projects.
+//! Copy URL and Quit remain available.
 //! Settings, autostart toggle, Logs, and Update controls live in the browser UI
 //! Settings page (Phase 8 / FR-007).
 //!
@@ -142,8 +143,8 @@ pub mod ids {
     pub const OPEN: &str = "gwt.tray.open";
     pub const COPY_URL: &str = "gwt.tray.copy_url";
     pub const QUIT: &str = "gwt.tray.quit";
-    /// `About GWT` opens the browser About / Version surface.
-    pub const ABOUT: &str = "gwt.tray.about";
+    pub const OPEN_PROJECT: &str = "gwt.tray.open_project";
+    pub const CLONE: &str = "gwt.tray.clone";
 }
 
 /// Logical menu action used by the Phase 4 event loop.
@@ -152,29 +153,36 @@ pub enum MenuAction {
     Open,
     CopyUrl,
     Quit,
-    About,
+    OpenProject,
+    Clone,
 }
 
 impl MenuAction {
+    /// Resolve browser-opening actions to the running Hub or its intake.
+    pub fn browser_url(self, browser_url: &str) -> Option<String> {
+        let action = match self {
+            Self::Open => return Some(browser_url.to_string()),
+            Self::OpenProject => "open-folder",
+            Self::Clone => "clone",
+            Self::CopyUrl | Self::Quit => return None,
+        };
+        Some(format!(
+            "{}/?action={action}",
+            browser_url.trim_end_matches('/')
+        ))
+    }
+
     /// Map a tray-icon `MenuEvent` id back to a typed action.
     pub fn from_id(id: &str) -> Option<Self> {
         match id {
             ids::OPEN => Some(Self::Open),
             ids::COPY_URL => Some(Self::CopyUrl),
             ids::QUIT => Some(Self::Quit),
-            ids::ABOUT => Some(Self::About),
+            ids::OPEN_PROJECT => Some(Self::OpenProject),
+            ids::CLONE => Some(Self::Clone),
             _ => None,
         }
     }
-}
-
-/// Derive the browser About URL from the running embedded-server URL.
-/// Existing fragments are replaced so repeated About clicks are stable.
-pub fn about_url_for_browser_url(browser_url: &str) -> String {
-    let base = browser_url
-        .split_once('#')
-        .map_or(browser_url, |(base, _)| base);
-    format!("{base}#about")
 }
 
 /// Visible tray label for the Copy URL action.
@@ -303,7 +311,12 @@ mod tests {
             Some(MenuAction::CopyUrl)
         );
         assert_eq!(MenuAction::from_id(ids::QUIT), Some(MenuAction::Quit));
-        assert_eq!(MenuAction::from_id(ids::ABOUT), Some(MenuAction::About));
+        assert_eq!(MenuAction::from_id("gwt.tray.about"), None);
+        assert_eq!(
+            MenuAction::from_id(ids::OPEN_PROJECT),
+            Some(MenuAction::OpenProject)
+        );
+        assert_eq!(MenuAction::from_id(ids::CLONE), Some(MenuAction::Clone));
         assert_eq!(MenuAction::from_id("unknown"), None);
     }
 
@@ -315,19 +328,30 @@ mod tests {
         assert_eq!(ids::OPEN, "gwt.tray.open");
         assert_eq!(ids::COPY_URL, "gwt.tray.copy_url");
         assert_eq!(ids::QUIT, "gwt.tray.quit");
-        assert_eq!(ids::ABOUT, "gwt.tray.about");
+        assert_eq!(ids::OPEN_PROJECT, "gwt.tray.open_project");
+        assert_eq!(ids::CLONE, "gwt.tray.clone");
     }
 
     #[test]
-    fn about_url_replaces_any_existing_fragment() {
-        assert_eq!(
-            about_url_for_browser_url("http://127.0.0.1:54321/"),
-            "http://127.0.0.1:54321/#about"
-        );
-        assert_eq!(
-            about_url_for_browser_url("http://127.0.0.1:54321/#old"),
-            "http://127.0.0.1:54321/#about"
-        );
+    fn tray_intake_ids_resolve_to_the_direct_hub_action() {
+        for (id, expected) in [
+            (ids::OPEN, "http://127.0.0.1:54321/"),
+            (
+                ids::OPEN_PROJECT,
+                "http://127.0.0.1:54321/?action=open-folder",
+            ),
+            (ids::CLONE, "http://127.0.0.1:54321/?action=clone"),
+        ] {
+            assert_eq!(
+                MenuAction::from_id(id)
+                    .unwrap()
+                    .browser_url("http://127.0.0.1:54321/")
+                    .as_deref(),
+                Some(expected)
+            );
+        }
+        assert_eq!(MenuAction::CopyUrl.browser_url("http://localhost/"), None);
+        assert_eq!(MenuAction::Quit.browser_url("http://localhost/"), None);
     }
 
     #[test]

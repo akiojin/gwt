@@ -1,0 +1,52 @@
+{
+  "environment": {
+    "RUSTUP_TOOLCHAIN": "1.99.1"
+  },
+  "working_directory": "E:\\gwt\\work\\issue-5561",
+  "existing_test": {
+    "command": "cargo test -p gwt-git blob::tests::persistent_batch_fans_shared_tree_and_blob_oids_across_many_distinct_commits -- --exact",
+    "exit_code": 0
+  },
+  "red": {
+    "command": "cargo test -p gwt-git --lib blob::tests::persistent_batch_fans_shared_tree_and_blob_oids_across_many_distinct_commits -- --exact",
+    "exit_code": 101,
+    "reason": "returned path allocation differs from selector descriptor allocation"
+  },
+  "green": {
+    "command": "cargo test -p gwt-git --lib blob::tests::persistent_batch_fans_shared_tree_and_blob_oids_across_many_distinct_commits -- --exact",
+    "exit_code": 0
+  },
+  "old_measurement": {
+    "prepare": "python target/issue-5561-ref-prepare.py old",
+    "command": "cargo run -p gwt-git --example issue_5561_ref_allocation_probe -- E:/gwt/work/issue-5561 target/issue-5561-ref-probe-input.json",
+    "exit_code": 0
+  },
+  "new_measurement": {
+    "prepare": "python target/issue-5561-ref-prepare.py new",
+    "command": "cargo run -p gwt-git --example issue_5561_ref_allocation_probe -- E:/gwt/work/issue-5561 target/issue-5561-ref-probe-input.json",
+    "exit_code": 0
+  },
+  "blob_regressions": {
+    "command": "cargo test -p gwt-git --lib blob::tests:: -- --test-threads=1",
+    "exit_code": 0,
+    "passed": 18,
+    "failed": 0
+  },
+  "clippy": {
+    "command": "cargo clippy -p gwt-git --all-targets --all-features -- -D warnings",
+    "exit_code": 0
+  },
+  "fmt": {
+    "command": "cargo fmt --all -- --check",
+    "exit_code": 0,
+    "note": "fmt.log is an explicit verification receipt; raw stdout was empty"
+  },
+  "diff_check": {
+    "command": "git diff --check -- crates/gwt-git/src/blob.rs",
+    "exit_code": 0
+  },
+  "cleanup": {
+    "temporary_example_removed": true,
+    "product_instrumentation": false
+  }
+}

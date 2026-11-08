@@ -419,7 +419,7 @@ pub enum ExecutionLaunchIntent {
     PreparedManualSuccessor(crate::SessionExecutionBinding),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ManualLaunchRuntimeProof {
     pub host_pid: u32,
     pub runtime_incarnation: u64,
@@ -434,7 +434,7 @@ pub struct ManualLaunchRuntimeProof {
 /// evidence — a launched Session always publishes a sidecar into its own
 /// Host's namespace — so it is modeled alongside the proof rather than folded
 /// into "no evidence".
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ManualLaunchRuntimeEvidence {
     Proof(ManualLaunchRuntimeProof),
     Absent,
@@ -446,7 +446,7 @@ impl From<ManualLaunchRuntimeProof> for ManualLaunchRuntimeEvidence {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ManualLaunchSuccessorPredecessor {
     Blocked,
     Completed,
@@ -454,7 +454,7 @@ pub enum ManualLaunchSuccessorPredecessor {
 }
 
 /// Final configuration used to spawn an agent process.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LaunchConfig {
     pub agent_id: AgentId,
     pub command: String,
@@ -517,6 +517,8 @@ pub struct LaunchConfig {
     /// Blocked merely because it has no new PR to show. It never reopens the
     /// GitHub Issue; materially different scope belongs to a new owner.
     pub explicit_follow_up: bool,
+    // Prepared authority is created and validated inside the project owner.
+    #[serde(skip)]
     pub execution_intent: ExecutionLaunchIntent,
     /// Issue #4217 FR-002: who started this launch. Only the launcher knows,
     /// so it is stamped here and persisted onto the Session rather than being
@@ -1297,17 +1299,22 @@ impl AgentLaunchBuilder {
             args.push(format!("--model={model}"));
         }
 
-        // Reasoning level (Codex-specific). `ultracode` is a Claude-only
-        // session setting and not a valid Codex reasoning effort, so skip the
-        // override defensively (Codex falls back to its own default) instead of
-        // emitting `model_reasoning_effort=ultracode`, which would fail to start.
-        if let Some(ref level) = self.reasoning_level {
-            if level != "ultracode" {
-                args.push("-c".to_string());
-                args.push(format!("model_reasoning_effort={level}"));
-                args.push("-c".to_string());
-                args.push("model_reasoning_summaries=detailed".to_string());
+        // Issue #4108: migrate Astra's legacy efforts and omit unsupported
+        // overrides so Codex can use its default. Other models keep their
+        // existing passthrough, excluding the Claude-only ultracode setting.
+        let reasoning_level = match (self.model.as_deref(), self.reasoning_level.as_deref()) {
+            (Some("gpt-6-astra"), Some("none" | "minimal")) => Some("low"),
+            (Some("gpt-6-astra"), Some(level @ ("low" | "medium" | "high" | "xhigh" | "max"))) => {
+                Some(level)
             }
+            (Some("gpt-6-astra"), _) | (_, Some("ultracode")) => None,
+            (_, level) => level,
+        };
+        if let Some(level) = reasoning_level {
+            args.push("-c".to_string());
+            args.push(format!("model_reasoning_effort={level}"));
+            args.push("-c".to_string());
+            args.push("model_reasoning_summaries=detailed".to_string());
         }
 
         if self.skip_permissions {
@@ -1960,6 +1967,77 @@ mod tests {
     }
 
     #[test]
+    fn codex_astra_reasoning_maps_legacy_and_preserves_supported_efforts() {
+        for (requested, expected) in [
+            ("none", "low"),
+            ("minimal", "low"),
+            ("low", "low"),
+            ("medium", "medium"),
+            ("high", "high"),
+            ("xhigh", "xhigh"),
+            ("max", "max"),
+        ] {
+            let config = AgentLaunchBuilder::new(AgentId::Codex)
+                .model("gpt-6-astra")
+                .reasoning_level(requested)
+                .build();
+            let expected = format!("model_reasoning_effort={expected}");
+            assert!(
+                config
+                    .args
+                    .windows(2)
+                    .any(|pair| pair[0] == "-c" && pair[1] == expected),
+                "Astra effort {requested} must emit {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn codex_astra_reasoning_omits_unsupported_efforts() {
+        for effort in ["ultra", "ultracode", "future-effort"] {
+            let config = AgentLaunchBuilder::new(AgentId::Codex)
+                .model("gpt-6-astra")
+                .reasoning_level(effort)
+                .build();
+            assert!(
+                !config
+                    .args
+                    .windows(2)
+                    .any(|pair| pair[0] == "-c" && pair[1].starts_with("model_reasoning_effort=")),
+                "Astra must omit unsupported effort {effort}"
+            );
+        }
+    }
+
+    #[test]
+    fn codex_non_astra_reasoning_keeps_existing_passthrough() {
+        for effort in ["none", "minimal", "ultra"] {
+            let config = AgentLaunchBuilder::new(AgentId::Codex)
+                .model("gpt-6.1-sol")
+                .reasoning_level(effort)
+                .build();
+            let expected = format!("model_reasoning_effort={effort}");
+            assert!(config
+                .args
+                .windows(2)
+                .any(|pair| pair[0] == "-c" && pair[1] == expected));
+        }
+    }
+
+    #[test]
+    fn codex_astra_fast_mode_omits_service_tier_override() {
+        let config = AgentLaunchBuilder::new(AgentId::Codex)
+            .model("gpt-6-astra")
+            .fast_mode(true)
+            .build();
+
+        assert!(!config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "-c" && pair[1] == "service_tier=fast"));
+    }
+
+    #[test]
     fn build_codex_ultracode_does_not_emit_reasoning_effort() {
         let config = AgentLaunchBuilder::new(AgentId::Codex)
             .reasoning_level("ultracode")
@@ -2491,7 +2569,7 @@ mod tests {
             },
             capability_generation: 2,
         };
-        let config = AgentLaunchBuilder::new(AgentId::Codex)
+        let mut config = AgentLaunchBuilder::new(AgentId::Codex)
             .session_mode(SessionMode::Resume)
             .resume_session_id("conversation-existing")
             .prepared_continuation(binding.clone())
@@ -2500,11 +2578,27 @@ mod tests {
         assert_eq!(config.session_mode, SessionMode::Resume);
         assert_eq!(
             config.execution_intent,
-            ExecutionLaunchIntent::PreparedContinuation(binding)
+            ExecutionLaunchIntent::PreparedContinuation(binding.clone())
         );
         assert!(
             config.args.iter().any(|arg| arg == "conversation-existing"),
             "the provider conversation remains a Resume even though execution is producing"
+        );
+
+        // The private owner request carries settings, never prepared authority.
+        config.env_vars = HashMap::from([("LAUNCH_TEST_SETTING".into(), "value".into())]);
+        let settings = serde_json::to_value(&config).expect("serialize launch settings");
+        assert!(settings.get("execution_intent").is_none());
+        let mut incoming = settings.clone();
+        incoming["execution_intent"] = serde_json::json!({
+            "PreparedContinuation": binding,
+        });
+        let restored: LaunchConfig =
+            serde_json::from_value(incoming).expect("deserialize launch settings");
+        assert_eq!(restored.execution_intent, ExecutionLaunchIntent::Automatic);
+        assert_eq!(
+            serde_json::to_value(restored).expect("roundtrip launch settings"),
+            settings,
         );
     }
 

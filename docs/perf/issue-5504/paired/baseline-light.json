@@ -1,0 +1,87 @@
+{
+  "issue": 5504,
+  "phase": "baseline",
+  "theme": "light",
+  "measured_at": "2026-10-15T09:10:32.540Z",
+  "source_sha": "e7778994a2cf451f9913208407425819380920ff",
+  "gwt_binary_sha256": "689d6f9ad3cd61c94e0e99322491f8ea379bca600aaa32dd63fb4e718a16a1d4",
+  "operator_shell_source_sha256": "51a642d4b6bf60333feb3d742c9b46a0dd7aa6afc322ff301f46b0de8a94a4cc",
+  "conditions": {
+    "pane_count": 8,
+    "pane_preset": "shell",
+    "workload": "idle shell prompts",
+    "settle_ms": 5000,
+    "requested_measurement_ms": 10000,
+    "viewport": {
+      "width": 1440,
+      "height": 900
+    },
+    "reduced_motion": "no-preference",
+    "build_profile": "debug",
+    "fresh_home": true,
+    "pm_auto_start": false,
+    "issue_monitor_enabled": false,
+    "frontend_pages": 1,
+    "cpu_percent_basis": "one logical core; CPU seconds / elapsed seconds * 100",
+    "renderer_scope": "sum of renderer processes in this owned Chromium browser",
+    "renderer_limitation": "Current checkout uses browser UI, not a native WebView. Chromium runs the same embedded frontend; values are not measurements of a native WebView process.",
+    "timing_limitation": "gwt snapshots bracket the renderer interval plus the process-sampler startup; each CPU percentage uses its own measured elapsed time.",
+    "instrumentation": "same callback-name counters and DOM MutationObserver for baseline and after; no stack capture"
+  },
+  "gwt": {
+    "before": {
+      "pid": 34428,
+      "process_name": "gwt",
+      "captured_at": "2026-10-15T09:10:17.7098150Z",
+      "cpu_seconds": 175.21875
+    },
+    "after": {
+      "cpu_seconds": 194.78125,
+      "process_name": "gwt",
+      "captured_at": "2026-10-15T09:10:31.2709800Z",
+      "pid": 34428
+    },
+    "elapsed_ms": 13561,
+    "cpu_seconds": 19.5625,
+    "cpu_percent_one_core": 144.25558587124843
+  },
+  "renderer": {
+    "before": [
+      {
+        "type": "renderer",
+        "id": 17160,
+        "cpuTime": 0.108969
+      },
+      {
+        "type": "renderer",
+        "id": 28968,
+        "cpuTime": 5.951924
+      }
+    ],
+    "after": [
+      {
+        "type": "renderer",
+        "id": 17160,
+        "cpuTime": 0.108991
+      },
+      {
+        "type": "renderer",
+        "id": 28968,
+        "cpuTime": 7.499023
+      }
+    ],
+    "elapsed_ms": 10004.417200000004,
+    "cpu_seconds": 1.5471209999999997,
+    "cpu_percent_one_core": 15.464379074475215
+  },
+  "clock": {
+    "before_text": "18:10:17",
+    "after_text": "18:10:27",
+    "callbacks": {
+      "raf": 457,
+      "timeout": 0,
+      "text_changes": 10
+    }
+  },
+  "errors": []
+}

@@ -1,0 +1,24 @@
+{
+  "source_files": [
+    {
+      "path": "crates/gwt-core/runtime/chroma_index_runner.py",
+      "sha256": "3442421ce309a375fd52c61666e375cde3a7e8dd7dd695a4b29f5b8713eb10f3"
+    },
+    {
+      "path": "crates/gwt-core/src/index_coordinator.rs",
+      "sha256": "29cb520eabf7766c96e585cd4d442aaa56bd79bb19ad4da3f165fa04e72c5800"
+    },
+    {
+      "path": "crates/gwt/src/bin/gwtd.rs",
+      "sha256": "c3bf7f14b1470062b231e2c4af64e088159e7c6179b91f36e49411e7c579e638"
+    },
+    {
+      "path": "crates/gwt/src/cli.rs",
+      "sha256": "603c0ee7db10d00950eee0470736d5492fa7b1e521cefb69de0003684407d138"
+    }
+  ],
+  "binary": "5ed8e1a1c145bc28810075004612ae41225663d14c614e9d3a0d4a6d618905a0",
+  "command": "cargo build -p gwt --bin gwt --bin gwtd",
+  "canonical_build_record": "vrr-837f712c4acd48ea861dadd2ee5020a1",
+  "boundary": "Rebuilt corrected source; failed full-saturation latency attempt retained without changing the 3000ms threshold."
+}

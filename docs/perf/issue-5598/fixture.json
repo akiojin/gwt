@@ -1,0 +1,118 @@
+{
+  "captured_utc": "2026-10-16T03:04:36.893536+00:00",
+  "repo_hash": "99a8660247f5bc49",
+  "cache_file_count": 9119,
+  "cache_tree_sha256": "05f16c59e2a15083e7278f843f1f6b1d827d1bc4f4e3d438e9e214041b7a2220",
+  "memory": {
+    "path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-benchmark-home\\.gwt\\projects\\99a8660247f5bc49\\work-notes\\memory.md",
+    "bytes": 1725919,
+    "sha256": "980586be014497d6a76ff79ee4368d4185b67ce14578067bbf4f3f5890d602d4"
+  },
+  "source_home": "C:\\Users\\AkioJinsenji秦泉寺章夫",
+  "home": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-benchmark-home",
+  "runtime_manifest": {
+    "index_path_policy": {
+      "path": "index_path_policy.json",
+      "sha256_16": "7d1c393e6133a5b0",
+      "versioned_path": "runners/index_path_policy.json"
+    },
+    "requirements": {
+      "path": "project_index_requirements.txt",
+      "sha256_16": "eac269738a090205"
+    },
+    "runner": {
+      "path": "runners/chroma_index_runner-2d0b4f30825a10ed.py",
+      "sha256_16": "2d0b4f30825a10ed"
+    },
+    "schema_version": 1,
+    "venv": {
+      "path": "venvs/chroma-venv-eac269738a090205"
+    }
+  },
+  "binary": {
+    "path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-baseline\\gwtd.exe",
+    "bytes": 65563136,
+    "sha256": "c42374da5699166bec520ecd94eea412176a1be9b802154eb987cf7585cfcafa"
+  },
+  "source_ref": "0b087f0b79dd5578dacadea51165caf467e43598",
+  "builds": [
+    {
+      "scope": "issues",
+      "wall_ms": 632872.1625999997,
+      "exit_code": 0,
+      "stdout": "{\"ok\": true, \"scope\": \"issues\", \"indexed\": 1622, \"newly_embedded\": 102, \"mode\": \"incremental\"}",
+      "stderr": "{\"phase\": \"indexing\", \"scope\": \"issues\", \"mode\": \"incremental\", \"done\": 0, \"total\": 0}\n\nLoading weights:   0%|          | 0/199 [00:00<?, ?it/s]\nLoading weights:   9%|9         | 18/199 [00:00<00:02, 87.34it/s]\nLoading weights:  14%|#3        | 27/199 [00:00<00:04, 42.19it/s]\nLoading weights:  19%|#8        | 37/199 [00:00<00:03, 53.17it/s]\nLoading weights:  22%|##2       | 44/199 [00:01<00:04, 35.41it/s]\nLoading weights:  27%|##6       | 53/199 [00:01<00:03, 43.51it/s]\nLoading weights:  30%|##9       | 59/199 [00:01<00:04, 31.24it/s]\nLoading weights:  32%|###2      | 64/199 [00:01<00:04, 32.22it/s]\nLoading weights:  36%|###6      | 72/199 [00:02<00:04, 26.82it/s]\nLoading weights:  49%|####8     | 97/199 [00:02<00:02, 47.40it/s]\nLoading weights:  61%|######1   | 122/199 [00:02<00:01, 72.09it/s]\nLoading weights:  72%|#######1  | 143/199 [00:02<00:00, 81.94it/s]\nLoading weights:  77%|#######6  | 153/199 [00:02<00:00, 76.81it/s]\nLoading weights:  93%|#########2| 185/199 [00:02<00:00, 119.70it/s]\nLoading weights: 100%|##########| 199/199 [00:02<00:00, 66.39it/s] \n{\"phase\": \"indexing\", \"scope\": \"issues\", \"done\": 1536, \"total\": 1622}\n{\"phase\": \"indexing\", \"scope\": \"issues\", \"done\": 1552, \"total\": 1622}\n{\"phase\": \"indexing\", \"scope\": \"issues\", \"done\": 1568, \"total\": 1622}\n{\"phase\": \"indexing\", \"scope\": \"issues\", \"done\": 1584, \"total\": 1622}\n{\"phase\": \"indexing\", \"scope\": \"issues\", \"done\": 1600, \"total\": 1622}\n{\"phase\": \"indexing\", \"scope\": \"issues\", \"done\": 1616, \"total\": 1622}\n{\"phase\": \"indexing\", \"scope\": \"issues\", \"done\": 1622, \"total\": 1622}\n{\"phase\": \"complete\", \"scope\": \"issues\", \"mode\": \"incremental\", \"indexed\": 1622, \"total\": 1622}\n",
+      "timed_out": false,
+      "output": {
+        "ok": true,
+        "scope": "issues",
+        "indexed": 1622,
+        "newly_embedded": 102,
+        "mode": "incremental"
+      }
+    },
+    {
+      "scope": "specs",
+      "wall_ms": 1175.3089000003456,
+      "exit_code": 1,
+      "stdout": "{\"ok\": false, \"error_code\": \"RUNTIME_ERROR\", \"error\": \"No module named 'chromadb'\"}",
+      "stderr": "{\"phase\": \"indexing\", \"scope\": \"specs\", \"mode\": \"incremental\", \"done\": 0, \"total\": 2882}\n",
+      "timed_out": false,
+      "output": {
+        "ok": false,
+        "error_code": "RUNTIME_ERROR",
+        "error": "No module named 'chromadb'"
+      }
+    }
+  ],
+  "aborted_preparation_indices": [
+    "E:\\gwt\\work\\issue-5598\\target\\issue-5598-benchmark-home\\.gwt\\index\\99a8660247f5bc49-aborted-preparation-1792120496713615300"
+  ],
+  "seed_generations": [
+    {
+      "scope": "issues",
+      "pointer": {
+        "schema_version": 1,
+        "generation": "gen-1792113258967-45628",
+        "scope": "issues",
+        "document_count": 1615,
+        "published_at": "2026-10-16T01:14:18.970324+00:00"
+      },
+      "source_db": {
+        "path": "C:\\Users\\AkioJinsenji秦泉寺章夫\\.gwt\\index\\99a8660247f5bc49\\issues.gen\\gen-1792113258967-45628\\chroma.sqlite3",
+        "bytes": 33812480,
+        "sha256": "eb4e1b8ec223fd17acda36368656526f00e029680b069f0b1f9ea1ddae2755c5"
+      }
+    },
+    {
+      "scope": "specs",
+      "pointer": {
+        "schema_version": 1,
+        "generation": "gen-1790567020664-39364",
+        "scope": "specs",
+        "document_count": 2331,
+        "published_at": "2026-09-28T03:43:40.668437+00:00"
+      },
+      "source_db": {
+        "path": "C:\\Users\\AkioJinsenji秦泉寺章夫\\.gwt\\index\\99a8660247f5bc49\\specs.gen\\gen-1790567020664-39364\\chroma.sqlite3",
+        "bytes": 33865728,
+        "sha256": "a57d79c217cab26345ee00d341f6bd88e9c38b59f3d2e47daa82107a23baabf0"
+      }
+    },
+    {
+      "scope": "memory",
+      "pointer": {
+        "schema_version": 1,
+        "generation": "gen-1789008339339-16116",
+        "scope": "memory",
+        "document_count": 367,
+        "published_at": "2026-09-10T02:45:39.342004+00:00"
+      },
+      "source_db": {
+        "path": "C:\\Users\\AkioJinsenji秦泉寺章夫\\.gwt\\index\\99a8660247f5bc49\\memory.gen\\gen-1789008339339-16116\\chroma.sqlite3",
+        "bytes": 6823936,
+        "sha256": "320072a59f6f2024095e56c858d0e40ef5627af58b6166f5bd669b2ad708ecd4"
+      }
+    }
+  ]
+}

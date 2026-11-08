@@ -52,14 +52,21 @@ const SETTINGS_WIZARD = {
     { value: "claude", label: "Claude Code", description: "Detected · 2.1.0" },
     { value: "grok", label: "Grok Build", description: "Detected · 1.0.3" },
   ],
+  agent_member_options: [
+    { value: "m-codex", label: "Aster (Codex)", description: "Fixed tool: codex" },
+    { value: "m-codex-two", label: "Birch (Codex)", description: "Fixed tool: codex" },
+    { value: "m-claude", label: "Cedar (Claude Code)", description: "Fixed tool: claude" },
+    { value: "m-grok", label: "Dahlia (Grok Build)", description: "Fixed tool: grok" },
+  ],
+  selected_agent_member_id: "m-codex",
   selected_agent_id: "codex",
   model_options: [{ value: "gpt-6-astra", label: "gpt-6-astra", description: "" }],
   selected_model: "gpt-6-astra",
   issue_monitor_pool: {
     active_index: 0,
     sets: [
-      { agent_id: "codex", summary: [] },
-      { agent_id: "claude", summary: CLAUDE_SUMMARY },
+      { agent_member_id: "m-codex", agent_id: "codex", summary: [] },
+      { agent_member_id: "m-claude", agent_id: "claude", summary: CLAUDE_SUMMARY },
     ],
     add_disabled_reason: null,
     remove_disabled_reason: null,
@@ -94,6 +101,11 @@ test.describe("Launch Wizard — Issue Monitor Agent Settings sets", () => {
     await expect(sets.nth(0)).toHaveAttribute("data-agent-id", "codex");
     await expect(sets.nth(0).locator(".launch-section").first()).toContainText("Launch");
     await expect(sets.nth(0).getByLabel("Model")).toHaveValue("gpt-6-astra");
+    await expect(sets.nth(0)).toHaveAttribute("data-agent-member-id", "m-codex");
+    await expect(modal.getByLabel("Agent", { exact: true })).toHaveValue("m-codex");
+    await expect(modal.getByLabel("Agent", { exact: true }).locator("option")).toHaveText(["Aster (Codex)", "Birch (Codex)", "Cedar (Claude Code)", "Dahlia (Grok Build)"]);
+    await modal.getByLabel("Agent", { exact: true }).selectOption("m-codex-two");
+
     // A set that is not open shows what it launches with instead.
     await expect(sets.nth(1)).not.toHaveClass(/is-open/);
     await expect(sets.nth(1)).toContainText("Claude Code");
@@ -105,6 +117,7 @@ test.describe("Launch Wizard — Issue Monitor Agent Settings sets", () => {
     await modal.getByRole("button", { name: "Remove Agent Settings 2", exact: true }).click();
     await modal.getByRole("button", { name: "Edit Agent Settings 2", exact: true }).click();
     expect(await sentWizardActions(page)).toEqual([
+      { kind: "set_agent_member", agent_member_id: "m-codex-two" },
       { kind: "add_agent_settings_set" },
       { kind: "move_agent_settings_set", index: 1, to: 0 },
       { kind: "remove_agent_settings_set", index: 1 },
@@ -122,6 +135,7 @@ test.describe("Launch Wizard — Issue Monitor Agent Settings sets", () => {
     await injectWizard(page, {
       ...SETTINGS_WIZARD,
       selected_agent_id: "grok",
+      selected_agent_member_id: "m-grok",
       model_options: [],
       selected_model: "",
       issue_monitor_pool: {
@@ -136,8 +150,8 @@ test.describe("Launch Wizard — Issue Monitor Agent Settings sets", () => {
               { label: "Runtime", value: "host" },
             ],
           },
-          { agent_id: "claude", summary: CLAUDE_SUMMARY },
-          { agent_id: "grok", summary: [] },
+          { agent_member_id: "m-claude", agent_id: "claude", summary: CLAUDE_SUMMARY },
+          { agent_member_id: "m-grok", agent_id: "grok", summary: [] },
         ],
         add_disabled_reason: ALL_AGENTS_USED_REASON,
         remove_disabled_reason: null,
@@ -175,7 +189,7 @@ test.describe("Launch Wizard — Issue Monitor Agent Settings sets", () => {
       ...SETTINGS_WIZARD,
       issue_monitor_pool: {
         active_index: 0,
-        sets: [{ agent_id: "codex", summary: [] }],
+        sets: [{ agent_member_id: "m-codex", agent_id: "codex", summary: [] }],
         add_disabled_reason: null,
         remove_disabled_reason: LAST_SET_REASON,
         resulting_summary: "codex / gpt-6-astra / auto / host / fast:off",

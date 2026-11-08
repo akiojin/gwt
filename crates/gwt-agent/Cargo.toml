@@ -27,12 +27,12 @@ thiserror.workspace = true
 reqwest.workspace = true
 semver.workspace = true
 dunce.workspace = true
-libc.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
 [dev-dependencies]
+filetime = "0.2"
 gwt-core = { workspace = true, features = ["test-support"] }
 gwt-docker = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true

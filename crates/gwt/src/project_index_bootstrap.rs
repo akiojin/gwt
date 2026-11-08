@@ -1313,8 +1313,15 @@ fn refresh_broker_drain_loop(proxy: AppEventProxy) {
             return;
         }
     };
+    let mut source_poll = Instant::now();
     loop {
         thread::sleep(REFRESH_BROKER_POLL_INTERVAL);
+        if source_poll.elapsed() >= Duration::from_secs(30) {
+            source_poll = Instant::now();
+            if let Err(error) = gwt::index_worker::poll_registered_project_index_sources(&broker) {
+                tracing::warn!(target: "gwt::index", %error, "project index source poll failed");
+            }
+        }
         let claim = match gwt::index_worker::claim_registered_project_index_refresh(&broker) {
             Ok(Some(claim)) => claim,
             Ok(None) => continue,

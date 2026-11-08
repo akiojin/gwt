@@ -94,7 +94,6 @@ test("Core readable surfaces opt into the text-first app-wide format bridge", ()
     ".workspace-detail-agent",
     ".workspace-detail-event",
     ".terminal-overlay",
-    ".file-tree-viewer-body",
     ".board-panel",
     ".logs-panel",
     ".knowledge-panel",

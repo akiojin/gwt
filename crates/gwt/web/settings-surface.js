@@ -1,7 +1,7 @@
 // SPEC-3064 Phase 3 (E4) — Settings windows surface extracted from app.js.
 // Owns the Settings window body (tabbed System / Custom Agents / Agent
-// Backends / Usage & Limits surface), the customAgentsState /
-// agentBackendsState / systemSettingsState stores, the Teams channel link
+// Backends / Usage & Limits surface), the customAgentsModel /
+// agentBackendsModel / systemSettingsModel stores, the Teams channel link
 // converters, the add-from-preset flow, the autostart appliers, and the
 // systemSettingsInteractionGuard that defers destructive System panel
 // re-renders while a native <select> dropdown is open. Pure movement from
@@ -20,12 +20,46 @@
 //   function created by createProviderUsageSurface in app.js (its usage
 //   snapshot state lives there), so it must be injected rather than
 //   imported as a sibling module.
-// - indexStatusByProjectRoot: per-project index status Map owned by the
+// - getIndexStatus: per-project shared index status snapshot owned by the
 //   Project Index surface instance created in app.js (E3).
 import { createInteractionGuard } from "/interaction-guard.js";
 import { renderIndexSettingsPanel } from "/index-settings-panel.js";
 import { renderCustomAgentEnvEditor } from "/custom-agent-env-editor.js";
+import { renderHookCenterPanel, hookRepairUnavailableReason } from "/hook-center-panel.js";
 import { createUiStateStore } from "./ui-state-store.js";
+import { bindControlExplanations, setControlExplanation } from "./control-explanations.js";
+
+function renderUpdateSettingsStatus(panel, status) {
+  const document = panel.ownerDocument;
+  panel.replaceChildren();
+  const values = document.createElement("p");
+  values.className = "settings-help";
+  const configured = status.auto_apply_updates;
+  values.textContent = `Saved: ${configured == null ? "Default (Off)" : configured ? "On" : "Off"} · Effective: ${status.auto_apply_updates_effective ? "On" : "Off"}`;
+  panel.appendChild(values);
+  const drain = status.update_drain;
+  const pending = document.createElement("p");
+  pending.className = "settings-help";
+  pending.textContent = drain ? `Update ${drain.version} pending · ${drain.reason || "waiting"}` : "No update pending";
+  panel.appendChild(pending);
+  if (!drain) return;
+  const list = document.createElement("ul");
+  list.className = "settings-help";
+  list.setAttribute("aria-label", "Update blockers");
+  for (const blocker of drain.blocking || []) {
+    const item = document.createElement("li");
+    switch (blocker.kind) {
+      case "active_pane": item.textContent = `Agent: ${blocker.label} (${blocker.state})`; break;
+      case "pending_acquire_claim": item.textContent = `Pending claim: #${blocker.issue_number}`; break;
+      case "active_execution": item.textContent = `Active execution: ${blocker.worktree}`; break;
+      case "held_verification_lease": item.textContent = `Verification: ${blocker.lease_id}`; break;
+      default: item.textContent = blocker.kind || "Waiting for work to finish";
+    }
+    list.appendChild(item);
+  }
+  if (!list.children.length) pending.textContent += " · waiting for quiet observations";
+  panel.appendChild(list);
+}
 
 function settingsTabId(windowId, tabId) {
   return `settings-${windowId}-tab-${tabId}`;
@@ -40,11 +74,16 @@ function linkSettingsPanel(panel, windowId, tabId) {
   panel.setAttribute("aria-labelledby", settingsTabId(windowId, tabId));
 }
 
+// Keep vendor banners and build hashes in diagnostics, not comparison columns.
+function supportedAgentVersion(value) {
+  return value?.match(/(?:^|[\s(])v?(\d+\.\d+\.\d+(?:-[\da-z.-]+)?)(?:\+[\da-z.-]+)?(?=$|[\s)])/i)?.[1] || null;
+}
+
 // SPEC #5017: maintain the built-in catalog without changing launch profiles.
 function renderSupportedAgentsPanel(panel, agents, options) {
   const document = panel.ownerDocument;
-  panel.replaceChildren();
   if (agents === null) {
+    panel.replaceChildren();
     const loading = document.createElement("p");
     loading.className = "settings-help";
     loading.setAttribute("role", "status");
@@ -55,23 +94,27 @@ function renderSupportedAgentsPanel(panel, agents, options) {
   const send = options?.send || (() => {});
   const maintenance = options?.maintenanceByAgent || new Map();
   const busy = Array.from(maintenance.values()).some((entry) => entry.pending);
-  const automaticLabel = document.createElement("label");
+  // Keep the local checkbox mounted while catalog tables advance in a frame.
+  const automaticLabel = panel.querySelector(".settings-checkbox-label") || document.createElement("label");
+  for (const child of [...panel.childNodes]) if (child !== automaticLabel) child.remove();
   automaticLabel.className = "settings-checkbox-label";
-  const automatic = document.createElement("input");
+  const automatic = automaticLabel.querySelector("input") || document.createElement("input");
   automatic.type = "checkbox";
   automatic.className = "settings-checkbox";
   automatic.setAttribute("aria-label", "Automatically update agents");
   automatic.checked = options?.autoUpdate === true;
   automatic.disabled = busy;
-  automatic.addEventListener("change", () => {
+  automatic.onchange = () => {
     send({ kind: "set_agent_auto_update", enabled: automatic.checked });
-  });
-  automaticLabel.appendChild(automatic);
-  automaticLabel.appendChild(document.createTextNode("Automatically update agents"));
-  panel.appendChild(automaticLabel);
+  };
+  if (!automatic.parentNode) {
+    automaticLabel.appendChild(automatic);
+    automaticLabel.appendChild(document.createTextNode("Automatically update agents"));
+  }
+  if (automaticLabel.parentNode !== panel) panel.appendChild(automaticLabel);
   const help = document.createElement("p");
   help.className = "settings-help";
-  help.textContent = "At the next app startup, update installed npm agents with a known newer version. "
+  help.textContent = "At the next app startup, update installed agents with a verified update route and a known newer version. "
     + "Updates require no open agent windows or pending launches, including the Project Manager. "
     + "Nothing is installed automatically. Manual installs and updates are refused while agent windows are running; "
     + "close them and retry. Update failures leave launches available.";
@@ -95,6 +138,7 @@ function renderSupportedAgentsPanel(panel, agents, options) {
     const cell = document.createElement("th");
     cell.setAttribute("scope", "col");
     cell.textContent = label;
+    cell.title = label;
     header.appendChild(cell);
   }
   const body = document.createElement("tbody");
@@ -103,24 +147,28 @@ function renderSupportedAgentsPanel(panel, agents, options) {
     const row = document.createElement("tr");
     body.appendChild(row);
     row.dataset.agentId = agent.id;
-    const version = agent.installed_version?.trim();
+    const rawVersion = agent.installed_version?.trim();
+    const version = supportedAgentVersion(rawVersion);
     const values = [
       `${agent.name} (${agent.id})`,
       agent.installed ? "Installed" : "Not installed",
       agent.installed
-        ? version || "Unknown (version unavailable)"
+        ? version || "Unknown"
         : "Not installed",
       agent.available_version
         ? agent.up_to_date
           ? `${agent.available_version} · Latest`
           : agent.available_version
-        : agent.update_check_error || "Version check unavailable",
+        : "Unknown",
     ];
     for (const value of values) {
       const cell = document.createElement("td");
       cell.textContent = value;
+      cell.title = value;
       row.appendChild(cell);
     }
+    if (agent.installed) row.children[2].title = rawVersion || "Installed version unavailable";
+    row.children[3].title = agent.update_check_error || agent.available_version || "Available version unavailable";
     const actions = document.createElement("td");
     const action = !agent.installed && agent.install_supported
       ? "install"
@@ -130,7 +178,7 @@ function renderSupportedAgentsPanel(panel, agents, options) {
       button.type = "button";
       button.className = "wizard-button";
       const label = `${action === "install" ? "Install" : "Update"} ${agent.name}`;
-      button.textContent = label;
+      button.textContent = action === "install" ? "Install" : "Update";
       button.setAttribute("aria-label", label);
       button.disabled = busy;
       button.addEventListener("click", () => {
@@ -148,6 +196,7 @@ function renderSupportedAgentsPanel(panel, agents, options) {
         status.textContent += ` Before: ${result.before_version || "Unknown (version unavailable)"}. `
           + `After: ${result.after_version || "Unknown (version unavailable)"}.`;
       }
+      status.title = status.textContent;
       actions.appendChild(status);
     }
     row.appendChild(actions);
@@ -185,7 +234,441 @@ export function mountProjectManagerSettingsPanel(
   return panel;
 }
 
-export function switchSettingsTab(body, target) {
+function renderIssuesSettingsPanel(panel, options) {
+  const { project, status, send, launchControls = [] } = options;
+  const document = panel.ownerDocument;
+  panel.replaceChildren();
+  const heading = document.createElement("h3");
+  heading.className = "settings-section-heading";
+  heading.textContent = `Project settings · ${project?.name || project?.project_root || "No project"}`;
+  panel.appendChild(heading);
+  const description = document.createElement("p");
+  description.className = "settings-help settings-issues-description";
+  description.textContent = project?.project_root || "Open a project to configure Issues.";
+  description.title = description.textContent;
+  panel.appendChild(description);
+  const group = name => {
+    const section = document.createElement("fieldset");
+    section.className = "settings-section";
+    section.disabled = !status;
+    const legend = document.createElement("legend");
+    legend.textContent = name;
+    section.appendChild(legend);
+    panel.appendChild(section);
+    return section;
+  };
+  const row = (section, name, control) => {
+    const label = document.createElement("label");
+    label.className = "settings-field";
+    const caption = document.createElement("span");
+    caption.textContent = name;
+    label.appendChild(caption);
+    label.appendChild(control);
+    section.appendChild(label);
+    return label;
+  };
+  const field = (section, name, type, value) => {
+    const input = document.createElement("input");
+    input.type = type;
+    input.className = type === "checkbox" ? "settings-checkbox" : "settings-input";
+    input.setAttribute("aria-label", name);
+    if (type === "checkbox") input.checked = value === true;
+    else input.value = String(value ?? "");
+    row(section, name, input);
+    return input;
+  };
+  const launch = group("Launch control");
+  for (const [action, name, key, kind] of [
+    ["monitor-autonomous", "Autonomous", "autonomous_mode", "set_issue_monitor_autonomous_mode"],
+    ["monitor-toggle", "Monitoring", "enabled", "set_issue_monitor_enabled"],
+  ]) {
+    const slot = document.createElement("span");
+    let control = launchControls.find(control => control.dataset.action === action);
+    if (!control) {
+      control = document.createElement("input");
+      control.type = "checkbox";
+      control.className = "settings-checkbox";
+      control.dataset.action = action;
+      control.setAttribute("aria-label", name);
+      control.addEventListener("change", () => {
+        const enabled = control.checked;
+        control.checked = control.dataset.confirmed === "true";
+        send({ kind, enabled });
+      });
+    }
+    control.checked = status?.[key] === true;
+    control.dataset.confirmed = String(control.checked);
+    control.disabled = !status;
+    setControlExplanation(control, action === "monitor-autonomous"
+      ? "Allow eligible issues to run without waiting for human approval. Also send structured gwt feedback without a dialog; free text is excluded. This is separate from Auto capacity. Feedback needs existing GH_TOKEN/GITHUB_TOKEN credentials; GitHub CLI sign-in alone keeps it unsent."
+      : "Start or pause monitoring for queued issues.", `settings-${action}`);
+    slot.appendChild(control);
+    row(launch, name, slot).dataset.settingsLaunchAction = action;
+  }
+  const replenishment = group("Refill");
+  const refill = field(replenishment, "Auto-refill", "checkbox", status?.terminal_queue_auto_refill);
+  const limit = field(replenishment, "Refill limit", "number", status?.terminal_queue_auto_refill_limit ?? 3);
+  setControlExplanation(refill, "Automatically add eligible issues to the launch queue when it has fewer issues than the refill limit.", "settings-auto-refill");
+  setControlExplanation(limit, "Target number of eligible issues kept in the launch queue by Auto-refill. 0 disables automatic refill.", "settings-refill-limit");
+  limit.min = "0";
+  limit.step = "1";
+  const saveRefill = () => {
+    const value = Number(limit.value);
+    if (Number.isInteger(value) && value >= 0) send({ kind: "set_issue_monitor_auto_refill", enabled: refill.checked, limit: value });
+  };
+  refill.addEventListener("change", saveRefill);
+  limit.addEventListener("change", saveRefill);
+  const labels = field(group("Target"), "Allowed labels", "text", (status?.allowed_labels || []).join(", "));
+  setControlExplanation(labels, "Comma-separated labels. Only matching issues enter the launch queue.", "settings-allowed-labels");
+  labels.addEventListener("change", () => send({ kind: "set_issue_monitor_allowed_labels", allowed_labels: [...new Set(labels.value.split(",").map(v => v.trim()).filter(Boolean))] }));
+}
+
+function renderCandidateSaveError(panel, event) {
+  if (!event || Number(panel.dataset.pendingRequest) !== event.request_id) return;
+  panel.dataset.saving = "false";
+  delete panel.dataset.pendingRequest;
+  for (const [control, disabled] of panel.candidateDisabledControls || []) control.disabled = disabled;
+  panel.candidateStructuralSave = false;
+  const feedback = panel.querySelector("[data-candidate-status]");
+  if (feedback) {
+    feedback.textContent = event.message;
+    feedback.dataset.kind = "error";
+    feedback.setAttribute("role", "alert");
+    const field = event.message.match(/\b(prefer_for|agent_member_id|agent_id|model|reasoning|session_mode|runtime_target|docker_service|windows_shell|skip_permissions|fast_mode)\b/)?.[1];
+    const row = panel.candidateSaveTarget?.closest("fieldset") || panel;
+    const rejectedTag = event.message.match(/prefer_for entry ("(?:\\.|[^"\\])*")/)?.[1];
+    const rejectedInput = rejectedTag && [...panel.querySelectorAll('[data-profile-field="prefer_for"]')]
+      .find(control => control.value.split(",").some(tag => tag.trim() === JSON.parse(rejectedTag)));
+    const input = rejectedInput || (field && row.querySelector(`[data-profile-field="${field}"]`)) || panel.candidateSaveTarget;
+    if (input?.isConnected) {
+      input.setAttribute("aria-invalid", "true");
+      input.closest(".settings-field")?.after(feedback);
+    }
+  }
+}
+
+function reconcileCandidateSave(panel, event) {
+  if (!event || Number(panel.dataset.pendingRequest) !== event.request_id) return;
+  panel.dataset.saving = "false";
+  delete panel.dataset.pendingRequest;
+  if (panel.candidateStructuralSave) {
+    panel.dataset.dirty = "false";
+    panel.candidateStructuralSave = false;
+    return true;
+  }
+  let dirty = [...panel.candidateSubmittedValues || []].some(([input, value]) =>
+    (input.type === "checkbox" ? input.checked : input.value) !== value);
+  const focused = panel.ownerDocument.activeElement;
+  for (const [index, row] of [...panel.querySelectorAll("fieldset[data-agent-id]")].entries()) {
+    const profile = event.profiles?.[index];
+    if (!profile) continue;
+    for (const input of row.querySelectorAll("[data-profile-field]")) {
+      const value = input.type === "checkbox" ? input.checked : input.value;
+      if (panel.candidateSubmittedValues?.get(input) !== value) {
+        dirty = true;
+        continue;
+      }
+      // Even a successful normalization must not move a live text cursor.
+      if (input === focused) continue;
+      const key = input.dataset.profileField;
+      if (input.dataset.inheritedDefault !== undefined && !input.dataset.profileEdited && profile[key] == null) continue;
+      if (input.type === "checkbox") input.checked = profile[key] === true;
+      else {
+        const saved = key === "prefer_for" ? (profile[key] || []).join(", ")
+          : String(profile[key] ?? (key === "session_mode" ? "Normal" : key === "runtime_target" ? "Host" : ""));
+        if (input.localName === "select") {
+          if (![...input.options].some(option => option.value === saved)) {
+            const option = panel.ownerDocument.createElement("option");
+            option.value = saved;
+            option.textContent = saved || "Auto";
+            input.appendChild(option);
+          }
+          [...input.options].find(option => option.value === saved).selected = true;
+        } else input.value = saved;
+      }
+    }
+  }
+  if (!dirty) for (const invalid of panel.querySelectorAll('[aria-invalid="true"]')) invalid.removeAttribute("aria-invalid");
+  panel.dataset.dirty = String(dirty);
+  const feedback = panel.querySelector("[data-candidate-status]");
+  if (feedback && !(dirty && feedback.dataset.kind === "error")) {
+    feedback.textContent = "Saved candidates.";
+    feedback.dataset.kind = "success";
+    feedback.setAttribute("role", "status");
+  }
+}
+
+export function renderAgentsSettingsPanel(panel, options) {
+  const { project, profiles, send, availableMembers = null, choices = null } = options;
+  const document = panel.ownerDocument;
+  panel.replaceChildren();
+  panel.dataset.dirty = "false";
+  panel.oninput = () => {
+    panel.dataset.dirty = "true";
+  };
+  const heading = document.createElement("h3");
+  heading.className = "settings-section-heading";
+  heading.textContent = `Project settings · ${project?.name || project?.project_root || "No project"}`;
+  panel.appendChild(heading);
+  const help = document.createElement("p");
+  help.className = "settings-help";
+  help.textContent = `${project?.project_root || "Open a project"} · Each candidate selects a registered member with a fixed tool. The first member in the list fixes the launch tool. Only selected members using that tool are tried in order. If none is available, new launches wait; tools never switch automatically. Changes apply to future launches.`;
+  panel.appendChild(help);
+  if (!profiles) {
+    help.textContent += " Loading launch profiles…";
+    return;
+  }
+  const feedback = document.createElement("p");
+  feedback.className = "settings-status";
+  feedback.dataset.candidateStatus = "";
+  const showFeedback = (message, error = false) => {
+    feedback.textContent = message;
+    feedback.dataset.kind = error ? "error" : "info";
+    feedback.setAttribute("role", error ? "alert" : "status");
+    if (error) panel.dataset.dirty = "true";
+  };
+  // Match resolve_agent_id aliases and the backend's provider comparison.
+  const providerAliases = new Map([
+    ["claudecode", "claude"], ["claude-code", "claude"], ["claude code", "claude"],
+    ["grok build", "grok"], ["grok-build", "grok"],
+    ["antigravity", "agy"], ["antigravity cli", "agy"], ["antigravity-cli", "agy"],
+    ["open-code", "opencode"], ["open-claw", "openclaw"],
+    ["hermes agent", "hermes"], ["hermes-agent", "hermes"],
+    ["copilot", "gh"], ["github copilot", "gh"], ["github-copilot", "gh"],
+  ]);
+  const provider = agentId => {
+    const id = String(agentId ?? "").trim().replace(/[A-Z]/g, character => character.toLowerCase());
+    return providerAliases.get(id) || id;
+  };
+  const rows = [];
+  const setChoices = (input, options, value) => {
+    input.replaceChildren();
+    const entries = options.map(option => typeof option === "string" ? { value: option, label: option || "Auto" } : option);
+    const saved = String(value ?? "");
+    if (!entries.some(option => option.value === saved)) entries.push({ value: saved, label: saved || "Auto" });
+    for (const entry of entries) {
+      const option = document.createElement("option");
+      option.value = entry.value;
+      option.textContent = entry.label;
+      option.selected = entry.value === saved;
+      input.appendChild(option);
+    }
+  };
+  const field = (parent, name, key, value, type = "text", choices = null) => {
+    const label = document.createElement("label");
+    label.className = "settings-field";
+    const span = document.createElement("span");
+    span.textContent = name;
+    label.appendChild(span);
+    const input = document.createElement(choices ? "select" : "input");
+    if (choices) setChoices(input, choices, value);
+    else input.type = type;
+    input.className = choices ? "settings-select" : type === "checkbox" ? "settings-checkbox" : "settings-input";
+    input.dataset.profileField = key;
+    input.setAttribute("aria-label", `${name} ${parent.dataset.profileLabel || parent.dataset.agentId || "candidate"}`);
+    if (type === "checkbox") input.checked = value === true;
+    else if (!choices) input.value = String(value ?? "");
+    label.appendChild(input);
+    parent.appendChild(label);
+    if (key !== "new") input.addEventListener("change", () => {
+      if (!input.disabled) {
+        input.dataset.profileEdited = "true";
+        parent.updateCandidateChoices?.(key);
+        submit(draft(), input);
+      }
+    });
+    return input;
+  };
+  const draft = () => rows.map(({ row, profile }) => {
+    const next = { ...profile };
+    for (const input of row.querySelectorAll("[data-profile-field]")) {
+      const key = input.dataset.profileField;
+      if (input.dataset.inheritedDefault !== undefined && !input.dataset.profileEdited) continue;
+      next[key] = input.type === "checkbox" ? input.checked
+        : key === "prefer_for" ? input.value.split(",").map(v => v.trim()).filter(Boolean)
+          : input.value.trim() || null;
+    }
+    const member = availableMembers?.find(member => (member.member_id || member.agent_member_id) === next.agent_member_id);
+    if (member) next.agent_id = member.agent_id;
+    return next;
+  });
+  const submit = (next, input = null) => {
+    panel.candidateSaveTarget = input;
+    panel.candidateSubmittedValues = new Map([...panel.querySelectorAll("[data-profile-field]")]
+      .map(control => [control, control.type === "checkbox" ? control.checked : control.value]));
+    // Structural responses change row identities. Freeze those controls until
+    // the correlated result so input cannot attach to a different candidate.
+    panel.candidateStructuralSave = input === null;
+    panel.candidateDisabledControls = new Map();
+    if (panel.candidateStructuralSave) {
+      for (const control of panel.querySelectorAll("input, select, button")) {
+        panel.candidateDisabledControls.set(control, control.disabled);
+        control.disabled = true;
+      }
+    }
+    showFeedback("Saving candidates…");
+    send({ kind: "issue_monitor_profiles_set", profiles: next });
+  };
+  const button = (parent, title, action, callback) => {
+    const node = document.createElement("button");
+    node.type = "button";
+    node.className = "wizard-button";
+    node.textContent = title;
+    node.dataset.action = action;
+    node.setAttribute("aria-label", title);
+    node.addEventListener("click", callback);
+    parent.appendChild(node);
+    return node;
+  };
+  const poolHeading = document.createElement("h3");
+  poolHeading.className = "settings-section-heading";
+  poolHeading.textContent = "Candidates";
+  panel.appendChild(poolHeading);
+  for (const [index, profile] of profiles.entries()) {
+    const row = document.createElement("fieldset");
+    row.className = "settings-section";
+    row.dataset.agentId = profile.agent_id;
+    row.dataset.agentMemberId = profile.agent_member_id || "";
+    const savedMember = availableMembers?.find(member => (member.member_id || member.agent_member_id) === profile.agent_member_id);
+    row.dataset.profileLabel = savedMember?.name || profile.agent_id;
+    const legend = document.createElement("legend");
+    legend.textContent = `${index + 1}. ${savedMember?.name || profile.agent_member_id || "Unavailable member"}`;
+    row.appendChild(legend);
+    panel.appendChild(row);
+    rows.push({ row, profile });
+    const memberChoices = (availableMembers || []).map(member => ({ value: member.member_id || member.agent_member_id,
+      label: `${member.name} (${choices?.agents.find(tool => provider(tool.id) === provider(member.agent_id))?.name || member.agent_id})${member.enabled ? "" : " · Resting"}` }));
+    if (!savedMember && profile.agent_member_id) memberChoices.push({ value: profile.agent_member_id, label: `${profile.agent_member_id} · Unavailable member` });
+    const agent = field(row, "Agent", "agent_member_id", profile.agent_member_id || "", "text", memberChoices);
+    agent.disabled = availableMembers === null;
+    const toolField = document.createElement("label"); toolField.className = "settings-field";
+    const toolCaption = document.createElement("span"), toolValue = document.createElement("output");
+    toolCaption.textContent = "Tool"; toolValue.dataset.profileTool = "";
+    toolField.append(toolCaption, toolValue); row.append(toolField);
+    const memberStatus = document.createElement("p"); memberStatus.className = "settings-help"; memberStatus.setAttribute("role", "status"); row.append(memberStatus);
+    const selectedMember = () => availableMembers?.find(member => (member.member_id || member.agent_member_id) === agent.value);
+    let previousTool = provider(profile.agent_id);
+    const capabilities = () => choices?.agents.find(entry => provider(entry.id) === provider(selectedMember()?.agent_id || profile.agent_id));
+    const initial = capabilities();
+    let model = field(row, "Model", "model", profile.model ?? initial?.default_model ?? "", "text", []);
+    const initialModel = initial?.models.find(option => option.value === model.value);
+    const initialReasoning = initialModel ? initialModel.default_reasoning : initial?.default_reasoning;
+    const reasoning = field(row, "Reasoning", "reasoning", profile.reasoning ?? initialReasoning ?? "", "text", []);
+    const docker = field(row, "Docker service", "docker_service", profile.docker_service ?? "", "text", [
+      { value: "", label: choices?.default_docker_service ? `Auto (${choices.default_docker_service})` : "Auto" },
+      ...(choices?.docker_services || []),
+    ]);
+    field(row, "Prefer for", "prefer_for", (profile.prefer_for || []).join(", "));
+    const mode = field(row, "Session mode", "session_mode", profile.session_mode || "Normal", "text", []);
+    const runtime = field(row, "Runtime", "runtime_target", profile.runtime_target || "Host", "text", ["Host", "Docker"]);
+    const shell = field(row, "Windows shell", "windows_shell", profile.windows_shell || "", "text", ["", "command_prompt", "windows_power_shell", "power_shell_7"]);
+    const skip = field(row, "Skip permissions", "skip_permissions", profile.skip_permissions, "checkbox");
+    const fast = field(row, "Fast mode", "fast_mode", profile.fast_mode, "checkbox");
+    const modelSuggestions = document.createElement("datalist");
+    modelSuggestions.id = `candidate-models-${Math.random().toString(36).slice(2)}`;
+    row.appendChild(modelSuggestions);
+    row.updateCandidateChoices = changed => {
+      const entry = capabilities();
+      const member = selectedMember();
+      const tool = member?.agent_id || profile.agent_id;
+      const agentChanged = changed === "agent_member_id" && previousTool !== provider(tool);
+      previousTool = provider(tool);
+      row.dataset.agentMemberId = agent.value;
+      row.dataset.agentId = tool;
+      const memberLabel = member?.name || agent.value || "Unavailable member";
+      row.dataset.profileLabel = memberLabel;
+      legend.textContent = `${index + 1}. ${memberLabel}`;
+      for (const input of row.querySelectorAll("[data-profile-field]")) {
+        const caption = input.closest("label")?.querySelector("span")?.textContent;
+        if (caption) input.setAttribute("aria-label", `${caption} ${memberLabel}`);
+      }
+      for (const button of row.querySelectorAll("button[data-action]")) {
+        const action = button.dataset.action;
+        button.setAttribute("aria-label", action === "remove" ? `Remove ${memberLabel}` : `Move ${action} ${memberLabel}`);
+        button.textContent = action === "remove" ? `Remove ${memberLabel}` : `Move ${action} ${memberLabel}`;
+      }
+      toolValue.setAttribute("aria-label", `Tool ${memberLabel}`);
+      toolValue.textContent = entry?.name || tool;
+      memberStatus.textContent = availableMembers === null ? "Loading registered members…" : !member
+        ? "Selected member is unavailable. Choose a registered member; no substitute will be launched."
+        : !member.enabled ? "Resting member. Future launches wait until this member is enabled." : "";
+      memberStatus.hidden = !memberStatus.textContent;
+      if (!changed || agentChanged) {
+        const value = agentChanged ? entry?.default_model ?? "" : model.value;
+        const freeText = Boolean(entry?.supports_model_input && !entry.models.length);
+        if (freeText !== (model.localName === "input")) {
+          const previous = model.closest("label");
+          model = field(row, "Model", "model", value, "text", freeText ? null : []);
+          previous.replaceWith(model.closest("label"));
+        }
+        if (freeText) model.value = value;
+        else setChoices(model, entry?.models || [], value);
+        modelSuggestions.replaceChildren();
+        for (const value of freeText ? entry?.model_suggestions || [] : []) {
+          const option = document.createElement("option");
+          option.value = value;
+          modelSuggestions.appendChild(option);
+        }
+        if (modelSuggestions.children.length) model.setAttribute("list", modelSuggestions.id);
+        else model.removeAttribute("list");
+        if (agentChanged) model.dataset.profileEdited = "true";
+        model.disabled = !entry || (!freeText && !entry.models.length);
+        setChoices(mode, entry?.session_modes || ["Normal"], agentChanged ? "Normal" : mode.value);
+        mode.disabled = !entry || entry.session_modes.length <= 1;
+        if (agentChanged) fast.checked = false;
+        if (agentChanged && !entry?.supports_skip_permissions) skip.checked = false;
+      }
+      const selectedModel = entry?.models.find(option => option.value === model.value);
+      const levels = selectedModel?.reasoning_options || entry?.reasoning_options || [];
+      const defaultReasoning = selectedModel ? selectedModel.default_reasoning : entry?.default_reasoning;
+      const level = agentChanged || changed === "model"
+        ? defaultReasoning ?? "" : reasoning.value;
+      if (agentChanged || changed === "model") reasoning.dataset.profileEdited = "true";
+      setChoices(reasoning, levels, level);
+      reasoning.disabled = levels.length === 0;
+      skip.disabled = !entry?.supports_skip_permissions;
+      fast.disabled = !entry?.supports_fast_mode;
+      docker.disabled = runtime.value !== "Docker";
+      shell.disabled = runtime.value === "Docker" || !choices?.windows_shell_supported;
+    };
+    row.updateCandidateChoices();
+    if (profile.model == null) model.dataset.inheritedDefault = model.value;
+    if (profile.reasoning == null) reasoning.dataset.inheritedDefault = reasoning.value;
+    for (const [direction, offset] of [["up", -1], ["down", 1]]) {
+      const move = button(row, `Move ${direction} ${row.dataset.profileLabel}`, direction, () => {
+        const next = draft();
+        [next[index], next[index + offset]] = [next[index + offset], next[index]];
+        submit(next);
+      });
+      move.disabled = index + offset < 0 || index + offset >= profiles.length;
+    }
+    const remove = button(row, `Remove ${row.dataset.profileLabel}`, "remove", () => submit(draft().filter((_, i) => i !== index)));
+    remove.disabled = profiles.length <= 1;
+  }
+  const add = document.createElement("section");
+  add.className = "settings-section";
+  panel.appendChild(add);
+  const remaining = (availableMembers || []).filter(member => !profiles.some(profile => profile.agent_member_id === (member.member_id || member.agent_member_id)));
+  const candidate = field(add, "Add candidate", "new", "", "text", [{ value: "", label: "Select a registered member…" },
+    ...remaining.map(member => ({ value: member.member_id || member.agent_member_id, label: `${member.name} (${member.agent_id})${member.enabled ? "" : " · Resting"}` }))]);
+  const addButton = button(add, "Add candidate", "add-candidate", () => {
+    const memberId = candidate.value.trim(), next = draft();
+    const member = availableMembers?.find(member => (member.member_id || member.agent_member_id) === memberId);
+    if (!memberId) showFeedback("Select a registered member to add.", true);
+    else if (next.some(profile => profile.agent_member_id === memberId)) showFeedback(`Member ${memberId} is already in the candidate pool.`, true);
+    else if (!member) showFeedback(`Unknown member: ${memberId}. Select a registered member.`, true);
+    else submit([...next, { agent_member_id: memberId, agent_id: member.agent_id }]);
+  });
+  candidate.disabled = addButton.disabled = availableMembers === null || remaining.length === 0;
+  showFeedback(availableMembers === null ? "Loading registered members…"
+    : remaining.length === 0 ? "All registered members are already in the candidate pool." : "Select a registered member to add.");
+  add.appendChild(feedback);
+}
+
+export function switchSettingsTab(body, target, focus = false) {
+  const showCandidates = target === "agents";
+  if (showCandidates) target = "issues";
+  body.dataset.settingsSection = target;
   const tabs = body.querySelectorAll(".settings-tab");
   tabs.forEach((tab) => {
     const isSelected = tab.dataset.settingsTab === target;
@@ -195,32 +678,49 @@ export function switchSettingsTab(body, target) {
   const panels = body.querySelectorAll(".settings-panel");
   panels.forEach((panel) => {
     panel.classList.toggle("hidden", panel.dataset.settingsPanel !== target);
+    if (focus && panel.dataset.settingsPanel === target) {
+      panel.tabIndex = -1;
+      const destination = showCandidates ? panel.querySelector("[data-settings-candidates]") || panel : panel;
+      destination.tabIndex = -1;
+      const scroller = body.dataset.surfaceOwner === "pm" ? body.querySelector(".settings-body") : null;
+      if (scroller) scroller.scrollTop = Math.max(0, destination.offsetTop - scroller.offsetTop);
+      else destination.scrollIntoView?.({ block: "start" });
+      destination.focus({ preventScroll: true });
+    }
   });
+  body.dispatchEvent(new body.ownerDocument.defaultView.CustomEvent("settings:section-changed", { bubbles: true,
+    detail: { windowId: body.dataset.settingsWindowId, section: target } }));
 }
 
 export function installSettingsOpenHandler(options) {
   const {
     document,
+    send,
     settingsWindowBodies,
     focusOrSpawnPreset,
     setPendingTarget,
+    activeProjectTab,
   } = options;
   document.addEventListener("settings:open", (event) => {
-    const target = event?.detail?.target || "system";
+    const target = event?.detail?.section || event?.detail?.target || "system";
+    const projectRoot = event?.detail?.project_root || activeProjectTab?.()?.project_root || "";
+    const surfaceOwner = event?.detail?.surface_owner === "pm" ? "pm" : null;
     if (target === "index") {
       focusOrSpawnPreset("index");
       return;
     }
     const existingBody = Array.from(settingsWindowBodies).find(
-      (settingsBody) => settingsBody.isConnected,
+      (settingsBody) => settingsBody.isConnected && (settingsBody.dataset.settingsProjectRoot || "") === projectRoot
+        && (settingsBody.dataset.surfaceOwner || null) === surfaceOwner,
     );
     if (existingBody) {
-      switchSettingsTab(existingBody, target);
-      focusOrSpawnPreset("settings");
+      focusOrSpawnPreset("settings", { surfaceOwner });
+      switchSettingsTab(existingBody, target, true);
+      if (target === "system") send({ kind: "get_update_settings" });
       return;
     }
-    setPendingTarget(target);
-    focusOrSpawnPreset("settings");
+    setPendingTarget(target, surfaceOwner);
+    focusOrSpawnPreset("settings", { surfaceOwner });
   });
 }
 
@@ -231,8 +731,10 @@ export function createSettingsSurface({
   activeProjectTab,
   focusOrSpawnPreset,
   renderUsagePanel,
-  indexStatusByProjectRoot,
+  getIndexStatus,
   pmSettingsPanel,
+  rosterModel,
+  scheduleFrame,
 }) {
       // Issue #2698 PR 4 — same guard applied to the System Settings
       // Output Language `<select>`. Backend echoes `system_settings`
@@ -243,51 +745,87 @@ export function createSettingsSurface({
       // commit. Delegated listeners scope to `select.settings-select`
       // so the guard covers every Settings window without per-window
       // wiring.
-      function applyAutostartStatus(event, statusMessage = "") {
-        systemSettingsState.autostartEnabled = event.enabled === true;
-        systemSettingsState.autostartPreviousEnabled =
-          systemSettingsState.autostartEnabled;
-        systemSettingsState.autostartMechanism = event.mechanism || "";
-        systemSettingsState.autostartInstallPath = event.install_path || "";
-        systemSettingsState.autostartLoaded = true;
-        systemSettingsState.autostartPending = false;
-        systemSettingsState.statusMessage = statusMessage;
-        systemSettingsState.statusKind = statusMessage ? "success" : "";
+      function applyBoardAuthStatus(event) {
+        systemSettingsModel.update(state => ({
+          ...state,
+          boardAuth: { slack: event.slack === true, teams: event.teams === true },
+          boardAuthMessage: event.message || "",
+          boardConfig: {
+            slackClientId: event.slack_client_id || "",
+            slackDefaultChannel: event.slack_default_channel || "",
+            slackHasSecret: event.slack_has_secret === true,
+            teamsClientId: event.teams_client_id || "",
+            teamsTenantId: event.teams_tenant_id || "",
+            teamsDefaultChannel: event.teams_default_channel || "",
+            oauthRedirectPort: event.oauth_redirect_port || 8765,
+          },
+        }));
+      }
+
+      function applyAutostartStatus(event, statusMessage = systemSettingsModel.read().autostartPending
+        ? "Saved login launch setting." : "") {
+        systemSettingsModel.update(state => ({
+          ...state,
+          autostartEnabled: event.enabled === true,
+          autostartPreviousEnabled: event.enabled === true,
+          autostartMechanism: event.mechanism || "",
+          autostartInstallPath: event.install_path || "",
+          autostartLoaded: true,
+          autostartPending: false,
+          autostartChecking: false,
+          autostartStatusMessage: statusMessage,
+          autostartStatusKind: statusMessage ? "success" : "",
+        }));
       }
 
       function applyAutostartError(event) {
-        systemSettingsState.autostartEnabled =
-          systemSettingsState.autostartPreviousEnabled === true;
-        systemSettingsState.autostartPending = false;
-        systemSettingsState.statusMessage =
-          event.message || "Failed to update login launch setting.";
-        systemSettingsState.statusKind = "error";
+        systemSettingsModel.update(state => ({
+          ...state,
+          autostartEnabled: state.autostartPending
+            ? state.autostartPreviousEnabled === true : state.autostartEnabled,
+          autostartPending: false,
+          autostartChecking: false,
+          autostartStatusMessage: event.message || (state.autostartLoaded
+            ? "Failed to update login launch setting."
+            : "Failed to check login launch status."),
+          autostartStatusKind: "error",
+        }));
       }
 
       // SPEC #1921 Phase 86 (#3813): the backend echoes the complete agent
       // resource policy on every system_settings / system_settings_updated
       // event; it is authoritative over any optimistic local edit.
-      function applyAgentResourceSnapshot(snapshot) {
-        if (!snapshot || typeof snapshot !== "object") {
-          return;
-        }
-        systemSettingsState.agentResource = {
+      function normalizeAgentResource(snapshot, previous) {
+        if (!snapshot || typeof snapshot !== "object") return previous;
+        return {
           enabled: snapshot.enabled !== false,
-          preset:
-            typeof snapshot.preset === "string" && snapshot.preset
-              ? snapshot.preset
-              : "automatic",
-          priority:
-            typeof snapshot.priority === "string" && snapshot.priority
-              ? snapshot.priority
-              : "below-normal",
-          cpuLimitPercent: Number.isInteger(snapshot.cpu_limit_percent)
-            ? snapshot.cpu_limit_percent
-            : null,
-          buildJobs: Number.isInteger(snapshot.build_jobs)
-            ? snapshot.build_jobs
-            : null,
+          preset: typeof snapshot.preset === "string" && snapshot.preset ? snapshot.preset : "automatic",
+          priority: typeof snapshot.priority === "string" && snapshot.priority ? snapshot.priority : "below-normal",
+          cpuLimitPercent: Number.isInteger(snapshot.cpu_limit_percent) ? snapshot.cpu_limit_percent : null,
+          buildJobs: Number.isInteger(snapshot.build_jobs) ? snapshot.build_jobs : null,
         };
+      }
+
+      function applySystemSettingsEvent(event) {
+        systemSettingsModel.update(state => {
+          if (event.kind === "system_settings_error") {
+            return { ...state, statusMessage: event.message || "Failed to update system settings.", statusKind: "error" };
+          }
+          const updated = event.kind === "system_settings_updated";
+          const clearStatus = !state.statusMessage || state.statusKind === "info";
+          return {
+            ...state,
+            language: event.language || (updated ? state.language : "auto"),
+            worksPreviewLines: Number.isInteger(event.works_preview_lines) && event.works_preview_lines >= 3 && event.works_preview_lines <= 10
+              ? event.works_preview_lines : updated ? state.worksPreviewLines : 3,
+            codexTrustManagedHooks: event.codex_trust_managed_hooks !== false,
+            boardProvider: event.board_provider || state.boardProvider || "local",
+            agentResource: normalizeAgentResource(event.agent_resource, state.agentResource),
+            loaded: state.loaded || !updated,
+            statusMessage: updated ? "Saved system settings." : clearStatus ? "" : state.statusMessage,
+            statusKind: updated ? "success" : clearStatus ? "" : state.statusKind,
+          };
+        });
       }
 
       // Empty input = automatic (null). A non-integer or value below 1 is
@@ -305,7 +843,7 @@ export function createSettingsSurface({
       }
 
       function agentResourceWirePayload() {
-        const resource = systemSettingsState.agentResource;
+        const resource = systemSettingsModel.read().agentResource;
         return {
           enabled: resource.enabled !== false,
           preset: resource.preset || "automatic",
@@ -320,76 +858,32 @@ export function createSettingsSurface({
       }
 
       const systemSettingsInteractionGuard = createInteractionGuard({
-        onFlush: (deferred) => {
-          if (!deferred || typeof deferred !== "object") {
-            return;
-          }
-          if (deferred.kind === "system_settings") {
-            systemSettingsState.language = deferred.language || "auto";
-            systemSettingsState.codexTrustManagedHooks =
-              deferred.codex_trust_managed_hooks !== false;
-            systemSettingsState.boardProvider =
-              deferred.board_provider || systemSettingsState.boardProvider || "local";
-            applyAgentResourceSnapshot(deferred.agent_resource);
-            systemSettingsState.loaded = true;
-            if (
-              !systemSettingsState.statusMessage
-              || systemSettingsState.statusKind === "info"
-            ) {
-              systemSettingsState.statusMessage = "";
-              systemSettingsState.statusKind = "";
-            }
-          } else if (deferred.kind === "system_settings_updated") {
-            systemSettingsState.language = deferred.language
-              || systemSettingsState.language;
-            systemSettingsState.codexTrustManagedHooks =
-              deferred.codex_trust_managed_hooks !== false;
-            systemSettingsState.boardProvider =
-              deferred.board_provider || systemSettingsState.boardProvider || "local";
-            applyAgentResourceSnapshot(deferred.agent_resource);
-            systemSettingsState.statusMessage = "Saved system settings.";
-            systemSettingsState.statusKind = "success";
-          } else if (deferred.kind === "system_settings_error") {
-            systemSettingsState.statusMessage = deferred.message
-              || "Failed to update system settings.";
-            systemSettingsState.statusKind = "error";
-          } else if (deferred.kind === "autostart_status") {
-            applyAutostartStatus(
-              deferred,
-              deferred.from_update ? "Saved login launch setting." : "",
-            );
-          } else if (deferred.kind === "autostart_error") {
-            applyAutostartError(deferred);
-          }
-          renderSystemPanelInAllSettingsWindows();
-        },
+        onFlush: () => renderSystemPanelInAllSettingsWindows(),
       });
 
 
       // All DOM nodes are built via createElement + textContent to avoid
       // innerHTML with mixed trust. Secrets in env tables are redacted by
       // the backend before reaching this layer (see redact_secrets_in_agent).
-      const customAgentsState = {
-        agents: [],
-        loading: false,
+      let renderedCustomAgentsState = null;
+      const customAgentsModel = createUiStateStore({
+        catalog: { agents: [], loading: false, loaded: false },
         statusMessage: "",
         statusKind: "",
-      };
+      }, { scheduleFrame });
       // SPEC-1921 2026-05-18 amendment / FR-099: Settings > Agent Backends
       // per-built-in backend profile state. `backends` is keyed by
-      // BuiltinAgentId string ("claudeCode" / "codex"). Mirrors
-      // customAgentsState shape so dispatch + status messages can share
-      // helpers like setSettingsStatus.
-      const agentBackendsState = {
+      // BuiltinAgentId string ("claudeCode" / "codex"). Status messages keep
+      // using the shared Custom Agents status channel.
+      const agentBackendsModel = createUiStateStore({
         backends: { claudeCode: [], codex: [] },
         loadingAgent: null,
-        statusMessage: "",
-        statusKind: "",
-      };
+      }, { scheduleFrame });
       // SPEC-1933 US-4: System tab state. `language` is the raw stored value
       // (auto/en/ja); the backend `system_settings` reply seeds it.
-      const systemSettingsState = {
+      const systemSettingsModel = createUiStateStore({
         language: "auto",
+        worksPreviewLines: 3,
         codexTrustManagedHooks: true,
         // SPEC #1921 Phase 86 (#3813): agent process-tree resource policy.
         // Numeric null = automatic (derived from max active agents / cores).
@@ -402,6 +896,9 @@ export function createSettingsSurface({
         },
         // SPEC-2959/2963: selected Board backend (local/slack/teams).
         boardProvider: "local",
+        loaded: false,
+        statusMessage: "",
+        statusKind: "",
         // SPEC-2963: remote provider sign-in state + last sign-in message.
         boardAuth: { slack: false, teams: false },
         boardAuthMessage: "",
@@ -422,21 +919,229 @@ export function createSettingsSurface({
         autostartInstallPath: "",
         autostartLoaded: false,
         autostartPending: false,
-        loaded: false,
-        statusMessage: "",
-        statusKind: "",
-      };
+        autostartChecking: false,
+        autostartStatusMessage: "",
+        autostartStatusKind: "",
+      }, { scheduleFrame });
+      // Renderer cache only: the model remains the sole source of settings values.
+      const renderedSystemPanels = new WeakMap();
       const settingsWindowBodies = new Set();
+      const hookDoctorModel = createUiStateStore({}, { scheduleFrame });
+      let nextHookDoctorRequest = 0;
+      function requestHookDoctor(projectRoot, repair = false, recovering = false) {
+        if (!projectRoot || projectRoot !== activeProjectTab()?.project_root) return;
+        const current = hookDoctorModel.read()[projectRoot];
+        if (repair && hookRepairUnavailableReason(current)) return;
+        if (!recovering && current?.pending) return;
+        const requestId = ++nextHookDoctorRequest;
+        hookDoctorModel.update(state => ({ ...state, [projectRoot]: {
+          report: null, error: null, requestId, pending: true, repairRequested: repair,
+          lastRepairOutcome: repair ? "unknown" : current?.lastRepairOutcome ?? null,
+        } }));
+        const result = send({ kind: "get_hook_doctor", request_id: requestId, repair });
+        if (repair && result === "unavailable") hookDoctorModel.update(state => ({ ...state, [projectRoot]: {
+          ...state[projectRoot], pending: false,
+          error: "Repair could not be confirmed on this connection. Reconnect and refresh the audit; the repair will not be retried automatically.",
+        } }));
+      }
+      function applyHookDoctorEvent(event) {
+        const current = hookDoctorModel.read()[event.project_root];
+        if (!current?.pending || current.requestId !== event.request_id) return;
+        hookDoctorModel.update(state => ({ ...state, [event.project_root]: {
+          ...current, pending: false, report: event.report || null,
+          error: event.error || (event.report ? null : "Hook audit did not return a report."),
+          lastRepairOutcome: current.repairRequested
+            ? !event.error && event.report?.repair?.repaired === true ? "regenerated"
+              : !event.error && event.report?.repair?.repaired === false ? "no_changes" : "unknown"
+            : current.lastRepairOutcome,
+        } }));
+      }
+      function renderHookCenterPanels(state = hookDoctorModel.read()) {
+        purgeDetachedSettingsBodies();
+        for (const body of settingsWindowBodies) {
+          const panel = body.querySelector('[data-settings-panel="hooks"]');
+          if (!panel) continue;
+          const root = body.dataset.settingsProjectRoot || "";
+          renderHookCenterPanel(panel, {
+            projectRoot: root, state: state[root], available: Boolean(root && root === activeProjectTab()?.project_root),
+            onRefresh: () => requestHookDoctor(root), onRepair: () => requestHookDoctor(root, true),
+          });
+        }
+      }
+      hookDoctorModel.subscribeFrame(state => state, renderHookCenterPanels);
+      agentBackendsModel.subscribeFrame(state => state, state => {
+        renderAgentBackendsPanelInAllSettingsWindows(state);
+      });
+      // Autostart must disable before send and recover immediately. Other
+      // received snapshots only change presentation on the next shared frame.
+      let previousSystemSettingsState = systemSettingsModel.read();
+      systemSettingsModel.subscribe(state => state, state => {
+        const autostartChanged = Object.keys(state).some(key => key.startsWith("autostart")
+          && !Object.is(previousSystemSettingsState[key], state[key]));
+        previousSystemSettingsState = state;
+        if (autostartChanged) renderSystemPanelInAllSettingsWindows(state);
+      });
+      systemSettingsModel.subscribeFrame(state => state, state => {
+        renderSystemPanelInAllSettingsWindows(state, true);
+      });
+      let nextProfilesRequest = 0;
+      const issueSettingsModel = createUiStateStore({}, { scheduleFrame });
+      issueSettingsModel.subscribeFrame(state => {
+        const root = activeProjectTab()?.project_root;
+        return root ? state[root]?.profilesSaveToken : null;
+      }, token => {
+        const root = activeProjectTab()?.project_root;
+        if (!root || !token || issueSettingsModel.read()[root]?.profilesSaveToken !== token) return;
+        send({ kind: "agent_roster", action: { kind: "read" }, expected_revision: null });
+      });
+      const globalUpdateModel = createUiStateStore({ auto_apply_updates: null, auto_apply_updates_effective: false, loaded: false, drains: {} }, { scheduleFrame });
+      const renderedUpdateStatuses = new WeakMap();
+      function renderUpdateStatus(body, state) {
+        const panel = body.querySelector('[data-update-settings-status]');
+        if (!panel || !state.loaded) return;
+        const root = body.dataset.settingsProjectRoot || "";
+        const previous = renderedUpdateStatuses.get(panel);
+        if (previous && previous.auto_apply_updates === state.auto_apply_updates
+          && previous.auto_apply_updates_effective === state.auto_apply_updates_effective
+          && previous.drains[root] === state.drains[root]) return;
+        renderUpdateSettingsStatus(panel, { ...state, update_drain: state.drains[root] || null });
+        renderedUpdateStatuses.set(panel, state);
+      }
+      // Preserve synchronous control reconciliation, including same-value save errors.
+      globalUpdateModel.subscribe(state => state, state => {
+        purgeDetachedSettingsBodies();
+        for (const body of settingsWindowBodies) {
+          const toggle = body.querySelector('[aria-label="Auto-apply updates"]');
+          if (toggle) {
+            toggle.checked = state.auto_apply_updates_effective;
+            toggle.disabled = !state.loaded;
+          }
+        }
+      });
+      globalUpdateModel.subscribeFrame(state => state, state => {
+        purgeDetachedSettingsBodies();
+        for (const body of settingsWindowBodies) renderUpdateStatus(body, state);
+      });
+      function applyGlobalUpdateSettings(event) {
+        if (!event.status) {
+          globalUpdateModel.update(state => ({ ...state }));
+          return;
+        }
+        globalUpdateModel.update(state => ({ ...state, ...event.status, loaded: true,
+          drains: { ...state.drains, [event.project_root || ""]: event.status.update_drain },
+        }));
+      }
+      function projectSettingsSnapshot(body) {
+        const root = body.dataset.settingsProjectRoot || "";
+        return issueSettingsModel.read()[root] || {};
+      }
+      function renderProjectSettings(body) {
+        const root = body.dataset.settingsProjectRoot || "";
+        const current = projectSettingsSnapshot(body);
+        const project = { project_root: root, name: body.dataset.settingsProjectName };
+        const launchControls = [...body.querySelectorAll('[data-action="monitor-autonomous"], [data-action="monitor-toggle"]')];
+        for (const control of launchControls) {
+          control.checked = current.status?.[control.dataset.action === "monitor-autonomous" ? "autonomous_mode" : "enabled"] === true;
+          control.dataset.confirmed = String(control.checked);
+          control.disabled = !current.status;
+        }
+        const focusedLaunchControl = launchControls.find(control => control === document.activeElement);
+        const agentsPanel = body.querySelector("[data-settings-candidates]");
+        if (agentsPanel) renderCandidateSaveError(agentsPanel, current.profilesFailure);
+        if (agentsPanel && reconcileCandidateSave(agentsPanel, {
+          request_id: current.profilesRequestId, profiles: current.profiles,
+        })) body.querySelector('[data-settings-tab="issues"]')?.focus();
+        const dispatch = message => {
+          // Project WebSockets own mutation authority. Never replay this
+          // window's edit through a different active project's connection.
+          if (!root || activeProjectTab()?.project_root !== root) return;
+          if (message.kind === "issue_monitor_profiles_set") {
+            message.request_id = ++nextProfilesRequest;
+            const panel = body.querySelector("[data-settings-candidates]");
+            if (panel) {
+              panel.dataset.dirty = "true";
+              panel.dataset.saving = "true";
+              panel.dataset.pendingRequest = String(message.request_id);
+            }
+          }
+          send(message);
+        };
+        const availableMembers = rosterModel?.read().revision == null ? null : rosterModel.read().members;
+        for (const [section, render] of [["issues", renderIssuesSettingsPanel], ["agents", renderAgentsSettingsPanel]]) {
+          const panel = body.querySelector(section === "issues" ? "[data-settings-issues-controls]" : "[data-settings-candidates]");
+          // A field's focusout can flush here between a button's mousedown and click.
+          const editing = panel?.contains(document.activeElement)
+            && document.activeElement?.matches(section === "agents" ? "input, select, textarea, button" : "input:not([type=checkbox]), select, textarea");
+          if (editing) body.dataset.issuesRenderDeferred = "true";
+          if (panel && !editing && !(section === "agents" && panel.dataset.dirty === "true")) render(panel, {
+            project, status: current.status, profiles: current.profiles, choices: current.choices, send: dispatch, launchControls,
+            availableMembers,
+          });
+        }
+        focusedLaunchControl?.focus({ preventScroll: true });
+        body.settingsExplanations?.refresh();
+      }
+      function applyIssueSettingsStatus(status, projectRoot) {
+        if (!projectRoot) return;
+        globalUpdateModel.update(state => ({ ...state, drains: { ...state.drains, [projectRoot]: status.update_drain } }));
+        issueSettingsModel.update(state => ({ ...state, [projectRoot]: { ...state[projectRoot], status } }));
+      }
+      function applyIssueMonitorProfiles(event) {
+        const root = event.project_root;
+        if (!root) return;
+        const bound = Array.isArray(event.profiles) && event.profiles.every(profile => profile.agent_member_id);
+        issueSettingsModel.update(state => ({ ...state, [root]: {
+          ...state[root], profiles: event.profiles, choices: event.choices, profilesRequestId: event.request_id,
+          profilesSaveToken: event.request_id == null ? state[root]?.profilesSaveToken : JSON.stringify([root, event.request_id]),
+          rosterProfilesPending: bound ? false : state[root]?.rosterProfilesPending,
+        } }));
+      }
+      function refreshProfilesAfterRoster(roster) {
+        issueSettingsModel.update(state => ({ ...state, completedRoster: roster }));
+      }
+      issueSettingsModel.subscribe(state => state.completedRoster, roster => {
+        purgeDetachedSettingsBodies();
+        const root = activeProjectTab()?.project_root;
+        if (!root || ![...settingsWindowBodies].some(body => body.dataset.settingsProjectRoot === root)) return;
+        if (typeof roster?.project_key !== "string" || roster.project_key !== rosterModel?.read().project_key) return;
+        // This wire ACK follows the producer's committed migration, even
+        // when only profiles changed and the roster revision stayed equal.
+        issueSettingsModel.update(state => ({ ...state, [root]: { ...state[root], rosterProfilesReady: true, rosterProfilesPending: false } }));
+      });
+      function refreshUnboundProfiles() {
+        const root = activeProjectTab()?.project_root;
+        if (!root || ![...settingsWindowBodies].some(body => body.dataset.settingsProjectRoot === root)) return;
+        const current = issueSettingsModel.read()[root];
+        if (!current?.rosterProfilesReady || current.rosterProfilesPending
+          || Array.isArray(current.profiles) && current.profiles.every(profile => profile.agent_member_id)) return;
+        issueSettingsModel.update(state => ({ ...state, [root]: { ...state[root], rosterProfilesPending: true } }));
+        send({ kind: "get_issue_monitor_profiles" });
+      }
+      function applyIssueMonitorProfilesError(event) {
+        if (!event.project_root) return;
+        issueSettingsModel.update(state => ({ ...state, [event.project_root]: {
+          ...state[event.project_root], profilesFailure: event,
+        } }));
+      }
+      issueSettingsModel.subscribe(state => state, () => {
+        purgeDetachedSettingsBodies();
+        refreshUnboundProfiles();
+        for (const body of settingsWindowBodies) {
+          renderProjectSettings(body);
+        }
+      });
       const supportedAgentsModel = createUiStateStore({
         agents: null,
         autoUpdate: false,
+        autoUpdateDraft: null,
         maintenanceByAgent: {},
-      });
+      }, { scheduleFrame });
+      const renderedSupportedAgentPanels = new WeakMap();
 
       function supportedAgentPanelOptions() {
         const state = supportedAgentsModel.read();
         return {
-          autoUpdate: state.autoUpdate,
+          autoUpdate: state.autoUpdateDraft ?? state.autoUpdate,
           maintenanceByAgent: new Map(Object.entries(state.maintenanceByAgent)),
           send(message) {
             if (message.kind === "maintain_supported_agent") {
@@ -450,6 +1155,9 @@ export function createSettingsSurface({
                   },
                 },
               }));
+              renderSupportedAgentPanels();
+            } else if (message.kind === "set_agent_auto_update") {
+              supportedAgentsModel.update(current => ({ ...current, autoUpdateDraft: message.enabled === true }));
             }
             send(message);
           },
@@ -458,9 +1166,13 @@ export function createSettingsSurface({
 
       function renderSupportedAgentPanels() {
         purgeDetachedSettingsBodies();
+        const state = supportedAgentsModel.read();
         for (const body of settingsWindowBodies) {
           const panel = body.querySelector("[data-settings-panel='supported-agents']");
-          if (panel) renderSupportedAgentsPanel(panel, supportedAgentsModel.read().agents, supportedAgentPanelOptions());
+          if (panel && renderedSupportedAgentPanels.get(panel) !== state) {
+            renderSupportedAgentsPanel(panel, state.agents, supportedAgentPanelOptions());
+            renderedSupportedAgentPanels.set(panel, state);
+          }
         }
       }
 
@@ -478,6 +1190,7 @@ export function createSettingsSurface({
           return {
             agents: event.agents,
             autoUpdate: event.auto_update === true,
+            autoUpdateDraft: null,
             maintenanceByAgent,
           };
         });
@@ -486,17 +1199,77 @@ export function createSettingsSurface({
       function applySupportedAgentMaintenance(event) {
         supportedAgentsModel.update(state => ({
           ...state,
+          autoUpdateDraft: event.agent_id === "" && event.success === false ? null : state.autoUpdateDraft,
           maintenanceByAgent: { ...state.maintenanceByAgent, [event.agent_id]: event },
         }));
       }
 
-      supportedAgentsModel.subscribe(state => state, renderSupportedAgentPanels);
+      supportedAgentsModel.subscribeFrame(state => state, () => renderSupportedAgentPanels());
+      customAgentsModel.subscribeFrame(state => state, state => {
+        if (state !== renderedCustomAgentsState) renderSettingsAgentList(state);
+      });
+      rosterModel?.subscribeFrame(state => state, () => {
+        purgeDetachedSettingsBodies();
+        for (const body of settingsWindowBodies) renderProjectSettings(body);
+      });
 
       function requestSupportedAgentRefresh() {
         purgeDetachedSettingsBodies();
         if (settingsWindowBodies.size) send({ kind: "list_supported_agents" });
       }
-      let pendingAddFromPreset = null;
+
+      function requestSettingsSnapshots(recovering = false) {
+        if (activeProjectTab()?.project_root) {
+          send({ kind: "list_issue_monitor" });
+          send({ kind: "get_issue_monitor_profiles" });
+          send({ kind: "agent_roster", action: { kind: "read" }, expected_revision: null });
+        }
+        send({ kind: "list_supported_agents" });
+        send({ kind: "get_system_settings" });
+        send({ kind: "get_update_settings" });
+        send({ kind: "get_board_auth_status" });
+        const autostart = systemSettingsModel.read();
+        const shouldRequestAutostartStatus = recovering || (!autostart.autostartPending
+          && !autostart.autostartChecking);
+        if (shouldRequestAutostartStatus) {
+          systemSettingsModel.update(state => ({ ...state, autostartChecking: true,
+            autostartStatusMessage: "", autostartStatusKind: "",
+          }));
+          send({ kind: "get_autostart_status" });
+        }
+        const customAgents = customAgentsModel.read().catalog;
+        if (recovering || (!customAgents.loading && customAgents.agents.length === 0)) {
+          // Keep a known catalog and any unsaved environment editor while reads recover.
+          customAgentsModel.update(state => state.catalog.loading || state.catalog.agents.length > 0 ? state : ({ ...state,
+            catalog: { ...state.catalog, loading: true },
+          }));
+          send({ kind: "list_custom_agents" });
+        }
+        for (const agent of ["claudeCode", "codex"]) {
+          send({ kind: "list_agent_backends", agent });
+        }
+      }
+
+      function resyncHookDoctor() {
+        purgeDetachedSettingsBodies();
+        const root = activeProjectTab()?.project_root;
+        // Lost replies must recover after leaving the tab; never replay repair.
+        if (hookDoctorModel.read()[root]?.pending
+          || [...settingsWindowBodies].some(body => body.dataset.settingsProjectRoot === root && body.dataset.settingsSection === "hooks")) requestHookDoctor(root, false, true);
+        renderHookCenterPanels();
+      }
+
+      function resyncSettings() {
+        purgeDetachedSettingsBodies();
+        if (settingsWindowBodies.size) {
+          requestSettingsSnapshots(true);
+          renderSystemPanelInAllSettingsWindows();
+        } else {
+          // Works shares this global presentation setting without mounting Settings.
+          send({ kind: "get_system_settings" });
+        }
+        resyncHookDoctor();
+      }
       let editingCustomAgentId = null;
 
       function createDiv(className) {
@@ -507,7 +1280,10 @@ export function createSettingsSurface({
 
       function purgeDetachedSettingsBodies() {
         for (const body of Array.from(settingsWindowBodies)) {
-          if (!body.isConnected) settingsWindowBodies.delete(body);
+          if (!body.isConnected) {
+            body.settingsExplanations?.dispose();
+            settingsWindowBodies.delete(body);
+          }
         }
       }
 
@@ -520,8 +1296,16 @@ export function createSettingsSurface({
         // not accumulate references.
         purgeDetachedSettingsBodies();
         while (body.firstChild) body.removeChild(body.firstChild);
+        const project = activeProjectTab();
+        body.dataset.settingsSection = "system";
+        body.dataset.settingsWindowId = windowData.id;
+        body.dataset.surfaceOwner = windowData.surface_owner || "";
+        body.dataset.settingsProjectRoot = project?.project_root || "";
+        body.dataset.settingsProjectName = project?.name || project?.title || project?.project_root?.split(/[\\/]/).pop() || "No project";
 
         const root = createDiv("settings-root");
+        body.settingsExplanations?.dispose();
+        body.settingsExplanations = bindControlExplanations({ document, root, id: `settings-control-explanation-${windowData.id}` });
 
         const toolbar = document.createElement("header");
         toolbar.className = "settings-toolbar";
@@ -532,7 +1316,11 @@ export function createSettingsSurface({
         const tabs = document.createElement("nav");
         tabs.className = "settings-tabs";
         tabs.setAttribute("role", "tablist");
-        tabs.appendChild(buildSettingsTab("system", "System", true, windowData.id));
+        tabs.setAttribute("aria-orientation", "vertical");
+        tabs.setAttribute("aria-label", "Settings sections");
+        const appScope = createNode("span", "settings-label", "Application settings");
+        tabs.appendChild(appScope);
+        tabs.appendChild(buildSettingsTab("system", "System", false, windowData.id));
         tabs.appendChild(
           buildSettingsTab("supported-agents", "Supported Agents", false, windowData.id),
         );
@@ -558,9 +1346,13 @@ export function createSettingsSurface({
         tabs.appendChild(
           buildSettingsTab("usage", "Usage & Limits", false, windowData.id),
         );
+        tabs.appendChild(createNode("span", "settings-label", `Project settings · ${body.dataset.settingsProjectName}`));
+        tabs.appendChild(buildSettingsTab("issues", "Issues execution settings", false, windowData.id));
+        tabs.appendChild(buildSettingsTab("hooks", "Hook Center", false, windowData.id));
+        // PM settings are also project-owned; keep all project tabs together.
+        tabs.appendChild(tabs.querySelector('[data-settings-tab="project-manager"]'));
 
         toolbar.appendChild(heading);
-        toolbar.appendChild(tabs);
 
         const bodyEl = createDiv("settings-body");
 
@@ -569,6 +1361,29 @@ export function createSettingsSurface({
         panelSystem.setAttribute("role", "tabpanel");
         panelSystem.dataset.settingsPanel = "system";
         linkSettingsPanel(panelSystem, windowData.id, "system");
+        panelSystem.appendChild(createNode("h3", "settings-section-heading", "Application settings"));
+        const updateSection = createDiv("settings-section");
+        const updateLabel = createNode("label", "settings-checkbox-label");
+        const updateToggle = document.createElement("input");
+        updateToggle.type = "checkbox";
+        updateToggle.className = "settings-checkbox";
+        updateToggle.setAttribute("aria-label", "Auto-apply updates");
+        updateToggle.checked = globalUpdateModel.read().auto_apply_updates_effective;
+        updateToggle.disabled = !globalUpdateModel.read().loaded;
+        updateToggle.addEventListener("change", () => send({ kind: "set_auto_apply_updates", enabled: updateToggle.checked }));
+        updateLabel.appendChild(updateToggle);
+        updateLabel.appendChild(document.createTextNode("Auto-apply updates"));
+        updateSection.appendChild(updateLabel);
+        updateSection.appendChild(createNode("p", "settings-help", "Applies across all projects when at least one open project has Autonomous enabled. Updates wait until agents finish."));
+        const updateStatus = createDiv();
+        updateStatus.dataset.updateSettingsStatus = "";
+        updateStatus.setAttribute("role", "status");
+        updateSection.appendChild(updateStatus);
+        panelSystem.appendChild(updateSection);
+        const systemContent = createDiv();
+        systemContent.id = `${panelSystem.id}-content`;
+        systemContent.dataset.systemSettingsContent = "";
+        panelSystem.appendChild(systemContent);
 
         const panelSupportedAgents = document.createElement("section");
         panelSupportedAgents.className = "settings-panel hidden";
@@ -610,9 +1425,30 @@ export function createSettingsSurface({
         bodyEl.appendChild(panelAgents);
         bodyEl.appendChild(panelBackends);
         bodyEl.appendChild(panelUsage);
+        const panelIssues = document.createElement("section");
+        panelIssues.className = "settings-panel settings-issues-panel hidden";
+        panelIssues.setAttribute("role", "tabpanel");
+        panelIssues.dataset.settingsPanel = "issues";
+        linkSettingsPanel(panelIssues, windowData.id, "issues");
+        bodyEl.appendChild(panelIssues);
+        const panelHooks = document.createElement("section");
+        panelHooks.className = "settings-panel hidden";
+        panelHooks.setAttribute("role", "tabpanel");
+        panelHooks.dataset.settingsPanel = "hooks";
+        linkSettingsPanel(panelHooks, windowData.id, "hooks");
+        bodyEl.appendChild(panelHooks);
+        const controls = createDiv();
+        controls.dataset.settingsIssuesControls = "";
+        panelIssues.appendChild(controls);
+        const candidates = createDiv();
+        candidates.dataset.settingsCandidates = "";
+        panelIssues.appendChild(candidates);
 
+        const layout = createDiv("settings-layout");
+        layout.appendChild(tabs);
+        layout.appendChild(bodyEl);
         root.appendChild(toolbar);
-        root.appendChild(bodyEl);
+        root.appendChild(layout);
         body.appendChild(root);
 
         tabs.addEventListener("click", (e) => {
@@ -633,48 +1469,48 @@ export function createSettingsSurface({
           send({ kind: "focus_window", id: windowData.id });
         });
         settingsWindowBodies.add(body);
-
-        renderSystemPanel(panelSystem);
+        body.addEventListener("settings:section-changed", event => {
+          if (event.detail.section === "hooks") requestHookDoctor(body.dataset.settingsProjectRoot);
+        });
+        renderHookCenterPanels();
+        renderUpdateStatus(body, globalUpdateModel.read());
+        body.addEventListener("focusout", event => {
+          // activeElement can still be BODY until the next focusin fires.
+          const candidates = event.target.closest?.("[data-settings-candidates]");
+          if (candidates && event.relatedTarget?.closest?.("[data-settings-candidates]") === candidates) return;
+          queueMicrotask(() => {
+            if (body.dataset.issuesRenderDeferred === "true") {
+              delete body.dataset.issuesRenderDeferred;
+              renderProjectSettings(body);
+            }
+          });
+        });
+        renderProjectSettings(body);
+        requestSettingsSnapshots();
+        renderSystemPanel(systemContent);
         renderSupportedAgentsPanel(panelSupportedAgents, supportedAgentsModel.read().agents, supportedAgentPanelOptions());
-        send({ kind: "list_supported_agents" });
+        renderedSupportedAgentPanels.set(panelSupportedAgents, supportedAgentsModel.read());
         renderUsagePanel(panelUsage);
-        // Always request fresh system settings on open so the dropdown
-        // reflects the on-disk config, even if the user changed it from a
-        // different gwt instance.
-        send({ kind: "get_system_settings" });
-        // SPEC-2963: also fetch remote Board provider sign-in state.
-        send({ kind: "get_board_auth_status" });
-        send({ kind: "get_autostart_status" });
-
         renderSettingsAgentList();
-        if (!customAgentsState.loading && customAgentsState.agents.length === 0) {
-          customAgentsState.loading = true;
-          send({ kind: "list_custom_agents" });
-        }
-
         // SPEC-1921 2026-05-18 amendment / FR-099: hydrate the Agent
         // Backends panel for both built-in agents that support Backend
         // Override (Claude Code, Codex). The backend returns the redacted
         // list (api_key replaced with `***REDACTED***`).
         renderAgentBackendsPanel(panelBackends);
-        for (const agent of ["claudeCode", "codex"]) {
-          send({ kind: "list_agent_backends", agent });
-        }
 
         // Honour any pending settings:open dispatch (e.g. from the badge
         // click) by switching to the requested tab once the panel is mounted.
-        if (pendingSettingsTabTarget) {
-          switchSettingsTab(body, pendingSettingsTabTarget);
-          pendingSettingsTabTarget = null;
-        }
+        const target = pendingSettingsTabTargets.get(windowData.surface_owner || null);
+        switchSettingsTab(body, target || "system", Boolean(target));
+        pendingSettingsTabTargets.delete(windowData.surface_owner || null);
       }
 
-      let pendingSettingsTabTarget = null;
+      const pendingSettingsTabTargets = new Map();
 
       function renderIndexPanel(panel) {
         const activeProjectRoot = activeProjectTab()?.project_root || "";
         const status =
-          (activeProjectRoot && indexStatusByProjectRoot.get(activeProjectRoot)) || null;
+          getIndexStatus(activeProjectRoot);
         renderIndexSettingsPanel({
           panel,
           status,
@@ -692,7 +1528,7 @@ export function createSettingsSurface({
       // `Custom Agents` tab (T308 follow-up). Today the panel exposes a
       // read-only mirror that confirms FR-101 silent migration produced
       // the expected `[builtinAgents.claudeCode.backends.*]` rows.
-      function renderAgentBackendsPanel(panel) {
+      function renderAgentBackendsPanel(panel, state = agentBackendsModel.read()) {
         while (panel.firstChild) panel.removeChild(panel.firstChild);
 
         for (const agent of ["claudeCode", "codex"]) {
@@ -708,16 +1544,16 @@ export function createSettingsSurface({
           const list = createDiv("agent-backends-list");
           list.dataset.role = "agent-backends-list";
           list.dataset.agent = agent;
-          renderAgentBackendsList(list, agent);
+          renderAgentBackendsList(list, agent, state);
           section.appendChild(list);
 
           panel.appendChild(section);
         }
       }
 
-      function renderAgentBackendsList(container, agent) {
+      function renderAgentBackendsList(container, agent, state = agentBackendsModel.read()) {
         while (container.firstChild) container.removeChild(container.firstChild);
-        const profiles = agentBackendsState.backends[agent] || [];
+        const profiles = state.backends[agent] || [];
         if (profiles.length === 0) {
           const empty = document.createElement("p");
           empty.className = "settings-help";
@@ -745,7 +1581,7 @@ export function createSettingsSurface({
         }
       }
 
-      function renderAgentBackendsPanelInAllSettingsWindows() {
+      function renderAgentBackendsPanelInAllSettingsWindows(state = agentBackendsModel.read()) {
         for (const settingsBody of Array.from(settingsWindowBodies)) {
           if (!settingsBody.isConnected) {
             settingsWindowBodies.delete(settingsBody);
@@ -754,7 +1590,7 @@ export function createSettingsSurface({
           const panel = settingsBody.querySelector(
             "[data-settings-panel='agent-backends']",
           );
-          if (panel) renderAgentBackendsPanel(panel);
+          if (panel) renderAgentBackendsPanel(panel, state);
         }
       }
 
@@ -779,10 +1615,12 @@ export function createSettingsSurface({
 
       installSettingsOpenHandler({
         document,
+        send,
         settingsWindowBodies,
         focusOrSpawnPreset,
-        setPendingTarget: (target) => {
-          pendingSettingsTabTarget = target;
+        activeProjectTab,
+        setPendingTarget: (target, surfaceOwner) => {
+          pendingSettingsTabTargets.set(surfaceOwner, target);
         },
       });
 
@@ -856,7 +1694,75 @@ export function createSettingsSurface({
         return { teamId, channelId };
       }
 
-      function renderSystemPanel(panel) {
+      function syncAutostartCheckbox(autostartCheckbox, state = systemSettingsModel.read()) {
+        autostartCheckbox.checked = state.autostartEnabled === true;
+        autostartCheckbox.disabled = !state.autostartLoaded ||
+          state.autostartChecking === true || state.autostartPending === true;
+      }
+
+      function renderAutostartStatus(autostartStatus, state = systemSettingsModel.read()) {
+        if (state.autostartPending) {
+          autostartStatus.textContent = "Saving…";
+          autostartStatus.dataset.kind = "info";
+        } else if (state.autostartChecking) {
+          autostartStatus.textContent = "Checking login launch status…";
+          autostartStatus.dataset.kind = "info";
+        } else {
+          const message = state.autostartStatusMessage || "";
+          autostartStatus.textContent = !state.autostartLoaded && message
+            ? `Login launch status unavailable. ${message}`
+            : message;
+          if (state.autostartStatusKind) {
+            autostartStatus.dataset.kind = state.autostartStatusKind;
+          } else {
+            delete autostartStatus.dataset.kind;
+          }
+        }
+      }
+
+      function renderSystemPanel(panel, state = systemSettingsModel.read()) {
+        // Reads used for recovery must not destroy explicit-save drafts,
+        // including secrets that only exist in these input elements.
+        if (panel.querySelector(".board-config-form[data-dirty='true'], .board-oauth-port-form[data-dirty='true']")) {
+          const autostart = panel.querySelector("input[id$='-settings-system-autostart']");
+          if (autostart) {
+            syncAutostartCheckbox(autostart, state);
+          }
+          const autostartStatus = panel.querySelector("[data-role='autostart-settings-status']");
+          if (autostartStatus) renderAutostartStatus(autostartStatus, state);
+          renderSystemPanelStatus(panel, state);
+          return;
+        }
+        const previous = renderedSystemPanels.get(panel);
+        if (previous && ["boardProvider", "boardAuth", "boardAuthMessage", "boardConfig",
+          "autostartLoaded", "autostartMechanism", "autostartInstallPath"]
+          .every(key => Object.is(previous[key], state[key]))) {
+          // Scalar changes must not detach the next pointer target when a
+          // numeric input's focusout flushes the interaction guard.
+          const resource = state.agentResource;
+          const control = suffix => panel.querySelector(`[id$='-settings-${suffix}']`);
+          for (const [suffix, value] of [
+            ["system-language", state.language || "auto"],
+            ["works-preview-lines", state.worksPreviewLines],
+            ["system-agent-preset", resource.preset || "automatic"],
+            ["system-agent-priority", resource.priority || "below-normal"],
+            ["system-agent-cpu-limit", resource.cpuLimitPercent ?? ""],
+            ["system-agent-build-jobs", resource.buildJobs ?? ""],
+          ]) control(suffix).value = String(value);
+          control("works-preview-lines").disabled = !state.loaded;
+          control("system-codex-hooks").checked = state.codexTrustManagedHooks !== false;
+          control("system-agent-resource-enabled").checked = resource.enabled !== false;
+          for (const suffix of ["system-agent-preset", "system-agent-priority",
+            "system-agent-cpu-limit", "system-agent-build-jobs"]) {
+            control(suffix).disabled = resource.enabled === false;
+          }
+          panel.querySelector("[data-role='agent-resource-custom']").hidden = resource.preset !== "custom";
+          syncAutostartCheckbox(control("system-autostart"), state);
+          renderAutostartStatus(panel.querySelector("[data-role='autostart-settings-status']"), state);
+          renderSystemPanelStatus(panel, state);
+          renderedSystemPanels.set(panel, state);
+          return;
+        }
         while (panel.firstChild) panel.removeChild(panel.firstChild);
 
         const section = createDiv("settings-section");
@@ -880,13 +1786,12 @@ export function createSettingsSurface({
           option.textContent = opt.text;
           select.appendChild(option);
         }
-        select.value = systemSettingsState.language || "auto";
+        select.value = state.language || "auto";
         select.addEventListener("change", (e) => {
           const next = e.target.value;
-          systemSettingsState.language = next;
-          systemSettingsState.statusMessage = "Saving…";
-          systemSettingsState.statusKind = "info";
-          renderSystemPanelStatus(panel);
+          systemSettingsModel.update(state => ({ ...state, language: next,
+            statusMessage: "Saving…", statusKind: "info" }));
+          renderSystemPanelInAllSettingsWindows();
           send({ kind: "update_system_settings", language: next });
         });
         section.appendChild(select);
@@ -898,6 +1803,32 @@ export function createSettingsSurface({
           "Settings UI text and gwtd subcommands stay English.";
         section.appendChild(help);
 
+        const worksSection = createDiv("settings-section");
+        const worksLabel = createNode("label", "settings-label", "Works output lines");
+        worksLabel.setAttribute("for", "settings-works-preview-lines");
+        const worksLines = document.createElement("input");
+        worksLines.id = "settings-works-preview-lines";
+        worksLines.className = "settings-input";
+        worksLines.type = "number";
+        worksLines.setAttribute("min", "3"); worksLines.setAttribute("max", "10"); worksLines.setAttribute("step", "1");
+        worksLines.setAttribute("aria-label", "Works output lines");
+        worksLines.value = String(state.worksPreviewLines);
+        worksLines.disabled = !state.loaded;
+        worksLines.addEventListener("change", () => {
+          const next = Number(worksLines.value);
+          if (!worksLines.value.trim() || !Number.isInteger(next) || next < 3 || next > 10) {
+            systemSettingsModel.update(state => ({ ...state,
+              statusMessage: "Works output lines must be a whole number from 3 to 10.", statusKind: "error" }));
+            renderSystemPanelInAllSettingsWindows();
+            return;
+          }
+          systemSettingsModel.update(state => ({ ...state, statusMessage: "Saving…", statusKind: "info" }));
+          renderSystemPanelInAllSettingsWindows();
+          send({ kind: "update_system_settings", language: systemSettingsModel.read().language || "auto", works_preview_lines: next });
+        });
+        worksSection.append(worksLabel, worksLines, createNode("p", "settings-help",
+          "Show 3–10 lines of terminal output in Works and its read-only list. Default: 3. Applies across projects."));
+
         const trustSection = createDiv("settings-section");
         const trustLabel = document.createElement("label");
         trustLabel.className = "settings-checkbox-label";
@@ -907,16 +1838,15 @@ export function createSettingsSurface({
         trustCheckbox.type = "checkbox";
         trustCheckbox.className = "settings-checkbox";
         trustCheckbox.id = "settings-system-codex-hooks";
-        trustCheckbox.checked = systemSettingsState.codexTrustManagedHooks !== false;
+        trustCheckbox.checked = state.codexTrustManagedHooks !== false;
         trustCheckbox.addEventListener("change", (e) => {
           const next = e.target.checked === true;
-          systemSettingsState.codexTrustManagedHooks = next;
-          systemSettingsState.statusMessage = "Saving…";
-          systemSettingsState.statusKind = "info";
-          renderSystemPanelStatus(panel);
+          systemSettingsModel.update(state => ({ ...state, codexTrustManagedHooks: next,
+            statusMessage: "Saving…", statusKind: "info" }));
+          renderSystemPanelInAllSettingsWindows();
           send({
             kind: "update_system_settings",
-            language: systemSettingsState.language || "auto",
+            language: systemSettingsModel.read().language || "auto",
             codex_trust_managed_hooks: next,
           });
         });
@@ -937,23 +1867,23 @@ export function createSettingsSurface({
         // Every control sends the complete policy object so the backend can
         // validate it as a unit and echo the authoritative result.
         const resourceSection = createDiv("settings-section");
-        const agentResource = systemSettingsState.agentResource;
+        const agentResource = state.agentResource;
         const resourceEnabled = agentResource.enabled !== false;
-        const sendAgentResourceUpdate = () => {
-          systemSettingsState.statusMessage = "Saving…";
-          systemSettingsState.statusKind = "info";
-          renderSystemPanelStatus(panel);
+        const sendAgentResourceUpdate = patch => {
+          systemSettingsModel.update(state => ({ ...state,
+            agentResource: { ...state.agentResource, ...patch },
+            statusMessage: "Saving…", statusKind: "info" }));
+          renderSystemPanelInAllSettingsWindows();
           send({
             kind: "update_system_settings",
-            language: systemSettingsState.language || "auto",
+            language: systemSettingsModel.read().language || "auto",
             agent_resource: agentResourceWirePayload(),
           });
         };
         const rejectAgentResourceInput = (message, input, previous) => {
           input.value = Number.isInteger(previous) ? String(previous) : "";
-          systemSettingsState.statusMessage = message;
-          systemSettingsState.statusKind = "error";
-          renderSystemPanelStatus(panel);
+          systemSettingsModel.update(state => ({ ...state, statusMessage: message, statusKind: "error" }));
+          renderSystemPanelInAllSettingsWindows();
         };
 
         const resourceLabel = document.createElement("label");
@@ -965,8 +1895,7 @@ export function createSettingsSurface({
         resourceCheckbox.id = "settings-system-agent-resource-enabled";
         resourceCheckbox.checked = resourceEnabled;
         resourceCheckbox.addEventListener("change", (e) => {
-          systemSettingsState.agentResource.enabled = e.target.checked === true;
-          sendAgentResourceUpdate();
+          sendAgentResourceUpdate({ enabled: e.target.checked === true });
         });
         const resourceText = document.createElement("span");
         resourceText.textContent = "Isolate agent process trees";
@@ -1006,8 +1935,7 @@ export function createSettingsSurface({
         presetSelect.value = agentResource.preset || "automatic";
         presetSelect.disabled = !resourceEnabled;
         presetSelect.addEventListener("change", (e) => {
-          systemSettingsState.agentResource.preset = e.target.value;
-          sendAgentResourceUpdate();
+          sendAgentResourceUpdate({ preset: e.target.value });
         });
         resourceSection.appendChild(presetSelect);
 
@@ -1044,8 +1972,7 @@ export function createSettingsSurface({
         prioritySelect.value = agentResource.priority || "below-normal";
         prioritySelect.disabled = !resourceEnabled;
         prioritySelect.addEventListener("change", (e) => {
-          systemSettingsState.agentResource.priority = e.target.value;
-          sendAgentResourceUpdate();
+          sendAgentResourceUpdate({ priority: e.target.value });
         });
         customSection.appendChild(prioritySelect);
 
@@ -1072,12 +1999,11 @@ export function createSettingsSurface({
             rejectAgentResourceInput(
               "CPU limit must be a whole number between 1 and 100, or empty for automatic.",
               e.target,
-              systemSettingsState.agentResource.cpuLimitPercent,
+              systemSettingsModel.read().agentResource.cpuLimitPercent,
             );
             return;
           }
-          systemSettingsState.agentResource.cpuLimitPercent = next;
-          sendAgentResourceUpdate();
+          sendAgentResourceUpdate({ cpuLimitPercent: next });
         });
         customSection.appendChild(cpuInput);
 
@@ -1103,12 +2029,11 @@ export function createSettingsSurface({
             rejectAgentResourceInput(
               "Build parallelism must be a whole number of at least 1, or empty for automatic.",
               e.target,
-              systemSettingsState.agentResource.buildJobs,
+              systemSettingsModel.read().agentResource.buildJobs,
             );
             return;
           }
-          systemSettingsState.agentResource.buildJobs = next;
-          sendAgentResourceUpdate();
+          sendAgentResourceUpdate({ buildJobs: next });
         });
         customSection.appendChild(jobsInput);
 
@@ -1146,19 +2071,18 @@ export function createSettingsSurface({
           option.textContent = opt.text;
           boardSelect.appendChild(option);
         }
-        boardSelect.value = systemSettingsState.boardProvider || "local";
+        boardSelect.value = state.boardProvider || "local";
         boardSelect.addEventListener("change", (e) => {
           const next = e.target.value;
-          systemSettingsState.boardProvider = next;
-          systemSettingsState.statusMessage = "Saving…";
-          systemSettingsState.statusKind = "info";
-          renderSystemPanelStatus(panel);
+          for (const form of panel.querySelectorAll("[data-dirty]")) delete form.dataset.dirty;
+          systemSettingsModel.update(state => ({ ...state, boardProvider: next,
+            statusMessage: "Saving…", statusKind: "info" }));
+          renderSystemPanelInAllSettingsWindows();
           send({
             kind: "update_system_settings",
-            language: systemSettingsState.language || "auto",
+            language: systemSettingsModel.read().language || "auto",
             board_provider: next,
           });
-          renderSystemPanelInAllSettingsWindows();
         });
         boardSection.appendChild(boardSelect);
 
@@ -1171,14 +2095,15 @@ export function createSettingsSurface({
 
         // SPEC-2963 FR-011/FR-012: sign-in affordance + auth status for the
         // selected remote provider. Local needs no sign-in.
-        const selectedProvider = systemSettingsState.boardProvider || "local";
+        const selectedProvider = state.boardProvider || "local";
         if (selectedProvider === "slack" || selectedProvider === "teams") {
           // SPEC-2963 FR-006: provider config form. Non-secret fields persist to
           // config.toml; the client secret is routed to the secure credential
           // store and never echoed back (placeholder shows "configured").
-          const cfg = systemSettingsState.boardConfig || {};
+          const cfg = state.boardConfig || {};
           const configForm = createDiv("settings-section board-config-form");
           configForm.dataset.provider = selectedProvider;
+          configForm.addEventListener("input", () => { configForm.dataset.dirty = "true"; });
 
           const makeField = (id, labelText, value, opts = {}) => {
             const wrap = createDiv("settings-field");
@@ -1294,10 +2219,10 @@ export function createSettingsSurface({
                   !parsedTeamsChannel.teamId ||
                   !parsedTeamsChannel.channelId
                 ) {
-                  systemSettingsState.statusMessage =
-                    "Paste a valid Teams channel link with groupId and /channel/...";
-                  systemSettingsState.statusKind = "error";
-                  renderSystemPanelStatus(panel);
+                  systemSettingsModel.update(state => ({ ...state,
+                    statusMessage: "Paste a valid Teams channel link with groupId and /channel/...",
+                    statusKind: "error" }));
+                  renderSystemPanelInAllSettingsWindows();
                   return;
                 }
                 nextTeamsDefaultChannel = composeTeamsDefaultChannel(
@@ -1305,6 +2230,7 @@ export function createSettingsSurface({
                   parsedTeamsChannel.channelId,
                 );
               }
+              delete configForm.dataset.dirty;
               send({
                 kind: "update_board_provider_config",
                 provider: selectedProvider,
@@ -1329,6 +2255,7 @@ export function createSettingsSurface({
                 payload.client_secret = secretInput.value;
               }
             }
+            delete configForm.dataset.dirty;
             send(payload);
           });
           configForm.appendChild(saveBtn);
@@ -1369,12 +2296,14 @@ export function createSettingsSurface({
           };
           renderRedirectHint();
           portInput.addEventListener("input", renderRedirectHint);
+          portInput.addEventListener("input", () => { oauthForm.dataset.dirty = "true"; });
           oauthForm.appendChild(redirectHint);
 
           const savePortBtn = createNode("button", "wizard-button", "Save port");
           savePortBtn.type = "button";
           savePortBtn.addEventListener("click", () => {
             const next = Number(portInput.value);
+            delete oauthForm.dataset.dirty;
             send({
               kind: "update_board_oauth_port",
               port: Number.isFinite(next) && next > 0 ? Math.floor(next) : 0,
@@ -1383,7 +2312,7 @@ export function createSettingsSurface({
           oauthForm.appendChild(savePortBtn);
           boardSection.appendChild(oauthForm);
 
-          const auth = systemSettingsState.boardAuth || { slack: false, teams: false };
+          const auth = state.boardAuth || { slack: false, teams: false };
           const signedIn = auth[selectedProvider] === true;
           const authRow = createDiv("settings-section board-auth-row");
           const statusText = createNode(
@@ -1424,9 +2353,9 @@ export function createSettingsSurface({
           authRow.appendChild(refreshBtn);
           boardSection.appendChild(authRow);
 
-          if (systemSettingsState.boardAuthMessage) {
+          if (state.boardAuthMessage) {
             boardSection.appendChild(
-              createNode("p", "settings-help", systemSettingsState.boardAuthMessage),
+              createNode("p", "settings-help", state.boardAuthMessage),
             );
           }
         }
@@ -1440,17 +2369,14 @@ export function createSettingsSurface({
         autostartCheckbox.type = "checkbox";
         autostartCheckbox.className = "settings-checkbox";
         autostartCheckbox.id = "settings-system-autostart";
-        autostartCheckbox.checked = systemSettingsState.autostartEnabled === true;
-        autostartCheckbox.disabled = systemSettingsState.autostartPending === true;
+        syncAutostartCheckbox(autostartCheckbox, state);
         autostartCheckbox.addEventListener("change", (e) => {
           const next = e.target.checked === true;
-          systemSettingsState.autostartPreviousEnabled =
-            systemSettingsState.autostartEnabled === true;
-          systemSettingsState.autostartEnabled = next;
-          systemSettingsState.autostartPending = true;
-          systemSettingsState.statusMessage = "Saving…";
-          systemSettingsState.statusKind = "info";
-          renderSystemPanelInAllSettingsWindows();
+          systemSettingsModel.update(state => ({ ...state,
+            autostartPreviousEnabled: state.autostartEnabled === true,
+            autostartEnabled: next, autostartPending: true,
+            autostartStatusMessage: "Saving…", autostartStatusKind: "info",
+          }));
           send({ kind: "update_autostart", enabled: next });
         });
 
@@ -1466,58 +2392,96 @@ export function createSettingsSurface({
           "Starts GWT in the menu bar when you log in. The browser does not open automatically.";
         autostartSection.appendChild(autostartHelp);
 
-        if (systemSettingsState.autostartLoaded) {
+        if (state.autostartLoaded) {
           const autostartDetail = document.createElement("p");
           autostartDetail.className = "settings-help";
-          const mechanism = systemSettingsState.autostartMechanism || "Unknown";
-          const installPath = systemSettingsState.autostartInstallPath || "";
+          const mechanism = state.autostartMechanism || "Unknown";
+          const installPath = state.autostartInstallPath || "";
           autostartDetail.textContent = installPath
             ? `Autostart: ${mechanism} · ${installPath}`
             : `Autostart: ${mechanism}`;
           autostartSection.appendChild(autostartDetail);
         }
 
+        const autostartStatus = document.createElement("p");
+        autostartStatus.className = "settings-status";
+        autostartStatus.dataset.role = "autostart-settings-status";
+        autostartStatus.setAttribute("role", "status");
+        autostartStatus.setAttribute("aria-live", "polite");
+        renderAutostartStatus(autostartStatus, state);
+        autostartSection.appendChild(autostartStatus);
+
         const status = document.createElement("p");
         status.className = "settings-status";
         status.dataset.role = "system-settings-status";
-        autostartSection.appendChild(status);
 
         panel.appendChild(section);
+        panel.appendChild(worksSection);
         panel.appendChild(trustSection);
         panel.appendChild(resourceSection);
         panel.appendChild(boardSection);
         panel.appendChild(autostartSection);
+        panel.appendChild(status);
         scopeSettingsControlIds(panel);
-        renderSystemPanelStatus(panel);
+        renderSystemPanelStatus(panel, state);
+        renderedSystemPanels.set(panel, state);
       }
 
-      function renderSystemPanelStatus(panel) {
+      function renderSystemPanelStatus(panel, state = systemSettingsModel.read()) {
         const status = panel.querySelector(
           "[data-role='system-settings-status']",
         );
         if (!status) return;
-        status.textContent = systemSettingsState.statusMessage || "";
-        if (systemSettingsState.statusKind) {
-          status.dataset.kind = systemSettingsState.statusKind;
+        status.textContent = state.statusMessage || "";
+        if (state.statusKind) {
+          status.dataset.kind = state.statusKind;
         } else {
           delete status.dataset.kind;
         }
       }
 
-      function renderSystemPanelInAllSettingsWindows() {
+      function renderSystemPanelInAllSettingsWindows(state = systemSettingsModel.read(), skipAlreadyRendered = false) {
+        // State commits immediately; only destructive DOM swaps wait for a
+        // native select/input interaction to finish. Flush reads the latest version.
+        let deferred;
         for (const body of Array.from(settingsWindowBodies)) {
           if (!body.isConnected) {
             settingsWindowBodies.delete(body);
             continue;
           }
-          const panel = body.querySelector(
-            "[data-settings-panel='system']",
-          );
-          if (panel) renderSystemPanel(panel);
+          const panel = body.querySelector("[data-system-settings-content]");
+          if (panel && (!skipAlreadyRendered || renderedSystemPanels.get(panel) !== state)) {
+            deferred ??= systemSettingsInteractionGuard.defer(true);
+            if (deferred) renderSystemPanelStatus(panel, state);
+            else renderSystemPanel(panel, state);
+          }
         }
       }
 
-      function renderSettingsAgentList() {
+      function renderCustomAgentStatus(scroll, state) {
+        let section = scroll.querySelector('[data-role="custom-agent-status"]');
+        if (!state.statusMessage) {
+          section?.remove();
+          return;
+        }
+        if (!section) {
+          section = createDiv("mock-section");
+          section.dataset.role = "custom-agent-status";
+          const label = createDiv("mock-label");
+          label.textContent = "Status";
+          section.appendChild(label);
+          const row = createDiv("mock-row");
+          row.appendChild(document.createElement("span"));
+          section.appendChild(row);
+          scroll.insertBefore(section, scroll.children[1] || null);
+        }
+        section.querySelector(".mock-label").style.color = state.statusKind === "error"
+          ? "var(--color-state-blocked)" : state.statusKind === "success"
+            ? "var(--color-state-success)" : "var(--color-text-muted)";
+        section.querySelector("span").textContent = state.statusMessage;
+      }
+
+      function renderSettingsAgentList(state = customAgentsModel.read()) {
         for (const body of Array.from(settingsWindowBodies)) {
           if (!body.isConnected) {
             settingsWindowBodies.delete(body);
@@ -1525,6 +2489,13 @@ export function createSettingsSurface({
           }
           const scroll = body.querySelector("[data-role='settings-scroll']");
           if (!scroll) continue;
+          const editor = scroll.querySelector('[data-role="custom-agent-env-editor"]');
+          if (editor?.dataset.agentId === editingCustomAgentId &&
+              state.catalog.agents.some(agent => agent.id === editingCustomAgentId)) {
+            // Keep the live draft and focus while the canonical catalog advances.
+            renderCustomAgentStatus(scroll, state);
+            continue;
+          }
           while (scroll.firstChild) scroll.removeChild(scroll.firstChild);
 
           const addBtn = document.createElement("button");
@@ -1550,27 +2521,9 @@ export function createSettingsSurface({
             );
           });
           scroll.appendChild(addBtn);
+          renderCustomAgentStatus(scroll, state);
 
-          if (customAgentsState.statusMessage) {
-            const section = createDiv("mock-section");
-            const label = createDiv("mock-label");
-            label.textContent = "Status";
-            label.style.color =
-              customAgentsState.statusKind === "error"
-                ? "#ff6b6b"
-                : customAgentsState.statusKind === "success"
-                  ? "#7abf7a"
-                  : "#999";
-            section.appendChild(label);
-            const row = createDiv("mock-row");
-            const text = document.createElement("span");
-            text.textContent = customAgentsState.statusMessage;
-            row.appendChild(text);
-            section.appendChild(row);
-            scroll.appendChild(section);
-          }
-
-          if (customAgentsState.loading && customAgentsState.agents.length === 0) {
+          if (state.catalog.loading && state.catalog.agents.length === 0) {
             const section = createDiv("mock-section");
             const row = createDiv("mock-row");
             const text = document.createElement("span");
@@ -1581,7 +2534,7 @@ export function createSettingsSurface({
             continue;
           }
 
-          if (customAgentsState.agents.length === 0) {
+          if (state.catalog.agents.length === 0) {
             const section = createDiv("mock-section");
             const row = createDiv("mock-row");
             const text = document.createElement("span");
@@ -1592,7 +2545,7 @@ export function createSettingsSurface({
             continue;
           }
 
-          for (const agent of customAgentsState.agents) {
+          for (const agent of state.catalog.agents) {
             const section = createDiv("mock-section");
             const label = createDiv("mock-label");
             label.textContent = agent.display_name || agent.id;
@@ -1631,128 +2584,125 @@ export function createSettingsSurface({
             row.appendChild(delBtn);
             section.appendChild(row);
             if (editingCustomAgentId === agent.id) {
-              section.appendChild(
-                renderCustomAgentEnvEditor({
-                  document,
-                  agent,
-                  onSave: (updatedAgent) => {
-                    editingCustomAgentId = null;
-                    setSettingsStatus("Saving custom agent…", "info");
-                    send({ kind: "update_custom_agent", agent: updatedAgent });
-                  },
-                  onCancel: () => {
-                    editingCustomAgentId = null;
+              const editor = renderCustomAgentEnvEditor({
+                document,
+                agent,
+                onSave: (draftAgent) => {
+                  const currentAgent = customAgentsModel.read().catalog.agents.find(entry => entry.id === draftAgent.id);
+                  editingCustomAgentId = null;
+                  if (!currentAgent) {
+                    setSettingsStatus("Custom agent is no longer available.", "error");
                     renderSettingsAgentList();
-                  },
-                }),
-              );
+                    return;
+                  }
+                  const updatedAgent = { ...currentAgent, env: draftAgent.env };
+                  setSettingsStatus("Saving custom agent…", "info");
+                  renderSettingsAgentList();
+                  send({ kind: "update_custom_agent", agent: updatedAgent });
+                },
+                onCancel: () => {
+                  editingCustomAgentId = null;
+                  renderSettingsAgentList();
+                },
+              });
+              editor.dataset.agentId = agent.id;
+              section.appendChild(editor);
             }
             scroll.appendChild(section);
           }
         }
+        // Local edits can render this snapshot before its scheduled frame.
+        renderedCustomAgentsState = state;
       }
 
-      function startAddClaudeCodeOpenaiCompatFlow() {
-        const baseUrl = window.prompt(
-          "Upstream base_url (http:// or https://)\n\nExample: http://192.168.100.166:32768",
-          "http://",
-        );
-        if (!baseUrl) return;
-        const apiKey = window.prompt(
-          "API key (forwarded as Bearer on /v1/models probe and ANTHROPIC_API_KEY at launch):",
-        );
-        if (!apiKey) return;
-        setSettingsStatus("Probing /v1/models…", "info");
-        pendingAddFromPreset = { baseUrl, apiKey };
-        send({ kind: "test_backend_connection", base_url: baseUrl, api_key: apiKey });
-      }
 
       function setSettingsStatus(message, kind) {
-        customAgentsState.statusMessage = message;
-        customAgentsState.statusKind = kind;
-        renderSettingsAgentList();
+        customAgentsModel.update(state => ({
+          ...state, statusMessage: message, statusKind: kind,
+        }));
       }
 
-      function completeAddFromPreset(discoveredModels) {
-        if (!pendingAddFromPreset) return;
-        if (!discoveredModels || discoveredModels.length === 0) {
-          setSettingsStatus("Upstream /v1/models returned no entries.", "error");
-          pendingAddFromPreset = null;
-          return;
+      function applyAgentBackendsReceiveEvent(event) {
+        const key = event.agent;
+        if (event.kind === "agent_backend_list" && key) {
+          agentBackendsModel.update(state => ({ ...state,
+            backends: { ...state.backends, [key]: event.backends || [] }, loadingAgent: null,
+          }));
+        } else if (event.kind === "agent_backend_saved" && key && event.profile) {
+          agentBackendsModel.update(state => {
+            const profiles = [...(state.backends[key] || [])];
+            const index = profiles.findIndex(profile => profile.id === event.profile.id);
+            if (index >= 0) profiles[index] = event.profile;
+            else profiles.push(event.profile);
+            return { ...state, backends: { ...state.backends, [key]: profiles } };
+          });
+          setSettingsStatus(`Saved backend "${event.profile.id}" for ${key}.`, "success");
+        } else if (event.kind === "agent_backend_deleted" && key && event.id) {
+          agentBackendsModel.update(state => ({ ...state, backends: { ...state.backends,
+            [key]: (state.backends[key] || []).filter(profile => profile.id !== event.id),
+          } }));
+          setSettingsStatus(`Deleted backend "${event.id}" for ${key}.`, "success");
+        } else if (event.kind === "agent_backend_error") {
+          setSettingsStatus(event.message || "Agent backend error.", "error");
         }
-        const modelList = discoveredModels.join("\n");
-        const model = window.prompt(
-          `Discovered ${discoveredModels.length} model(s). Choose default_model (copy one ID):\n\n${modelList}`,
-          discoveredModels[0],
-        );
-        if (!model) {
-          pendingAddFromPreset = null;
-          setSettingsStatus("Cancelled.", "info");
-          return;
-        }
-        const id = window.prompt("Custom agent id (alphanumeric + `-`):", "claude-code-openai");
-        if (!id) {
-          pendingAddFromPreset = null;
-          setSettingsStatus("Cancelled.", "info");
-          return;
-        }
-        const displayName = window.prompt("Display name:", "Claude Code (OpenAI-compat)");
-        if (!displayName) {
-          pendingAddFromPreset = null;
-          setSettingsStatus("Cancelled.", "info");
-          return;
-        }
-        setSettingsStatus("Saving preset…", "info");
-        send({
-          kind: "add_custom_agent_from_preset",
-          input: {
-            id,
-            display_name: displayName,
-            base_url: pendingAddFromPreset.baseUrl,
-            api_key: pendingAddFromPreset.apiKey,
-            default_model: model,
-          },
-        });
-        pendingAddFromPreset = null;
       }
 
-
-      // SPEC-3064 Phase 3 (E4): receive() delegates for the two settings
-      // cases whose bodies reassign module-level state
-      // (editingCustomAgentId / pendingAddFromPreset) and therefore cannot
-      // stay inline in app.js once that state lives here.
-      function applyCustomAgentDeleted(event) {
-        customAgentsState.agents = customAgentsState.agents.filter(
-          (a) => a.id !== event.agent_id,
-        );
-        if (editingCustomAgentId === event.agent_id) {
+      function applyCustomAgentsReceiveEvent(event) {
+        if (event.kind === "custom_agent_deleted" && editingCustomAgentId === event.agent_id) {
           editingCustomAgentId = null;
         }
-        setSettingsStatus(`Deleted custom agent "${event.agent_id}".`, "success");
-      }
-
-      function applyCustomAgentError(event) {
-        customAgentsState.loading = false;
-        pendingAddFromPreset = null;
-        setSettingsStatus(
-          `Error [${event.code}]: ${event.message}`,
-          "error",
-        );
+        customAgentsModel.update(state => {
+          switch (event.kind) {
+            case "custom_agent_list":
+              return { ...state, catalog: { agents: event.agents || [], loading: false, loaded: true } };
+            case "custom_agent_saved": {
+              const agents = [...state.catalog.agents];
+              if (event.agent) {
+                const index = agents.findIndex(agent => agent.id === event.agent.id);
+                if (index >= 0) agents[index] = event.agent;
+                else agents.push(event.agent);
+              }
+              return { ...state, catalog: { ...state.catalog, agents, loading: false },
+                statusMessage: `Saved custom agent "${event.agent ? event.agent.id : "?"}".`, statusKind: "success" };
+            }
+            case "custom_agent_deleted":
+              return { ...state, catalog: { ...state.catalog,
+                  agents: state.catalog.agents.filter(agent => agent.id !== event.agent_id) },
+                statusMessage: `Deleted custom agent "${event.agent_id}".`, statusKind: "success" };
+            case "custom_agent_error":
+              return { ...state, catalog: { ...state.catalog, loading: false, loaded: true },
+                statusMessage: `Error [${event.code}]: ${event.message}`, statusKind: "error" };
+            case "backend_connection_result":
+              return { ...state, statusMessage: `/v1/models returned ${event.models.length} model(s).`, statusKind: "success" };
+            default: return state;
+          }
+        });
       }
 
       return {
-        customAgentsState,
-        agentBackendsState,
-        systemSettingsState,
+        hookDoctorModel,
+        applyHookDoctorEvent,
+        applyGlobalUpdateSettings,
+        applyIssueSettingsStatus,
+        applyIssueMonitorProfiles,
+        refreshProfilesAfterRoster,
+        applyIssueMonitorProfilesError,
+        customAgentsModel,
+        supportedAgentsModel,
+        agentBackendsModel,
+        applyAgentBackendsReceiveEvent,
+        systemSettingsModel,
         systemSettingsInteractionGuard,
-        applyAgentResourceSnapshot,
+        applySystemSettingsEvent,
+        applyBoardAuthStatus,
         applyAutostartStatus,
         applyAutostartError,
-        applyCustomAgentDeleted,
-        applyCustomAgentError,
+        applyCustomAgentsReceiveEvent,
         applySupportedAgentList,
         applySupportedAgentMaintenance,
         requestSupportedAgentRefresh,
+        resyncHookDoctor,
+        resyncSettings,
         renderSettingsWindow,
         renderSettingsAgentList,
         renderAgentBackendsPanel,
@@ -1761,6 +2711,5 @@ export function createSettingsSurface({
         renderIndexPanelInAllSettingsWindows,
         requestFullIndexStatusRefresh,
         setSettingsStatus,
-        completeAddFromPreset,
       };
 }

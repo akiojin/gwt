@@ -157,6 +157,9 @@ pub(crate) struct IpcListener {
 impl IpcListener {
     /// Bind the daemon transport at `bind`.
     pub(crate) fn bind(bind: &Path) -> io::Result<Self> {
+        // Unit-test fixtures also reach bind indirectly through spawn_server.
+        #[cfg(test)]
+        gwt_core::test_support::checked_socket_path(bind);
         #[cfg(unix)]
         {
             Ok(Self {
@@ -397,7 +400,7 @@ mod tests {
     /// the named-pipe path; on Unix it is the historical socket path.
     #[tokio::test]
     async fn listener_and_client_round_trip_a_line_on_this_platform() {
-        let temp = tempfile::TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let bind = bind_for(&temp, "feedfacecafebeef");
         prepare_bind_parent(&bind).expect("prepare parent");
         cleanup_stale_bind(&bind);
@@ -406,7 +409,8 @@ mod tests {
             "nothing may be served before bind"
         );
 
-        let mut listener = IpcListener::bind(&bind).expect("bind");
+        let mut listener =
+            IpcListener::bind(gwt_core::test_support::checked_socket_path(&bind)).expect("bind");
         let server = tokio::spawn(async move {
             let stream = listener.accept().await.expect("accept");
             let (read_half, mut write_half) = stream.into_split();
@@ -450,12 +454,13 @@ mod tests {
     /// of silently sharing the transport with the first one.
     #[tokio::test]
     async fn second_bind_on_the_same_address_is_rejected() {
-        let temp = tempfile::TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let bind = bind_for(&temp, "feedfacecafebeef");
         prepare_bind_parent(&bind).expect("prepare parent");
-        let _first = IpcListener::bind(&bind).expect("first bind");
+        let _first = IpcListener::bind(gwt_core::test_support::checked_socket_path(&bind))
+            .expect("first bind");
         assert!(
-            IpcListener::bind(&bind).is_err(),
+            IpcListener::bind(gwt_core::test_support::checked_socket_path(&bind)).is_err(),
             "second bind must be rejected while the first listener is alive"
         );
     }
@@ -464,7 +469,7 @@ mod tests {
     /// an error rather than hang, so `daemon.status` can report `failed:`.
     #[tokio::test]
     async fn connect_to_an_unbound_address_fails() {
-        let temp = tempfile::TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let bind = bind_for(&temp, "does-not-exist");
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(5),

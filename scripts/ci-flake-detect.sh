@@ -16,10 +16,11 @@
 #
 #   GWT_FLAKE_TARGETS      space-separated `<crate>|test|<name>` / `<crate>|lib|`
 #                          tokens naming the cargo test targets to exercise
-#   GWT_FLAKE_BASE_SHA     PR / merge-group base for changed-file test selection
+#   GWT_FLAKE_BASE_SHA     PR / merge-group / push base for changed-file selection
 #                          (unset keeps full targets for standalone use)
+#   GWT_FLAKE_HEAD_SHA     Owner source head (defaults to HEAD for local callers)
 #   GWT_FLAKE_RUNS         integration run ceiling (default 20); libraries use 2
-#   GWT_FLAKE_BUDGET_SECS  test execution budget, excluding compile (default 600)
+#   GWT_FLAKE_BUDGET_SECS  total detector budget, including build/list (default 600)
 #   GWT_FLAKE_MIN_FREE_MB  stop repeating below this much free disk (default 2048)
 #   GWT_FLAKE_LOG_DIR      where per-run logs go (default: a temp dir)
 #
@@ -32,9 +33,10 @@
 #   * Issue #5171 / SPEC #5170: libraries stop at the minimum two runs needed
 #     to compare outcomes. Warm `cargo test -p gwt --lib` takes 381s, so even
 #     those two runs exceed 600s; the comparison guarantee takes precedence.
-#     Integration targets keep a ceiling of 20, reduced by the 600s execution
-#     budget shared across targets. Compile is excluded. The budget never
-#     increases a target's ceiling, and the log states the actual run count.
+#     Integration targets keep a ceiling of 20, reduced by the remaining
+#     detector budget shared across targets. Build and listing consume that
+#     budget too. The budget never increases a target's ceiling, and the log
+#     states the actual run count and any mandatory-comparison overrun.
 #   * Time is not the only budget. On 2026-09-21 a crate-scoped run of PR #4575
 #     caught two genuine flakes (runs 4 and 6) and then filled the runner's
 #     disk; the step summary write failed with "No space left on device", so
@@ -48,6 +50,7 @@
 # tests compete with each other for the host.
 
 set -uo pipefail
+test_started=$SECONDS
 
 targets="${GWT_FLAKE_TARGETS:-}"
 max_runs="${GWT_FLAKE_RUNS:-20}"
@@ -84,6 +87,7 @@ selector_for() {
 select_changed_tests() {
   python3 - "$1" "$2" "$GWT_FLAKE_BASE_SHA" <<'PY'
 # changed-test-selection-begin
+import os
 import pathlib
 import re
 import subprocess
@@ -94,16 +98,50 @@ entry, listing, base = sys.argv[1:]
 if not base:
     raise SystemExit("Changed-test selection requires a base commit")
 crate, kind, target = entry.split("|")
+# CI may test a synthetic merge containing newer base commits. Select only
+# the owner's changes, while retaining the merged checkout for test execution.
+head = os.environ.get("GWT_FLAKE_HEAD_SHA") or "HEAD"
 changed = subprocess.check_output(
-    ["git", "diff", "--name-only", "--no-renames", "-z", base, "HEAD"],
+    ["git", "diff", "--name-only", "--no-renames", "-z", f"{base}...{head}"],
     text=True,
 ).split("\0")
 tests = sorted({line.removesuffix(": test") for line in
                 pathlib.Path(listing).read_text().splitlines()
                 if line.endswith(": test")})
 if kind == "test":
-    # A direct integration target is already one changed test file.
     selected = tests
+    if crate == "gwt":
+        # Consolidated targets contain several original test files. Reuse the
+        # classifier's Cargo/source map to retain only their changed modules.
+        sys.path.insert(0, str(pathlib.Path("scripts").resolve()))
+        from test_layout import integration_sources
+        try:
+            sources = integration_sources(pathlib.Path.cwd())
+        except (OSError, ValueError):
+            sources = {}
+        modules = set()
+        for name in changed:
+            if name.startswith("crates/gwt/src/"):
+                modules.clear()
+                break
+            if not name.startswith("crates/gwt/tests/"):
+                continue
+            source = sources.get(name)
+            if source is None:
+                modules.clear()
+                break
+            source_target, module = source
+            if source_target != target:
+                continue
+            if (module is None or not pathlib.Path(name).is_file()
+                    or not any(test.startswith(f"{module}::") for test in tests)):
+                # A changed harness, deleted file, or missing module cannot
+                # safely narrow the target, even if another file is mapped.
+                modules.clear()
+                break
+            modules.add(module)
+        if modules:
+            selected = [test for test in tests if test.partition("::")[0] in modules]
 elif kind == "lib":
     functions = set()
     for name in changed:
@@ -173,14 +211,12 @@ report_finding() {
 
 target_count=0
 for _ in $targets; do target_count=$((target_count + 1)); done
-budget_share=$((budget_secs / target_count))
-
-echo "Flake detection: 2 runs per library, up to $max_runs per integration target, ${budget_secs}s test budget (compile excluded; minimum 2 runs)"
+echo "Flake detection: 2 runs per library, up to $max_runs per integration target, ${budget_secs}s total detector budget (build/list included; minimum 2 runs)"
 echo "Targets ($target_count): $targets"
 echo "Logs: $log_dir  (free: $(free_mb)MB, floor: ${min_free_mb}MB)"
 
-# Build once so a cold target/ does not count as the first run's latency and so
-# a compile error fails fast instead of once per run.
+# Build once so the first-run sample measures test execution, while compilation
+# still consumes the total budget. A compile error fails fast instead of once per run.
 for entry in $targets; do
   selector="$(selector_for "$entry")" || exit 1
   # shellcheck disable=SC2086 # the selector is a deliberate argument list
@@ -193,7 +229,7 @@ done
 
 wobbled=""
 cut_short=""
-test_started=$SECONDS
+remaining_targets=$target_count
 for entry in $targets; do
   selector="$(selector_for "$entry")"
   safe="${entry//|/_}"
@@ -213,16 +249,22 @@ for entry in $targets; do
     fi
     if [ ! -s "$selection" ] || ! grep -q '[^[:space:]]' "$selection"; then
       echo "$entry: no active tests in the built target"
+      remaining_targets=$((remaining_targets - 1))
       continue
     fi
     echo "$entry: repeating $(wc -l <"$selection") exact tests from changed files"
   fi
 
+  remaining_budget=$((budget_secs - (SECONDS - test_started)))
+  [ "$remaining_budget" -lt 0 ] && remaining_budget=0
+  budget_share=$((remaining_budget / remaining_targets))
+  remaining_targets=$((remaining_targets - 1))
   started=$SECONDS
   first="$(outcome_of "$selector" "$log_dir/$safe-run-1.log" "$selection")"
   elapsed=$((SECONDS - started))
   [ "$elapsed" -lt 1 ] && elapsed=1
 
+  # The first measured run is included in this target's total run count.
   runs=$((budget_share / elapsed))
   [ "$runs" -gt "$max_runs" ] && runs=$max_runs
   [ "$runs" -lt 2 ] && runs=2
@@ -237,11 +279,11 @@ for entry in $targets; do
   completed=1
   for run in $(seq 2 "$runs"); do
     # Finish the mandatory comparison, then stop admitting runs once the
-    # shared execution budget is spent. A slower later run must not turn the
+    # shared detector budget is spent. A slower later run must not turn the
     # first run's estimate into another fixed-duration repetition loop.
     if [ "$run" -gt 2 ] && [ "$((SECONDS - test_started))" -ge "$budget_secs" ]; then
       cut_short="${cut_short:+$cut_short }$entry(budget:${budget_secs}s)"
-      echo "  stopping after $completed run(s): ${budget_secs}s test execution budget reached"
+      echo "  stopping after $completed run(s): ${budget_secs}s total detector budget reached"
       break
     fi
     # From the third run on. Two runs is the least that can detect anything and
@@ -289,6 +331,11 @@ for entry in $targets; do
     echo "     That is a deterministic failure, which \`Test (Rust)\` reports. Not a flake."
   fi
 done
+
+detector_elapsed=$((SECONDS - test_started))
+if [ "$detector_elapsed" -gt "$budget_secs" ]; then
+  echo "::warning::Flake detector exceeded its ${budget_secs}s budget by $((detector_elapsed - budget_secs))s (${detector_elapsed}s elapsed); mandatory comparisons were completed."
+fi
 
 if [ -z "$wobbled" ]; then
   if [ -n "$cut_short" ]; then

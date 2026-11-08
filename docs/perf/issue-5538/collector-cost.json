@@ -1,0 +1,37 @@
+{
+  "issue": 5538,
+  "measurement": "same-run alternating rounds; identical arithmetic handler work with/without fast-path collection",
+  "command": "cargo test -p gwt --lib perf::dispatch::tests -- --nocapture",
+  "suite_passed": 4,
+  "iterations_per_round": 100000,
+  "rounds": 10,
+  "baseline_ns_per_dispatch": 1732.654,
+  "instrumented_ns_per_dispatch": 1684.606,
+  "delta_ns_per_dispatch": -48.048,
+  "baseline_rounds_ns": [
+    1954.413,
+    1709.179,
+    2155.819,
+    1732.654,
+    1983.453,
+    2283.49,
+    2036.361,
+    1348.793,
+    1317.72,
+    1279.926
+  ],
+  "instrumented_rounds_ns": [
+    2262.667,
+    2365.209,
+    1684.606,
+    1558.527,
+    2242.925,
+    2415.926,
+    1757.046,
+    1647.923,
+    1290.947,
+    1292.441
+  ],
+  "limitation": "No increase was detected in this sample. Negative delta is measurement noise, not a speedup claim. This measures the fast collection path and representative handler work, not a hard latency bound or real fleet CPU. Slow-sample aggregation and writer backpressure are verified separately. Final canonical verification must still pass.",
+  "source_commit": "500d2847fb2f62ba772ffdf6dc1ddde8968cf5af"
+}

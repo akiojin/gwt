@@ -1,0 +1,373 @@
+{
+  "label": "after",
+  "theme": "dark",
+  "measurement_scope": "steady idle",
+  "build_profile": "release",
+  "daemon_pid": 52512,
+  "issue_monitor_enabled": false,
+  "requested_sample_ms": 600000,
+  "elapsed_seconds": 600.0776251,
+  "process_cpu_seconds": 40.984375,
+  "average_cores": 0.06829845554259777,
+  "cpu_percent": 6.8298455542597765,
+  "machine_cpu_percent": 0.21343267357061801,
+  "logical_processors": 32,
+  "native_snapshots": [
+    {
+      "phase": "start",
+      "process_id": 52512,
+      "process_started_at": "2026-11-04T17:42:36.4171019Z",
+      "binary": "E:\\gwt\\work\\issue-6743\\target\\issue-6743-r1\\release\\gwtd.exe",
+      "binary_sha256": "89e4abdab7e0bec447da3ffd66a0329bcd88cc2484f176f0b1df6ceac7bfea2d",
+      "timestamp_utc": "2026-11-04T17:49:07.7108167Z",
+      "elapsed_seconds": 0.0093941,
+      "process_cpu_seconds": 24.890625,
+      "working_set_bytes": 80052224,
+      "private_memory_bytes": 65855488,
+      "peak_working_set_bytes": 175792128,
+      "threads": [
+        {
+          "id": 43472,
+          "name": "main",
+          "created_file_time": "134382877564171050",
+          "kernel_seconds": 0.015625,
+          "user_seconds": 0.015625
+        },
+        {
+          "id": 5436,
+          "name": "tracing-appender",
+          "created_file_time": "134382877565363201",
+          "kernel_seconds": 0.296875,
+          "user_seconds": 0.046875
+        },
+        {
+          "id": 41664,
+          "name": "tokio-rt-worker",
+          "created_file_time": "134382877565389393",
+          "kernel_seconds": 0.25,
+          "user_seconds": 0.140625
+        },
+        {
+          "id": 11208,
+          "name": "tokio-rt-worker",
+          "created_file_time": "134382877565389826",
+          "kernel_seconds": 0.359375,
+          "user_seconds": 0.203125
+        },
+        {
+          "id": 44444,
+          "name": "",
+          "created_file_time": "134382877565420760",
+          "kernel_seconds": 14.765625,
+          "user_seconds": 1.234375
+        },
+        {
+          "id": 42776,
+          "name": "gwt-verification-cap-relief",
+          "created_file_time": "134382877565423543",
+          "kernel_seconds": 0.15625,
+          "user_seconds": 0.015625
+        },
+        {
+          "id": 11788,
+          "name": "runtime-namespace-gc",
+          "created_file_time": "134382877565440338",
+          "kernel_seconds": 0.296875,
+          "user_seconds": 0.109375
+        },
+        {
+          "id": 21808,
+          "name": "tokio-rt-worker",
+          "created_file_time": "134382877565629730",
+          "kernel_seconds": 0.15625,
+          "user_seconds": 0.046875
+        },
+        {
+          "id": 8856,
+          "name": "",
+          "created_file_time": "134382877567906991",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 52388,
+          "name": "gwt-monitor-runtime",
+          "created_file_time": "134382877581242676",
+          "kernel_seconds": 1.25,
+          "user_seconds": 0.03125
+        },
+        {
+          "id": 47648,
+          "name": "notify-rs windows loop",
+          "created_file_time": "134382877778348475",
+          "kernel_seconds": 0.046875,
+          "user_seconds": 0.015625
+        },
+        {
+          "id": 15604,
+          "name": "",
+          "created_file_time": "134382877913773322",
+          "kernel_seconds": 0.015625,
+          "user_seconds": 0
+        },
+        {
+          "id": 15272,
+          "name": "",
+          "created_file_time": "134382877913773808",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 32988,
+          "name": "",
+          "created_file_time": "134382878117114869",
+          "kernel_seconds": 0.015625,
+          "user_seconds": 0
+        },
+        {
+          "id": 43456,
+          "name": "",
+          "created_file_time": "134382878117115352",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 51364,
+          "name": "tokio-rt-worker",
+          "created_file_time": "134382878216602251",
+          "kernel_seconds": 0.03125,
+          "user_seconds": 0.015625
+        },
+        {
+          "id": 23452,
+          "name": "",
+          "created_file_time": "134382878348691482",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 42588,
+          "name": "",
+          "created_file_time": "134382878348691995",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 40700,
+          "name": "",
+          "created_file_time": "134382878554199873",
+          "kernel_seconds": 0.015625,
+          "user_seconds": 0
+        },
+        {
+          "id": 52216,
+          "name": "",
+          "created_file_time": "134382878554200382",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 45264,
+          "name": "",
+          "created_file_time": "134382878812141960",
+          "kernel_seconds": 0.03125,
+          "user_seconds": 0
+        },
+        {
+          "id": 36180,
+          "name": "",
+          "created_file_time": "134382878812142442",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 42020,
+          "name": "",
+          "created_file_time": "134382880564739979",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 50944,
+          "name": "",
+          "created_file_time": "134382880565196701",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        }
+      ]
+    },
+    {
+      "phase": "end",
+      "process_id": 52512,
+      "process_started_at": "2026-11-04T17:42:36.4171019Z",
+      "binary": "E:\\gwt\\work\\issue-6743\\target\\issue-6743-r1\\release\\gwtd.exe",
+      "binary_sha256": "89e4abdab7e0bec447da3ffd66a0329bcd88cc2484f176f0b1df6ceac7bfea2d",
+      "timestamp_utc": "2026-11-04T17:59:07.7882610Z",
+      "elapsed_seconds": 600.0870192,
+      "process_cpu_seconds": 65.875,
+      "working_set_bytes": 80687104,
+      "private_memory_bytes": 66609152,
+      "peak_working_set_bytes": 175792128,
+      "threads": [
+        {
+          "id": 43472,
+          "name": "main",
+          "created_file_time": "134382877564171050",
+          "kernel_seconds": 0.015625,
+          "user_seconds": 0.015625
+        },
+        {
+          "id": 5436,
+          "name": "tracing-appender",
+          "created_file_time": "134382877565363201",
+          "kernel_seconds": 0.6875,
+          "user_seconds": 0.125
+        },
+        {
+          "id": 41664,
+          "name": "tokio-rt-worker",
+          "created_file_time": "134382877565389393",
+          "kernel_seconds": 0.84375,
+          "user_seconds": 0.265625
+        },
+        {
+          "id": 11208,
+          "name": "tokio-rt-worker",
+          "created_file_time": "134382877565389826",
+          "kernel_seconds": 0.859375,
+          "user_seconds": 0.40625
+        },
+        {
+          "id": 44444,
+          "name": "",
+          "created_file_time": "134382877565420760",
+          "kernel_seconds": 44.734375,
+          "user_seconds": 2.21875
+        },
+        {
+          "id": 42776,
+          "name": "gwt-verification-cap-relief",
+          "created_file_time": "134382877565423543",
+          "kernel_seconds": 0.515625,
+          "user_seconds": 0.03125
+        },
+        {
+          "id": 11788,
+          "name": "runtime-namespace-gc",
+          "created_file_time": "134382877565440338",
+          "kernel_seconds": 1.890625,
+          "user_seconds": 0.46875
+        },
+        {
+          "id": 21808,
+          "name": "tokio-rt-worker",
+          "created_file_time": "134382877565629730",
+          "kernel_seconds": 0.53125,
+          "user_seconds": 0.09375
+        },
+        {
+          "id": 8856,
+          "name": "",
+          "created_file_time": "134382877567906991",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 52388,
+          "name": "gwt-monitor-runtime",
+          "created_file_time": "134382877581242676",
+          "kernel_seconds": 3.140625,
+          "user_seconds": 0.1875
+        },
+        {
+          "id": 47648,
+          "name": "notify-rs windows loop",
+          "created_file_time": "134382877778348475",
+          "kernel_seconds": 0.046875,
+          "user_seconds": 0.046875
+        },
+        {
+          "id": 15604,
+          "name": "",
+          "created_file_time": "134382877913773322",
+          "kernel_seconds": 0.015625,
+          "user_seconds": 0
+        },
+        {
+          "id": 15272,
+          "name": "",
+          "created_file_time": "134382877913773808",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 32988,
+          "name": "",
+          "created_file_time": "134382878117114869",
+          "kernel_seconds": 0.015625,
+          "user_seconds": 0
+        },
+        {
+          "id": 43456,
+          "name": "",
+          "created_file_time": "134382878117115352",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 51364,
+          "name": "tokio-rt-worker",
+          "created_file_time": "134382878216602251",
+          "kernel_seconds": 0.296875,
+          "user_seconds": 0.09375
+        },
+        {
+          "id": 23452,
+          "name": "",
+          "created_file_time": "134382878348691482",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 42588,
+          "name": "",
+          "created_file_time": "134382878348691995",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 40700,
+          "name": "",
+          "created_file_time": "134382878554199873",
+          "kernel_seconds": 0.015625,
+          "user_seconds": 0
+        },
+        {
+          "id": 52216,
+          "name": "",
+          "created_file_time": "134382878554200382",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 45264,
+          "name": "",
+          "created_file_time": "134382878812141960",
+          "kernel_seconds": 0.03125,
+          "user_seconds": 0
+        },
+        {
+          "id": 36180,
+          "name": "",
+          "created_file_time": "134382878812142442",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        }
+      ]
+    }
+  ],
+  "budget": {
+    "asserted": true,
+    "max_average_cores": 0.01
+  }
+}

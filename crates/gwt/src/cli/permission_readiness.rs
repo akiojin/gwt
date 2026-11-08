@@ -324,15 +324,34 @@ pub fn block_launch_if_unready(
     let Some(record) = pre_launch_block(owner_kind, owner_number, session_id, decision) else {
         return Ok(());
     };
-    capture_self_improvement(worktree, &record);
     // Best effort: the refusal is the contract, and a store that cannot be
     // written must not turn a refused launch into an accepted one.
-    if let Err(error) =
-        crate::cli::trusted_store::with_write_lease(worktree, || save(worktree, &record))
-    {
+    if let Err(error) = record_pre_launch_block(worktree, &record) {
         tracing::warn!(%error, owner = owner_number, "could not record the permission readiness block");
     }
     Err(format!("launch refused: {}", record.describe()))
+}
+
+/// Persist and read back this exact refusal. A failed audit cannot claim that
+/// its recovery record was confirmed; the launch remains refused either way.
+pub fn record_pre_launch_block(
+    worktree: &Path,
+    record: &PermissionReadinessRecord,
+) -> io::Result<()> {
+    if record.kind != PermissionReadinessKind::PreLaunchBlock || !record.integrity_ok() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "invalid pre-launch refusal",
+        ));
+    }
+    capture_self_improvement(worktree, record);
+    crate::cli::trusted_store::with_write_lease(worktree, || {
+        save(worktree, record)?;
+        if load(worktree)?.as_ref() != Some(record) {
+            return Err(io::Error::other("permission refusal readback changed"));
+        }
+        Ok(())
+    })
 }
 
 /// Append a work-notes memory entry for a block the machine caused.

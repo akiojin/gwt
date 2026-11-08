@@ -64,23 +64,16 @@ pub enum SpawnPlacement {
     Inherit { reason: String },
     /// Hand it to the daemon, which launches it outside the agent tree.
     Delegate,
+    /// A degraded launcher has no compatible daemon to escape to.
+    Refuse { reason: String },
 }
 
 /// Decide where one verification command is launched from.
 ///
-/// **This never refuses.** An earlier revision refused when a degraded
-/// launcher had no daemon to escape to, on the reasoning that a missing daemon
-/// is a configuration problem the caller can fix. Shipping that gate on its own
-/// would have stopped verification across the whole fleet, and it was caught
-/// the only way such a thing gets caught — the gate rejected this very change's
-/// own `verify.run`, from inside an agent worktree, because no host had a
-/// daemon new enough yet.
-///
-/// The gate is not wrong, it is just not deliverable before the escape route
-/// it depends on actually works in production. It lands as its own change once
-/// `Delegate` is the normal outcome rather than the rare one, and until then a
-/// launcher that cannot escape runs in place and records the fact — the
-/// behaviour that predates this module, plus an explanation.
+/// A missing or incompatible daemon is a configuration failure: refusing here
+/// prevents an implicit fallback to the degraded agent tree (Issue #4473).
+/// This is separate from a daemon that can spawn but cannot restore nice 0;
+/// that workload still runs and records its observed priority (Issue #4409 AC-6).
 pub fn decide_placement(launcher: LauncherPriority, daemon: &DaemonAvailability) -> SpawnPlacement {
     if !launcher.is_degraded() {
         return SpawnPlacement::Inherit {
@@ -95,15 +88,14 @@ pub fn decide_placement(launcher: LauncherPriority, daemon: &DaemonAvailability)
     match daemon {
         DaemonAvailability::Available => SpawnPlacement::Delegate,
         DaemonAvailability::Absent | DaemonAvailability::Incompatible { .. } => {
-            SpawnPlacement::Inherit {
+            SpawnPlacement::Refuse {
                 reason: unescaped_reason(launcher, daemon),
             }
         }
     }
 }
 
-/// Explain a workload that stayed in the agent tree: why baseline priority
-/// could not be given to it, and what would change that (Issue #4409 AC-6).
+/// Explain why the workload cannot receive baseline priority and how to retry.
 fn unescaped_reason(launcher: LauncherPriority, daemon: &DaemonAvailability) -> String {
     let nice = launcher
         .nice
@@ -120,12 +112,11 @@ fn unescaped_reason(launcher: LauncherPriority, daemon: &DaemonAvailability) -> 
         DaemonAvailability::Available => unreachable!("Available never lands here"),
     };
     format!(
-        "launcher runs at nice {nice} and could not escape the agent process tree, so its \
-         commands inherit that priority (SPEC #1921 Phase 86; measured as a 54x slowdown in \
-         Issue #4405). Baseline priority can only be given by launching from the gwt daemon, and \
-         {cause}. The run continues at the inherited priority; expect it to be slower under agent \
-         load. To get baseline priority, run a gwt GUI whose daemon is new enough to accept \
-         verification spawns"
+        "verification spawn refused: launcher runs at nice {nice}, and {cause}. It cannot \
+         guarantee nice 0 because an unprivileged process cannot lower its inherited nice \
+         value from inside the agent process tree. No verification command was started. \
+         Start or upgrade the gwt GUI so its daemon supports verification spawns, then \
+         retry verify.run"
     )
 }
 
@@ -188,17 +179,11 @@ mod tests {
         );
     }
 
-    /// A degraded launcher with nowhere to escape to runs in place and says so.
-    ///
-    /// Refusing here is the tempting answer and it is what an earlier revision
-    /// did, but a gate with no working escape route stops every agent instead
-    /// of protecting them — this change's own verification was the first thing
-    /// it blocked. The reason string is the deliverable part: it has to name
-    /// the priority, the cause, and the fact that the run continued.
+    /// Issue #4473: configuration failures refuse rather than inherit nice.
     #[test]
-    fn a_degraded_launcher_without_a_daemon_runs_in_place_and_records_why() {
+    fn a_degraded_launcher_without_a_daemon_is_refused_with_recovery() {
         let placement = decide_placement(degraded(), &DaemonAvailability::Absent);
-        let SpawnPlacement::Inherit { reason } = placement else {
+        let SpawnPlacement::Refuse { reason } = placement else {
             panic!("a launcher with no daemon has no way to delegate: {placement:?}");
         };
         assert!(reason.contains("nice 10"), "{reason}");
@@ -207,24 +192,29 @@ mod tests {
             "the record must say why baseline priority could not be given: {reason}"
         );
         assert!(
-            reason.contains("The run continues"),
-            "the record must say the run was not refused: {reason}"
+            reason.contains("nice 0")
+                && reason.contains("GUI")
+                && reason.contains("retry verify.run"),
+            "the refusal must explain the guarantee and recovery: {reason}"
         );
     }
 
     #[test]
-    fn an_outdated_daemon_runs_in_place_and_names_its_protocol() {
+    fn an_outdated_daemon_is_refused_and_names_its_protocol() {
         let placement = decide_placement(
             degraded(),
             &DaemonAvailability::Incompatible {
                 protocol_version: 3,
             },
         );
-        let SpawnPlacement::Inherit { reason } = placement else {
+        let SpawnPlacement::Refuse { reason } = placement else {
             panic!("a daemon that cannot spawn is as good as absent: {placement:?}");
         };
         assert!(reason.contains("protocol 3"), "{reason}");
-        assert!(reason.contains("The run continues"), "{reason}");
+        assert!(
+            reason.contains("upgrade") && reason.contains("retry verify.run"),
+            "{reason}"
+        );
     }
 
     #[test]

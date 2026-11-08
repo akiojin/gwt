@@ -16,6 +16,11 @@ pub fn context_limit(model: &str) -> Option<u64> {
         return Some(1_000_000);
     }
 
+    // Fable 5 and Mythos 5 use 1M without an explicit context suffix.
+    if m.contains("claude-fable-5") || m.contains("claude-mythos-5") {
+        return Some(1_000_000);
+    }
+
     // Anthropic Claude family: standard 200k context.
     if m.contains("claude") || m.contains("opus") || m.contains("sonnet") || m.contains("haiku") {
         return Some(200_000);
@@ -33,6 +38,12 @@ pub fn context_limit(model: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fable_and_mythos_use_one_million_context() {
+        assert_eq!(context_limit("claude-fable-5"), Some(1_000_000));
+        assert_eq!(context_limit("CLAUDE-MYTHOS-5"), Some(1_000_000));
+    }
 
     #[test]
     fn known_claude_models_resolve_to_200k() {

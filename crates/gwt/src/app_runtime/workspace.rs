@@ -9,19 +9,16 @@
 //!   [`retain_live_workspace_agents`],
 //!   [`workspace_projection_for_current_resume`])
 //! - derives Active Work resume / cleanup state
-//!   ([`workspace_projection_owner_title`],
+//!   ([`gwt::project_runtime::installation::workspace_projection_owner_title`],
 //!   [`workspace_cleanup_candidate_for_projection`])
-//! - persists launch projections and work events
-//!   ([`save_workspace_launch_projection`],
-//!   [`workspace_work_event_from_launch_projection`])
+//! - reexports shared project-runtime launch projection and Work event writers
+//!   ([`save_workspace_launch_projection`])
 //! - runs the Workspace cleanup flow keyed by
 //!   `WORKSPACE_CLEANUP_EVENT_ID` ([`spawn_workspace_cleanup_async`],
 //!   [`clear_workspace_cleanup_git_details_event`])
 //!
-//! Behavior-preserving move: shared view helpers
-//! (`active_work_projection_from_saved_with_journal`,
-//! `non_empty_workspace_text`, ...) stay in `mod.rs` and are imported via
-//! `super`.
+//! GUI view and cleanup adapters remain here. Launch publication and successor
+//! transitions use the single implementation in `gwt::project_runtime::workspace`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -32,65 +29,12 @@ use gwt::BranchCleanupOperationStore;
 use super::{
     active_work_cleanup_candidate_view_from_candidate,
     active_work_projection_from_saved_with_journal, cleanup_selected_branches_with_progress,
-    list_branch_entries_with_active_sessions, non_empty_workspace_text,
-    resume_branch_refs_snapshot, work_session_index, workspace_journal_entry_view_from_entry,
-    workspace_work_item_view_from_item, ActiveAgentSession, AppEventProxy, AppRuntime,
-    BackendEvent, BranchCleanupOptions, BranchEntriesPhase, OutboundEvent, ResumeBranchIndex,
-    UserEvent, WindowPreset, WorkspaceResumeContext, WORKSPACE_CLEANUP_EVENT_ID,
-    WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
+    list_branch_entries_with_active_sessions, resume_branch_refs_snapshot, work_session_index,
+    workspace_journal_entry_view_from_entry, workspace_work_item_view_from_item,
+    ActiveAgentSession, AppEventProxy, AppRuntime, BackendEvent, BranchCleanupOptions,
+    BranchEntriesPhase, OutboundEvent, ResumeBranchIndex, UserEvent, WindowPreset,
+    WORKSPACE_CLEANUP_EVENT_ID, WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
 };
-
-pub(super) fn active_agent_summary_from_session(
-    session: &ActiveAgentSession,
-    updated_at: chrono::DateTime<chrono::Utc>,
-) -> gwt_core::workspace_projection::WorkspaceAgentSummary {
-    gwt_core::workspace_projection::WorkspaceAgentSummary {
-        session_id: session.session_id.clone(),
-        window_id: Some(session.window_id.clone()),
-        agent_id: session.agent_id.clone(),
-        display_name: session.display_name.clone(),
-        status_category: gwt_core::workspace_projection::WorkspaceStatusCategory::Active,
-        current_focus: None,
-        title_summary: None,
-        worktree_path: Some(session.worktree_path.clone()),
-        branch: Some(session.branch_name.clone()),
-        last_board_entry_id: None,
-        last_board_entry_kind: None,
-        coordination_scope: None,
-        affiliation_status:
-            gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
-        workspace_id: None,
-        updated_at,
-    }
-}
-
-pub(super) fn workspace_projection_owner_title(
-    project_root: &Path,
-    branch_name: Option<&str>,
-) -> gwt_core::error::Result<Option<String>> {
-    let Some(branch_name) = branch_name
-        .map(str::trim)
-        .filter(|branch| !branch.is_empty())
-    else {
-        return Ok(None);
-    };
-    let Some(projection) = gwt_core::workspace_projection::load_workspace_projection(project_root)?
-    else {
-        return Ok(None);
-    };
-    let projection_branch = projection
-        .git_details
-        .as_ref()
-        .and_then(|details| details.branch.as_deref())
-        .map(str::trim);
-    if projection_branch != Some(branch_name) {
-        return Ok(None);
-    }
-    Ok(projection
-        .owner
-        .map(|owner| owner.trim().to_string())
-        .filter(|owner| !owner.is_empty()))
-}
 
 pub(super) fn merge_active_sessions_into_projection<'a>(
     projection: &mut gwt_core::workspace_projection::WorkspaceProjection,
@@ -139,38 +83,6 @@ pub(super) fn retain_live_workspace_agents(
     );
 }
 
-/// SPEC-2359 US-80 (FR-427): register a Start-Work Shell as a first-class Work
-/// in the persisted projection so it appears in the Active Work / Workspace
-/// overview like an agent. Shell Works carry the window id as their identity
-/// (no agent session) and reuse the agent canonical Work id derivation via the
-/// shell's branch / worktree, so a shell groups into the same Work row as an
-/// agent on the same branch. `retain_live_agents_keep_shells` drops only dead
-/// agents (FR-429): launching the shell never prunes other live or paused
-/// shells.
-pub(super) fn save_shell_work_projection(
-    project_root: &Path,
-    window_id: &str,
-    worktree_path: Option<PathBuf>,
-    branch: Option<String>,
-    live_session_ids: &std::collections::HashSet<String>,
-) -> Result<(), String> {
-    let now = chrono::Utc::now();
-    gwt_core::workspace_projection::mutate_workspace_projection(project_root, |projection| {
-        projection.retain_live_agents_keep_shells(live_session_ids.iter().map(String::as_str), now);
-        let summary = gwt_core::workspace_projection::WorkspaceAgentSummary::shell_work(
-            window_id.to_string(),
-            worktree_path,
-            branch,
-            gwt_core::workspace_projection::WorkspaceStatusCategory::Active,
-            now,
-        );
-        projection.upsert_agent_summary(summary);
-        projection.updated_at = now;
-        Ok(())
-    })
-    .map_err(|error| error.to_string())
-}
-
 pub(super) fn workspace_projection_for_current_resume(
     mut projection: gwt_core::workspace_projection::WorkspaceProjection,
     sessions: &[&ActiveAgentSession],
@@ -193,293 +105,6 @@ pub(super) fn workspace_cleanup_candidate_for_projection(
     let branch_has_live_agent = sessions.iter().any(|session| session.branch_name == branch);
     let candidate = projection.cleanup_candidate(branch_has_live_agent)?;
     Some(active_work_cleanup_candidate_view_from_candidate(candidate))
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(super) enum WorkspaceLaunchProjectionKind {
-    StartWork,
-    Resume { created_by_start_work: bool },
-}
-
-pub(super) struct WorkspaceLaunchTransition<'a> {
-    pub(super) work_id: Option<String>,
-    pub(super) base_branch: Option<&'a str>,
-    pub(super) linked_issue_number: Option<u64>,
-    /// Trusted execution owner (#3426). When present it overrides any
-    /// presentation-derived `resume_context.owner` so the Work projection can
-    /// never fork from the ECR/ledger owner kind.
-    pub(super) canonical_owner: Option<gwt::cli::execution_state::ExecutionOwnerKey>,
-    pub(super) resume_context: Option<&'a WorkspaceResumeContext>,
-    pub(super) kind: WorkspaceLaunchProjectionKind,
-    pub(super) live_session_ids: &'a std::collections::HashSet<String>,
-    pub(super) now: chrono::DateTime<chrono::Utc>,
-}
-
-impl WorkspaceLaunchTransition<'_> {
-    fn owner(&self) -> Option<String> {
-        self.canonical_owner
-            .map(workspace_owner_label)
-            .or_else(|| {
-                self.resume_context
-                    .and_then(|context| non_empty_workspace_text(context.owner.as_deref()))
-            })
-            .or_else(|| {
-                self.linked_issue_number
-                    .map(|number| format!("Issue #{number}"))
-            })
-    }
-}
-
-/// Canonical Work owner label for a trusted execution owner key.
-pub(super) fn workspace_owner_label(owner: gwt::cli::execution_state::ExecutionOwnerKey) -> String {
-    match owner.kind {
-        gwt::cli::execution_state::ExecutionOwnerKind::Spec => {
-            format!("SPEC-{}", owner.number)
-        }
-        gwt::cli::execution_state::ExecutionOwnerKind::Issue => {
-            format!("Issue #{}", owner.number)
-        }
-    }
-}
-
-impl WorkspaceLaunchProjectionKind {
-    fn work_event_kind(self) -> gwt_core::workspace_projection::WorkEventKind {
-        match self {
-            Self::StartWork => gwt_core::workspace_projection::WorkEventKind::Start,
-            Self::Resume { .. } => gwt_core::workspace_projection::WorkEventKind::Resume,
-        }
-    }
-
-    fn created_by_start_work(self) -> bool {
-        match self {
-            Self::StartWork => true,
-            Self::Resume {
-                created_by_start_work,
-            } => created_by_start_work,
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn save_workspace_launch_projection(
-    project_root: &Path,
-    session: &ActiveAgentSession,
-    base_branch: Option<&str>,
-    linked_issue_number: Option<u64>,
-    canonical_owner: Option<gwt::cli::execution_state::ExecutionOwnerKey>,
-    workspace_resume_context: Option<&WorkspaceResumeContext>,
-    launch_kind: WorkspaceLaunchProjectionKind,
-    live_session_ids: Option<&std::collections::HashSet<String>>,
-) -> Result<(), String> {
-    let now = chrono::Utc::now();
-    gwt_core::workspace_projection::transact_workspace_state_for_work_event_root(
-        project_root,
-        &session.worktree_path,
-        |projection, work_items, _work_items_persisted| {
-            // A worker's launch-time snapshot cannot prove another concurrent
-            // launch is dead. Keep all persisted agents until the GUI requests
-            // a projection refresh with its current live-session registry.
-            let preserved_sessions;
-            let live_session_ids = match live_session_ids {
-                Some(live) => live,
-                None => {
-                    preserved_sessions = projection
-                        .agents
-                        .iter()
-                        .map(|agent| agent.session_id.clone())
-                        .collect();
-                    &preserved_sessions
-                }
-            };
-            let work_event = apply_workspace_launch_for_current_work(
-                project_root,
-                projection,
-                work_items,
-                session,
-                WorkspaceLaunchTransition {
-                    work_id: None,
-                    base_branch,
-                    linked_issue_number,
-                    canonical_owner,
-                    resume_context: workspace_resume_context,
-                    kind: launch_kind,
-                    live_session_ids,
-                    now,
-                },
-            )?;
-            Ok(((), vec![work_event]))
-        },
-    )
-    .map_err(|error| error.to_string())
-}
-
-/// Select the Work lifetime before attaching a new Session, under the same
-/// transaction as launch publication (and fresh ECR activation).
-pub(super) fn apply_workspace_launch_for_current_work(
-    project_root: &Path,
-    projection: &mut gwt_core::workspace_projection::WorkspaceProjection,
-    work_items: &gwt_core::workspace_projection::WorkItemsProjection,
-    session: &ActiveAgentSession,
-    mut transition: WorkspaceLaunchTransition<'_>,
-) -> gwt_core::error::Result<gwt_core::workspace_projection::WorkEvent> {
-    use gwt_core::workspace_projection::{
-        can_upgrade_work_owner, canonical_work_id, current_work_id, successor_work_id,
-        workspace_group_key_for_item, WorkEventKind,
-    };
-    let canonical_id = canonical_work_id(
-        project_root,
-        Some(&session.branch_name),
-        Some(&session.worktree_path),
-    );
-    transition.work_id = current_work_id(
-        work_items,
-        project_root,
-        Some(&session.branch_name),
-        Some(&session.worktree_path),
-    );
-    let mut predecessor_id = None;
-    if let Some(current) = work_items
-        .work_items
-        .iter()
-        .find(|item| Some(&item.id) == transition.work_id.as_ref())
-        .filter(|item| item.is_terminal() || Some(&item.id) != canonical_id.as_ref())
-    {
-        let owner = transition.owner();
-        let owner_matches = current.owner == owner
-            || can_upgrade_work_owner(current.owner.as_deref(), owner.as_deref());
-        // Shared Work history can include other hosts' paths. Require one
-        // exact local container without dropping those historical references.
-        let container_matches = current
-            .execution_containers
-            .iter()
-            .filter(|container| {
-                canonical_work_id(
-                    project_root,
-                    container.branch.as_deref(),
-                    container.worktree_path.as_deref(),
-                ) == canonical_id
-                    && container.worktree_path.as_deref().is_some_and(|path| {
-                        path == session.worktree_path
-                            || dunce::canonicalize(path)
-                                .ok()
-                                .zip(dunce::canonicalize(&session.worktree_path).ok())
-                                .is_some_and(|(left, right)| left == right)
-                    })
-            })
-            .count()
-            == 1;
-        if !owner_matches || !container_matches {
-            return Err(gwt_core::error::GwtError::Other(format!(
-                "cannot launch successor of Work {}: owner or execution container mismatch",
-                current.id
-            )));
-        }
-        if work_items.work_items.iter().any(|item| {
-            item.is_terminal()
-                && Some(workspace_group_key_for_item(project_root, item)) == canonical_id
-                && item
-                    .agents
-                    .iter()
-                    .any(|agent| agent.session_id == session.session_id)
-        }) {
-            return Err(gwt_core::error::GwtError::Other(format!(
-                "Session {} belongs to a terminal Work; start a new Session for the successor",
-                session.session_id
-            )));
-        }
-        if current.is_terminal() {
-            let successor_id = successor_work_id(&current.id);
-            if work_items
-                .work_items
-                .iter()
-                .any(|item| item.id == successor_id)
-            {
-                return Err(gwt_core::error::GwtError::Other(format!(
-                    "cannot launch successor of Work {}: successor {successor_id} has invalid lineage", current.id)));
-            }
-            predecessor_id = Some(current.id.clone());
-            transition.work_id = Some(successor_id);
-        }
-    }
-    let mut event = apply_workspace_launch_transition(projection, session, transition);
-    if let Some(predecessor_id) = predecessor_id {
-        event.kind = WorkEventKind::Start;
-        event.related_work_item_id = Some(predecessor_id);
-    }
-    Ok(event)
-}
-
-pub(super) fn apply_workspace_launch_transition(
-    projection: &mut gwt_core::workspace_projection::WorkspaceProjection,
-    session: &ActiveAgentSession,
-    transition: WorkspaceLaunchTransition<'_>,
-) -> gwt_core::workspace_projection::WorkEvent {
-    let owner = transition.owner();
-    // #3065: drop dead agent entries before computing the running-agents
-    // status text. Agent launch never prunes Shell Work.
-    projection.retain_live_agents_keep_shells(
-        transition.live_session_ids.iter().map(String::as_str),
-        transition.now,
-    );
-    projection.apply_launch(
-        gwt_core::workspace_projection::WorkspaceLaunchUpdate {
-            work_id: transition.work_id,
-            title: transition
-                .resume_context
-                .and_then(|context| non_empty_workspace_text(context.title.as_deref())),
-            summary: transition
-                .resume_context
-                .and_then(|context| non_empty_workspace_text(context.summary.as_deref())),
-            owner,
-            next_action: transition
-                .resume_context
-                .and_then(|context| non_empty_workspace_text(context.next_action.as_deref())),
-            branch: session.branch_name.clone(),
-            worktree_path: session.worktree_path.clone(),
-            base_branch: transition.base_branch.map(str::to_string),
-            created_by_start_work: transition.kind.created_by_start_work(),
-        },
-        active_agent_summary_from_session(session, transition.now),
-        transition.now,
-    );
-    workspace_work_event_from_launch_projection(
-        projection,
-        session,
-        transition.kind.work_event_kind(),
-        transition.now,
-    )
-}
-
-fn workspace_work_event_from_launch_projection(
-    projection: &gwt_core::workspace_projection::WorkspaceProjection,
-    session: &ActiveAgentSession,
-    kind: gwt_core::workspace_projection::WorkEventKind,
-    updated_at: chrono::DateTime<chrono::Utc>,
-) -> gwt_core::workspace_projection::WorkEvent {
-    let mut event =
-        gwt_core::workspace_projection::WorkEvent::new(kind, projection.id.clone(), updated_at);
-    event.title = Some(projection.title.clone());
-    event.intent = projection
-        .summary
-        .clone()
-        .or_else(|| projection.next_action.clone());
-    event.summary = Some(projection.status_text.clone());
-    event.status_category = Some(projection.status_category);
-    event.owner = projection.owner.clone();
-    event.next_action = projection.next_action.clone();
-    event.agent_session_id = Some(session.session_id.clone());
-    event.agent_id = Some(session.agent_id.to_string());
-    event.display_name = Some(session.display_name.clone());
-    event.execution_container = projection.git_details.as_ref().map(|details| {
-        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
-            branch: details.branch.clone(),
-            worktree_path: details.worktree_path.clone(),
-            pr_number: details.pr_number,
-            pr_url: details.pr_url.clone(),
-            pr_state: details.pr_state.clone(),
-        }
-    });
-    event
 }
 
 /// Issue #4433: everything the Workspace cleanup worker needs. Grouped into a
@@ -1039,6 +664,18 @@ impl AppRuntime {
         Vec::new()
     }
 }
+
+#[cfg(test)]
+pub(super) use gwt::project_runtime::workspace::save_workspace_launch_projection;
+pub(super) use gwt::project_runtime::workspace::{
+    active_agent_summary_from_session, workspace_owner_label,
+};
+#[cfg(test)]
+pub(super) use gwt::project_runtime::workspace::{
+    apply_workspace_launch_for_current_work, apply_workspace_launch_transition,
+    invalid_successor_supersession_event, SuccessorSupersessionAuthority,
+    WorkspaceLaunchProjectionKind, WorkspaceLaunchTransition,
+};
 
 #[cfg(test)]
 mod tests {

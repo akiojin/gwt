@@ -28,8 +28,7 @@ use gwt_core::{
 use gwt::board_audience::{gui_default_board_scope, post_audience_for_gui};
 
 use super::{
-    combined_window_id, same_worktree_path, AppRuntime, BackendEvent, OutboundEvent,
-    WindowGeometry, WindowPreset,
+    combined_window_id, same_worktree_path, AppRuntime, BackendEvent, OutboundEvent, WindowPreset,
 };
 
 pub(super) fn gui_default_board_scope_for_project(
@@ -191,13 +190,25 @@ impl AppRuntime {
             }
         }
 
+        let posted_id = entry.id.clone();
         match gwt::board_provider::post_entry(&tab.project_root, entry) {
             Ok(snapshot) => {
                 publish_board_change(&tab.project_root, snapshot.board.entries.len());
-                let mut entries = snapshot.board.entries;
                 // Capture the milestone entry before attaching the serialize-only
                 // `body_html`, so workspace milestone persistence stays clean.
-                let latest_entry = entries.last().cloned();
+                let latest_entry = snapshot.board.entries.last().cloned();
+                // A future-dated or concurrent post may be last in the snapshot.
+                // Remote providers may replace the draft ID: retain their prior
+                // snapshot acknowledgement when no exact identity is available.
+                let mut entries = match snapshot
+                    .board
+                    .entries
+                    .iter()
+                    .find(|entry| entry.id == posted_id)
+                {
+                    Some(entry) => vec![entry.clone()],
+                    None => snapshot.board.entries,
+                };
                 attach_board_body_html(&mut entries);
                 let mut events = vec![OutboundEvent::reply(
                     client_id,
@@ -231,9 +242,8 @@ impl AppRuntime {
         client_id: &str,
         id: &str,
         origin_session_id: &str,
-        bounds: Option<WindowGeometry>,
     ) -> Vec<OutboundEvent> {
-        let (tab_id, board_geometry) = match self.board_surface_context(id) {
+        let tab_id = match self.board_surface_context(id) {
             Ok(context) => context,
             Err(message) => return board_error(client_id, id, message),
         };
@@ -248,7 +258,7 @@ impl AppRuntime {
             .find(|(_, session)| session.session_id == origin_session_id)
             .map(|(window_id, _)| window_id.clone());
         if let Some(window_id) = live_window_id {
-            let events = self.focus_window_events(&window_id, bounds);
+            let events = self.focus_window_events(&window_id);
             return if events.is_empty() {
                 board_error(
                     client_id,
@@ -264,7 +274,7 @@ impl AppRuntime {
             Ok(config) => config,
             Err(message) => return board_error(client_id, id, message),
         };
-        match self.spawn_agent_window(&tab_id, config, bounds.unwrap_or(board_geometry), None) {
+        match self.spawn_agent_window(&tab_id, config, None) {
             Ok(events) => events,
             Err(message) => board_error(client_id, id, message),
         }
@@ -333,7 +343,7 @@ impl AppRuntime {
         Ok(config)
     }
 
-    fn board_surface_context(&self, id: &str) -> Result<(String, WindowGeometry), String> {
+    fn board_surface_context(&self, id: &str) -> Result<String, String> {
         let address = self
             .window_lookup
             .get(id)
@@ -348,7 +358,7 @@ impl AppRuntime {
         if window.preset != WindowPreset::Board {
             return Err("Window is not a Board surface".to_string());
         }
-        Ok((address.tab_id.clone(), window.geometry.clone()))
+        Ok(address.tab_id.clone())
     }
 
     pub(crate) fn record_workspace_board_milestone_event(
@@ -451,8 +461,45 @@ fn publish_board_change(_project_root: &std::path::Path, _entries_count: usize) 
 /// the web UI renders server-sanitized HTML, while the JSONL event log (which
 /// `skip_serializing`s a `None` `body_html`) never stores it.
 pub(crate) fn attach_board_body_html(entries: &mut [coordination::BoardEntry]) {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<BoardBodyHtmlCache>> =
+        std::sync::OnceLock::new();
+    let mut cache = CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     for entry in entries.iter_mut() {
-        entry.body_html = Some(gwt::board_remote::markdown::markdown_to_html(&entry.body));
+        entry.body_html =
+            Some(cache.html_for(entry, gwt::board_remote::markdown::markdown_to_html));
+    }
+}
+
+/// Bound the display-only memo independently of the persisted Board history.
+/// Keep the source too: remote providers can reuse IDs in different channels.
+#[derive(Default)]
+struct BoardBodyHtmlCache {
+    entries: HashMap<String, (chrono::DateTime<chrono::Utc>, String, String)>,
+}
+
+impl BoardBodyHtmlCache {
+    fn html_for(
+        &mut self,
+        entry: &coordination::BoardEntry,
+        render: impl FnOnce(&str) -> String,
+    ) -> String {
+        if let Some((updated_at, body, html)) = self.entries.get(&entry.id) {
+            if *updated_at == entry.updated_at && *body == entry.body {
+                return html.clone();
+            }
+        }
+        let html = render(&entry.body);
+        if self.entries.len() >= coordination::HOT_PROJECTION_ENTRY_LIMIT * 4 {
+            self.entries.clear();
+        }
+        self.entries.insert(
+            entry.id.clone(),
+            (entry.updated_at, entry.body.clone(), html.clone()),
+        );
+        html
     }
 }
 
@@ -703,6 +750,7 @@ impl AppRuntime {
             context,
             mut events,
             milestone,
+            decision_notifications,
         } = refreshed;
         if !context
             .as_ref()
@@ -710,10 +758,13 @@ impl AppRuntime {
         {
             return Vec::new();
         }
+        let context = context.as_ref().expect("current Board project context");
+        for notification in decision_notifications {
+            self.notify_board_decision(context, notification);
+        }
         events.retain(|event| match &event.event {
             BackendEvent::BoardEntries { id, .. } => {
-                self.project_key_for_window(id)
-                    == context.as_ref().map(|context| &context.project_key)
+                self.project_key_for_window(id) == Some(&context.project_key)
             }
             _ => false,
         });
@@ -723,6 +774,34 @@ impl AppRuntime {
             );
         }
         events
+    }
+
+    /// Board notifications have internal authority to send only this fixed
+    /// pointer to a saved decision. They never grant an agent PM input rights
+    /// or turn the decision's untrusted body into a privileged prompt.
+    fn notify_board_decision(
+        &self,
+        context: &super::ProjectContext,
+        notification: BoardDecisionNotification,
+    ) {
+        let root = context.project_root.clone();
+        if let Err(error) = self.blocking_tasks.try_spawn(move || {
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_all().build().map_err(|error| error.to_string())
+                .and_then(|executor| executor.block_on(async {
+                    let client = gwt::project_runtime::client::ProjectRuntimeClient::from_current_project(
+                        &root, &gwt_core::paths::gwt_home(),
+                    ).await?;
+                    client.command(gwt::project_runtime::events::OwnerCommand::NotifyBoardDecision {
+                        entry_id: notification.entry_id, session_id: notification.session_id,
+                    }).await
+                }));
+            if let Err(error) = result {
+                tracing::warn!(%error, "project owner declined Board notification");
+            }
+        }) {
+            tracing::warn!(%error, "Board notification worker unavailable");
+        }
     }
 
     #[cfg(test)]
@@ -764,6 +843,14 @@ pub(crate) struct BoardProjectionRefreshed {
     /// The Workspace projection after the latest post was recorded as a Work
     /// milestone, when it resolved to one.
     pub(crate) milestone: Option<(PathBuf, workspace_projection::WorkspaceProjection)>,
+    /// Saved decision pointers, independent of whether any Board window is open.
+    pub(crate) decision_notifications: Vec<BoardDecisionNotification>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct BoardDecisionNotification {
+    entry_id: String,
+    session_id: String,
 }
 
 /// Scoped Board views of one project, by Board window, kept between refreshes
@@ -785,39 +872,129 @@ pub(crate) fn run_board_projection_refresh(
         return (refreshed, retained);
     };
     let Ok(snapshot) = gwt::board_provider::load_snapshot(&job.project_root) else {
-        return (refreshed, retained);
+        return (refreshed, views);
     };
+    refreshed.decision_notifications = snapshot
+        .board
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == BoardEntryKind::Decision)
+        .flat_map(|entry| {
+            entry
+                .mentions
+                .iter()
+                .filter(|mention| {
+                    mention.target_kind == coordination::BoardMentionTargetKind::Session
+                })
+                .map(|mention| BoardDecisionNotification {
+                    entry_id: entry.id.clone(),
+                    session_id: mention.target.clone(),
+                })
+        })
+        .collect();
     for window in job.windows {
         let scope = if window.all_view {
             coordination::BoardAudienceScope::All
         } else {
-            gui_default_board_scope_for_project(&window.tab_project_root)
-                .unwrap_or(coordination::BoardAudienceScope::All)
-        };
-        let board = if matches!(scope, coordination::BoardAudienceScope::All) {
-            snapshot.board.clone()
-        } else {
-            match gwt::board_provider::refresh_scoped_board_view(
-                &window.tab_project_root,
-                &scope,
-                views.remove(&window.window_id),
-            ) {
-                Ok((view, _)) => {
-                    let board = view.board.clone();
-                    retained.insert(window.window_id.clone(), view);
-                    board
+            let Ok(scope) = gui_default_board_scope_for_project(&window.tab_project_root) else {
+                if let Some(previous) = views.remove(&window.window_id) {
+                    retained.insert(window.window_id, previous);
                 }
-                Err(_) => snapshot.board.clone(),
-            }
+                continue;
+            };
+            scope
         };
-        let mut entries = board.entries;
+        let previous = views
+            .remove(&window.window_id)
+            .filter(|view| view.scope == scope);
+        let known = previous.as_ref().map(|view| {
+            view.board
+                .entries
+                .iter()
+                .map(|entry| (entry.id.as_str(), entry))
+                .collect::<HashMap<_, _>>()
+        });
+        let previous_total = previous.as_ref().map(|view| view.board.total_entries);
+        let since = previous.as_ref().map(|view| {
+            view.board
+                .entries
+                .iter()
+                .map(|entry| entry.updated_at)
+                .max()
+                .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC)
+        });
+        // All uses the same bounded cache as Workspace/Broadcast. The core
+        // hot cursor handles ordinary appends without rereading event segments.
+        let Ok((view, _)) = gwt::board_provider::refresh_scoped_board_view(
+            &window.tab_project_root,
+            &scope,
+            previous.clone(),
+        ) else {
+            if let Some(previous) = previous {
+                retained.insert(window.window_id, previous);
+            }
+            continue;
+        };
+        let changed = |entry: &coordination::BoardEntry| {
+            // Some remote providers keep their creation timestamp on edits.
+            !known
+                .as_ref()
+                .and_then(|known| known.get(entry.id.as_str()))
+                .is_some_and(|known| *known == entry)
+        };
+        let mut entries = view
+            .board
+            .entries
+            .iter()
+            .filter(|entry| changed(entry))
+            .cloned()
+            .collect::<Vec<_>>();
+        // A coalesced burst may exceed the hot window. Recover those new posts
+        // via the timestamp-indexed segments, without adding I/O to normal posts.
+        // Include the boundary timestamp; the ID/version comparison deduplicates
+        // it, while the view difference also catches backdated entries.
+        if previous_total.is_some_and(|total| {
+            view.board.total_entries.saturating_sub(total) > view.board.entries.len()
+        }) {
+            if let Some(since) = since {
+                let since = since
+                    .checked_sub_signed(chrono::Duration::nanoseconds(1))
+                    .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC);
+                match gwt::board_provider::load_entries_since(&window.tab_project_root, since) {
+                    Ok(recent) => {
+                        let mut ids = entries
+                            .iter()
+                            .map(|entry| entry.id.clone())
+                            .collect::<std::collections::HashSet<_>>();
+                        entries.extend(recent.into_iter().filter(|entry| {
+                            coordination::board_entry_visible_for_scope(entry, &scope)
+                                && changed(entry)
+                                && ids.insert(entry.id.clone())
+                        }));
+                        entries.sort_by_key(|entry| entry.created_at);
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to load Board catch-up entries");
+                        if let Some(previous) = previous {
+                            retained.insert(window.window_id, previous);
+                        }
+                        continue;
+                    }
+                }
+            }
+        }
+        let has_more_before = view.board.has_more_before;
+        retained.insert(window.window_id.clone(), view);
+        if entries.is_empty() {
+            continue;
+        }
         attach_board_body_html(&mut entries);
         refreshed.events.push(OutboundEvent::project(
             context.project_key.clone(),
             BackendEvent::BoardEntries {
                 id: window.window_id,
                 entries,
-                has_more_before: board.has_more_before,
+                has_more_before,
             },
         ));
     }
@@ -842,9 +1019,33 @@ fn persist_workspace_board_milestone(
     project_root: &Path,
     entry: &coordination::BoardEntry,
 ) -> gwt_core::Result<(workspace_projection::WorkspaceProjection, bool)> {
-    workspace_projection::transact_workspace_state(
+    let projection = workspace_projection::load_or_default_workspace_projection(project_root)?;
+    let work_items = workspace_projection::load_or_synthesize_workspace_work_items(project_root)?;
+    let work_event_root = workspace_projection::resolve_workspace_work_event_from_board_entry(
+        &projection,
+        &work_items,
+        entry,
+    )
+    .and_then(|event| event.execution_container?.worktree_path)
+    .unwrap_or_else(|| project_root.to_path_buf());
+    workspace_projection::transact_workspace_state_for_work_event_root_with_preflight(
         project_root,
+        &work_event_root,
         |projection, work_items, _work_items_persisted| {
+            let current_root = workspace_projection::resolve_workspace_work_event_from_board_entry(
+                projection, work_items, entry,
+            )
+            .and_then(|event| event.execution_container?.worktree_path)
+            .unwrap_or_else(|| project_root.to_path_buf());
+            if current_root != work_event_root {
+                return Err(gwt_core::error::GwtError::Other(
+                    "Board milestone Worktree assignment changed; retry with current state".into(),
+                ));
+            }
+            Ok(())
+        },
+        |projection, work_items, _work_items_persisted| {
+            // The locked preflight rejects changed roots before migration writes.
             let Some(event) = workspace_projection::resolve_workspace_work_event_from_board_entry(
                 projection, work_items, entry,
             ) else {
@@ -861,4 +1062,36 @@ fn persist_workspace_board_milestone(
             Ok(((projection.clone(), true), vec![event]))
         },
     )
+}
+
+#[cfg(test)]
+mod body_html_tests {
+    use super::*;
+
+    #[test]
+    fn board_body_html_memo_reuses_versions_and_invalidates_changed_bodies() {
+        let mut cache = BoardBodyHtmlCache::default();
+        let mut entry = coordination::BoardEntry::new(
+            coordination::AuthorKind::Agent,
+            "test",
+            BoardEntryKind::Status,
+            "**old**",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        let first = cache.html_for(&entry, gwt::board_remote::markdown::markdown_to_html);
+        assert_eq!(
+            cache.html_for(&entry, |_| panic!("unchanged body rendered again")),
+            first
+        );
+        entry.updated_at += chrono::Duration::seconds(1);
+        entry.body = "**new**".into();
+        let next = cache.html_for(&entry, gwt::board_remote::markdown::markdown_to_html);
+        assert!(next.contains("<strong>new</strong>"));
+        // The display cache is shared across providers: guard reused channel IDs.
+        entry.body = "other channel".into();
+        assert_eq!(cache.html_for(&entry, str::to_string), "other channel");
+    }
 }

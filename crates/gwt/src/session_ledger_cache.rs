@@ -22,6 +22,15 @@ impl SessionLedgerCache {
         schedule_retention(sessions_dir);
         gwt_agent::session_ledger::load_sessions(sessions_dir).unwrap_or_default()
     }
+
+    pub(crate) fn load_shared(
+        &mut self,
+        sessions_dir: &Path,
+    ) -> Vec<std::sync::Arc<gwt_agent::Session>> {
+        #[cfg(not(test))]
+        schedule_retention(sessions_dir);
+        gwt_agent::session_ledger::load_sessions_shared(sessions_dir).unwrap_or_default()
+    }
 }
 
 #[cfg(not(test))]

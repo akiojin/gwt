@@ -118,13 +118,26 @@ fn runtime_hook_terminal_state_refreshes_active_work_off_the_gui_event_loop() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let repo = temp.path().join("repo");
-    let (mut runtime, events, _window_id) = active_work_off_loop_setup(temp.path(), &repo);
-    // Seed the cache the cache-only acknowledgement reads from.
-    let _ = runtime.active_work_projection_for_tab("tab-1", &runtime.tabs[0]);
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, probe, _window_id) = owner_browser_input_fixture(temp.path());
+    let owner = runtime.test_project_owners.values().next().unwrap().clone();
+    let status = owner_runtime_status_event(&owner, &probe, "Error", "Stop");
+    let context = runtime.test_context();
+    let identity = owner.client().identity().unwrap().clone();
+    let AppEventProxy::Stub(events) = &runtime.proxy else {
+        panic!("recording fixture");
+    };
+    let events = events.clone();
+    // Resolve the actual owner's saved Work outside the callback under test.
+    let job = runtime
+        .active_work_projection_refresh_job(&context.project_root)
+        .unwrap();
+    let prepared = super::super::run_active_work_projection_refresh(job);
+    runtime.apply_active_work_projection_refresh(prepared);
+    events.lock().unwrap().clear();
 
     super::super::workspace_views::reset_full_active_work_projection_builds();
-    let hook_events = runtime.handle_runtime_hook_event(runtime_hook_state("Error", "session-1"));
+    let hook_events = runtime.handle_project_owner_event(&context, 1, &identity, status);
 
     assert_eq!(
         super::super::workspace_views::full_active_work_projection_builds(),
@@ -137,7 +150,10 @@ fn runtime_hook_terminal_state_refreshes_active_work_off_the_gui_event_loop() {
             .any(|event| matches!(event.event, BackendEvent::ActiveWorkProjectionPatch { .. })),
         "the hook still acknowledges the rail from cache: {hook_events:?}"
     );
-    assert_eq!(active_work_refresh_requests(&events, &repo), 1);
+    assert_eq!(
+        active_work_refresh_requests(&events, &context.project_root),
+        1
+    );
 }
 
 /// SPEC-2014 FR-PERF-003: ProjectTabRuntime caches `main_worktree_root`
@@ -360,7 +376,7 @@ fn github_repository_search_parser_maps_gh_json_fields() {
 }
 
 #[test]
-fn clone_project_done_opens_workspace_home_and_broadcasts_done() {
+fn clone_project_done_opens_workspace_home_and_replies_to_its_client() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let workspace_home = temp.path().join("sample");
@@ -381,7 +397,7 @@ fn clone_project_done_opens_workspace_home_and_broadcasts_done() {
 
     assert!(
         runtime
-            .handle_clone_project_done(&workspace_home)
+            .handle_clone_project_done("clone-client", &workspace_home)
             .is_empty(),
         "the clone completion is prepared off-thread"
     );
@@ -400,18 +416,19 @@ fn clone_project_done_opens_workspace_home_and_broadcasts_done() {
     assert!(events.iter().any(|event| matches!(
         event,
         OutboundEvent {
-            target: DispatchTarget::Hub,
+            target: DispatchTarget::Client(client_id),
             event: BackendEvent::CloneProjectDone {
                 workspace_home: emitted_workspace_home,
+                ..
             },
             ..
-        } if emitted_workspace_home == &workspace_home.display().to_string()
+        } if client_id == "clone-client" && emitted_workspace_home == &workspace_home.display().to_string()
     )));
     assert!(events.iter().any(|event| matches!(
         event,
         OutboundEvent {
             target: DispatchTarget::Project(_),
-            event: BackendEvent::WindowCanvasState { .. },
+            event: BackendEvent::WorkspaceState { .. },
             ..
         }
     )));
@@ -582,7 +599,7 @@ fn clone_project_start_validation_uses_clone_project_error_event() {
         event,
         OutboundEvent {
             target: DispatchTarget::Client(client_id),
-            event: BackendEvent::CloneProjectError { message },
+            event: BackendEvent::CloneProjectError { message, .. },
             ..
         } if client_id == "client-1" && message.contains("repository URL")
     )));
@@ -593,6 +610,77 @@ fn clone_project_start_validation_uses_clone_project_error_event() {
             ..
         }
     )));
+}
+
+#[test]
+fn clone_project_start_refuses_registered_origin_before_clone_side_effects() {
+    for registration in ["open", "cached_recent", "uncached_recent"] {
+        let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
+        let repo = temp.path().join("registered");
+        fs::create_dir_all(&repo).expect("registered repo");
+        init_repo(&repo);
+        run_git(
+            &repo,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://github.com/example/registered.git",
+            ],
+        );
+        let key = gwt_core::paths::resolve_project_scope(&repo).hash;
+        let tabs = if registration == "open" {
+            vec![sample_project_tab(
+                "registered",
+                "Registered",
+                repo.clone(),
+                ProjectKind::Git,
+                &[],
+            )]
+        } else {
+            Vec::new()
+        };
+        let (mut runtime, recorded_events) = sample_runtime_with_events(temp.path(), tabs, None);
+        let (blocking_tasks, queued_tasks) = BlockingTaskSpawner::queued();
+        runtime.blocking_tasks = blocking_tasks;
+        if registration != "open" {
+            runtime.recent_projects = vec![gwt::RecentProjectEntry {
+                path: repo.clone(),
+                title: "Registered".to_string(),
+                kind: ProjectKind::Git,
+            }];
+            if registration == "cached_recent" {
+                runtime.remember_recent_project_key(repo, key.clone());
+            }
+        }
+        let before_recent = runtime.recent_projects.clone();
+        let before_tabs = runtime.tabs.len();
+        // A missing parent makes a regression fail locally before any network clone.
+        let parent = temp.path().join("missing-destination-parent");
+        let started = runtime.clone_project_start_events(
+            "clone-client",
+            "git@github.com:EXAMPLE/Registered.git",
+            parent.to_str().expect("parent path"),
+        );
+        assert!(started
+            .iter()
+            .all(|event| event.target == DispatchTarget::Client("clone-client".to_string())));
+        drain_queued_blocking_tasks(&queued_tasks);
+        let recorded = recorded_events.lock().expect("recorded events");
+        assert!(recorded.iter().any(|event| matches!(event,
+            UserEvent::CloneProjectError { client_id, message, existing_project_key }
+                if client_id == "clone-client" && message.contains("already registered")
+                    && existing_project_key.as_deref() == Some(key.as_str())
+        )), "{registration}: registered origin must be refused before clone validation: {recorded:?}");
+        assert!(
+            !parent.exists(),
+            "duplicate refusal must not create clone directories"
+        );
+        assert_eq!(runtime.tabs.len(), before_tabs);
+        assert_eq!(runtime.recent_projects, before_recent);
+        assert!(runtime.pending_project_navigation.is_none());
+    }
 }
 
 #[test]
@@ -1068,11 +1156,11 @@ fn host_codex_launch_writes_worktree_local_hooks_into_a_new_linked_worktree() {
 
 #[test]
 fn codex_hook_discovery_has_no_standalone_process_probe() {
-    let source = include_str!("../launch.rs");
+    let source = include_str!("../../project_runtime/launch.rs");
     let discovery = source
-        .split("pub(super) fn codex_hook_discovery_mode_for_launch_config")
+        .split("pub fn codex_hook_discovery_mode_for_launch_config")
         .nth(1)
-        .and_then(|tail| tail.split("pub(super) fn maybe_register_codex").next())
+        .and_then(|tail| tail.split("pub fn maybe_register_codex").next())
         .expect("Codex hook discovery implementation");
 
     assert!(!discovery.contains("detect_installed_codex_hook_discovery_mode"));
@@ -1225,6 +1313,7 @@ fn codex_project_trust_launch_registers_the_process_stable_host_worktree() {
             issue_number: 42,
             project_root: home.path().to_path_buf(),
             session_mode: mode,
+            review_dispatch: false,
         };
         let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
             .working_dir(worktree.path())
@@ -1429,6 +1518,7 @@ fn managed_project_trust_skips_worktree_relative_codex_home() {
         issue_number: 42,
         project_root: project.clone(),
         session_mode: gwt_agent::SessionMode::Normal,
+        review_dispatch: false,
     };
     let worktrees = vec![gwt_git::WorktreeInfo {
         path: worktree.clone(),
@@ -1487,6 +1577,7 @@ fn managed_project_trust_skips_absolute_process_codex_home_inside_worktree() {
         issue_number: 42,
         project_root: project.clone(),
         session_mode: gwt_agent::SessionMode::Normal,
+        review_dispatch: false,
     };
     let worktrees = vec![gwt_git::WorktreeInfo {
         path: worktree.clone(),
@@ -1548,6 +1639,7 @@ fn managed_project_trust_skips_profile_supplied_arbitrary_codex_home() {
         issue_number: 42,
         project_root: project.clone(),
         session_mode: gwt_agent::SessionMode::Normal,
+        review_dispatch: false,
     };
     let worktrees = vec![gwt_git::WorktreeInfo {
         path: worktree.clone(),
@@ -1607,6 +1699,7 @@ fn codex_project_trust_launch_is_codex_only_and_fail_closed() {
         issue_number: 42,
         project_root: home.path().to_path_buf(),
         session_mode: gwt_agent::SessionMode::Normal,
+        review_dispatch: false,
     };
     let worktrees = vec![gwt_git::WorktreeInfo {
         path: worktree.path().to_path_buf(),
@@ -1678,6 +1771,90 @@ fn codex_project_trust_launch_is_codex_only_and_fail_closed() {
         )
         .expect_err("project trust failure must abort before Codex can prompt");
     assert!(error.contains("failed to trust gwt-managed Codex worktree"));
+}
+
+#[test]
+fn codex_project_trust_scope_accepts_only_exact_isolated_monitor_review() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).expect("create project");
+    init_repo_with_initial_commit(&project);
+    let head = gwt_core::process::run_git_logged(&["rev-parse", "HEAD"], Some(&project))
+        .expect("read reviewed HEAD");
+    assert!(head.status.success());
+    let reviewed_sha = String::from_utf8(head.stdout).unwrap().trim().to_string();
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .linked_issue_number(42)
+        .build();
+    let mut request = gwt::LaunchWizardLaunchRequest::Agent(Box::new(config));
+    request.set_review_dispatch_context(&reviewed_sha);
+    let gwt::LaunchWizardLaunchRequest::Agent(config) = request else {
+        unreachable!("agent request");
+    };
+    let mut config = *config;
+    crate::launch_runtime::resolve_launch_worktree(&project, &mut config)
+        .expect("resolve detached review checkout");
+    let worktrees = gwt_git::WorktreeManager::new(&project)
+        .list()
+        .expect("read authoritative repository worktrees");
+    let mut feedback = issue_monitor_feedback(42);
+    feedback.issue_monitor_project_root = Some(project.clone());
+    feedback.issue_monitor_session_mode = Some(gwt_agent::SessionMode::Normal);
+    feedback.issue_monitor_review_dispatch = true;
+    let candidate = super::super::issue_monitor_trust_candidate_from_feedback(
+        &gwt_agent::AgentId::Codex,
+        Some(&feedback),
+    )
+    .unwrap()
+    .unwrap();
+    let validate =
+        |candidate, config: &gwt_agent::LaunchConfig, worktrees: &[gwt_git::WorktreeInfo]| {
+            super::super::validate_issue_monitor_managed_codex_worktree(
+                candidate, &project, config, worktrees,
+            )
+        };
+
+    assert!(validate(Some(&candidate), &config, &worktrees)
+        .expect("the exact typed review checkout must receive managed project trust")
+        .is_some());
+    assert!(validate(None, &config, &worktrees).unwrap().is_none());
+    assert!(validate(Some(&candidate), &config, &[]).is_err());
+    let mut ordinary_feedback = feedback;
+    ordinary_feedback.issue_monitor_review_dispatch = false;
+    let ordinary_candidate = super::super::issue_monitor_trust_candidate_from_feedback(
+        &gwt_agent::AgentId::Codex,
+        Some(&ordinary_feedback),
+    )
+    .unwrap()
+    .unwrap();
+    assert!(validate(Some(&ordinary_candidate), &config, &worktrees).is_err());
+
+    for missing in [
+        "ephemeral",
+        "read-only",
+        "marker",
+        "exact SHA",
+        "detached",
+        "managed path",
+    ] {
+        let mut invalid = config.clone();
+        match missing {
+            "ephemeral" => invalid.is_ephemeral = false,
+            "read-only" => invalid.suppress_execution_control = false,
+            "marker" => {
+                invalid.env_vars.remove("GWT_REVIEW_DISPATCH");
+            }
+            "exact SHA" => invalid.ephemeral_base_ref = Some("0".repeat(reviewed_sha.len())),
+            "detached" => invalid.branch = Some("work/issue-42".to_string()),
+            "managed path" => invalid.working_dir = Some(project.clone()),
+            _ => unreachable!(),
+        }
+        assert!(
+            validate(Some(&candidate), &invalid, &worktrees).is_err(),
+            "a review without {missing} evidence must fail closed"
+        );
+    }
 }
 
 #[test]
@@ -1821,12 +1998,13 @@ fn issue_monitor_codex_trust_preflight_failure_keeps_actual_delivery_provenance(
         )],
         Some("tab-1"),
     );
-    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig {
+    let mut monitor = test_monitor(gwt::IssueMonitorConfig {
         enabled: true,
         ..gwt::IssueMonitorConfig::default()
     });
     monitor.terminal_queue_push(&[42], "operator", "2026-07-28T00:00:00Z");
     monitor.record_candidate(gwt::IssueMonitorIssue {
+        author_login: None,
         number: 42,
         title: "Codex trust preflight failure".to_string(),
         labels: Vec::new(),
@@ -1867,6 +2045,8 @@ fn issue_monitor_codex_trust_preflight_failure_keeps_actual_delivery_provenance(
     assert!(matches!(
         runtime.issue_monitor_launch_deliveries.get(&delivery_id),
         Some(super::super::IssueMonitorLaunchDeliveryState::LaunchFailed {
+            fresh_execution: None,
+            retryable: true,
             message,
             session_mode: gwt_agent::SessionMode::Resume,
         }) if message == &error
@@ -1888,8 +2068,7 @@ fn issue_monitor_codex_trust_preflight_failure_keeps_actual_delivery_provenance(
         .failed_issues
         .iter()
         .any(|failure| failure.issue_number == 42 && failure.message == error));
-    let restored =
-        gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), persisted);
+    let restored = test_monitor_with_prefs(gwt::IssueMonitorConfig::default(), persisted);
     assert_eq!(
         restored.active_count(),
         0,
@@ -1899,9 +2078,9 @@ fn issue_monitor_codex_trust_preflight_failure_keeps_actual_delivery_provenance(
 
 #[test]
 fn issue_monitor_codex_project_trust_precedes_runner_probe_and_session_creation() {
-    let source = include_str!("../launch.rs");
+    let source = include_str!("../../project_runtime/launch.rs");
     let worker = source
-        .split("fn spawn_agent_window_async_with_claim")
+        .split("fn prepare_agent_launch")
         .nth(1)
         .expect("launch worker source");
     let validate = worker
@@ -1920,8 +2099,18 @@ fn issue_monitor_codex_project_trust_precedes_runner_probe_and_session_creation(
         .find("resolve_host_runner_health_checked")
         .expect("host runner probe");
     let session = worker
-        .find("gwt_agent::Session::new")
+        .find("initialize_launch_session(")
         .expect("durable Session creation");
+    let initializer_source = include_str!("../../session_launch.rs");
+    let initializer = initializer_source
+        .split("pub fn initialize_launch_session(")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub fn apply_resume_identity_to_session(")
+                .next()
+        })
+        .expect("shared Session initializer");
+    assert!(initializer.contains("Session::new("));
 
     assert!(
         validate < register,
@@ -1955,6 +2144,7 @@ fn codex_project_trust_scope_refuses_arbitrary_working_dir_even_with_issue_metad
         issue_number: 42,
         project_root: project.path().to_path_buf(),
         session_mode: gwt_agent::SessionMode::Normal,
+        review_dispatch: false,
     };
     let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
         .working_dir(arbitrary.path())
@@ -1996,6 +2186,7 @@ fn codex_project_trust_scope_rejects_mismatched_issue_monitor_provenance() {
         issue_number: 42,
         project_root: project.path().to_path_buf(),
         session_mode: gwt_agent::SessionMode::Normal,
+        review_dispatch: false,
     };
     let valid_entry = gwt_git::WorktreeInfo {
         path: worktree.path().to_path_buf(),
@@ -2010,6 +2201,7 @@ fn codex_project_trust_scope_rejects_mismatched_issue_monitor_provenance() {
                 issue_number: 42,
                 project_root: other_project.path().to_path_buf(),
                 session_mode: gwt_agent::SessionMode::Normal,
+                review_dispatch: false,
             },
             base_config(),
             valid_entry.clone(),
@@ -2290,6 +2482,118 @@ fn codex_hook_trust_launch_trusts_every_discovered_worktree_hook_file() {
     }
 }
 
+/// Issue #5270 AC-R3: a restarted GUI and a new window must preserve the
+/// shared hook identity already trusted before an installed binary changes.
+#[test]
+fn codex_shared_hook_trust_survives_update_restart_and_new_window() {
+    let home = tempdir().expect("initial home");
+    let _gwt_home = ScopedGwtHome::set(home.path());
+    let codex_config = home.path().join(".codex/config.toml");
+    let fixture_root = tempdir().expect("fixture tempdir");
+    let (repo, worktree) = codex_hook_trust_linked_worktree_fixture(fixture_root.path());
+    // The fixture tracks both copies. This regression concerns an untracked
+    // shared root, which must stay portable independently of tracking policy.
+    for root in [&repo, &worktree] {
+        let status = gwt_core::process::hidden_command("git")
+            .args(["rm", "--cached", "--", ".codex/hooks.json"])
+            .current_dir(root)
+            .status()
+            .expect("untrack fixture hook config");
+        assert!(status.success(), "untrack fixture hook config: {status}");
+    }
+    {
+        let _pin = gwt_skills::settings_local::ScopedHookBin::set(gwt_skills::CANONICAL_HOOK_BIN);
+        gwt_skills::generate_codex_hooks_for_mode(
+            &worktree,
+            gwt_skills::CodexHookDiscoveryMode::Both,
+        )
+        .expect("generate initially portable hooks");
+    }
+    let initial = gwt_skills::register_codex_managed_hook_trust_for_mode_with_expected_bin(
+        &worktree,
+        &codex_config,
+        gwt_skills::CodexHookDiscoveryMode::Both,
+        Some(gwt_skills::CANONICAL_HOOK_BIN),
+    )
+    .expect("register initial trust");
+    assert!(initial.hooks_need_review_reason().is_none(), "{initial:?}");
+    let shared_paths = gwt_skills::codex_hooks_paths_for_codex_discovery(
+        &worktree,
+        gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+    );
+    let shared_hooks = &shared_paths[0];
+    let shared_before = fs::read(shared_hooks).expect("read initial shared hooks");
+    let trust_before = fs::read(&codex_config).expect("read persisted initial trust");
+
+    let restarted_home = tempdir().expect("restarted GUI home");
+    let _restarted_home = ScopedGwtHome::set(restarted_home.path());
+    let updated_bin = fixture_root
+        .path()
+        .join("updated-install")
+        .join(format!("gwtd{}", std::env::consts::EXE_SUFFIX));
+    write_executable_test_file(&updated_bin, "updated binary");
+    let updated_bin = updated_bin.to_string_lossy().into_owned();
+    let _updated_pin = gwt_skills::settings_local::ScopedHookBin::set(&updated_bin);
+    super::super::startup::self_heal_managed_hooks_in_worktrees_with_expected(
+        [worktree.as_path()],
+        Some(&updated_bin),
+    );
+    assert_eq!(
+        fs::read(shared_hooks).unwrap(),
+        shared_before,
+        "GUI startup must preserve the previously trusted shared hook identity"
+    );
+    let materialization = gwt::refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
+        &worktree,
+        &gwt_agent::AgentId::Codex,
+        gwt_skills::CodexHookDiscoveryMode::Both,
+        false,
+    )
+    .expect("materialize a new window after restart");
+    assert_eq!(fs::read(shared_hooks).unwrap(), shared_before);
+    // Check persisted trust before launch can repair it. Re-registering first
+    // would hide the changed shared command that stopped another Codex window.
+    let inspected = gwt_skills::inspect_codex_managed_hook_trust_for_mode_with_expected_bin(
+        &worktree,
+        &codex_config,
+        gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+        Some(&updated_bin),
+    )
+    .expect("inspect persisted shared hook trust without registering");
+    assert!(
+        inspected.hooks_need_review_reason().is_none(),
+        "shared trust must survive before new-window registration: {inspected:?}"
+    );
+    assert_eq!(fs::read(&codex_config).unwrap(), trust_before);
+
+    let mut launch_config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(&worktree)
+        .build();
+    launch_config.env_vars.insert(
+        "CODEX_HOME".to_string(),
+        codex_config.parent().unwrap().display().to_string(),
+    );
+    let report = super::super::maybe_register_codex_managed_hook_trust_for_launch(
+        &restarted_home.path().join(".gwt/config.toml"),
+        &worktree,
+        &launch_config,
+        None,
+        gwt_skills::CodexHookDiscoveryMode::Both,
+        materialization.hook_bin.as_deref(),
+    )
+    .expect("new-window launch must not stop for Hooks need review")
+    .expect("Codex launch registers both hook copies");
+    assert!(report.hooks_need_review_reason().is_none(), "{report:?}");
+    let config: toml::Value =
+        toml::from_str(&fs::read_to_string(&report.config_path).unwrap()).unwrap();
+    for path in gwt_skills::codex_hooks_paths_for_codex_discovery(
+        &worktree,
+        gwt_skills::CodexHookDiscoveryMode::Both,
+    ) {
+        assert_every_codex_hook_is_trusted(&config, &path);
+    }
+}
+
 /// Issue #3967 AC-4: a pre-registration that cannot vouch for the gwt hooks
 /// must fail the launch with a concrete reason instead of handing the agent a
 /// human-only prompt that silently holds the Issue Monitor slot.
@@ -2432,7 +2736,7 @@ fn workspace_view_for_tab_omits_work_item_history_from_workspace_state() {
         title: "Repo".to_string(),
         project_root: repo.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(empty_workspace_state()),
+        workspace: WindowRegistry::from_persisted(empty_workspace_state()),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };

@@ -1,29 +1,67 @@
 use super::*;
 
+fn run_queued_projection_prepare(
+    tasks: &BlockingTestTaskQueue,
+    events: &Arc<Mutex<Vec<UserEvent>>>,
+) -> Box<super::super::workspace_views::ActiveWorkProjectionPrepared> {
+    // Run the independent census before the initially queued Work task. Later
+    // generations may queue only Work, or another census after an in-flight Work.
+    let queued = std::mem::take(&mut *tasks.lock().expect("queued tasks"));
+    for task in queued {
+        task();
+    }
+    let mut events = events.lock().expect("recorded events");
+    let index = events
+        .iter()
+        .position(|event| {
+            matches!(
+                recorded_project_payload(event),
+                UserEvent::ActiveWorkProjectionPrepared(_)
+            )
+        })
+        .expect("projection completion");
+    let UserEvent::ActiveWorkProjectionPrepared(prepared) =
+        into_recorded_project_payload(events.remove(index))
+    else {
+        unreachable!();
+    };
+    prepared
+}
+
 #[test]
 fn issue_3777_runtime_hook_returns_before_full_projection_build() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).expect("repo dir");
-    let tab = sample_project_tab_with_window_at(
-        "tab-1",
-        "codex-1",
-        repo,
-        WindowPreset::Codex,
-        WindowProcessStatus::Running,
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "codex-1");
-    runtime.active_agent_sessions.insert(
-        window_id.clone(),
-        sample_active_agent_session("tab-1", &window_id),
-    );
+    let (mut runtime, probe, id) = owner_browser_input_fixture(temp.path());
+    let owner = runtime.test_project_owners.values().next().unwrap().clone();
+    let status = owner_runtime_status_event(&owner, &probe, "Error", "Stop");
+    let context = runtime.test_context();
+    let identity = owner.client().identity().unwrap().clone();
+    // Commit launch-time preparation before measuring this status request.
+    // test-hygiene: allow-wall-clock-deadline Bounds the existing setup; actual observer completion establishes ordering.
+    let preparation_deadline = Instant::now() + Duration::from_secs(5);
+    runtime.blocking_tasks = BlockingTaskSpawner::thread();
+    runtime.refresh_active_work_projection_for_project_root(&context.project_root);
+    wait_for_active_work_projection(&mut runtime);
+    // Work and census finish independently. A running census would correctly
+    // coalesce this next request instead of enqueueing another worker.
+    while super::super::workspace_views::local_agent_activity_refresh_is_running(
+        &runtime,
+        &context.project_root,
+    ) {
+        assert!(
+            // test-hygiene: allow-wall-clock-deadline Same setup hang guard; the observer's running state supplies ordering.
+            Instant::now() < preparation_deadline,
+            "launch-time census did not finish before measuring the next hook"
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
 
     super::super::workspace_views::reset_full_active_work_projection_builds();
-    let events = runtime.handle_runtime_hook_event(runtime_hook_state("Stopped", "session-1"));
+    let events = runtime.handle_project_owner_event(&context, 1, &identity, status);
+    assert_eq!(runtime.runtimes[&id].status, WindowProcessStatus::Error);
 
     assert_eq!(
         super::super::workspace_views::full_active_work_projection_builds(),
@@ -39,7 +77,7 @@ fn issue_3777_runtime_hook_returns_before_full_projection_build() {
     assert_eq!(
         tasks.lock().expect("queued tasks").len(),
         2,
-        "one heartbeat worker and one background projection worker must be queued",
+        "the owner handled heartbeat; the GUI queues census and projection workers",
     );
 }
 
@@ -129,8 +167,10 @@ fn issue_3777_cache_only_patch_invalidates_stale_serialized_projection() {
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("repo dir");
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let (runtime, recorded_events) =
+    let (mut runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
     let stale_payload: Arc<str> = Arc::from("stale-before-watcher-patch");
     runtime
         .project_state_for_tab("tab-1")
@@ -163,13 +203,239 @@ fn issue_3777_cache_only_patch_invalidates_stale_serialized_projection() {
             .contains_key("tab-1"),
         "a cache-only structured mutation must invalidate the older wire payload"
     );
-    assert!(runtime
-        .active_work_projection_reply("client-1", "tab-1")
-        .is_some());
+    assert!(
+        runtime
+            .active_work_projection_reply("client-1", "tab-1")
+            .is_none(),
+        "a materialized Work must not be replaced by the empty live-session fallback"
+    );
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        2,
+        "the census and full wire payload are prepared independently off the GUI thread"
+    );
     assert!(
         recorded_events.lock().expect("recorded events").is_empty(),
         "FrontendReady must not replay a payload serialized before the watcher patch"
     );
+}
+
+#[test]
+fn local_agent_activity_does_not_wait_for_work_history_lock() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let (mut runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (sent, received) = std::sync::mpsc::channel();
+    runtime.proxy = AppEventProxy::Notifying {
+        inner: Box::new(runtime.proxy.clone()),
+        sent,
+    };
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    runtime.active_work_projection_reply("client", "tab-1");
+    let cache = runtime
+        .project_state_for_tab("tab-1")
+        .unwrap()
+        .work_items_cache
+        .clone();
+    let history_lock = cache.lock().unwrap();
+    let workers = tasks
+        .lock()
+        .unwrap()
+        .drain(..)
+        .map(std::thread::spawn)
+        .collect::<Vec<_>>();
+    // This timeout only guards a deadlock. The held mutex, not elapsed time,
+    // proves that the census arrives before Work history can be materialized.
+    // test-hygiene: allow-wall-clock-deadline Deadlock guard: the Work-history mutex stays locked until an independent census event arrives.
+    let observed = received.recv_timeout(Duration::from_secs(30));
+    drop(history_lock);
+    for worker in workers {
+        worker.join().unwrap();
+    }
+    assert!(
+        observed.is_ok(),
+        "local census must not wait for Work history"
+    );
+    let event = events.lock().unwrap().remove(0);
+    let UserEvent::ProjectDispatch { events, .. } = into_recorded_project_payload(event) else {
+        panic!("expected an independent local census dispatch");
+    };
+    assert!(matches!(
+        events[0].event,
+        BackendEvent::LocalAgentActivity { .. }
+    ));
+}
+
+#[test]
+fn local_agent_activity_hydrates_while_work_refreshes_keep_superseding() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    runtime.merge_workspace_projection_into_cached_active_work(
+        &repo,
+        &gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo),
+    );
+    assert!(runtime
+        .active_work_projection_reply("client", "tab-1")
+        .is_none());
+
+    for _ in 0..2 {
+        runtime.schedule_runtime_hook_active_work_projection_refresh(
+            &repo,
+            "posttooluse",
+            "running",
+        );
+        let prepared = run_queued_projection_prepare(&tasks, &events);
+        let commit = runtime.handle_active_work_projection_prepared(*prepared);
+        assert!(
+            commit.prepared_dispatch.is_none(),
+            "stale Work stays withheld"
+        );
+        let event = commit
+            .local_activity
+            .expect("current census must reach hydration");
+        let wire = serde_json::to_value(event.event).unwrap();
+        assert_eq!(wire["kind"], "local_agent_activity");
+        assert_eq!(wire["activity"]["agents"], serde_json::json!([]));
+        assert_eq!(tasks.lock().unwrap().len(), 1, "one rerun remains queued");
+    }
+
+    let mut prepared = run_queued_projection_prepare(&tasks, &events);
+    prepared.context.generation += 1;
+    let commit = runtime.handle_active_work_projection_prepared(*prepared);
+    assert!(
+        commit.local_activity.is_none(),
+        "old project contexts stay fenced"
+    );
+    assert!(commit.prepared_dispatch.is_none());
+}
+
+#[test]
+fn issue_5404_unchanged_projection_inputs_skip_rebuild_and_changed_work_refreshes() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    // Hook discovery is fingerprinted from HOME as well as GWT HOME.
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo dir");
+    // Keep the first audit independent of the user's installed plugin inventory.
+    fs::create_dir_all(repo.join(".gwt")).expect("fixture settings");
+    fs::write(repo.join(".gwt/external-skill-roots.json"), "[]").expect("isolated skill roots");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    super::super::workspace_views::reset_full_active_work_projection_builds();
+
+    let refresh = |runtime: &mut AppRuntime| {
+        runtime.refresh_active_work_projection_for_project_root(&repo);
+        let completion = run_queued_projection_prepare(&tasks, &events);
+        runtime.handle_active_work_projection_prepared(*completion)
+    };
+    assert!(refresh(&mut runtime).prepared_dispatch.is_some());
+    let unchanged = refresh(&mut runtime);
+    assert_eq!(
+        super::super::workspace_views::full_active_work_projection_builds(),
+        1,
+        "unchanged input fingerprints must reuse the prepared projection",
+    );
+    assert!(
+        unchanged.prepared_dispatch.is_none(),
+        "unchanged inputs do not broadcast"
+    );
+    assert!(
+        unchanged.local_activity.is_some(),
+        "memo hits still carry their census"
+    );
+
+    let mut projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    projection.title = "Changed canonical Work".into();
+    gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+        .expect("save changed Current");
+    assert!(refresh(&mut runtime).prepared_dispatch.is_some());
+    assert_eq!(
+        super::super::workspace_views::full_active_work_projection_builds(),
+        2
+    );
+
+    fs::create_dir_all(repo.join(".claude")).expect("create hook surface");
+    assert!(
+        refresh(&mut runtime).prepared_dispatch.is_some(),
+        "hook surface presence invalidates the projection memo"
+    );
+
+    let discussion = repo.join(".gwt/discussion.md");
+    fs::create_dir_all(discussion.parent().unwrap()).unwrap();
+    fs::write(
+        discussion,
+        "## Discussion TODO\n\n### Proposal A - Goal handoff [chosen]\n\
+         - Goal Condition: finish projection verification\n- Goal State: pending\n",
+    )
+    .unwrap();
+    assert!(
+        refresh(&mut runtime).prepared_dispatch.is_some(),
+        "pending goal changes invalidate the projection memo"
+    );
+}
+
+#[test]
+#[ignore = "Issue #5404 same-fixture GUI occupancy measurement"]
+fn issue_5404_gui_occupancy_measurement() {
+    let temp = tempdir().expect("fixture");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    fs::create_dir_all(&runtime.sessions_dir).unwrap();
+    let mut session =
+        gwt_agent::Session::new(repo.clone(), "work/fixture", gwt_agent::AgentId::Codex);
+    session.launch_args = vec!["x".repeat(21 * 1024)];
+    for index in 0..2500 {
+        session.id = format!("occupancy-session-{index:04}");
+        session.save(&runtime.sessions_dir).unwrap();
+    }
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let before = Instant::now();
+    runtime
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
+        .unwrap();
+    let synchronous_ms = before.elapsed().as_secs_f64() * 1000.0;
+    let after = Instant::now();
+    for _ in 0..20 {
+        runtime.refresh_active_work_projection_for_project_root(&repo);
+    }
+    let gui_ms_per_call = after.elapsed().as_secs_f64() * 1000.0 / 20.0;
+    assert_eq!(tasks.lock().unwrap().len(), 2);
+    let completion = run_queued_projection_prepare(&tasks, &events);
+    runtime.handle_active_work_projection_prepared(*completion);
+    let completion = run_queued_projection_prepare(&tasks, &events);
+    runtime.handle_active_work_projection_prepared(*completion);
+    let builds = super::super::workspace_views::full_active_work_projection_builds();
+    let loads = super::super::workspace_views::active_work_projection_shared_loads();
+    let memo_started = Instant::now();
+    runtime.refresh_active_work_projection_for_project_root(&repo);
+    run_queued_projection_prepare(&tasks, &events);
+    let memo_refresh_ms = memo_started.elapsed().as_secs_f64() * 1000.0;
+    let extra_builds = super::super::workspace_views::full_active_work_projection_builds() - builds;
+    let extra_loads = super::super::workspace_views::active_work_projection_shared_loads();
+    let extra_loads = std::array::from_fn::<_, 3, _>(|index| extra_loads[index] - loads[index]);
+    println!("Issue #5404: sessions=2500, synchronous_full_build_ms={synchronous_ms:.3}, gui_schedule_ms_per_call={gui_ms_per_call:.3}, burst_requests=20, workers=2, memo_refresh_ms={memo_refresh_ms:.3}, memo_full_builds={extra_builds}, memo_hook_journal_ledger_loads={extra_loads:?}");
 }
 
 #[test]
@@ -192,22 +458,11 @@ fn issue_3777_runtime_hook_refresh_burst_keeps_one_worker_and_latest_generation(
         .is_empty());
     assert_eq!(
         tasks.lock().expect("queued tasks").len(),
-        1,
-        "a refresh burst must keep at most one worker in flight",
+        2,
+        "a refresh burst keeps one census and one Work worker in flight",
     );
 
-    let first_task = tasks.lock().expect("queued tasks").remove(0);
-    first_task();
-    let first_completion = recorded_events
-        .lock()
-        .expect("recorded events")
-        .pop()
-        .expect("first projection completion");
-    let UserEvent::ActiveWorkProjectionPrepared(first_completion) =
-        into_recorded_project_payload(first_completion)
-    else {
-        panic!("expected ActiveWorkProjectionPrepared");
-    };
+    let first_completion = run_queued_projection_prepare(&tasks, &recorded_events);
     let first_commit = runtime.handle_active_work_projection_prepared(*first_completion);
     assert!(
         first_commit.prepared_dispatch.is_none(),
@@ -223,18 +478,7 @@ fn issue_3777_runtime_hook_refresh_burst_keeps_one_worker_and_latest_generation(
         "the latest dirty generation starts only after the first worker completes",
     );
 
-    let latest_task = tasks.lock().expect("queued tasks").remove(0);
-    latest_task();
-    let latest_completion = recorded_events
-        .lock()
-        .expect("recorded events")
-        .pop()
-        .expect("latest projection completion");
-    let UserEvent::ActiveWorkProjectionPrepared(latest_completion) =
-        into_recorded_project_payload(latest_completion)
-    else {
-        panic!("expected ActiveWorkProjectionPrepared");
-    };
+    let latest_completion = run_queued_projection_prepare(&tasks, &recorded_events);
     let latest_commit = runtime.handle_active_work_projection_prepared(*latest_completion);
     assert!(
         latest_commit.prepared_dispatch.is_some(),
@@ -303,7 +547,7 @@ fn issue_3777_close_project_tab_discards_cached_and_pending_projection_work() {
 
     runtime.refresh_active_work_projection_for_project_root(&repo);
     runtime.refresh_active_work_projection_for_project_root(&repo);
-    assert_eq!(tasks.lock().expect("queued tasks").len(), 1);
+    assert_eq!(tasks.lock().expect("queued tasks").len(), 2);
     let cache_owner = runtime
         .project_state_for_tab("tab-1")
         .unwrap()
@@ -327,27 +571,7 @@ fn issue_3777_close_project_tab_discards_cached_and_pending_projection_work() {
     drop(cache_lease);
     drop(cache_owner);
 
-    tasks.lock().expect("queued tasks").remove(0)();
-    let completion_index = recorded_events
-        .lock()
-        .expect("recorded events")
-        .iter()
-        .position(|event| {
-            matches!(
-                recorded_project_payload(event),
-                UserEvent::ActiveWorkProjectionPrepared(_)
-            )
-        })
-        .expect("stale projection completion");
-    let completion = recorded_events
-        .lock()
-        .expect("recorded events")
-        .remove(completion_index);
-    let UserEvent::ActiveWorkProjectionPrepared(completion) =
-        into_recorded_project_payload(completion)
-    else {
-        panic!("expected ActiveWorkProjectionPrepared");
-    };
+    let completion = run_queued_projection_prepare(&tasks, &recorded_events);
     let commit = runtime.handle_active_work_projection_prepared(*completion);
     assert!(commit.prepared_dispatch.is_none());
     assert!(
@@ -391,17 +615,7 @@ fn issue_3777_first_authoritative_projection_refuses_legacy_only_work() {
     runtime.blocking_tasks = spawner;
 
     runtime.refresh_active_work_projection_for_project_root(&repo);
-    tasks.lock().expect("queued tasks").remove(0)();
-    let completion = recorded_events
-        .lock()
-        .expect("recorded events")
-        .pop()
-        .expect("first projection completion");
-    let UserEvent::ActiveWorkProjectionPrepared(completion) =
-        into_recorded_project_payload(completion)
-    else {
-        panic!("expected ActiveWorkProjectionPrepared");
-    };
+    let completion = run_queued_projection_prepare(&tasks, &recorded_events);
     assert!(completion.result.is_err());
     let error = completion.load_error.as_ref().expect("legacy load error");
     assert!(error.message.contains("v9.106.0"));
@@ -436,27 +650,9 @@ fn issue_3777_normal_refresh_does_not_erase_pending_runtime_hook_profile() {
     runtime.schedule_runtime_hook_active_work_projection_refresh(&repo, "stop", "stopped");
     runtime.refresh_active_work_projection_for_project_root(&repo);
 
-    tasks.lock().expect("queued tasks").remove(0)();
-    let first = recorded_events
-        .lock()
-        .expect("recorded events")
-        .pop()
-        .expect("first completion");
-    let UserEvent::ActiveWorkProjectionPrepared(first) = into_recorded_project_payload(first)
-    else {
-        panic!("expected ActiveWorkProjectionPrepared");
-    };
+    let first = run_queued_projection_prepare(&tasks, &recorded_events);
     runtime.handle_active_work_projection_prepared(*first);
-    tasks.lock().expect("queued tasks").remove(0)();
-    let latest = recorded_events
-        .lock()
-        .expect("recorded events")
-        .pop()
-        .expect("latest completion");
-    let UserEvent::ActiveWorkProjectionPrepared(latest) = into_recorded_project_payload(latest)
-    else {
-        panic!("expected ActiveWorkProjectionPrepared");
-    };
+    let latest = run_queued_projection_prepare(&tasks, &recorded_events);
 
     assert_eq!(latest.profile.source_event, "stop");
     assert_eq!(latest.profile.composed_state, "stopped");
@@ -493,6 +689,7 @@ fn issue_3777_runtime_hook_failure_preserves_last_good_projection() {
         works: Vec::new(),
         cleanup_candidate: None,
         managed_hook_health: None,
+        local_agent_activity: None,
         active_work_count: 0,
         active_works: Vec::new(),
         agents: Vec::new(),
@@ -519,20 +716,14 @@ fn issue_3777_runtime_hook_failure_preserves_last_good_projection() {
     runtime.blocking_tasks = spawner;
 
     runtime.refresh_active_work_projection_for_project_root(&repo);
-    tasks.lock().expect("queued tasks").remove(0)();
-    let completion = recorded_events
-        .lock()
-        .expect("recorded events")
-        .pop()
-        .expect("failed projection completion");
-    let UserEvent::ActiveWorkProjectionPrepared(completion) =
-        into_recorded_project_payload(completion)
-    else {
-        panic!("expected ActiveWorkProjectionPrepared");
-    };
+    let completion = run_queued_projection_prepare(&tasks, &recorded_events);
     let commit = runtime.handle_active_work_projection_prepared(*completion);
 
     assert!(commit.prepared_dispatch.is_none());
+    assert!(
+        commit.local_activity.is_some(),
+        "Work errors do not suppress the census"
+    );
     assert!(
         commit.profile.is_some(),
         "a failed prepare still emits its content-free timing profile",
@@ -595,24 +786,30 @@ fn issue_3777_runtime_hook_profiles_work_lease_wait_separately_from_parse() {
         .open(work_items_path.with_extension("lock"))
         .expect("open Work lease");
     lease.lock_exclusive().expect("hold Work lease");
+    let (contention_tx, contention_rx) = std::sync::mpsc::channel();
+    let _contention = gwt_core::operation_deadline::ScopedNamedLockContentionObserver::set(
+        &work_items_path.with_extension("lock"),
+        move || {
+            contention_tx
+                .send(())
+                .expect("report Work lease contention")
+        },
+    );
     let release = thread::spawn(move || {
-        thread::sleep(Duration::from_millis(120));
+        // Start the existing hold interval only after the loader is waiting.
+        // Always unlock before reporting a missing notification to avoid a hang.
+        // test-hygiene: allow-wall-clock-deadline Bounds a missing notification, not the measured lock wait; unlock before failing.
+        let contention = contention_rx.recv_timeout(Duration::from_secs(30));
+        if contention.is_ok() {
+            thread::sleep(Duration::from_millis(120));
+        }
         lease.unlock().expect("release Work lease");
+        contention.expect("observe Work lease contention before release");
     });
 
     runtime.refresh_active_work_projection_for_project_root(&repo);
-    tasks.lock().expect("queued tasks").remove(0)();
+    let completion = run_queued_projection_prepare(&tasks, &recorded_events);
     release.join().expect("join Work lease holder");
-    let completion = recorded_events
-        .lock()
-        .expect("recorded events")
-        .pop()
-        .expect("projection completion");
-    let UserEvent::ActiveWorkProjectionPrepared(completion) =
-        into_recorded_project_payload(completion)
-    else {
-        panic!("expected ActiveWorkProjectionPrepared");
-    };
 
     assert!(
         completion.profile.lock_wait_ms >= 75,

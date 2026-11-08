@@ -348,9 +348,48 @@ pub fn sync_issue_cache_from_remote_with_wait(
     cache_root: &Path,
     wait: &mut dyn FnMut(Duration),
 ) -> Result<(), String> {
+    sync_issue_cache_from_remote_with_page_cache(repo_path, cache_root, wait, false)
+}
+
+/// Scan-owned retries reuse general pages without extending their freshness.
+/// Explicit refreshes retain the live path above; queue pages always stay live.
+pub fn sync_issue_cache_from_remote_for_monitor(
+    repo_path: &Path,
+    cache_root: &Path,
+) -> Result<(), String> {
+    sync_issue_cache_from_remote_with_page_cache(
+        repo_path,
+        cache_root,
+        &mut std::thread::sleep,
+        true,
+    )
+    .map_err(|error| {
+        gwt_core::error_ledger::record_fail_open(
+            gwt_core::error_ledger::ErrorKind::CacheRefreshFailure,
+            format!("issue cache full refresh: {error}"),
+            gwt_core::error_ledger::ErrorTarget {
+                project_root: Some(repo_path.display().to_string()),
+                ..gwt_core::error_ledger::ErrorTarget::default()
+            },
+        );
+        error
+    })
+}
+
+fn sync_issue_cache_from_remote_with_page_cache(
+    repo_path: &Path,
+    cache_root: &Path,
+    wait: &mut dyn FnMut(Duration),
+    reuse_pages: bool,
+) -> Result<(), String> {
     gwt_core::operation_deadline::ensure_remaining("Issue cache refresh")
         .map_err(|error| error.to_string())?;
-    let snapshots = fetch_issue_list_snapshots(repo_path)?;
+    let (snapshots, fetched_at) = fetch_issue_list_snapshots(
+        repo_path,
+        reuse_pages
+            .then(|| cache_root.join("refresh-list-pages"))
+            .as_deref(),
+    )?;
     fs::create_dir_all(cache_root).map_err(|err| err.to_string())?;
     let cache = Cache::new(cache_root.to_path_buf());
     let ledger = BudgetLedger::global();
@@ -358,11 +397,25 @@ pub fn sync_issue_cache_from_remote_with_wait(
     for listed_snapshot in &snapshots {
         gwt_core::operation_deadline::ensure_remaining("Issue cache entry")
             .map_err(|error| error.to_string())?;
+        // A targeted read may be newer than a page retained by a failed scan.
+        // Bind the comparison to this generation so a concurrent writer wins.
+        let generation = cache
+            .current_generation(listed_snapshot.number)
+            .map_err(|error| error.to_string())?;
+        let cached = cache.load_entry(listed_snapshot.number);
+        if cached.as_ref().is_some_and(|entry| {
+            DateTime::parse_from_rfc3339(&entry.snapshot.updated_at.0)
+                .ok()
+                .zip(DateTime::parse_from_rfc3339(&listed_snapshot.updated_at.0).ok())
+                .is_some_and(|(cached, listed)| cached > listed)
+        }) {
+            continue;
+        }
         let snapshot = if is_spec_issue(listed_snapshot) {
-            if cache
-                .load_entry(listed_snapshot.number)
-                .is_some_and(|entry| entry.snapshot.updated_at == listed_snapshot.updated_at)
-            {
+            if cached.is_some_and(|entry| {
+                entry.snapshot.updated_at == listed_snapshot.updated_at
+                    && entry.snapshot.author_login.is_some()
+            }) {
                 continue;
             }
             if let Some(delay) = ledger.burst_wait(GitHubQuota::GraphQl, &policy, Utc::now()) {
@@ -383,8 +436,9 @@ pub fn sync_issue_cache_from_remote_with_wait(
             listed_snapshot.clone()
         };
         cache
-            .write_snapshot(&snapshot)
-            .map_err(|err| format!("write issue cache: {err}"))?;
+            .write_snapshot_if_generation(&snapshot, generation.as_ref())
+            .map_err(|err| format!("write issue cache: {err}"))?
+            .ok_or_else(|| format!("cached Issue #{} changed during refresh", snapshot.number.0))?;
     }
     // The complete queue census also synchronizes cached membership, including
     // generation-matched SPECs skipped above. Queue rows are open by contract.
@@ -459,7 +513,7 @@ pub fn sync_issue_cache_from_remote_with_wait(
                 )
             })?;
     }
-    write_issue_cache_refresh_meta(cache_root, ISSUE_CACHE_TTL)?;
+    write_issue_cache_refresh_meta_at(cache_root, ISSUE_CACHE_TTL, fetched_at)?;
     Ok(())
 }
 
@@ -535,11 +589,20 @@ fn read_issue_cache_refresh_meta(cache_root: &Path) -> Option<IssueCacheRefreshM
     serde_json::from_slice(&bytes).ok()
 }
 
+#[cfg(test)]
 fn write_issue_cache_refresh_meta(cache_root: &Path, ttl: Duration) -> Result<(), String> {
+    write_issue_cache_refresh_meta_at(cache_root, ttl, Utc::now())
+}
+
+fn write_issue_cache_refresh_meta_at(
+    cache_root: &Path,
+    ttl: Duration,
+    fetched_at: DateTime<Utc>,
+) -> Result<(), String> {
     fs::create_dir_all(cache_root).map_err(|err| err.to_string())?;
     let ttl_minutes = std::cmp::max(1, ttl.as_secs() / 60);
     let payload = IssueCacheRefreshMeta {
-        last_full_refresh: Utc::now().to_rfc3339(),
+        last_full_refresh: fetched_at.to_rfc3339(),
         ttl_minutes,
     };
     let bytes = serde_json::to_vec_pretty(&payload).map_err(|err| err.to_string())?;
@@ -661,7 +724,18 @@ fn run_gh_issue_command_with_gate(
     // Keep caller-owned quota accounting (Issue #3891 AC-3); the capture
     // wrapper applies the deadline without counting this spawn again.
     let quota = gwt_core::github_quota::classify_gh_args(args);
-    ledger.record_spawn_from(quota, &gwt_core::github_budget::spawn_source(args), now);
+    let caller = if label == "gh api queued issues" {
+        "issue-cache.queued-issues"
+    } else if label == "gh api issues" {
+        "issue-cache.refresh"
+    } else {
+        "issue-cache.issue"
+    };
+    ledger.record_spawn_from(
+        quota,
+        &gwt_core::github_budget::spawn_source_for_caller(args, caller),
+        now,
+    );
 
     let cwd = gh_repo_cwd(repo_path);
     let output = capture_gh_blocking(
@@ -713,10 +787,29 @@ fn probe_rate_limit_payload(cwd: &Path) -> Option<String> {
 /// The bounded general Issue enumeration (SPEC #4093 FR-002), overlaid with
 /// the complete REST open queue label collection (#5080 AC-1). Only the label
 /// read opts out of the ordinary page cap. Both lists use the `core` budget.
-fn fetch_issue_list_snapshots(repo_path: &Path) -> Result<Vec<IssueSnapshot>, String> {
+fn fetch_issue_list_snapshots(
+    repo_path: &Path,
+    page_cache: Option<&Path>,
+) -> Result<(Vec<IssueSnapshot>, DateTime<Utc>), String> {
+    let mut oldest_page = Utc::now();
     let pages = gwt_git::gh_rest::read_pages_with(
         "repos/{owner}/{repo}/issues?state=all&sort=updated&direction=desc",
-        |path| run_gh_issue_command(repo_path, &["api", path, "--include"], "gh api issues"),
+        |path| {
+            let fetch =
+                || run_gh_issue_command(repo_path, &["api", path, "--include"], "gh api issues");
+            let Some(cache_dir) = page_cache else {
+                return fetch();
+            };
+            let (fetched_at, stdout) = gwt_git::gh_rest::cached_list_response_at_with(
+                cache_dir,
+                path,
+                Utc::now(),
+                ISSUE_CACHE_TTL.as_secs() as i64,
+                fetch,
+            )?;
+            oldest_page = oldest_page.min(fetched_at);
+            Ok(stdout)
+        },
     )?;
     let queued = gwt_git::issue::fetch_queued_issue_listing_with("{owner}", "{repo}", |path| {
         run_gh_issue_command(
@@ -740,6 +833,7 @@ fn fetch_issue_list_snapshots(repo_path: &Path) -> Result<Vec<IssueSnapshot>, St
     snapshots.extend(queued.issues.into_iter().map(|issue| {
         let snapshot = IssueSnapshot {
             number: IssueNumber(issue.number),
+            author_login: issue.author_login,
             title: issue.title,
             body: issue.body.unwrap_or_default(),
             labels: issue.labels,
@@ -753,7 +847,7 @@ fn fetch_issue_list_snapshots(repo_path: &Path) -> Result<Vec<IssueSnapshot>, St
         };
         (snapshot.number, snapshot)
     }));
-    Ok(snapshots.into_values().collect())
+    Ok((snapshots.into_values().collect(), oldest_page))
 }
 
 fn fetch_issue_snapshot(repo_path: &Path, number: IssueNumber) -> Result<IssueSnapshot, String> {
@@ -764,7 +858,7 @@ fn fetch_issue_snapshot(repo_path: &Path, number: IssueNumber) -> Result<IssueSn
             "view",
             &number.0.to_string(),
             "--json",
-            "number,title,body,labels,state,updatedAt,comments",
+            "number,title,body,labels,state,updatedAt,author,comments",
         ],
         &format!("gh issue view #{number}", number = number.0),
     )?;
@@ -866,6 +960,11 @@ fn parse_issue_snapshot(json: &str, number: IssueNumber) -> Result<IssueSnapshot
 
     Ok(IssueSnapshot {
         number: IssueNumber(actual_number),
+        author_login: issue
+            .pointer("/author/login")
+            .and_then(Value::as_str)
+            .filter(|login| !login.is_empty())
+            .map(str::to_string),
         title,
         body,
         labels,
@@ -886,6 +985,7 @@ fn issue_list_snapshots(rows: &[Value]) -> Vec<IssueSnapshot> {
         .into_iter()
         .map(|row| IssueSnapshot {
             number: IssueNumber(row.number),
+            author_login: row.author_login,
             title: row.title,
             body: row.body.unwrap_or_default(),
             labels: row.labels,
@@ -983,6 +1083,7 @@ mod tests {
             r#"[{
                 "number": 1776,
                 "title": "Launch Agent issue linkage",
+                "author": {"login": "OriginalCreator"},
                 "body": "Body",
                 "labels": [{"name": "ux"}],
                 "state": "OPEN",
@@ -993,6 +1094,10 @@ mod tests {
         .expect("parse snapshots");
         assert_eq!(snapshots.len(), 1);
         assert_eq!(snapshots[0].number.0, 1776);
+        assert_eq!(
+            snapshots[0].author_login.as_deref(),
+            Some("OriginalCreator")
+        );
         assert_eq!(snapshots[0].title, "Launch Agent issue linkage");
         assert_eq!(snapshots[0].body, "Body");
         assert_eq!(snapshots[0].labels, vec!["ux".to_string()]);
@@ -1051,6 +1156,117 @@ mod tests {
             ISSUE_CACHE_REFRESH_LIMIT.parse::<usize>().unwrap(),
             gwt_git::gh_rest::REST_MAX_PAGES_PER_READ * gwt_git::gh_rest::REST_PAGE_SIZE
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn issue_5730_failed_monitor_refresh_reuses_pages_but_queue_and_explicit_refresh_stay_live() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _gh_lock = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let cache_root = temp.path().join("cache");
+        let log = temp.path().join("calls.txt");
+        let fake = temp.path().join("gh.cmd");
+        fs::write(
+            &fake,
+            r#"@echo off
+if "%~2"=="repos/{owner}/{repo}/issues?state=open&labels=gwt-queued&sort=created&direction=desc&per_page=100&page=1" (
+  echo queue>>"%GWT_5730_CALLS%"
+  if "%GWT_5730_MODE%"=="fail" (
+    echo HTTP/2.0 503 queue unavailable
+    echo.
+    echo []
+    exit /b 0
+  )
+  echo HTTP/2.0 200 OK
+  echo.
+  echo [{"number":7,"title":"fresh queue","state":"open","labels":[{"name":"gwt-queued"}]}]
+  exit /b 0
+)
+echo general>>"%GWT_5730_CALLS%"
+echo HTTP/2.0 200 OK
+echo.
+echo [{"number":8,"title":"older open issue","state":"open","updated_at":"2026-10-18T00:00:00Z"}]
+"#,
+        )
+        .unwrap();
+        let _gh = gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_GH", &fake);
+        let _log = gwt_core::test_support::ScopedEnvVar::set("GWT_5730_CALLS", &log);
+        let _mode = gwt_core::test_support::ScopedEnvVar::set("GWT_5730_MODE", "fail");
+        for _ in 0..2 {
+            let error =
+                sync_issue_cache_from_remote_for_monitor(temp.path(), &cache_root).unwrap_err();
+            assert!(error.contains("queue unavailable"), "{error}");
+            assert!(!issue_cache_refresh_meta_path(&cache_root).exists());
+        }
+        let authoritative = IssueSnapshot {
+            author_login: None,
+            number: IssueNumber(8),
+            title: "newer closed issue".into(),
+            body: String::new(),
+            labels: vec![],
+            state: IssueState::Closed,
+            updated_at: UpdatedAt::new("2026-10-18T01:00:00Z"),
+            comments: vec![],
+        };
+        Cache::new(cache_root.clone())
+            .write_snapshot(&authoritative)
+            .unwrap();
+        let _success = gwt_core::test_support::ScopedEnvVar::set("GWT_5730_MODE", "ok");
+        sync_issue_cache_from_remote_for_monitor(temp.path(), &cache_root).unwrap();
+        let entry = Cache::new(cache_root.clone())
+            .load_entry(IssueNumber(7))
+            .unwrap();
+        assert_eq!(entry.snapshot.title, "fresh queue");
+        let retained = Cache::new(cache_root.clone())
+            .load_entry(IssueNumber(8))
+            .unwrap();
+        assert_eq!(
+            retained.snapshot, authoritative,
+            "retry cannot roll back a newer targeted refresh"
+        );
+        assert_eq!(
+            fs::read_to_string(&log)
+                .unwrap()
+                .lines()
+                .filter(|line| *line == "general")
+                .count(),
+            1
+        );
+        assert_eq!(
+            fs::read_to_string(&log)
+                .unwrap()
+                .lines()
+                .filter(|line| *line == "queue")
+                .count(),
+            3
+        );
+        sync_issue_cache_from_remote(temp.path(), &cache_root).unwrap();
+        assert_eq!(
+            fs::read_to_string(&log)
+                .unwrap()
+                .lines()
+                .filter(|line| *line == "general")
+                .count(),
+            2
+        );
+        let snapshot = BudgetLedger::global().snapshot(Utc::now());
+        let sources = &snapshot.local["core"].points_last_hour_by_source;
+        for (caller, expected) in [("issue-cache.refresh", 2), ("issue-cache.queued-issues", 4)] {
+            assert_eq!(
+                sources
+                    .iter()
+                    .filter(|(source, _)| source.ends_with(&format!("[{caller}]")))
+                    .map(|(_, count)| count)
+                    .sum::<u64>(),
+                expected
+            );
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -1442,7 +1658,7 @@ exit 1\n",
         );
         assert_eq!(
             fs::read_to_string(&invocation_log).expect("read invocation log"),
-            "issue view 42 --json number,title,body,labels,state,updatedAt,comments\n"
+            "issue view 42 --json number,title,body,labels,state,updatedAt,author,comments\n"
         );
         let entry = Cache::new(cache_root)
             .load_entry(IssueNumber(42))
@@ -1673,6 +1889,7 @@ exit 1\n",
         let temp = tempdir().expect("tempdir");
         let cache_root = temp.path().join("cache");
         let snapshot = IssueSnapshot {
+            author_login: None,
             number: IssueNumber(7),
             title: "Cache freshness".to_string(),
             body: "body".to_string(),
@@ -1879,14 +2096,14 @@ updated_43="${{FAKE_UPDATED_43:-{v1}}}"
 case "$1 $2" in
   "issue list" | "api repos/"*)
     if [ "$1" = "api" ]; then printf 'HTTP/2.0 200 OK\n\r\n'; fi
-    printf '[{{"number":7,"title":"Plain","body":"Body","labels":[{{"name":"bug"}}],"state":"OPEN","url":"https://example.test/issues/7","updatedAt":"{v1}"}},{{"number":42,"title":"Spec 42","body":"Spec body 42","labels":[{{"name":"gwt-spec"}}],"state":"OPEN","url":"https://example.test/issues/42","updatedAt":"{v1}"}},{{"number":43,"title":"Spec 43","body":"Spec body 43","labels":[{{"name":"gwt-spec"}}],"state":"OPEN","url":"https://example.test/issues/43","updatedAt":"%s"}}]\n' "$updated_43"
+    printf '[{{"author":{{"login":"OriginalCreator"}},"number":7,"title":"Plain","body":"Body","labels":[{{"name":"bug"}}],"state":"OPEN","url":"https://example.test/issues/7","updatedAt":"{v1}"}},{{"author":{{"login":"OriginalCreator"}},"number":42,"title":"Spec 42","body":"Spec body 42","labels":[{{"name":"gwt-spec"}}],"state":"OPEN","url":"https://example.test/issues/42","updatedAt":"{v1}"}},{{"author":{{"login":"OriginalCreator"}},"number":43,"title":"Spec 43","body":"Spec body 43","labels":[{{"name":"gwt-spec"}}],"state":"OPEN","url":"https://example.test/issues/43","updatedAt":"%s"}}]\n' "$updated_43"
     exit 0
     ;;
   "issue view")
     if [ "$3" = "42" ]; then
-      printf '{{"number":42,"title":"Spec 42","body":"Spec body 42","labels":[{{"name":"gwt-spec"}}],"state":"OPEN","updatedAt":"{v1}","comments":[]}}\n'
+      printf '{{"author":{{"login":"OriginalCreator"}},"number":42,"title":"Spec 42","body":"Spec body 42","labels":[{{"name":"gwt-spec"}}],"state":"OPEN","updatedAt":"{v1}","comments":[]}}\n'
     else
-      printf '{{"number":43,"title":"Spec 43","body":"Spec body 43","labels":[{{"name":"gwt-spec"}}],"state":"OPEN","updatedAt":"%s","comments":[]}}\n' "$updated_43"
+      printf '{{"author":{{"login":"OriginalCreator"}},"number":43,"title":"Spec 43","body":"Spec body 43","labels":[{{"name":"gwt-spec"}}],"state":"OPEN","updatedAt":"%s","comments":[]}}\n' "$updated_43"
     fi
     exit 0
     ;;
@@ -2002,6 +2219,7 @@ esac
         ] {
             cache
                 .write_snapshot(&IssueSnapshot {
+                    author_login: Some("OriginalCreator".into()),
                     number: IssueNumber(number),
                     title: format!("Cached {number}"),
                     body: format!("Cached body {number}"),
@@ -2058,6 +2276,7 @@ esac
         let cache = Cache::new(cache_root.clone());
         cache
             .write_snapshot(&IssueSnapshot {
+                author_login: None,
                 number: IssueNumber(777),
                 title: "Cached".into(),
                 body: "Keep body".into(),
@@ -2097,6 +2316,7 @@ esac
         let cache = Cache::new(cache_root.clone());
         cache
             .write_snapshot(&IssueSnapshot {
+                author_login: None,
                 number: IssueNumber(777),
                 title: "Cached".into(),
                 body: "Keep body".into(),
@@ -2280,6 +2500,27 @@ esac
             invocations(&log),
             vec![LIST_CALL, QUEUED_LIST_CALL],
             "unchanged SPECs cost two REST list calls and no views"
+        );
+
+        let cache = Cache::new(cache_root.clone());
+        let mut legacy = cache.load_entry(IssueNumber(42)).unwrap().snapshot;
+        legacy.author_login = None;
+        cache.write_snapshot(&legacy).unwrap();
+        fs::remove_file(&log).expect("reset log");
+        sync_issue_cache_from_remote(&repo_path, &cache_root).expect("backfill legacy author");
+        assert_eq!(
+            invocations(&log),
+            vec![LIST_CALL, QUEUED_LIST_CALL, "issue view 42"],
+            "missing author forces one full SPEC read even at the same revision"
+        );
+        assert_eq!(
+            cache
+                .load_entry(IssueNumber(42))
+                .unwrap()
+                .snapshot
+                .author_login
+                .as_deref(),
+            Some("OriginalCreator")
         );
 
         fs::remove_file(&log).expect("reset log");

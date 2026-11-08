@@ -26,7 +26,7 @@ export function classifyTerminalCopyKeyEvent(event, {
   return empty;
 }
 
-export function detectTerminalShortcutPlatform(navigatorLike = globalThis.navigator) {
+function detectTerminalShortcutPlatform(navigatorLike = globalThis.navigator) {
   return navigatorLike?.userAgentData?.platform || navigatorLike?.platform || "";
 }
 

@@ -24,6 +24,7 @@ fn git(repo: &Path, args: &[&str]) -> String {
 }
 
 struct RemoteFixture {
+    _home_guard: gwt_core::test_support::ScopedGwtHome,
     _root: tempfile::TempDir,
     verified_repo: PathBuf,
     other_clone: PathBuf,
@@ -33,6 +34,9 @@ struct RemoteFixture {
 impl RemoteFixture {
     fn new() -> Self {
         let root = tempfile::tempdir().expect("remote-head fixture");
+        // Keep trusted checkpoints and their final record in the same store
+        // while sibling tests rewrite the process HOME.
+        let home_guard = gwt_core::test_support::ScopedGwtHome::set(root.path().join("home"));
         let remote = root.path().join("remote.git");
         let verified_repo = root.path().join("verified");
         let other_clone = root.path().join("other");
@@ -90,6 +94,7 @@ impl RemoteFixture {
         Self::configure(&other_clone);
         git(&other_clone, &["checkout", "--quiet", HEAD_BRANCH]);
         Self {
+            _home_guard: home_guard,
             _root: root,
             verified_repo,
             other_clone,
@@ -194,11 +199,265 @@ impl RemoteFixture {
         assert!(env.pr_comments.is_empty());
         (code, serde_json::from_str(&output).unwrap())
     }
+
+    fn view(&self) -> String {
+        self.view_for_base(Some(BASE_BRANCH))
+    }
+
+    fn view_for_base(&self, base: Option<&str>) -> String {
+        let mut env = crate::cli::TestEnv::new(self.verified_repo.clone());
+        let value = serde_json::json!({
+            "number": 5278, "title": "fix: bookkeeping freshness",
+            "url": "https://example.invalid/pull/5278", "state": "OPEN",
+            "headRefName": HEAD_BRANCH, "baseRefName": BASE_BRANCH,
+        });
+        let pr = gwt_git::pr_status::parse_pr_status_json(&value.to_string()).unwrap();
+        env.seed_current_pr(Some(pr.clone()));
+        env.seed_pr(5278, pr);
+        let check = self.check();
+        if let Some(base) = base {
+            let mut inventory = gwt_git::pr_status::parse_pr_inventory_json(
+                &format!("[{value}]"),
+                chrono::Utc::now(),
+            )
+            .unwrap()
+            .remove(0);
+            inventory.base_ref_name = base.to_string();
+            env.completion_prs.insert(
+                5278,
+                gwt_git::pr_status::PrCompletionSnapshot {
+                    state: gwt_git::pr_status::PrState::Open,
+                    head_sha: check.remote_head.clone(),
+                    inventory,
+                },
+            );
+        }
+        env.pr_quarantine_contexts.insert(
+            5278,
+            crate::cli::pr::PrQuarantineContext {
+                number: 5278,
+                body: check.body_note().unwrap(),
+                comments: Vec::new(),
+            },
+        );
+        let mut out = String::new();
+        assert_eq!(
+            crate::cli::pr::run(
+                &mut env,
+                crate::cli::PrCommand::View { number: 5278 },
+                &mut out
+            )
+            .unwrap(),
+            0
+        );
+        out
+    }
 }
 
 #[test]
-fn head_check_read_diagnoses_stale_base_sync_without_refreshing_evidence() {
+fn remote_fixture_keeps_its_store_when_the_process_home_changes() {
+    let _env = gwt_core::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _fixture = RemoteFixture::new();
+    let home = gwt_core::paths::gwt_home();
+    let moved = tempfile::tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", moved.path());
+    let _profile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", moved.path());
+    assert_eq!(gwt_core::paths::gwt_home(), home);
+}
+
+#[test]
+fn source_identical_merge_cannot_hide_reverted_product_history() {
+    let fixture = RemoteFixture::new();
+    git(&fixture.other_clone, &["checkout", "-b", "side"]);
+    let product = fixture.commit_other("src.txt", "unverified source\n", "fix: side product");
+    git(&fixture.other_clone, &["revert", "--no-edit", &product]);
+    git(&fixture.other_clone, &["checkout", HEAD_BRANCH]);
+    git(
+        &fixture.other_clone,
+        &["merge", "--no-ff", "-m", "merge reverted side", "side"],
+    );
+    fixture.push_head();
+    let check = fixture.check();
+    assert_eq!(check.classification, "unverified_product");
+    assert!(
+        !crate::cli::verification_record::preserves_verified_head(
+            &fixture.verified_repo,
+            &fixture.verified_head,
+            &check.remote_head
+        ),
+        "completion and fallback diagnostics must reject the same product history"
+    );
+}
+
+fn changed_pr_base_fixture() -> RemoteFixture {
+    let fixture = RemoteFixture::new();
+    fixture.canonical_record();
+    git(
+        &fixture.other_clone,
+        &["branch", "release", "origin/develop"],
+    );
+    git(&fixture.other_clone, &["push", "origin", "release"]);
+    fixture.sync_changed_base();
+    fixture
+}
+
+#[test]
+fn view_uses_the_current_pr_base_instead_of_the_retained_base() {
+    let fixture = changed_pr_base_fixture();
+    let check = compare(
+        &fixture.verified_repo,
+        "origin",
+        HEAD_BRANCH,
+        "release",
+        &fixture.verified_head,
+    )
+    .unwrap();
+    assert_eq!(check.classification, "unverified_product");
+    let view = fixture.view_for_base(Some("release"));
+    assert!(view.contains("classification=unverified_product"), "{view}");
+}
+
+#[test]
+fn view_does_not_reuse_the_retained_base_when_the_current_base_is_unavailable() {
+    let fixture = changed_pr_base_fixture();
+    let unavailable = fixture.view_for_base(None);
+    assert!(
+        unavailable.contains("classification=drift"),
+        "an unavailable current base must not reuse the old base: {unavailable}"
+    );
+}
+
+#[test]
+fn view_distinguishes_unprovable_from_matching_fresh_heads() {
     use crate::cli::verification_record as verification;
+    let fixture = RemoteFixture::new();
+    let record = fixture.canonical_record();
+    let matched = fixture.view();
+    assert!(matched.contains("classification=matched"), "{matched}");
+    assert!(
+        matched.contains("local_verification_fresh=true"),
+        "{matched}"
+    );
+    assert!(!matched.contains("PR head drift detected"), "{matched}");
+
+    // ls-remote still succeeds, but fetch cannot prove the comparison.
+    git(
+        &fixture.verified_repo,
+        &["config", "fetch.output", "invalid"],
+    );
+    let check = fixture.check();
+    assert_eq!(check.classification, "unprovable");
+    assert_eq!(check.remote_head, fixture.verified_head);
+    assert_eq!(
+        git(
+            &fixture.verified_repo,
+            &["rev-parse", "HEAD", "@{upstream}"]
+        ),
+        format!("{}\n{}", fixture.verified_head, fixture.verified_head)
+    );
+    let out = fixture.view();
+    assert!(out.contains("classification=unprovable"), "{out}");
+    assert!(out.contains("local_verification_fresh=true"), "{out}");
+    assert!(out.contains("drift has not been established"), "{out}");
+    assert!(!out.contains("PR head drift detected"), "{out}");
+    assert!(!out.contains("fast-forward"), "{out}");
+    assert!(!out.contains("rerun verify.plan / verify.run"), "{out}");
+    assert_eq!(
+        verification::load(&fixture.verified_repo).unwrap().unwrap(),
+        record,
+        "diagnostics must preserve the original verification evidence"
+    );
+}
+
+#[test]
+fn all_four_routes_share_the_bookkeeping_freshness_rule() {
+    // AC-5 is also an architecture contract: paired behavioral tests would
+    // still pass if a later change copied the exception into another gate.
+    let verification = include_str!("../../verification_record.rs");
+    assert!(verification.contains("hasher.update(verification_head("));
+    assert!(verification
+        .contains("verification_head(&worktree, verified) == verification_head(&worktree, head)"));
+    assert!(include_str!("../mod.rs").contains("verification_record::preserves_verified_head("));
+    assert!(
+        include_str!("../head_check.rs").contains("verification_record::preserves_verified_head(")
+    );
+    assert!(
+        include_str!("../../completion_pr.rs").contains("verification::preserves_verified_head(")
+    );
+}
+
+fn assert_heads_agree_across_view_head_check_and_freshness(product: bool) {
+    use crate::cli::verification_record as verification;
+    let fixture = RemoteFixture::new();
+    let record = fixture.canonical_record();
+    let digest = "ab".repeat(32);
+    fixture.commit_other(
+        &format!(".gwt/work/events/ab/{digest}.jsonl"),
+        "{}\n",
+        "chore(work): receipt",
+    );
+    fixture.push_head();
+    if product {
+        fixture.commit_other("src.txt", "unverified source\n", "fix: product");
+        fixture.push_head();
+    }
+    git(&fixture.verified_repo, &["fetch", "origin", HEAD_BRANCH]);
+    git(
+        &fixture.verified_repo,
+        &["merge", "--ff-only", &format!("origin/{HEAD_BRANCH}")],
+    );
+    let (code, report) = fixture.read_check();
+    assert_eq!(code, 0, "{report}");
+    let classification = if product {
+        "unverified_product"
+    } else {
+        "bookkeeping_or_base_sync"
+    };
+    assert_eq!(report["classification"], classification);
+    assert_eq!(report["local_verification_fresh"], !product);
+    let out = fixture.view();
+    assert!(
+        out.contains(&format!("classification={classification}")),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!("local_verification_fresh={}", !product)),
+        "{out}"
+    );
+    assert_eq!(out.contains("PR head drift detected"), product, "{out}");
+    assert_eq!(out.contains("fast-forward locally"), product, "{out}");
+    assert_eq!(
+        out.contains("rerun verify.plan / verify.run"),
+        product,
+        "{out}"
+    );
+    let unavailable = fixture.view_for_base(None);
+    assert_eq!(unavailable.contains("PR head drift detected"), product,
+        "canonical shards remain provable without a live base, while product history stays protected: {unavailable}");
+    assert_eq!(
+        verification::load(&fixture.verified_repo).unwrap().unwrap(),
+        record,
+        "diagnostics must preserve the original verification evidence"
+    );
+}
+
+#[test]
+fn bookkeeping_heads_agree_across_view_head_check_and_freshness() {
+    assert_heads_agree_across_view_head_check_and_freshness(false);
+}
+
+#[test]
+fn product_heads_agree_across_view_head_check_and_freshness() {
+    assert_heads_agree_across_view_head_check_and_freshness(true);
+}
+
+fn stale_base_sync_fixture() -> (
+    RemoteFixture,
+    crate::cli::verification_record::VerificationRunRecord,
+    String,
+) {
     let fixture = RemoteFixture::new();
     let record = fixture.canonical_record();
     fixture.sync_changed_base();
@@ -208,6 +467,13 @@ fn head_check_read_diagnoses_stale_base_sync_without_refreshing_evidence() {
         &["merge", "--ff-only", &format!("origin/{HEAD_BRANCH}")],
     );
     let local_head = git(&fixture.verified_repo, &["rev-parse", "HEAD"]);
+    (fixture, record, local_head)
+}
+
+#[test]
+fn head_check_read_diagnoses_stale_base_sync_without_refreshing_evidence() {
+    use crate::cli::verification_record as verification;
+    let (fixture, record, local_head) = stale_base_sync_fixture();
     let (code, report) = fixture.read_check();
     assert_eq!(code, 0, "{report}");
     assert_eq!(report["canonical_record_state"], "passed");
@@ -223,7 +489,16 @@ fn head_check_read_diagnoses_stale_base_sync_without_refreshing_evidence() {
         verification::load(&fixture.verified_repo).unwrap().unwrap(),
         record
     );
+    assert_eq!(
+        git(&fixture.verified_repo, &["rev-parse", "HEAD"]),
+        local_head
+    );
+}
 
+#[test]
+fn head_check_read_diagnoses_product_after_stale_base_sync_without_refreshing_evidence() {
+    use crate::cli::verification_record as verification;
+    let (fixture, record, local_head) = stale_base_sync_fixture();
     let product_commit = fixture.commit_other("src.txt", "unverified source\n", "fix: product");
     fixture.push_head();
     let (code, report) = fixture.read_check();

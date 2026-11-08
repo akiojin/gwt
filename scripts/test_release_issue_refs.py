@@ -4,6 +4,9 @@ import importlib.util
 import json
 import sys
 import unittest
+import subprocess
+from unittest.mock import patch
+from urllib.parse import parse_qs, urlsplit
 from pathlib import Path
 from textwrap import dedent
 
@@ -382,6 +385,306 @@ class ReleasePrBodyTests(unittest.TestCase):
         self.assertIn("- #3527", text)
         self.assertNotIn("Closes", text)
         self.assertIsNone(GITHUB_CLOSING_RE.search(text))
+
+
+class FeedbackApiRunner:
+    """No command is executed; every API response has its real provenance shape."""
+    def __init__(self):
+        self.calls = []
+        self.posts = []
+        self.issues = {
+            20: self.issue(20, "akiojin", "<!-- gwt-feedback-source:10 -->"),
+            10: self.issue(10, "external", "<!-- gwt-feedback:11111111-1111-1111-1111-111111111111 -->"),
+            99: self.issue(99, "akiojin", "Unrelated requirements"),
+        }
+        self.comments = {20: [], 10: []}
+        self.release = {"draft": False, "published_at": "2026-10-22T00:00:00Z",
+                        "tag_name": "v1.2.3", "html_url": "https://github.com/akiojin/gwt/releases/tag/v1.2.3"}
+        self.fail_page = None
+        self.lose_post = False
+        self.persist_post = True
+        self.merged = True
+        self.merge_sha = "a" * 40
+        self.pr_author = "akiojin"
+
+    @staticmethod
+    def issue(number, author, body="", labels=()):
+        return {"number": number, "user": {"login": author}, "body": body,
+                "labels": [{"name": name} for name in labels]}
+
+    @staticmethod
+    def comment(number, author, body):
+        return {"id": number, "user": {"login": author}, "body": body}
+
+    def __call__(self, args):
+        args = list(args)
+        self.calls.append(args)
+        if args[:2] == ["git", "rev-list"]:
+            return "a" * 40 + "\n"
+        if args[:6] != ["gh", "api", "--hostname", "github.com", "--method", "GET"] and args[:6] != ["gh", "api", "--hostname", "github.com", "--method", "POST"]:
+            raise AssertionError(f"Unexpected/non-fixed command: {args!r}")
+        path = args[6]
+        if path == "repos/akiojin/gwt/releases/tags/v1.2.3":
+            return json.dumps(self.release)
+        if path.startswith("repos/akiojin/gwt/pulls/"):
+            return json.dumps({"user": {"login": self.pr_author},
+                               "merged_at": "2026-10-21T00:00:00Z" if self.merged else None,
+                               "merge_commit_sha": self.merge_sha})
+        parsed = urlsplit(path)
+        parts = parsed.path.split("/")
+        if parts[:4] != ["repos", "akiojin", "gwt", "issues"]:
+            raise AssertionError(path)
+        number = int(parts[4])
+        if len(parts) == 5:
+            return json.dumps(self.issues[number])
+        if parts[5] != "comments":
+            raise AssertionError(path)
+        if args[5] == "POST":
+            body = args[args.index("-f") + 1].removeprefix("body=")
+            self.posts.append((number, body))
+            comment = self.comment(10000 + len(self.posts), "github-actions[bot]", body)
+            if self.persist_post:
+                self.comments.setdefault(number, []).append(comment)
+            if self.lose_post:
+                raise subprocess.CalledProcessError(1, args, stderr="response lost")
+            return json.dumps(comment)
+        page = int(parse_qs(parsed.query)["page"][0])
+        if self.fail_page == (number, page):
+            raise subprocess.CalledProcessError(1, args, stderr="page unavailable")
+        return json.dumps(self.comments.get(number, [])[(page-1)*100:page*100])
+
+
+class FeedbackReleaseNotificationTests(unittest.TestCase):
+    def report(self):
+        return release_issue_refs.ReleaseIssueRefs(
+            repo="akiojin/gwt", range="v1.2.2..v1.2.3",
+            refs=[release_issue_refs.CommitRef(100, "pr", "squash", [20], [99])],
+            delivered_issues=[20], reference_only_issues=[99])
+
+    def notify(self, api, report=None):
+        return release_issue_refs.notify_feedback_results(report or self.report(), "v1.2.3", runner=api)
+
+    def test_notify_mode_is_explicit(self):
+        self.assertIn("--notify-feedback", release_issue_refs.build_parser().format_help())
+
+    def test_owner_body_recovers_source_and_ignores_forged_links_and_dedup(self):
+        api = FeedbackApiRunner()
+        api.comments[20] = [api.comment(1, "external", "<!-- gwt-feedback-owner:999:20 -->")]
+        api.comments[10] = [
+            api.comment(2, "external", "<!-- gwt-feedback-release:10:20:v1.2.3 -->"),
+            api.comment(3, "akiojin", "```text\n<!-- gwt-feedback-release:10:20:v1.2.3 -->\n```"),
+        ]
+        self.notify(api)
+        self.assertEqual([10], [number for number, _ in api.posts])
+        body = api.posts[0][1]
+        for link in ("/pull/100", "/issues/20", "/releases/tag/v1.2.3"):
+            self.assertIn("https://github.com/akiojin/gwt" + link, body)
+        self.assertIn("<!-- gwt-feedback-release:10:20:v1.2.3 -->", body)
+        self.notify(api)
+        self.assertEqual(1, len(api.posts), "a trusted posted marker makes rerun idempotent")
+
+    def test_trusted_comment_uses_its_own_author_and_exact_owner(self):
+        api = FeedbackApiRunner()
+        api.issues[20]["body"] = "Curated requirements"
+        api.comments[20] = [
+            api.comment(1, "external", "<!-- gwt-feedback-owner:999:20 -->"),
+            api.comment(2, "github-actions[bot]", "<!-- gwt-feedback-owner:999:21 -->"),
+            api.comment(3, "akiojin", "```text\n<!-- gwt-feedback-owner:10:20 -->\n```"),
+        ]
+        self.notify(api)
+        self.assertEqual([], api.posts, "quoted reporter evidence is not a dedicated linkage comment")
+        api.comments[20][-1]["body"] = "<!-- gwt-feedback-owner:10:20 -->\n\nCurated source link"
+        self.notify(api)
+        self.assertEqual([10], [number for number, _ in api.posts])
+
+    def test_direct_aggregate_owner_receives_notice_without_raw_reclassification(self):
+        api = FeedbackApiRunner()
+        api.issues[20]["body"] = "Curated requirements"
+        api.comments[20] = [api.comment(1, "external", "<!-- gwt-feedback:11111111-1111-1111-1111-111111111111 -->\nnew environment")]
+        self.notify(api)
+        self.assertEqual([20], [number for number, _ in api.posts])
+
+    def test_untrusted_original_owner_or_raw_owner_never_supplies_authority(self):
+        for author, body, labels in [
+            ("external", "<!-- gwt-feedback-source:10 -->", []),
+            ("akiojin", "<!-- gwt-feedback:11111111-1111-1111-1111-111111111111 -->", []),
+            ("akiojin", "<!-- gwt-feedback-source:10 -->", ["gwt-feedback"]),
+        ]:
+            with self.subTest(author=author, body=body):
+                api = FeedbackApiRunner()
+                api.issues[20] = api.issue(20, author, body, labels)
+                self.notify(api)
+                self.assertEqual([], api.posts)
+
+    def test_external_pr_requires_trusted_exact_leading_owner_settlement(self):
+        api = FeedbackApiRunner()
+        api.pr_author = "external-contributor"
+        api.issues[20]["labels"] = [{"name": "gwt-spec"}]
+        marker = f"<!-- gwt-merged-issue-settlement v1 pr=100 sha={api.merge_sha} -->"
+        api.comments[20] = [api.comment(1, "external-contributor", marker)]
+        self.notify(api)
+        self.assertEqual([], api.posts, "merged body refs and reporter-forged proof grant no linkage")
+        api.comments[20] = [api.comment(1, "github-actions[bot]", marker.replace(api.merge_sha, "b" * 40))]
+        self.notify(api)
+        self.assertEqual([], api.posts, "a settlement for another merge SHA grants no linkage")
+        api.comments[20] = [api.comment(1, "akiojin", "Quoted proof:\n" + marker)]
+        self.notify(api)
+        self.assertEqual([], api.posts, "the exact proof must lead the trusted owner comment")
+        api.comments[20] = [api.comment(1, "github-actions[bot]", marker + "\n\nDelivered phase")]
+        self.notify(api)
+        self.assertEqual([10], [number for number, _ in api.posts])
+        self.assertIn("/pull/100", api.posts[0][1])
+        self.assertIn("SPEC phase", api.posts[0][1])
+        self.assertIn("does not mark", api.posts[0][1])
+
+    def test_any_raw_feedback_prefix_excludes_an_execution_owner(self):
+        api = FeedbackApiRunner()
+        api.issues[20]["body"] += "\n<!-- GWT-Feedback:legacy-or-incomplete"
+        self.notify(api)
+        self.assertEqual([], api.posts, "raw prefix excludes even a trusted original owner")
+
+    def test_incomplete_pagination_and_unknown_comment_author_hold_notifications(self):
+        api = FeedbackApiRunner()
+        api.comments[10] = [api.comment(i, "external", "context") for i in range(1, 101)]
+        api.fail_page = (10, 2)
+        with self.assertRaisesRegex(RuntimeError, "pending|unverified"):
+            self.notify(api)
+        self.assertEqual([], api.posts)
+        api.fail_page = None
+        api.comments[10] = [{"id": 1, "body": "<!-- gwt-feedback-release:10:20:v1.2.3 -->"}]
+        with self.assertRaisesRegex(ValueError, "author"):
+            self.notify(api)
+        self.assertEqual([], api.posts)
+
+    def test_later_page_trusted_notification_suppresses_post(self):
+        api = FeedbackApiRunner()
+        api.comments[10] = [api.comment(i, "external", "context") for i in range(1, 101)]
+        api.comments[10].append(api.comment(101, "akiojin", "<!-- gwt-feedback-release:10:20:v1.2.3 -->"))
+        self.notify(api)
+        self.assertEqual([], api.posts)
+        self.assertTrue(any("page=2" in arg for call in api.calls for arg in call))
+
+    def test_publication_and_fixed_repository_are_required_before_mutation(self):
+        api = FeedbackApiRunner()
+        api.release["draft"] = True
+        with self.assertRaisesRegex(ValueError, "published"):
+            self.notify(api)
+        self.assertEqual([], api.posts)
+        api.release["draft"] = False
+        api.release["published_at"] = None
+        with self.assertRaisesRegex(ValueError, "published"):
+            self.notify(api)
+        report = self.report()
+        report.repo = "other/project"
+        with self.assertRaisesRegex(ValueError, "akiojin/gwt"):
+            self.notify(api, report)
+        self.assertEqual([], api.posts)
+
+    def test_delivered_spec_phase_is_not_lost_in_global_reference_only_filter(self):
+        api = FeedbackApiRunner()
+        # Actual partial-SPEC PR shape: leave the parent open and list prior PRs.
+        body = """## Closing Issues
+
+None
+
+## Related Issues / Links
+
+- Refs #4810。親 Issue は閉じません。#5883 と #5900 の配信済み境界を前提に、残る受付部分を追加します。
+"""
+        parsed = release_issue_refs.parse_pr_body_refs(body, pr_number=100)
+        self.assertEqual([], parsed.delivered_issues)
+        self.assertEqual([4810, 5883, 5900], parsed.reference_only_issues)
+        report = self.report()
+        report.refs = [release_issue_refs.CommitRef(100, "pr", "squash",
+                       parsed.delivered_issues, parsed.reference_only_issues)]
+        report.delivered_issues = []
+        report.reference_only_issues = parsed.reference_only_issues
+        api.issues[4810] = api.issue(4810, "akiojin", "<!-- gwt-feedback-source:10 -->", ["gwt-spec"])
+        api.comments[4810] = []
+        for number in (5883, 5900):
+            api.issues[number] = {"number": number, "pull_request": {"url": f"https://api.github.com/repos/akiojin/gwt/pulls/{number}"}}
+        self.notify(api, report)
+        self.assertEqual([], api.posts, "trusted PR authorship does not authorize Related-only refs")
+        marker = f"<!-- gwt-merged-issue-settlement v1 pr=100 sha={api.merge_sha} -->"
+        api.comments[4810] = [api.comment(1, "external", marker)]
+        self.notify(api, report)
+        self.assertEqual([], api.posts, "a reporter-forged settlement is not phase delivery")
+        api.comments[4810] = [api.comment(1, "github-actions[bot]", marker + "\n\nDelivered phase")]
+        self.notify(api, report)
+        self.assertEqual([10], [number for number, _ in api.posts])
+        self.assertIn("/issues/4810", api.posts[0][1])
+        self.assertIn("SPEC phase", api.posts[0][1])
+        self.assertIn("does not mark", api.posts[0][1])
+        self.assertNotIn("/pull/5883", api.posts[0][1])
+        self.assertNotIn("/pull/5900", api.posts[0][1])
+
+    def test_unmerged_or_out_of_range_pr_does_not_claim_delivery(self):
+        api = FeedbackApiRunner()
+        api.merged = False
+        with self.assertRaisesRegex(ValueError, "merged"):
+            self.notify(api)
+        self.assertEqual([], api.posts)
+        api.merged = True
+        api.merge_sha = "b" * 40
+        with self.assertRaisesRegex(ValueError, "merged"):
+            self.notify(api)
+        self.assertEqual([], api.posts)
+
+    def test_ambiguous_post_reconciles_and_never_blindly_reposts(self):
+        api = FeedbackApiRunner()
+        api.lose_post = True
+        self.notify(api)
+        self.assertEqual(1, len(api.posts))
+        self.notify(api)
+        self.assertEqual(1, len(api.posts))
+        api = FeedbackApiRunner()
+        api.lose_post = True
+        api.persist_post = False
+        with self.assertRaisesRegex(RuntimeError, "pending|unverified"):
+            self.notify(api)
+        self.assertEqual(1, len(api.posts), "unknown POST is not retried in this invocation")
+
+    def test_release_range_skips_draft_tags_and_nonancestor_releases(self):
+        outputs = {
+            ("gh", "api", "--hostname", "github.com", "--method", "GET", "repos/akiojin/gwt/releases?per_page=100&page=1"): json.dumps([
+                {"id": 4, "tag_name": "v1.2.3", "draft": False, "published_at": "now"},
+                {"id": 3, "tag_name": "v1.2.2", "draft": True, "published_at": None},
+                {"id": 2, "tag_name": "v2.0.0", "draft": False, "published_at": "earlier"},
+                {"id": 1, "tag_name": "v1.2.1", "draft": False, "published_at": "earlier"}]),
+            ("git", "tag", "--merged", "v1.2.3"): "v1.2.1\nv1.2.2\nv1.2.3\n",
+            ("git", "describe", "--tags", "--abbrev=0", "--match", "v1.2.1", "v1.2.3"): "v1.2.1\n",
+        }
+        self.assertEqual("v1.2.1..v1.2.3", release_issue_refs.feedback_release_range("v1.2.3", FakeRunner(outputs)))
+
+    def test_release_range_requires_complete_release_pagination(self):
+        calls = []
+        def runner(args):
+            calls.append(list(args))
+            if args[-1].endswith("page=1"):
+                return json.dumps([{"id": i, "draft": True} for i in range(1, 101)])
+            raise subprocess.CalledProcessError(1, args, stderr="second page unavailable")
+        with self.assertRaises(subprocess.CalledProcessError):
+            release_issue_refs.feedback_release_range("v1.2.3", runner)
+        self.assertEqual(2, len(calls))
+        self.assertFalse(any(call[0] == "git" for call in calls))
+
+    def test_collection_host_is_fixed_for_api_and_pr_reads(self):
+        calls = []
+        with patch.object(release_issue_refs, "run_command", side_effect=lambda args: calls.append(args) or "{}"):
+            release_issue_refs._fixed_github_collection_command(["gh", "api", "repos/akiojin/gwt/issues/20"])
+            release_issue_refs._fixed_github_collection_command(["gh", "pr", "view", "100", "--repo", "akiojin/gwt", "--json", "body"])
+        self.assertEqual(["gh", "api", "--hostname", "github.com"], calls[0][:4])
+        self.assertEqual("https://github.com/akiojin/gwt", calls[1][calls[1].index("--repo") + 1])
+
+    def test_release_workflow_notifies_only_after_publish_with_full_history(self):
+        workflow = MODULE_PATH.parents[1].joinpath(".github/workflows/release.yml").read_text()
+        upload = workflow.split("  upload-release:", 1)[1]
+        self.assertIn("fetch-depth: 0", upload)
+        self.assertLess(upload.index("--draft=false"), upload.index("--notify-feedback"))
+        self.assertIn("--repo akiojin/gwt", upload)
+        self.assertIn("--version", upload)
+        self.assertIn('--range "$TAG_NAME"', upload)
+        self.assertIn("if: github.repository == 'akiojin/gwt'", upload)
 
 
 if __name__ == "__main__":

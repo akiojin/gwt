@@ -1,0 +1,9 @@
+{
+  "worktree_count": 495,
+  "observed_at": "2026-10-15T21:52:58.9270288Z",
+  "source_count": 2430572.0,
+  "groups": 1232,
+  "source_index_sha256": "f6f9624f6b80e6c03f5d6ae1d7bae8ba8ecd3c9007f5e39163b6255eaca56dea",
+  "projection_version": "source-context-v10-legacy-log-metadata-cache",
+  "stored_group_bytes": 484022232.0
+}

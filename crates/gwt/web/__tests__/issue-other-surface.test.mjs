@@ -6,9 +6,29 @@ import {
 import assert from "node:assert/strict";
 import { parseHTML } from "linkedom";
 import {
+  createActiveWorkProjectionModel,
   createIssueOtherSurface,
   mergeActiveWorkProjectionPatch,
 } from "../issue-other-surface.js";
+
+test("Active Work model commits immutable merged snapshots and clears on null", () => {
+  const { model, applyActiveWorkProjectionReceiveEvent } = createActiveWorkProjectionModel();
+  const rendered = [];
+  model.subscribe(state => state, state => rendered.push(state));
+  const initial = { id: "p", journal_entries: [{ id: "history" }], active_works: [] };
+  applyActiveWorkProjectionReceiveEvent({ kind: "active_work_projection", projection: initial });
+  assert.notEqual(model.read().projection, initial);
+  assert.ok(Object.isFrozen(model.read().projection.journal_entries[0]));
+  applyActiveWorkProjectionReceiveEvent({ kind: "active_work_projection_patch", projection: { id: "p", title: "Changed" } });
+  assert.equal(model.read().projection.title, "Changed");
+  assert.deepEqual(model.read().projection.journal_entries, initial.journal_entries);
+  applyActiveWorkProjectionReceiveEvent({ kind: "active_work_projection_patch", projection: { id: "other" } });
+  assert.equal(model.read().projection.journal_entries, undefined, "project identity fences history");
+  applyActiveWorkProjectionReceiveEvent({ kind: "active_work_projection", projection: null });
+  applyActiveWorkProjectionReceiveEvent({ kind: "active_work_projection", projection: null });
+  assert.deepEqual(rendered.slice(-2), [{ projection: null }, { projection: null }]);
+  model.dispose();
+});
 
 test("bounded Active Work patches preserve history while replacing live membership", () => {
   const previousSession = {
@@ -361,6 +381,19 @@ test("Workspace Overview keeps unassigned agents in an explicit queue outside Wo
     queue.querySelectorAll(".workspace-overview-agent-row").length,
     1,
   );
+});
+
+test("Active Work agents show assigned names with provider as secondary context", () => {
+  const fixture = createFixture();
+  const projection = sampleProjection();
+  projection.unassigned_agents[0].agent_name = "Lumen";
+  const surface = createSurface(fixture, projection);
+  surface.renderInto(fixture.body, fixture.windowData.id);
+  assert.equal(fixture.body.querySelector(".workspace-overview-agent-name").textContent, "Lumen");
+  assert.match(fixture.body.querySelector(".workspace-overview-agent-meta").textContent, /Codex/);
+  projection.unassigned_agents[0].agent_name = null;
+  surface.renderInto(fixture.body, fixture.windowData.id);
+  assert.equal(fixture.body.querySelector(".workspace-overview-agent-name").textContent, "work/20260511-0100");
 });
 
 test("Workspace Overview renders Active Works from active_works and keeps Unassigned Agents separate", () => {
@@ -804,6 +837,30 @@ test("Workspace detail surfaces Managed Hooks health without raw JSON dumps", ()
   assert.match(hookSection.textContent, /workflow-policy/);
   assert.match(hookSection.textContent, /1250ms/);
   assert.match(hookSection.textContent, /Stop/);
+  assert.deepEqual(Array.from(hookSection.querySelectorAll("dd"), node => node.textContent), [
+    "Needs attention", "PreToolUse", "2026-06-17T00:00:00Z", "Proposal A", "Implement hook health first",
+  ]);
+  assert.deepEqual(Array.from(hookSection.querySelectorAll("p"), node => node.textContent), ["Choose the repair path"]);
+});
+
+test("Work detail renders all six hook health states without inventing pending work", () => {
+  for (const [status, label] of [
+    ["ready", "Ready"],
+    ["needs_attention", "Needs attention"],
+    ["self_healed", "Self healed"],
+    ["degraded", "Degraded"],
+    ["inactive", "Inactive"],
+    ["waiting_for_first_hook_event", "Waiting for first hook event"],
+  ]) {
+    const projection = sampleProjection();
+    projection.works[0].managed_hook_health = { status };
+    const fixture = createFixture();
+    createSurface(fixture, projection).renderInto(fixture.body, fixture.windowData.id);
+    const section = fixture.body.querySelector('[data-section="managed-hooks"]');
+    assert.equal(section.dataset.status, status);
+    assert.equal(section.querySelector("dd").textContent, label);
+    assert.deepEqual(Array.from(section.querySelectorAll("dt"), node => node.textContent), ["Status"]);
+  }
 });
 
 test("Workspace detail renders Sessions under a Work, highlighting the active one (SPEC-2359)", () => {
@@ -962,11 +1019,10 @@ test("each Work exposes one Continue work action with opaque Work identity (SPEC
   const fixture = createFixture();
   const continued = [];
   const surface = createSurface(fixture, projection, {
-    continueWork: (workId, bounds) => {
-      continued.push({ workId, bounds });
+    continueWork: (workId) => {
+      continued.push({ workId });
       return true;
     },
-    getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
   });
 
   surface.renderInto(fixture.body, fixture.windowData.id);
@@ -986,7 +1042,6 @@ test("each Work exposes one Continue work action with opaque Work identity (SPEC
   actions[0].click();
   assert.deepEqual(continued, [{
     workId: "work-opaque-1",
-    bounds: { x: 0, y: 0, width: 800, height: 600 },
   }]);
 });
 
@@ -1250,7 +1305,6 @@ test("Open session pending timeout keeps the pending label (SPEC-2359 FR-581)", 
     },
   };
   const surface = createSurface(fixture, projection, {
-    getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
     launchPending,
   });
 
@@ -1294,7 +1348,6 @@ test("Each Session row carries its own Resume that resumes that conversation (SP
   const sent = [];
   const surface = createSurface(fixture, projection, {
     send: (message) => sent.push(message),
-    getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
   });
 
   surface.renderInto(fixture.body, fixture.windowData.id);
@@ -1316,7 +1369,7 @@ test("Each Session row carries its own Resume that resumes that conversation (SP
   assert.match(sent[0].operation_id, /^resume-/);
   assert.equal(sent[0].session_id, "work-launch-1");
   assert.equal(sent[0].agent_session_id, "conv-latest2222");
-  assert.ok(sent[0].bounds, "resume carries viewport bounds for the new window");
+  assert.equal(Object.hasOwn(sent[0], "bounds"), false, "resume carries no window coordinates");
 });
 
 test("Non-resumable Sessions show no Resume control while Continue work owns fallback (SPEC-2359)", () => {
@@ -1327,11 +1380,10 @@ test("Non-resumable Sessions show no Resume control while Continue work owns fal
   const fixture = createFixture();
   const continued = [];
   const surface = createSurface(fixture, projection, {
-    continueWork: (workId, bounds) => {
-      continued.push({ workId, bounds });
+    continueWork: (workId) => {
+      continued.push({ workId });
       return true;
     },
-    getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
   });
 
   surface.renderInto(fixture.body, fixture.windowData.id);
@@ -3248,7 +3300,6 @@ test("Continue work click marks the Work pending and a re-click does not re-send
   });
   const surface = createSurface(fixture, projection, {
     continueWork: dispatcher.dispatch,
-    getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
     launchPending,
   });
 
@@ -3295,7 +3346,6 @@ test("Continue work keeps keyboard focus on the pending replacement action", () 
   });
   const surface = createSurface(fixture, projection, {
     continueWork: dispatcher.dispatch,
-    getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
     launchPending,
     createNode: (tag, className, text) => {
       const node = createNode(fixture.document, tag, className, text);
@@ -3331,7 +3381,6 @@ test("a pending Work renders focusable disabled semantics with progress label", 
     "Continue work",
   );
   const surface = createSurface(fixture, projection, {
-    getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
     launchPending,
   });
 
@@ -3536,4 +3585,33 @@ test("Other remote rows deduplicate Issue-linked branches and use the Issue lane
   surface.renderInto(fixture.body, fixture.windowData.id, { laneFilter: "remote" });
   assert.deepEqual(rowIdsInList(fixture), ["remote-start:feature/remote"]);
   assert.equal(fixture.body.querySelector(".issue-other-summary").textContent, "Other (1)");
+});
+
+
+test("Work detail keeps named windows distinct even when their provider matches", () => {
+  const projection = continuationProjection();
+  const work = projection.active_works[0].works[0];
+  work.agents = ["ミオ", "ハヤテ"].map((name, index) => ({
+    session_id: `window-${index}`, agent_id: "codex", display_name: "Codex", agent_name: name,
+    sessions: [{ agent_session_id: `conversation-${index}`, is_active: true }],
+  }));
+  const fixture = createFixture();
+  createSurface(fixture, projection).renderInto(fixture.body, fixture.windowData.id);
+  assert.equal(fixture.body.querySelectorAll(".workspace-detail-session").length, 2);
+  assert.match(fixture.body.textContent, /ミオ \(Codex\)/);
+  assert.match(fixture.body.textContent, /ハヤテ \(Codex\)/);
+});
+
+test("Work detail retains separate sessions and Resume actions with the same assigned name", () => {
+  const projection = continuationProjection();
+  projection.active_works[0].works[0].agents = ["first", "second"].map(id => ({
+    session_id: id, agent_id: "codex", display_name: "Codex", agent_name: "ミオ",
+    status_category: "idle",
+    sessions: [{ agent_session_id: `conversation-${id}`, is_active: true }],
+  }));
+  const fixture = createFixture();
+  createSurface(fixture, projection).renderInto(fixture.body, fixture.windowData.id);
+  const resumes = Array.from(fixture.body.querySelectorAll("[data-action='resume-session']"));
+  assert.equal(fixture.body.querySelectorAll(".workspace-detail-session").length, 2);
+  assert.deepEqual(resumes.map(button => button.dataset.sessionId), ["first", "second"]);
 });

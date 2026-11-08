@@ -1,0 +1,29 @@
+[
+  {
+    "schema_version": 1,
+    "type": "sample",
+    "timestamp": "2026-10-20T02:10:31.643181Z",
+    "stream": "ui",
+    "target": "phase:work_events.ingest.worktree_scan",
+    "value": 5784699.0257,
+    "unit": "ms"
+  },
+  {
+    "schema_version": 1,
+    "type": "sample",
+    "timestamp": "2026-10-20T02:10:31.643220500Z",
+    "stream": "ui",
+    "target": "phase:work_events.ingest.worktree_read",
+    "value": 0.045399999999999996,
+    "unit": "ms"
+  },
+  {
+    "schema_version": 1,
+    "type": "sample",
+    "timestamp": "2026-10-20T02:10:40.276961500Z",
+    "stream": "ui",
+    "target": "phase:work_events.ingest.ref_scan",
+    "value": 8633.7377,
+    "unit": "ms"
+  }
+]

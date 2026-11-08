@@ -7,9 +7,9 @@
 //! blocker. Claude Code's built-in `stop_hook_active` flag (FR-014o)
 //! short-circuits this handler to prevent infinite loops.
 //!
-//! Fail-open policy (FR-014u): any I/O or parse failure resolves to
-//! `HookOutput::Silent` so a corrupted state file never accidentally
-//! blocks a Stop.
+//! Fail-open policy (FR-014u): read failures produce a nonblocking warning
+//! so an unreadable state file never accidentally blocks a Stop. Missing
+//! files and unrecognized Markdown stay silent.
 
 use std::{
     io::{self, Read},
@@ -29,8 +29,8 @@ pub fn handle() -> Result<HookOutput, HookError> {
     Ok(handle_with_input(&cwd, &input, current_session.as_deref()))
 }
 
-/// Pure core decision. Always returns `Silent` on any parse/IO failure
-/// so the Stop hook stays fail-open.
+/// Pure core decision. Warns without blocking on read failures so the
+/// Stop hook stays fail-open.
 ///
 /// Issue #3465: `current_session_id` keeps the gate inside the session that
 /// opened the discussion. The canonical log is project-scoped, so without it
@@ -44,8 +44,15 @@ pub fn handle_with_input(
     if stop_hook_active_from(input) {
         return HookOutput::Silent;
     }
-    let Ok(Some(pending)) = discussion_stop_blocker(worktree, current_session_id) else {
-        return HookOutput::Silent;
+    let pending = match discussion_stop_blocker(worktree, current_session_id) {
+        Ok(Some(pending)) => pending,
+        Ok(None) => return HookOutput::Silent,
+        Err(error) => {
+            tracing::warn!(%error, "discussion record is unreadable");
+            return HookOutput::SystemMessage(format!(
+                "Warning: Discussion record is unreadable ({error}). Stop is not blocked by this infrastructure failure."
+            ));
+        }
     };
     let Some(question) = pending
         .next_question
@@ -308,10 +315,24 @@ mod tests {
     }
 
     #[test]
-    fn silent_when_discussion_md_is_malformed() {
+    fn malformed_markdown_is_silent_and_unreadable_discussion_warns_without_blocking_stop() {
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let _session_env = [
+            gwt_agent::GWT_SESSION_ID_ENV,
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            gwt_agent::GWT_HOOK_FORWARD_URL_ENV,
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "CODEX_THREAD_ID",
+        ]
+        .map(ScopedEnvVar::unset);
         let dir = tempfile::tempdir().unwrap();
-        // `parse_proposals` is tolerant, but this test future-proofs the
-        // fail-open contract: any unparseable input must not block Stop.
+        // Tolerant Markdown parsing still treats an unrecognized header as absent.
         write_discussion(
             dir.path(),
             "### Proposal ??? broken header without status label\n",
@@ -320,5 +341,35 @@ mod tests {
             handle_with_input(dir.path(), "{}", None),
             HookOutput::Silent
         );
+
+        let path = dir.path().join(".gwt/discussion.md");
+        let unreadable = b"\xff\xfe";
+        fs::write(&path, unreadable).unwrap();
+        assert_eq!(
+            discussion_stop_blocker(dir.path(), Some("sess-1"))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        let output = handle_with_input(dir.path(), "{}", Some("sess-1"));
+        let HookOutput::SystemMessage(message) = output else {
+            panic!("unreadable discussion must warn without blocking Stop: {output:?}");
+        };
+        assert!(message.contains("Discussion"), "{message}");
+        assert!(message.contains("unreadable"), "{message}");
+        assert!(message.contains("not blocked"), "{message}");
+
+        let output = super::super::event_dispatcher::handle_with_input(
+            "Stop",
+            "{}",
+            dir.path(),
+            Some("sess-1"),
+        )
+        .expect("public Stop hook");
+        let HookOutput::SystemMessage(public_message) = output else {
+            panic!("public Stop must retain the warning: {output:?}");
+        };
+        assert!(public_message.contains(&message), "{public_message}");
+        assert_eq!(fs::read(&path).unwrap(), unreadable);
     }
 }

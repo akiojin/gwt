@@ -54,7 +54,7 @@ class ResolveDbPathTests(unittest.TestCase):
             ".gwt",
             "index",
             "abc1234567890def",
-            "specs",
+            "issues",
         )
         self.assertEqual(path.parts[-len(expected) :], expected)
 

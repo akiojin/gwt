@@ -81,7 +81,7 @@ fn project_route_for_a_known_recent_project_auto_opens_it_for_the_bound_client()
 
     assert_eq!(runtime.tabs.len(), 1, "the known Recent project opens");
     assert!(
-        committed.iter().any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })
+        committed.iter().any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })
             && event.target == DispatchTarget::Project(key.clone())),
         "the waiting /p/<hash> client receives the Project full sync: {committed:?}"
     );

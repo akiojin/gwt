@@ -48,3 +48,183 @@ test('a throwing view does not leave other views stale and nested updates settle
   store.dispose();
   assert.throws(() => store.update(() => ({ value: 4 })), /disposed/);
 });
+
+test('frame selectors batch five streams without dropping synchronous updates or waking unrelated views', () => {
+  const frames = [];
+  const store = createUiStateStore({ windows: [0, 0, 0, 0, 0], unrelated: 0 }, {
+    scheduleFrame: callback => { frames.push(callback); return () => {}; },
+  });
+  const packets = [], renders = [[], [], [], [], []], unrelated = [];
+  store.subscribe(state => state.windows, windows => packets.push([...windows]));
+  renders.forEach((values, i) => store.subscribeFrame(state => state.windows[i], value => values.push(value)));
+  store.subscribeFrame(state => state.unrelated, value => unrelated.push(value));
+  for (let value = 1; value <= 3; value++) {
+    for (let i = 0; i < 5; i++) {
+      store.update(state => ({ ...state, windows: state.windows.map((old, j) => j === i ? value : old) }));
+    }
+  }
+  assert.equal(packets.length, 16, 'all packets are consumed synchronously');
+  assert.deepEqual(store.read().windows, [3, 3, 3, 3, 3]);
+  assert.equal(frames.length, 1, 'one frame for the store, rather than one per view');
+  assert.deepEqual(renders, [[0], [0], [0], [0], [0]]);
+  frames.shift()();
+  assert.deepEqual(renders, [[0, 3], [0, 3], [0, 3], [0, 3], [0, 3]]);
+  assert.deepEqual(unrelated, [0]);
+  store.dispose();
+});
+
+test('frame subscriptions cancel on unsubscribe/dispose and ignore obsolete callbacks', () => {
+  const frames = [], cancelled = [], values = [];
+  const store = createUiStateStore(0, { scheduleFrame: callback => {
+    frames.push(callback);
+    return () => cancelled.push(callback);
+  } });
+  const unsubscribe = store.subscribeFrame(state => state, value => values.push(value));
+  store.update(() => 1);
+  unsubscribe();
+  assert.equal(cancelled.length, 1);
+  const remount = store.subscribeFrame(state => state, value => values.push(value));
+  store.update(() => 2);
+  frames[0]();
+  assert.deepEqual(values, [0, 1], 'an old cancelled callback cannot flush a new subscription');
+  frames[1]();
+  assert.deepEqual(values, [0, 1, 2]);
+  store.update(() => 3);
+  store.dispose();
+  assert.equal(cancelled.length, 2);
+  frames[2]();
+  assert.deepEqual(values, [0, 1, 2]);
+  remount();
+});
+
+test('a failed frame view does not starve siblings or reentrant updates', () => {
+  const frames = [], values = [];
+  const store = createUiStateStore(0, { scheduleFrame: callback => {
+    frames.push(callback);
+    return () => {};
+  } });
+  let broken = true;
+  store.subscribeFrame(state => state, value => {
+    if (value === 1 && broken) throw new Error('broken frame view');
+  });
+  store.subscribeFrame(state => state, value => {
+    values.push(value);
+    if (value === 1) store.update(() => 0);
+  });
+  store.update(() => 1);
+  assert.throws(() => frames.shift()(), /broken frame view/);
+  assert.deepEqual(values, [0, 1]);
+  broken = false;
+  assert.equal(frames.length, 1, 'returning to the old selection still needs a follow-up frame');
+  frames.shift()();
+  assert.deepEqual(values, [0, 1, 0]);
+  store.dispose();
+});
+
+test('frame fallback runs while rAF is suspended and cancels the losing callback', () => {
+  const original = Object.fromEntries(['requestAnimationFrame', 'cancelAnimationFrame', 'setTimeout', 'clearTimeout']
+    .map(key => [key, globalThis[key]]));
+  const frames = [], timers = [], cancelledFrames = [], cancelledTimers = [], values = [];
+  globalThis.requestAnimationFrame = callback => { frames.push(callback); return frames.length; };
+  globalThis.cancelAnimationFrame = id => cancelledFrames.push(id);
+  globalThis.setTimeout = (callback, delay) => { assert.equal(delay, 100); timers.push(callback); return timers.length; };
+  globalThis.clearTimeout = id => cancelledTimers.push(id);
+  const store = createUiStateStore(0);
+  try {
+    store.subscribeFrame(state => state, value => values.push(value));
+    store.update(() => 1);
+    timers[0]();
+    assert.deepEqual(values, [0, 1]);
+    assert.deepEqual(cancelledFrames, [1]);
+    store.update(() => 2);
+    frames[0]();
+    assert.deepEqual(values, [0, 1], 'late frame from the first batch is harmless');
+    frames[1]();
+    assert.deepEqual(values, [0, 1, 2]);
+    assert.deepEqual(cancelledTimers, [1, 2]);
+  } finally {
+    store.dispose();
+    Object.assign(globalThis, original);
+  }
+});
+
+test('hidden frame views coalesce and cancel without waiting for timers or animation frames', () => {
+  const original = Object.fromEntries(['document', 'MessageChannel', 'requestAnimationFrame', 'setTimeout']
+    .map(key => [key, globalThis[key]]));
+  const tasks = [], values = [], timers = [], frames = [];
+  globalThis.document = { hidden: true };
+  globalThis.requestAnimationFrame = callback => { frames.push(callback); return 0; };
+  globalThis.setTimeout = callback => { timers.push(callback); return 0; };
+  globalThis.MessageChannel = class {
+    constructor() {
+      this.closed = 0;
+      this.posted = 0;
+      this.port1 = { onmessage: null, close: () => this.closed++ };
+      this.port2 = { postMessage: () => this.posted++, close: () => this.closed++ };
+      tasks.push(this);
+    }
+  };
+  const store = createUiStateStore(0);
+  try {
+    store.subscribeFrame(state => state, value => values.push(value));
+    store.update(() => 1);
+    store.update(() => 2);
+    assert.equal(timers.length + frames.length, 0, 'hidden rendering must not depend on clamped timers or suspended frames');
+    assert.equal(tasks.length, 1, 'updates share one yielding task');
+    assert.equal(tasks[0].posted, 1, 'the yielding task is actually submitted');
+    tasks[0].port1.onmessage();
+    assert.deepEqual(values, [0, 2]);
+    assert.equal(tasks[0].closed, 2);
+    store.update(() => 3);
+    const stale = tasks[1].port1.onmessage;
+    store.dispose();
+    stale();
+    assert.equal(tasks[1].closed, 2);
+    assert.deepEqual(values, [0, 2], 'disposed views ignore already delivered callbacks');
+  } finally {
+    store.dispose();
+    Object.assign(globalThis, original);
+  }
+});
+
+test('pending visible frame views keep progressing when the document becomes hidden', () => {
+  const original = Object.fromEntries(['document', 'MessageChannel', 'requestAnimationFrame', 'cancelAnimationFrame', 'setTimeout', 'clearTimeout']
+    .map(key => [key, globalThis[key]]));
+  const listeners = new Set(), tasks = [], values = [], stalled = [];
+  globalThis.document = { hidden: false,
+    addEventListener: (type, listener) => { assert.equal(type, 'visibilitychange'); listeners.add(listener); },
+    removeEventListener: (type, listener) => { assert.equal(type, 'visibilitychange'); listeners.delete(listener); },
+  };
+  globalThis.requestAnimationFrame = globalThis.setTimeout = callback => { stalled.push(callback); return 0; };
+  globalThis.cancelAnimationFrame = globalThis.clearTimeout = () => {};
+  globalThis.MessageChannel = class {
+    constructor() {
+      this.closed = 0;
+      this.port1 = { onmessage: null, close: () => this.closed++ };
+      this.port2 = { postMessage() {}, close: () => this.closed++ };
+      tasks.push(this);
+    }
+  };
+  const store = createUiStateStore(0);
+  try {
+    store.subscribeFrame(state => state, value => values.push(value));
+    store.update(() => 1);
+    assert.equal(stalled.length, 2, 'visible views retain the timer/frame race');
+    globalThis.document.hidden = true;
+    for (const listener of [...listeners]) listener();
+    assert.equal(tasks.length, 1, 'a pending visible batch must escape background timer/frame throttling');
+    store.update(() => 2);
+    tasks[0].port1.onmessage();
+    for (const callback of stalled) callback();
+    assert.deepEqual(values, [0, 2], 'the latest model renders once without another update or focus');
+    assert.equal(tasks[0].closed, 2);
+    assert.equal(listeners.size, 0, 'completed batches release their visibility listener');
+    globalThis.document.hidden = false;
+    store.update(() => 3);
+    store.dispose();
+    assert.equal(listeners.size, 0, 'cancelled batches release their visibility listener');
+  } finally {
+    store.dispose();
+    Object.assign(globalThis, original);
+  }
+});

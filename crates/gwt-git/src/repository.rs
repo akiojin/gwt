@@ -7,6 +7,42 @@ use std::{
 
 use gwt_core::{config::BareProjectConfig, GwtError, Result};
 
+pub mod git_health;
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static CONFIG_WRITE_CONTENTION: std::cell::RefCell<
+        Option<std::sync::mpsc::Sender<&'static str>>
+    > = const { std::cell::RefCell::new(None) };
+}
+
+/// Serialize commands that can update the repository's shared Git config.
+/// The sidecar stays separate from Git's own `config.lock` protocol.
+pub(crate) fn lock_repository_config_write(
+    repo: &Path,
+) -> Result<gwt_core::operation_deadline::NamedFileLock> {
+    let common_dir = gwt_core::repo_hash::resolve_repository_common_dir(repo).ok_or_else(|| {
+        GwtError::Git(format!(
+            "cannot resolve shared Git directory for {}",
+            repo.display()
+        ))
+    })?;
+    let common_dir = fs::canonicalize(common_dir).map_err(GwtError::Io)?;
+    gwt_core::operation_deadline::NamedFileLock::acquire_observed(
+        &common_dir.join("gwt-config-write.lock"),
+        "git config write",
+        || {
+            #[cfg(test)]
+            CONFIG_WRITE_CONTENTION.with(|slot| {
+                if let Some(sender) = slot.borrow().as_ref() {
+                    let _ = sender.send("contended");
+                }
+            });
+        },
+    )
+    .map_err(GwtError::Io)
+}
+
 /// The type of repository detected at a given path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RepoType {
@@ -724,11 +760,14 @@ mod tests {
     // ---- clone_repo tests ----
 
     #[test]
-    fn clone_repo_fails_with_invalid_url() {
+    fn clone_repo_fails_with_missing_local_repository() {
+        let _lock = gwt_core::test_support::env_lock().lock().unwrap();
+        let _protocol = gwt_core::test_support::ScopedEnvVar::set("GIT_ALLOW_PROTOCOL", "file");
         let tmp = tempfile::tempdir().unwrap();
         let target = tmp.path().join("clone-target");
-        let result = clone_repo("https://invalid.example.com/no-such-repo.git", &target);
-        assert!(result.is_err());
+        let missing = tmp.path().join("missing.git");
+        let error = clone_repo(missing.to_str().unwrap(), &target).unwrap_err();
+        assert!(error.to_string().contains("missing.git"), "{error}");
     }
 
     #[test]

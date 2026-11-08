@@ -1005,6 +1005,284 @@ fn run_ws_raw(fixture: &Fixture, json: &str) -> std::process::Output {
     child.wait_with_output().expect("wait gwtd")
 }
 
+fn reconcile_git(repo: &Path, args: &[&str]) -> std::process::Output {
+    hidden_command("git")
+        .arg("-C")
+        .arg(repo)
+        .args([
+            "-c",
+            "user.name=Reconcile Test",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "core.autocrlf=false",
+        ])
+        .args(args)
+        .output()
+        .expect("run reconciliation fixture Git")
+}
+
+fn assert_reconcile_git(repo: &Path, args: &[&str]) {
+    let output = reconcile_git(repo, args);
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn legacy_supersession(host: &str) -> WorkEvent {
+    let parent = "reconcile-parent";
+    let successor = gwt_core::workspace_projection::successor_work_id(parent);
+    let mut event = WorkEvent::new(WorkEventKind::Discard, &successor, Utc::now());
+    event.id = format!("superseded-{successor}");
+    event.related_work_item_id = Some(parent.to_string());
+    event.execution_container = Some(WorkspaceExecutionContainerRef {
+        branch: Some(BRANCH.to_string()),
+        worktree_path: Some(PathBuf::from(host)),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    });
+    event
+}
+
+fn seed_reconcile_collision(
+    fixture: &Fixture,
+    incoming: &WorkEvent,
+    local: &WorkEvent,
+) -> (PathBuf, Vec<u8>, Vec<u8>) {
+    assert_reconcile_git(
+        fixture.project.path(),
+        &["commit", "--allow-empty", "-qm", "base"],
+    );
+    let remote = tempfile::tempdir().expect("incoming host");
+    assert_reconcile_git(
+        remote.path(),
+        &[
+            "clone",
+            "-q",
+            "--no-hardlinks",
+            fixture.project.path().to_str().unwrap(),
+            ".",
+        ],
+    );
+    let incoming_path =
+        gwt_core::paths::gwt_repo_local_work_event_shard_path(remote.path(), &incoming.id);
+    fs::create_dir_all(incoming_path.parent().unwrap()).unwrap();
+    let incoming_bytes = format!(" {}\r\n", serde_json::to_string(incoming).unwrap()).into_bytes();
+    fs::write(&incoming_path, &incoming_bytes).unwrap();
+    assert_reconcile_git(remote.path(), &["add", ".gwt/work/events"]);
+    assert_reconcile_git(
+        remote.path(),
+        &[
+            "-c",
+            "core.autocrlf=false",
+            "commit",
+            "-qm",
+            "incoming tombstone",
+        ],
+    );
+    assert_reconcile_git(
+        fixture.project.path(),
+        &[
+            "fetch",
+            "-q",
+            remote.path().to_str().unwrap(),
+            "HEAD:refs/remotes/incoming/main",
+        ],
+    );
+    let local_path =
+        gwt_core::paths::gwt_repo_local_work_event_shard_path(fixture.project.path(), &incoming.id);
+    fs::create_dir_all(local_path.parent().unwrap()).unwrap();
+    let local_bytes = format!("\t{}\n", serde_json::to_string(local).unwrap()).into_bytes();
+    fs::write(&local_path, &local_bytes).unwrap();
+    (local_path, local_bytes, incoming_bytes)
+}
+
+#[test]
+fn workspace_events_reconcile_preserves_both_hosts_and_unblocks_git_merge() {
+    let fixture = fixture();
+    let incoming = legacy_supersession("/host-a/work");
+    let mut local = legacy_supersession("/host-b/work");
+    local.updated_at = incoming.updated_at;
+    let (old_path, local_bytes, incoming_bytes) =
+        seed_reconcile_collision(&fixture, &incoming, &local);
+    let before = tracked_work_event_store_snapshot(fixture.project.path());
+    let home_before = fs::read_dir(fixture.home.path()).unwrap().count();
+    assert!(!reconcile_git(
+        fixture.project.path(),
+        &["merge", "--ff-only", "refs/remotes/incoming/main"]
+    )
+    .status
+    .success());
+    let index_before = fs::read(fixture.project.path().join(".git/index")).ok();
+
+    let dry_run = envelope_payload(&run_ws(
+        &fixture,
+        r#"{"schema_version":1,"operation":"workspace.events_reconcile","params":{"reference":"refs/remotes/incoming/main"}}"#,
+    ));
+    assert_eq!(dry_run["dry_run"], true);
+    assert_eq!(dry_run["collisions"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        tracked_work_event_store_snapshot(fixture.project.path()),
+        before
+    );
+    assert_eq!(
+        fs::read_dir(fixture.home.path()).unwrap().count(),
+        home_before
+    );
+    assert_eq!(
+        fs::read(fixture.project.path().join(".git/index")).ok(),
+        index_before
+    );
+
+    let applied = envelope_payload(&run_ws(
+        &fixture,
+        r#"{"schema_version":1,"operation":"workspace.events_reconcile","params":{"reference":"refs/remotes/incoming/main","dry_run":false}}"#,
+    ));
+    assert_eq!(applied["reconciled"], 1);
+    assert!(!old_path.exists());
+    for (side, original) in [("local", &local_bytes), ("incoming", &incoming_bytes)] {
+        let archive = applied["collisions"][0][format!("{side}_archive")]
+            .as_str()
+            .unwrap();
+        assert_eq!(&fs::read(archive).unwrap(), original);
+    }
+    let events = load_tracked_work_events(fixture.project.path());
+    assert_eq!(
+        events.len(),
+        2,
+        "both hosts must be reader-visible before merging"
+    );
+    assert!(events.iter().all(WorkEvent::is_successor_supersession));
+    assert_ne!(events[0].id, events[1].id);
+    let reader_path = fixture.home.path().join("reader/works.json");
+    let sources = tracked_work_event_store_snapshot(fixture.project.path())
+        .shards
+        .into_values()
+        .map(|bytes| String::from_utf8(bytes).unwrap())
+        .collect::<Vec<_>>();
+    let report = gwt_core::work_events_intake::ingest_work_events_contents(
+        &reader_path,
+        sources.iter().map(String::as_str),
+    )
+    .expect("canonical shared Work event reader");
+    assert_eq!(report.skipped_close_kind, 0);
+    let projection = load_workspace_work_items_from_path(&reader_path)
+        .unwrap()
+        .unwrap();
+    for event in &events {
+        assert!(projection.work_items[0].events.contains(event));
+    }
+    assert_reconcile_git(
+        fixture.project.path(),
+        &["merge", "--ff-only", "refs/remotes/incoming/main"],
+    );
+    assert_eq!(fs::read(&old_path).unwrap(), incoming_bytes);
+    let merged = load_tracked_work_events(fixture.project.path());
+    assert_eq!(merged.len(), 3);
+    for event in events {
+        assert!(merged.contains(&event));
+    }
+    let repeated = envelope_payload(&run_ws(
+        &fixture,
+        r#"{"schema_version":1,"operation":"workspace.events_reconcile","params":{"reference":"refs/remotes/incoming/main","dry_run":false}}"#,
+    ));
+    assert_eq!(repeated["reconciled"], 0);
+}
+
+#[test]
+fn workspace_events_reconcile_refuses_unsafe_collisions_without_moving_source() {
+    for unsafe_case in [
+        "non-tombstone",
+        "branch-mismatch",
+        "tracked-change",
+        "tracked-collision",
+        "archive-collision",
+    ] {
+        let fixture = fixture();
+        let incoming = legacy_supersession("/host-a/work");
+        let mut local = legacy_supersession("/host-b/work");
+        if unsafe_case == "non-tombstone" {
+            local.kind = WorkEventKind::Update;
+        }
+        if unsafe_case == "branch-mismatch" {
+            local.execution_container.as_mut().unwrap().branch = Some("work/other".into());
+        }
+        let (old_path, local_bytes, _) = seed_reconcile_collision(&fixture, &incoming, &local);
+        if matches!(unsafe_case, "tracked-change" | "tracked-collision") {
+            assert_reconcile_git(fixture.project.path(), &["add", ".gwt/work/events"]);
+        }
+        if unsafe_case == "tracked-collision" {
+            assert_reconcile_git(
+                fixture.project.path(),
+                &["commit", "-qm", "local tombstone"],
+            );
+        }
+        if unsafe_case == "archive-collision" {
+            use sha2::{Digest, Sha256};
+            let archive = fixture
+                .home
+                .path()
+                .join(".gwt/projects")
+                .join(project_scope_hash(fixture.project.path()).as_str())
+                .join("work-event-reconcile")
+                .join(format!("{:x}.jsonl", Sha256::digest(&local_bytes)));
+            fs::create_dir_all(archive.parent().unwrap()).unwrap();
+            fs::write(archive, b"unrelated archive bytes").unwrap();
+        }
+        let before = tracked_work_event_store_snapshot(fixture.project.path());
+        let output = run_ws_raw(
+            &fixture,
+            r#"{"schema_version":1,"operation":"workspace.events_reconcile","params":{"reference":"refs/remotes/incoming/main","dry_run":false}}"#,
+        );
+        assert!(
+            !output.status.success(),
+            "{unsafe_case} must be refused: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert_eq!(fs::read(&old_path).unwrap(), local_bytes, "{unsafe_case}");
+        assert_eq!(
+            tracked_work_event_store_snapshot(fixture.project.path()),
+            before,
+            "{unsafe_case}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_events_reconcile_accepts_home_reached_through_an_alias() {
+    let fixture = fixture();
+    seed_reconcile_collision(
+        &fixture,
+        &legacy_supersession("/host-a/work"),
+        &legacy_supersession("/host-b/work"),
+    );
+    let aliases = tempfile::tempdir().unwrap();
+    let home_alias = aliases.path().join("home");
+    std::os::unix::fs::symlink(fixture.home.path(), &home_alias).unwrap();
+    for dry_run in [true, false] {
+        let mut child = gwtd_command(&fixture, SESSION)
+            .env("HOME", &home_alias)
+            .env("USERPROFILE", &home_alias)
+            .spawn()
+            .expect("run gwtd through aliased HOME");
+        let request = serde_json::json!({"schema_version":1,"operation":"workspace.events_reconcile","params":{"reference":"refs/remotes/incoming/main","dry_run":dry_run}});
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(request.to_string().as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "{}", output_text(&output));
+        let result = envelope_payload(&serde_json::from_slice(&output.stdout).unwrap());
+        assert_eq!(result["collisions"].as_array().unwrap().len(), 1);
+    }
+}
+
 fn run_ws_raw_with_forward_env(
     fixture: &Fixture,
     json: &str,

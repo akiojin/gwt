@@ -4,6 +4,8 @@ export function createTerminalContextMenuController({
   document,
   window,
   terminalRoot,
+  hasSelection = () => false,
+  copySelection = async () => false,
   readClipboardText = async () => "",
   readClipboardItems = async () => [],
   pasteText = () => {},
@@ -21,6 +23,13 @@ export function createTerminalContextMenuController({
   menu.setAttribute("aria-label", "Terminal");
   menu.hidden = true;
 
+  const copyButton = document.createElement("button");
+  copyButton.type = "button";
+  copyButton.className = "terminal-context-menu__item";
+  copyButton.setAttribute("role", "menuitem");
+  copyButton.textContent = "Copy";
+  menu.appendChild(copyButton);
+
   const pasteButton = document.createElement("button");
   pasteButton.type = "button";
   pasteButton.className = "terminal-context-menu__item";
@@ -35,7 +44,8 @@ export function createTerminalContextMenuController({
     menu.hidden = false;
     menu.style.left = `${event.clientX || 0}px`;
     menu.style.top = `${event.clientY || 0}px`;
-    pasteButton.focus?.();
+    copyButton.disabled = !hasSelection();
+    (copyButton.disabled ? pasteButton : copyButton).focus?.();
   }
 
   function hide() {
@@ -77,6 +87,17 @@ export function createTerminalContextMenuController({
     void pasteFromClipboard();
   };
 
+  const handleCopyClick = async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    hide();
+    try {
+      if (hasSelection()) await copySelection();
+    } finally {
+      focusTerminal();
+    }
+  };
+
   const handlePointerDown = (event) => {
     if (menu.hidden || menu.contains(event.target)) {
       return;
@@ -95,6 +116,7 @@ export function createTerminalContextMenuController({
   };
 
   terminalRoot.addEventListener("contextmenu", handleContextMenu);
+  copyButton.addEventListener("click", handleCopyClick);
   pasteButton.addEventListener("click", handlePasteClick);
   document.addEventListener("pointerdown", handlePointerDown, true);
   document.addEventListener("keydown", handleKeyDown, true);
@@ -106,6 +128,7 @@ export function createTerminalContextMenuController({
     pasteFromClipboard,
     dispose() {
       terminalRoot.removeEventListener("contextmenu", handleContextMenu);
+      copyButton.removeEventListener("click", handleCopyClick);
       pasteButton.removeEventListener("click", handlePasteClick);
       document.removeEventListener("pointerdown", handlePointerDown, true);
       document.removeEventListener("keydown", handleKeyDown, true);

@@ -442,6 +442,9 @@ pub fn classify_operation_refusal(operation: &str, error: &str) -> Option<Operat
         return None;
     }
     let lowered = error.to_lowercase();
+    if operation == "workspace.ensure" && lowered.contains("session ledger is missing") {
+        return Some(OperationRefusalKind::Authority);
+    }
     // Issue #3868 AC-24: a refusal that names the agent's own next step is not
     // a governance refusal, whatever family emitted it. These phrases come from
     // the obligation gate (T-247), the evidence gate, and the receipt gate;
@@ -513,18 +516,31 @@ pub fn render_operation_refusal_body(
     error: &str,
     kind: OperationRefusalKind,
 ) -> String {
+    let missing_ledger = operation == "workspace.ensure"
+        && error.to_lowercase().contains("session ledger is missing");
+    let cause = if missing_ledger {
+        "Session ledger が失われており、この Session では復帰不能です。担当 agent の入力・順序の修正では解消できません。".to_string()
+    } else {
+        format!(
+            "未判定。拒否メッセージ本文を読んで判断してください（機械分類の候補: {}）。\
+             担当 agent 側の順序・前提・入力の修正で解消できる場合があります。",
+            kind.as_str(),
+        )
+    };
+    let request = if missing_ledger {
+        "PM は issue.monitor.status で対象 Issue の launch identity を確認し、issue.monitor.stop に number・reason・必要な identity と remove_from_queue:false を渡してください。generation_release の成功を確認し、返却された stopped_window_id を pane.close で閉じてから、issue.monitor.requeue に number・reason を渡して後継 Session を手配してください。Monitor 管理外の場合は Start Work / Launch で新しい Session を手配してください。"
+    } else {
+        kind.request_hint()
+    };
     format!(
         "事象: JSON operation `{operation}` が拒否されました。\n\
          ```\n{error}\n```\n\
-         原因: 未判定。拒否メッセージ本文を読んで判断してください（機械分類の候補: {kind}）。\
-         担当 agent 側の順序・前提・入力の修正で解消できる場合があります。\n\
+         原因: {cause}\n\
          依頼: {request}\n\
          再開条件: 上記が解消され、`{operation}` 相当の操作が通る状態になること。\n\
          \n\
          この投稿は gwt が自動起票しました（Issue #3655 AC-2）。担当 agent は必要に応じて \
          事象・原因を補足してください。",
-        kind = kind.as_str(),
-        request = kind.request_hint(),
     )
 }
 
@@ -1118,6 +1134,26 @@ mod tests {
                 "{operation} must not auto-escalate"
             );
         }
+    }
+
+    #[test]
+    fn missing_session_ledger_escalation_requires_pm_recovery() {
+        let error = "workspace.ensure prerequisite probe refused: Session ledger is missing for Session lost; this Session cannot be recovered";
+        let kind = classify_operation_refusal("workspace.ensure", error)
+            .expect("missing durable identity must escalate");
+        assert_eq!(kind, OperationRefusalKind::Authority);
+        let body = render_operation_refusal_body("workspace.ensure", error, kind);
+        validate_escalation_body(&body).expect("missing-ledger escalation contract");
+        assert!(body.contains(error), "{body}");
+        assert!(
+            body.contains("入力・順序の修正では解消できません"),
+            "{body}"
+        );
+        assert!(body.contains("issue.monitor.stop"), "{body}");
+        assert!(body.contains("generation_release"), "{body}");
+        assert!(body.contains("issue.monitor.requeue"), "{body}");
+        assert!(!body.contains("修正で解消できる場合があります"), "{body}");
+        assert!(!body.contains("担当が解消して再試行"), "{body}");
     }
 
     #[test]

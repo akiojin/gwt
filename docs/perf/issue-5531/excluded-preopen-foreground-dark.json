@@ -1,0 +1,111 @@
+{
+  "label": "after",
+  "theme": "dark",
+  "baseline_sha": "bc175f05a2b730775e1f5302b3af0d588ba4470a",
+  "outcome": "complete",
+  "recovery_stage": "complete",
+  "recovery_error": null,
+  "recovery_timeout_ms": null,
+  "foreground_metrics_complete": true,
+  "timing_origin": "controller timestamp immediately before native window restore request",
+  "controller_restore_started_at_ms": 1792188058669,
+  "browser_performance_time_origin_ms": 1792188047711.2,
+  "controller_restore_start_performance_ms": 10957.800048828125,
+  "long_task_windows_ms": {
+    "recovery": [
+      0,
+      2000
+    ],
+    "settled": [
+      2000,
+      4000
+    ]
+  },
+  "acceptance_duration": false,
+  "background_elapsed_ms": 5031,
+  "workload": {
+    "transport": "native loopback WebSocket (ws@8.18.3); browser message events",
+    "panes": 8,
+    "tick_ms": 50,
+    "burst_events": 4096,
+    "burst_interval_ms": 30000,
+    "events": [
+      "terminal_output",
+      "terminal_preview",
+      "workspace_state"
+    ]
+  },
+  "frontend": {
+    "base_url": "http://127.0.0.1:51719/",
+    "checkout": "E:\\gwt\\work\\issue-5531",
+    "owned_pid": "26884",
+    "isolated_home": "E:\\gwt\\work\\issue-5531\\target\\issue-5531-home-cfe9f8f15ab94fc7a7331e30c5e76635",
+    "browser_pid": 7684,
+    "background": "native minimized Chromium window"
+  },
+  "input_ms": 722,
+  "snapshot_ms": 583,
+  "ready_requests_after_resume": 1,
+  "metrics": {
+    "active": true,
+    "maxQueue": 2048,
+    "messages": 8526,
+    "resyncs": 2,
+    "resumes": 0,
+    "resync_reasons": {
+      "overflow": 2
+    },
+    "visible_at": 11125.5,
+    "max_long_task_ms": 550,
+    "long_tasks": [
+      {
+        "start_ms": 5733.29999999702,
+        "duration_ms": 75
+      },
+      {
+        "start_ms": 5981.70000000298,
+        "duration_ms": 75
+      },
+      {
+        "start_ms": 8226.20000000298,
+        "duration_ms": 550
+      },
+      {
+        "start_ms": 10908.5,
+        "duration_ms": 89
+      }
+    ],
+    "visibility": [
+      {
+        "state": "visible",
+        "at_ms": 11125.5
+      }
+    ],
+    "resume_max_long_task_ms": 89,
+    "settled_max_long_task_ms": 0
+  },
+  "traffic": {
+    "ticks": 85,
+    "frames": 9609,
+    "ready_requests": 3
+  },
+  "traffic_samples": [],
+  "samples": [
+    {
+      "at_ms": 5026,
+      "ticks": 85,
+      "frames": 5495,
+      "ready_requests": 2,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 5479,
+        "maxQueue": 2048,
+        "max_long_task_ms": 550,
+        "resyncs": 1,
+        "resumes": 0
+      }
+    }
+  ],
+  "errors": [],
+  "fixture_errors": []
+}

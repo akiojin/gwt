@@ -52,6 +52,7 @@ exit 0
 
 fn auto_issue() -> IssueMonitorIssue {
     IssueMonitorIssue {
+        author_login: None,
         number: 42,
         title: "Issue 42".to_string(),
         labels: vec!["auto-merge".to_string()],
@@ -64,7 +65,7 @@ fn auto_issue() -> IssueMonitorIssue {
 }
 
 fn reviewed_monitor() -> IssueMonitorState {
-    let mut monitor = IssueMonitorState::with_prefs(
+    let mut monitor = test_monitor_with_prefs(
         IssueMonitorConfig::default(),
         IssueMonitorPrefs {
             enabled: true,
@@ -236,4 +237,14 @@ fn autonomous_merge_pipeline_executes_through_mock_gh() {
 
 fn cleanup(tmp: &Path) {
     let _ = fs::remove_dir_all(tmp);
+}
+
+// These lifecycle fixtures model an ordinary repository with resolved provenance.
+fn test_monitor_with_prefs(
+    config: gwt::IssueMonitorConfig,
+    prefs: gwt::IssueMonitorPrefs,
+) -> gwt::IssueMonitorState {
+    let mut monitor = gwt::IssueMonitorState::with_prefs(config, prefs);
+    monitor.set_source_repository(Some(("example", "repo")));
+    monitor
 }

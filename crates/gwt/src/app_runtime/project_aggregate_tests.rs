@@ -21,7 +21,7 @@ fn aggregate_test_runtime(root: &Path) -> AppRuntime {
                 WindowPreset::Shell,
                 WindowProcessStatus::Error,
             ));
-            tab.workspace = WindowCanvasState::from_persisted(persisted);
+            tab.workspace = WindowRegistry::from_persisted(persisted);
             tab
         })
         .collect();
@@ -197,4 +197,566 @@ fn project_aggregate_reopen_discards_unread_and_fences_old_ack() {
         &ClientScope::Project(context.project_key),
     );
     assert!(events.is_empty());
+}
+
+#[test]
+fn project_notification_routes_one_client_and_updates_unread() {
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let mut runtime = aggregate_test_runtime(temp.path());
+    let context = runtime.project_context("a").unwrap();
+    let other = runtime.project_context("b").unwrap();
+    let clients = crate::ClientHub::default();
+    for (id, key) in [
+        ("first", &context.project_key),
+        ("latest", &context.project_key),
+        ("foreign", &other.project_key),
+    ] {
+        clients.register_scoped(id.into(), ClientScope::Project(key.clone()));
+        let attention = serde_json::from_value(serde_json::json!({
+            "kind": "project_client_attention", "visible": false, "focused": false,
+            "notification_permission": "granted"
+        }))
+        .unwrap();
+        runtime.handle_frontend_event_in_scope(
+            id.into(),
+            attention,
+            &ClientScope::Project(key.clone()),
+        );
+    }
+    runtime.refresh_project_aggregates();
+    let started = Instant::now() - Duration::from_secs(300);
+    runtime.observe_notification_transition_at("a::agent", WindowProcessStatus::Running, started);
+    runtime.apply_owner_status_projection("a::agent", WindowProcessStatus::Stopped, None);
+    let (events, native) = runtime.collect_project_notifications(&clients);
+    assert!(native.is_empty());
+    let recipients: Vec<_> = events
+        .iter()
+        .filter_map(|event| match (&event.target, &event.event) {
+            (DispatchTarget::Client(id), BackendEvent::ProjectNotification { .. }) => {
+                Some(id.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(recipients, ["latest"]);
+    assert!(aggregate_payload(&events, &context.project_key).unread);
+    assert!(runtime.collect_project_notifications(&clients).0.is_empty());
+}
+
+#[test]
+fn project_notification_monitor_replay_is_suppressed_and_close_revokes_native() {
+    use std::sync::atomic::Ordering;
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let mut runtime = aggregate_test_runtime(temp.path());
+    let context = runtime.project_context("a").unwrap();
+    let clients = crate::ClientHub::default();
+    // Establish the baseline that frontend_ready sends before attention reports.
+    runtime.refresh_project_aggregates();
+    let attention = serde_json::from_value(serde_json::json!({
+        "kind": "project_client_attention", "visible": false, "focused": false,
+        "notification_permission": "granted"
+    }))
+    .unwrap();
+    runtime.handle_frontend_event_in_scope(
+        "gone".into(),
+        attention,
+        &ClientScope::Project(context.project_key.clone()),
+    );
+    let event = OutboundEvent::project(
+        context.project_key.clone(),
+        BackendEvent::IssueMonitorToast {
+            notification_transition: Some(
+                gwt::issue_monitor::MonitorNotificationTransition::NeedsHuman,
+            ),
+            notification_transition_id: Some("source-transition".into()),
+            level: "error".into(),
+            message: "private/path/error".into(),
+            issue_number: Some(3287),
+        },
+    );
+    runtime.observe_notification_toasts(std::slice::from_ref(&event));
+    let (events, native) = runtime.collect_project_notifications(&clients);
+    assert!(aggregate_payload(&events, &context.project_key).unread);
+    assert_eq!(native.len(), 1);
+    assert!(!native[0].intent.body.contains("private/path"));
+    runtime.observe_notification_toasts(&[event]);
+    assert!(runtime.collect_project_notifications(&clients).1.is_empty());
+    runtime.project_tab_incarnations.remove("a");
+    runtime.collect_project_notifications(&clients);
+    assert!(!native[0].validity.load(Ordering::Acquire));
+}
+
+#[test]
+fn project_notification_silent_process_install_does_not_infer_agent_running() {
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let mut runtime = aggregate_test_runtime(temp.path());
+    let id = "a::agent";
+    let context = runtime.project_context("a").unwrap();
+    let owner = owner_fixture_block_on(production_owner_fixture(&context.project_root));
+    let receipt = owner_fixture_block_on(owner.command(owner_fixture_agent_command(
+        &owner,
+        &context.project_root,
+        "silent-agent",
+        "silent-agent-launch",
+    )))
+    .expect("actual silent Agent launch");
+    let snapshot: super::RemoteRuntimeSnapshot = serde_json::from_value(
+        owner_fixture_block_on(owner.command(
+            gwt::project_runtime::events::OwnerCommand::Snapshot {
+                id: owner.pane_id("silent-agent"),
+                incarnation: receipt["incarnation"].as_u64().unwrap(),
+            },
+        ))
+        .expect("actual silent owner snapshot"),
+    )
+    .unwrap();
+    assert_eq!(
+        snapshot.status,
+        WindowProcessStatus::Starting,
+        "physical liveness without a provider hook must remain Starting at the owner"
+    );
+    let session = gwt_agent::Session::load(
+        &gwt_core::paths::gwt_sessions_dir()
+            .join(format!("{}.toml", snapshot.session_id.as_deref().unwrap())),
+    )
+    .unwrap();
+    runtime.install_remote_owner_projection(&context, id, owner.client(), snapshot, Some(session));
+    assert_eq!(
+        runtime.window_status(id),
+        Some(WindowProcessStatus::Starting)
+    );
+    runtime.observe_notification_transition_at(
+        id,
+        WindowProcessStatus::Stopped,
+        Instant::now() + Duration::from_secs(300),
+    );
+    let intents = runtime.notification_coordinator.drain_intents();
+    owner_fixture_block_on(owner.shutdown());
+    assert!(intents.is_empty(), "PTY liveness is not Agent Running");
+}
+
+#[test]
+fn owner_output_interleaving_preserves_contiguous_pane_deltas() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut runtime = aggregate_test_runtime(temp.path());
+    let context = runtime.project_context("a").unwrap();
+    let identity = gwt::daemon_subscriber::ProjectOwnerIdentity {
+        pid: 42,
+        host_started_at: 100,
+        host_instance_id: "interleaved-owner".into(),
+    };
+    let state = runtime.project_state_mut(&context).unwrap();
+    state.project_owner_connection_id = 1;
+    state.project_owner_identity = Some(identity.clone());
+    let mut endpoint = gwt_core::daemon::DaemonEndpoint::new(
+        gwt_core::daemon::RuntimeScope::new(
+            context.project_key.as_str(),
+            "fixture",
+            context.project_root.clone(),
+            gwt_core::daemon::RuntimeTarget::Host,
+        )
+        .unwrap(),
+        identity.pid,
+        "fixture".into(),
+        "private-fixture".into(),
+        "fixture".into(),
+    );
+    endpoint.project_transport_url = Some("http://127.0.0.1:1".into());
+    for (alias, owner_id) in [("a::agent", "owner-a"), ("a::shell", "owner-b")] {
+        runtime.runtimes.insert(
+            alias.into(),
+            WindowRuntime::remote(
+                owner_id.into(),
+                7,
+                100,
+                gwt::project_runtime::client::ProjectRuntimeClient::new(&endpoint).unwrap(),
+                identity.clone(),
+            ),
+        );
+    }
+    let mut events = Vec::new();
+    // Global stream positions interleave; each pane's own predecessor remains exact.
+    for (id, seq, previous_seq) in [("owner-a", 1, 0), ("owner-b", 2, 0), ("owner-a", 3, 1)] {
+        let output = serde_json::from_value(serde_json::json!({
+            "type": "output", "id": id, "incarnation": 7,
+            "seq": seq, "previous_seq": previous_seq, "screen_seq": seq,
+            "data": [b'x'], "screen": "x", "screen_ansi": [b'x'],
+        }))
+        .unwrap();
+        events.extend(runtime.handle_project_owner_event(&context, 1, &identity, output));
+    }
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event, BackendEvent::TerminalOutput { .. }))
+            .count(),
+        3,
+        "another pane's output must not replace a continuous delta with a snapshot"
+    );
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::TerminalSnapshot { .. })));
+}
+
+#[test]
+fn project_owner_health_is_project_scoped_and_rejects_stale_context() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut runtime = aggregate_test_runtime(temp.path());
+    let a = runtime.project_context("a").unwrap();
+    let b = runtime.project_context("b").unwrap();
+    let health = gwt::protocol::ProjectOwnerHealthView {
+        project_key: a.project_key.to_string(),
+        state: gwt::protocol::ProjectOwnerHealthState::Degraded,
+        detail: Some("Project connection lost".into()),
+    };
+    let events = runtime.handle_project_owner_health(&a, 1, None, health.clone());
+    assert!(events.iter().any(
+        |event| matches!(&event.target, DispatchTarget::Project(key) if key == &a.project_key)
+    ));
+    assert!(!events.iter().any(
+        |event| matches!(&event.target, DispatchTarget::Project(key) if key == &b.project_key)
+    ));
+    let catalog = runtime.hub_state_view();
+    let a_health = &catalog
+        .projects
+        .iter()
+        .find(|p| p.project_key == a.project_key.as_str())
+        .unwrap()
+        .owner_health;
+    assert_eq!(a_health.as_ref(), Some(&health));
+    assert!(catalog
+        .projects
+        .iter()
+        .find(|p| p.project_key == b.project_key.as_str())
+        .unwrap()
+        .owner_health
+        .is_none());
+    let now = chrono::Utc::now().to_rfc3339();
+    assert!(runtime
+        .issue_monitor_window_snapshot_for_tab("b", &now)
+        .is_some());
+    assert!(
+        runtime
+            .issue_monitor_window_snapshot_for_tab("a", &now)
+            .is_none(),
+        "a native-managed project's GUI must not publish a second physical canvas, even when degraded"
+    );
+    let mut stale_health = health.clone();
+    stale_health.detail = Some("Stale connection failure".into());
+    assert!(runtime
+        .handle_project_owner_health(&a, 0, None, stale_health)
+        .is_empty());
+    assert_eq!(
+        runtime
+            .project_state(&a)
+            .unwrap()
+            .project_owner_health
+            .as_ref(),
+        Some(&health)
+    );
+    // Owner events are a remote read model; no physical pane is created in the GUI.
+    let identity = gwt::daemon_subscriber::ProjectOwnerIdentity {
+        pid: 42,
+        host_started_at: 100,
+        host_instance_id: "owner-a".into(),
+    };
+    // Seed an already-authenticated subscriber projection; no background network worker
+    // or physical pane belongs to this read-model regression.
+    let accepted = runtime.project_state_mut(&a).unwrap();
+    accepted.project_owner_connection_id = 2;
+    accepted.project_owner_identity = Some(identity.clone());
+    let mut endpoint = gwt_core::daemon::DaemonEndpoint::new(
+        gwt_core::daemon::RuntimeScope::new(
+            a.project_key.as_str(),
+            "fixture",
+            a.project_root.clone(),
+            gwt_core::daemon::RuntimeTarget::Host,
+        )
+        .unwrap(),
+        identity.pid,
+        "fixture".into(),
+        "private-fixture".into(),
+        "fixture".into(),
+    );
+    endpoint.project_transport_url = Some("http://127.0.0.1:1".into());
+    runtime.runtimes.insert(
+        "a::agent".into(),
+        WindowRuntime::remote(
+            "owner-pane-a".into(),
+            7,
+            100,
+            gwt::project_runtime::client::ProjectRuntimeClient::new(&endpoint).unwrap(),
+            identity.clone(),
+        ),
+    );
+    // The next event is a contiguous delta after this accepted read-model position.
+    runtime.runtimes.get_mut("a::agent").unwrap().output_seq = 4;
+    let output = |incarnation| gwt::project_runtime::events::OwnerEvent::Output {
+        id: "owner-pane-a".into(),
+        incarnation,
+        data: b"owner bytes".to_vec(),
+        seq: 5,
+        previous_seq: Some(4),
+        screen: "owner screen".into(),
+        screen_ansi: b"owner ANSI".to_vec(),
+        screen_seq: 5,
+    };
+    assert!(
+        runtime
+            .handle_project_owner_event(&a, 1, &identity, output(7))
+            .is_empty(),
+        "old connection"
+    );
+    let mut replaced_identity = identity.clone();
+    replaced_identity.host_instance_id = "replacement".into();
+    assert!(
+        runtime
+            .handle_project_owner_event(&a, 2, &replaced_identity, output(7))
+            .is_empty(),
+        "old owner"
+    );
+    assert!(
+        runtime
+            .handle_project_owner_event(&b, 2, &identity, output(7))
+            .is_empty(),
+        "other project"
+    );
+    assert!(
+        runtime
+            .handle_project_owner_event(&a, 2, &identity, output(6))
+            .is_empty(),
+        "old pane incarnation"
+    );
+    let events = runtime.handle_project_owner_event(&a, 2, &identity, output(7));
+    assert!(events.iter().any(
+        |event| matches!(&event.event, BackendEvent::TerminalOutput { .. })
+            && event.terminal_stream_seq == Some(5)
+    ));
+    assert_eq!(runtime.runtimes["a::agent"].screen, "owner screen");
+    assert_eq!(runtime.runtimes["a::agent"].screen_ansi, b"owner ANSI");
+    assert!(
+        runtime
+            .handle_project_owner_event(&a, 2, &identity, output(7))
+            .is_empty(),
+        "duplicate sequence"
+    );
+    let deadline = runtime
+        .next_runtime_output_deadline()
+        .expect("existing preview batch");
+    assert!(runtime.flush_runtime_output_batches(deadline).iter().any(|event| matches!(&event.event, BackendEvent::TerminalPreview { text, .. } if text == "owner screen")));
+    let status = gwt::project_runtime::events::OwnerEvent::Status {
+        id: "owner-pane-a".into(),
+        incarnation: 7,
+        raw_status: WindowProcessStatus::Stopped,
+        status: WindowProcessStatus::Stopped,
+        detail: Some("owner exit".into()),
+        exit_confirmed: true,
+        exit_code: Some(0),
+    };
+    assert!(!runtime
+        .handle_project_owner_event(&a, 2, &identity, status)
+        .is_empty());
+    assert!(runtime.runtimes["a::agent"].exit_confirmed);
+    assert_eq!(
+        runtime.runtimes["a::agent"].status,
+        WindowProcessStatus::Stopped
+    );
+    assert_eq!(runtime.runtimes["a::agent"].exit_code, Some(0));
+    let snapshot = super::RemoteRuntimeSnapshot {
+        has_unsent_user_input: false,
+        input_observation: None,
+        id: "owner-pane-a".into(),
+        incarnation: 7,
+        screen: "new snapshot".into(),
+        screen_ansi: b"new ANSI".to_vec(),
+        screen_seq: 6,
+        child_pid: Some(43),
+        started_at_ms: 100,
+        raw_status: WindowProcessStatus::Running,
+        status: WindowProcessStatus::Running,
+        detail: None,
+        exit_confirmed: false,
+        exit_code: None,
+        session_id: None,
+        pm_registration: None,
+        agent_id: None,
+        agent_name: None,
+        display_name: None,
+        purpose_title: None,
+        branch: None,
+        worktree_path: None,
+        closing: false,
+        runtime_target: None,
+    };
+    let repaired = runtime.handle_project_owner_snapshot(super::RemoteOwnerSnapshotCompletion {
+        context: a.clone(),
+        connection_id: 2,
+        identity: identity.clone(),
+        id: "a::agent".into(),
+        incarnation: 7,
+        status_revision: 0,
+        client_id: None,
+        result: Ok(snapshot),
+    });
+    assert!(repaired.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::TerminalSnapshot { .. }
+    ) && event.terminal_stream_seq == Some(6)));
+    assert_eq!(runtime.runtimes["a::agent"].screen, "new snapshot");
+    assert_eq!(
+        runtime.runtimes["a::agent"].status,
+        WindowProcessStatus::Stopped,
+        "an older snapshot request cannot regress newer status evidence"
+    );
+    assert!(runtime.runtimes["a::agent"].exit_confirmed);
+
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
+    let gap = runtime.handle_project_owner_event(
+        &a,
+        2,
+        &identity,
+        gwt::project_runtime::events::OwnerEvent::Output {
+            id: "owner-pane-a".into(),
+            incarnation: 7,
+            seq: 8,
+            previous_seq: Some(7),
+            data: b"delta after a dropped chunk".to_vec(),
+            screen: "full repaired screen".into(),
+            screen_ansi: b"full repaired ANSI".to_vec(),
+            screen_seq: 8,
+        },
+    );
+    assert!(!gap.iter().any(|event| matches!(event.event, BackendEvent::TerminalSnapshot { .. })),
+        "a visible-only frame cannot replace the terminal's retained history");
+    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else { unreachable!() };
+    assert_eq!(tasks.lock().unwrap().len(), 1, "request the owner's semantic snapshot");
+    assert!(
+        !gap.iter()
+            .any(|event| matches!(event.event, BackendEvent::TerminalOutput { .. })),
+        "a stream gap cannot forward the surviving delta as a contiguous raw chunk"
+    );
+
+    // The reader may parse its final bytes before retirement rejects its
+    // queued Output event. The successful close ACK must retain that screen.
+    let closed = |incarnation, error: Option<&str>, screen_seq| {
+        serde_json::from_value(serde_json::json!({
+            "type": "closed", "id": "owner-pane-a", "incarnation": incarnation,
+            "error": error,
+            "final_screen": {
+                "screen": "final diagnostic screen", "screen_ansi": b"final ANSI",
+                "screen_seq": screen_seq,
+            },
+        }))
+        .unwrap()
+    };
+    assert!(runtime
+        .handle_project_owner_event(&a, 1, &identity, closed(7, None, 9))
+        .is_empty());
+    assert!(runtime
+        .handle_project_owner_event(&a, 2, &replaced_identity, closed(7, None, 9))
+        .is_empty());
+    assert!(runtime
+        .handle_project_owner_event(&b, 2, &identity, closed(7, None, 9))
+        .is_empty());
+    assert!(runtime
+        .handle_project_owner_event(&a, 2, &identity, closed(6, None, 9))
+        .is_empty());
+    runtime.handle_project_owner_event(&a, 2, &identity, closed(7, Some("close failed"), 9));
+    assert_eq!(runtime.runtimes["a::agent"].screen, "full repaired screen");
+    let finalized = runtime.handle_project_owner_event(&a, 2, &identity, closed(7, None, 9));
+    assert_eq!(
+        runtime.runtimes["a::agent"].screen,
+        "final diagnostic screen"
+    );
+    assert_eq!(runtime.runtimes["a::agent"].screen_seq, 9);
+    assert_eq!(runtime.runtimes["a::agent"].output_seq, 9);
+    assert!(finalized.iter().any(|event| matches!(&event.event,
+        BackendEvent::TerminalSnapshot { data_base64, .. }
+        if base64::engine::general_purpose::STANDARD.decode(data_base64).unwrap() == b"final ANSI")
+        && event.terminal_stream_seq == Some(9)));
+    let restored = runtime.request_owner_snapshot("a::agent", Some("reconnected-client".into()));
+    assert!(restored.iter().any(|event| matches!(&event.event,
+        BackendEvent::TerminalSnapshot { data_base64, .. }
+        if base64::engine::general_purpose::STANDARD.decode(data_base64).unwrap() == b"final ANSI")
+        && event.terminal_stream_seq == Some(9)
+        && event.target == DispatchTarget::Client("reconnected-client".into())),
+        "closed diagnostic panes restore the final semantic snapshot without a live owner");
+    assert!(runtime
+        .handle_project_owner_event(&a, 2, &identity, output(7))
+        .is_empty());
+    runtime.handle_project_owner_event(&a, 2, &identity, closed(7, None, 7));
+    assert_eq!(runtime.runtimes["a::agent"].screen_seq, 9);
+
+    let legacy = serde_json::from_value(serde_json::json!({
+        "type": "output", "id": "owner-pane-a", "incarnation": 7,
+        "seq": 10, "screen_seq": 10, "data": b"legacy delta",
+        "screen": "legacy screen", "screen_ansi": b"legacy ANSI",
+    }))
+    .unwrap();
+    let legacy = runtime.handle_project_owner_event(&a, 2, &identity, legacy);
+    assert!(!legacy
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::TerminalSnapshot { .. })));
+    assert!(
+        !legacy
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::TerminalOutput { .. })),
+        "an older sender without a predecessor witness requires snapshot repair"
+    );
+
+    assert!(
+        runtime
+            .handle_project_owner_event(
+                &a,
+                2,
+                &identity,
+                gwt::project_runtime::events::OwnerEvent::WindowRemoved {
+                    id: "owner-pane-a".into(),
+                    incarnation: 6,
+                    session_id: None,
+                }
+            )
+            .is_empty(),
+        "stale removal cannot close the current alias"
+    );
+    assert!(runtime.runtimes.contains_key("a::agent"));
+    let removed = runtime.handle_project_owner_event(
+        &a,
+        2,
+        &identity,
+        gwt::project_runtime::events::OwnerEvent::WindowRemoved {
+            id: "owner-pane-a".into(),
+            incarnation: 7,
+            session_id: None,
+        },
+    );
+    assert!(!runtime.runtimes.contains_key("a::agent"));
+    assert!(!runtime.window_lookup.contains_key("a::agent"));
+    assert!(removed
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })));
+    assert!(removed
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::ActiveWorkProjectionPatch { .. })));
+
+    runtime
+        .project_tab_incarnations
+        .get_mut("a")
+        .unwrap()
+        .generation += 1;
+    runtime.refresh_project_state("a");
+    assert!(runtime
+        .handle_project_owner_health(&a, 2, None, health)
+        .is_empty());
+    assert!(
+        runtime
+            .handle_project_owner_event(&a, 2, &identity, output(7))
+            .is_empty(),
+        "closed ProjectContext generation"
+    );
 }

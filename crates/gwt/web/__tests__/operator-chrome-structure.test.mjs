@@ -1,9 +1,35 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
+import { createUiStateStore } from "../ui-state-store.js";
+import { mapAgentTelemetryState } from "../window-runtime-state.js";
+
+test("Issue #5531: Profile resync reloads a lost read while preserving the draft and save", () => {
+  const source = readFileSync(new URL("../profile-window-surface.js", import.meta.url), "utf8");
+  const createProfileWindowSurface = Function("createUiStateStore",
+    '"use strict"; ' + source.slice(source.indexOf("export function"))
+      .replace("export function", "function") + "; return createProfileWindowSurface;",
+  )(createUiStateStore);
+  const sent = [];
+  const surface = createProfileWindowSurface({ send: message => sent.push(message), windowMap: new Map() });
+  const state = surface.ensureProfileState("profile");
+  surface.requestProfile("profile");
+  state.draft = { name: "unsaved profile" };
+  state.saveInFlight = true;
+  state.saveTimer = 17;
+  surface.requestProfile("other-project");
+  sent.length = 0;
+
+  surface.resyncProfile(["profile"]);
+
+  assert.deepEqual(sent, [{ kind: "load_profile", id: "profile" }]);
+  assert.equal(state.draft.name, "unsaved profile");
+  assert.equal(state.saveInFlight, true);
+  assert.equal(state.saveTimer, 17);
+});
 
 const here = dirname(fileURLToPath(import.meta.url));
 const indexPath = resolve(here, "../index.html");
@@ -28,12 +54,6 @@ const launchWizardSource = readFileSync(
 );
 const liveGwtHelperSource = readFileSync(
   resolve(here, "../../playwright/tests/_helpers/live-gwt.ts"),
-  "utf8",
-);
-// SPEC-3064 Phase 3 (E6a): the File Tree window surface moved from app.js
-// to file-tree-surface.js.
-const fileTreeSurfaceSource = readFileSync(
-  resolve(here, "../file-tree-surface.js"),
   "utf8",
 );
 // SPEC-3064 Phase 3 (E6b): the Branches window & cleanup surface moved from
@@ -68,14 +88,12 @@ const projectShellSurfaceSource = readFileSync(
   resolve(here, "../project-shell-surface.js"),
   "utf8",
 );
-const fleetMinimapSource = readFileSync(resolve(here, "../fleet-minimap.js"), "utf8");
 const windowWorktreeFormPath = resolve(here, "../window-worktree-form.js");
 const windowWorktreeFormSource = existsSync(windowWorktreeFormPath)
   ? readFileSync(windowWorktreeFormPath, "utf8")
   : "";
 const branchCleanupSource = readFileSync(resolve(here, "../branch-cleanup-modal.js"), "utf8");
 const branchListStateSource = readFileSync(resolve(here, "../branch-list-state.js"), "utf8");
-const windowDockingSource = readFileSync(resolve(here, "../window-docking.js"), "utf8");
 const workspaceOverviewPath = resolve(here, "../issue-other-surface.js");
 const workspaceOverviewSource = existsSync(workspaceOverviewPath)
   ? readFileSync(workspaceOverviewPath, "utf8")
@@ -88,6 +106,16 @@ const typographySource = readFileSync(resolve(here, "../styles/typography.css"),
 const inlineStyle = readFileSync(resolve(here, "../styles/app.css"), "utf8");
 const componentsStyle = readFileSync(resolve(here, "../styles/components.css"), "utf8");
 const frontendStyle = `${inlineStyle}\n${componentsStyle}`;
+
+test("Issue #6476: narrow project chrome keeps Operator tokens and shared controls", () => {
+  const mobile = extractMediaBlocks(componentsStyle, "max-width: 600px");
+  assert.match(mobile, /\.project-bar/, "project actions need a narrow-screen layout");
+  assert.match(mobile, /var\(--space-/);
+  assert.doesNotMatch(mobile, /#[0-9a-f]{3,8}\b|\brgba?\(|\bhsla?\(/i);
+  assert.equal(document.querySelector("#op-theme-toggle").getAttribute("role"), "radiogroup");
+  assert.ok(document.querySelector("#split-view-button"));
+  assert.ok(document.querySelector("#close-project-button"));
+});
 
 function cssRemVar(source, name) {
   const match = source.match(new RegExp(`${name}:\\s*([0-9.]+)rem\\s*;`));
@@ -301,7 +329,7 @@ test("deprecated Intake command route emits no open_intake_session wire", () => 
 test("frontend handles active work projection as status-strip telemetry", () => {
   assert.match(
     appSource,
-    /case\s+"active_work_projection":[\s\S]+activeWorkProjection\s*=\s*event\.projection/,
+    /case\s+"active_work_projection":[\s\S]+applyActiveWorkProjectionReceiveEvent\(event\)/,
     "expected frontend to store active_work_projection separately from canvas workspace_state",
   );
   assert.match(
@@ -316,12 +344,67 @@ test("frontend handles active work projection as status-strip telemetry", () => 
   );
 });
 
+test("Issue #6362 Status Strip counts live census separately from catalog mission progress", () => {
+  let activity = { count: 2, agents: [
+    { window_id: "agent", session_id: "current" },
+    { window_id: "pm", session_id: "manager", is_pm: true },
+  ] };
+  const windows = [
+    { id: "agent", session_id: "current", preset: "codex", status: "running" },
+    { id: "pm", session_id: "manager", preset: "claude", status: "waiting" },
+    { id: "old", session_id: "retired", preset: "codex", status: "running" },
+    { id: "board", preset: "board", status: "running" },
+  ];
+  const runtimeStates = { old: "stopped" };
+  let counts, activeWorks = [{ active_agents: 9 }];
+  const dependencies = { window: { __operatorShell: { applyTelemetryCounts() {} } },
+    agentActivityModel: { read: () => activity },
+    windowCatalogModel: { read: () => ({ catalog: { appState: { tabs: [
+      { id: "active", project_key: "this-project", workspace: { windows: [] } },
+      { id: "sibling", project_key: "this-project", workspace: { windows } },
+    ] }, runtimeStates } }) },
+    allProjectWindowIds: () => windows.map(window => window.id),
+    activeWorkItemsFromProjection: () => activeWorks,
+    activeWorkProjection: { active_agents: 9 }, windowMap: new Map(),
+    workspaceWindowById: id => windows.find(window => window.id === id),
+    presetSupportsWaitingStatus: preset => ["codex", "claude"].includes(preset),
+    mapAgentTelemetryState,
+    applyOperatorTelemetryCounts: value => { counts = value; },
+  };
+  const recompute = Function(...Object.keys(dependencies),
+    `return () => { ${extractFunctionBody(appSource, "recomputeOperatorTelemetry")} };`)(...Object.values(dependencies));
+  recompute();
+  assert.equal(counts.running, 1, "Work history and unmounted terminals cannot replace the census");
+  assert.equal(counts.waiting, 1);
+  assert.equal(counts.agents, 3, "MISSION includes the project's agent panes without requiring a census");
+  assert.equal(counts.done, 1, "runtime state overrides catalog status for completed panes");
+  const [implementation, pm] = activity.agents;
+  activity = { count: 1, agents: [pm] }; runtimeStates.pm = "running"; recompute();
+  assert.equal(counts.running, 1, "a PM-only census still contributes to runtime telemetry");
+  activity = { count: 1, agents: [implementation] }; runtimeStates.agent = "idle"; recompute();
+  assert.equal(counts.running, 0, "an assigned idle implementation child is not running");
+  assert.equal(counts.idle, 1);
+  runtimeStates.agent = "running"; recompute();
+  assert.equal(counts.running, 1, "an implementation child resuming work returns to RUNNING");
+  activity = { ...activity, snapshot: { project_key: "another-project" } }; recompute();
+  assert.equal(counts.running, "—", "another project's catalog cannot supply runtime state");
+  assert.equal(counts.agents, 0, "another project's catalog cannot supply MISSION progress");
+  assert.equal(counts.done, 0);
+  activity = { count: 0, agents: [] }; recompute();
+  assert.equal(counts.running, 0, "a retired child cannot be resurrected from Work history");
+  assert.equal(counts.agents, 3, "retiring a live child does not erase MISSION panes");
+  assert.equal(counts.done, 1);
+  activity = { count: null, agents: [] }; recompute();
+  assert.equal(counts.running, "—", "unknown is never a measured zero");
+  assert.equal(counts.agents, 3, "an unavailable census preserves MISSION progress");
+  assert.equal(counts.done, 1);
+  activeWorks = []; recompute();
+  assert.equal(Object.hasOwn(counts, "branches"), false, "catalog refresh preserves independent branch inventory");
+});
+
 test("Status Strip RUNNING counter filters non-agent preset windows", () => {
-  // SPEC-2356 follow-up: recomputeOperatorTelemetry walked windowMap.values()
-  // without checking preset, so every workspace window with data-agent-state
-  // (Board / Workspace / Logs / Branches / etc.) inflated counts.agents and
-  // the Status Strip RUNNING cell showed e.g. 4 when only 2 agent panes were
-  // live. The DOM walk must scope to presets that represent agent panes.
+  // Membership comes from the host census. Non-agent catalog windows must
+  // never inflate telemetry, even when their DOM carries agent-state fields.
   const fnMatch = appSource.match(
     /function\s+recomputeOperatorTelemetry[\s\S]*?(?=\n\s+function\s+\w)/,
   );
@@ -332,8 +415,8 @@ test("Status Strip RUNNING counter filters non-agent preset windows", () => {
   const body = fnMatch[0];
   assert.match(
     body,
-    /windowMap\.entries\(\)/,
-    "recomputeOperatorTelemetry must iterate windowMap.entries() so it can resolve each window's preset before counting it as an agent",
+    /for\s*\(const agent of activity\.agents\)/,
+    "recomputeOperatorTelemetry must count only the observed agent census",
   );
   assert.match(
     body,
@@ -349,10 +432,10 @@ test("Status Strip does not count empty active Work projection as an idle agent"
     /category\s*===\s*"idle"[\s\S]{0,120}counts\.idle\s*=\s*Math\.max\(counts\.idle,\s*1\)/,
     "an active_work_projection with zero agents must not make the Status Strip show IDLE 1",
   );
-  assert.match(
+  assert.doesNotMatch(
     body,
-    /category\s*===\s*"idle"[\s\S]{0,180}activeAgents\s*>\s*0[\s\S]{0,180}counts\.idle/,
-    "the idle fallback must be guarded by a real active agent count",
+    /activeWorkProjection\.(?:status_category|active_agents|blocked_agents)/,
+    "historical Work status cannot supply live agent state",
   );
 });
 
@@ -389,48 +472,20 @@ test("Sidebar retires the Active Works overview in favor of the Work surface (SP
   );
 });
 
-test("Command Rail groups items into Navigate / Windows / Agents / System (SPEC-3038 US-1)", () => {
-  // SPEC-3038 US-1: the rail is the single always-visible home for navigation
-  // (Start Work / Work / Board / Logs), window operations (Tile / Stack /
-  // Align / Windows / Add), and system actions (Palette / Update) — in that
-  // order. Groups carry aria-labels instead of visual headings. SPEC-2356
-  // Anshin (FR-042) inserts an Agents group (STOP ALL) before System.
-  // Issue #4777 T-1 puts the Surfaces group right under the PM.
+test("Command Rail retains navigation and direct surface entries without retired window groups (#4777)", () => {
   const groups = Array.from(document.querySelectorAll(".op-rail > .op-rail__group")).map(
     (group) => group.getAttribute("aria-label"),
   );
-  // User verification 2026-06-12: the Update CTA returned to its fixed
-  // bottom-right home, so the sidebar no longer carries an Update section.
-  assert.deepEqual(
-    groups,
-    ["Navigate", "Surfaces", "Windows", "Agents", "System"],
-    "Rail order must be Navigate (PM) → Surfaces → Windows → Agents → System",
-  );
-});
-
-test("Command Rail Windows group carries the window-operation controls (SPEC-3038 US-1)", () => {
-  const windowsGroup = document.querySelector('.op-rail > .op-rail__group[aria-label="Windows"]');
-  assert.ok(windowsGroup, "expected a Windows group in the rail");
-  for (const id of ["tile-button", "stack-button", "align-button", "window-list-button", "add-button"]) {
-    const control = document.getElementById(id);
-    assert.ok(control, `expected ${id}`);
-    assert.ok(
-      windowsGroup.contains(control),
-      `${id} must live inside the rail Windows group`,
-    );
-    assert.ok(
-      control.classList.contains("op-rail__item"),
-      `${id} must adopt the rail item vocabulary`,
-    );
+  assert.deepEqual(groups, ["Navigate", "Surfaces", "System"]);
+  for (const id of ["window-list-button", "window-list-panel", "op-rail-window-count", "add-button", "preset-modal"]) {
+    assert.equal(Boolean(document.getElementById(id)), false, `${id} must be removed`);
   }
-  // The window-list popover rides along with its trigger.
-  assert.ok(
-    windowsGroup.querySelector("#window-list-panel"),
-    "window-list-panel must anchor to its rail trigger",
-  );
-  // AS-1.4: the Windows item carries an open-window count badge.
-  const badge = windowsGroup.querySelector("#op-rail-window-count.op-rail__badge");
-  assert.ok(badge, "expected the Windows rail item to expose a window-count badge");
+  for (const [command, label] of [["open-logs", "Logs"], ["open-index", "Index"], ["open-profile", "Profile"]]) {
+    const entry = document.querySelector(`.op-rail__item[data-cmd="${command}"]`);
+    assert.ok(entry, `${label} must remain directly reachable`);
+    assert.equal(entry.textContent.trim().endsWith(label), true);
+  }
+  assert.match(componentsStyle, /\.op-rail\s*\{[^}]*overflow-y:\s*auto/s);
 });
 
 test("Command Rail System group hosts the Command Palette trigger (SPEC-3038 US-1)", () => {
@@ -467,18 +522,14 @@ test("Right-bottom floating controls are removed; the canvas corner is empty (SP
   );
 });
 
-test("Status Strip hosts the zoom controls so canvas zoom is always reachable (SPEC-2356)", () => {
-  const strip = document.getElementById("op-status-strip");
-  assert.ok(strip, "expected op-status-strip");
+test("fixed surfaces omit canvas zoom controls", () => {
+  assert.ok(document.getElementById("op-status-strip"));
+  assert.equal(document.querySelector(".op-status-strip__cell--zoom"), null);
   for (const id of ["zoom-out-button", "zoom-reset-button", "zoom-in-button"]) {
-    const control = document.getElementById(id);
-    assert.ok(control, `expected ${id}`);
-    assert.ok(strip.contains(control), `${id} must live in the Status Strip`);
+    assert.equal(document.getElementById(id), null);
   }
-  // Labels are preserved so the existing app.js zoom handlers stay wired by id.
-  assert.equal(document.getElementById("zoom-reset-button").textContent.trim(), "100%");
+  assert.doesNotMatch(componentsStyle, /\.op-status-strip__zoom-button/);
 });
-
 test("Update CTA and alerts share one fixed bottom-right layout host", () => {
   // SPEC-2356 moved the Update CTA into the sidebar and SPEC-3038 briefly
   // anchored it to the rail, but the user found chrome-docked placements hard
@@ -565,11 +616,6 @@ test("workspace windows expose role badges and hide panel runtime chips", () => 
     /\.status-chip\[hidden\]\s*\{[\s\S]*display:\s*none/,
     "hidden runtime chips must stay hidden even though .status-chip uses inline-flex",
   );
-  assert.match(
-    projectShellSurfaceSource,
-    /window-list-role/,
-    "expected window list rows to include a role badge",
-  );
 });
 
 test("workspace windows expose semantic worktree badges separately from agent color", () => {
@@ -598,16 +644,6 @@ test("workspace windows expose semantic worktree badges separately from agent co
     "workspace window render keys must use the same worktree-form adapter as the badge",
   );
   assert.match(
-    projectShellSurfaceSource,
-    /window-list-worktree/,
-    "window list rows must include the same worktree badge contract",
-  );
-  assert.match(
-    projectShellSurfaceSource,
-    /class="window-worktree-badge window-list-worktree"[^>]*role="img"/,
-    "window list worktree badges must expose an image role for their accessible name",
-  );
-  assert.match(
     windowWorktreeFormSource,
     /badgeElement\.setAttribute\("role",\s*"img"\)/,
     "visible titlebar worktree badges must expose an image role",
@@ -618,29 +654,9 @@ test("workspace windows expose semantic worktree badges separately from agent co
     "hidden titlebar worktree badges must remove their image role",
   );
   assert.match(
-    projectShellSurfaceSource,
-    /appendRenderKeyPart\(parts,\s*windowWorktreeForm\(entry\)\)/,
-    "window list render keys must use the same worktree-form adapter as the badge",
-  );
-  assert.match(
     inlineStyle,
     /\.window-worktree-badge\s*\{[\s\S]*border:\s*1px solid var\(--color-border/,
     "worktree badges must use Operator tokens, not raw colors",
-  );
-  assert.match(
-    frontendStyle,
-    /\.fleet-minimap__cell\[data-worktree-symbol\]::before/,
-    "minimap cells must render a compact worktree marker",
-  );
-  assert.match(
-    fleetMinimapSource,
-    /const WORKTREE_MARKER_MIN_CELL_SIZE = 17;/,
-    "minimap marker footprint must have one semantic 17px boundary",
-  );
-  assert.match(
-    fleetMinimapSource,
-    /width >= WORKTREE_MARKER_MIN_CELL_SIZE[\s\S]*height >= WORKTREE_MARKER_MIN_CELL_SIZE/,
-    "minimap cells must apply the marker boundary on both dimensions",
   );
   assert.match(
     windowWorktreeFormSource,
@@ -650,7 +666,7 @@ test("workspace windows expose semantic worktree badges separately from agent co
 });
 
 test("old lane identity vocabulary is absent from production presentation wiring", () => {
-  const consumerSource = `${appSource}\n${projectShellSurfaceSource}\n${fleetMinimapSource}`;
+  const consumerSource = `${appSource}\n${projectShellSurfaceSource}`;
   const presentationSource = `${consumerSource}\n${frontendStyle}`;
   assert.equal(
     existsSync(resolve(here, "../window-lane-identity.js")),
@@ -785,28 +801,16 @@ test("Agent window titles are truncated with long focus detail kept as tooltip",
   );
 });
 
-test("canvas world grid is synchronized from viewport state", () => {
-  assert.ok(
-    document.querySelector("#canvas-world-grid.canvas-world-grid"),
-    "expected canvas to expose a dedicated world-space grid layer",
-  );
-  assert.match(
-    appSource,
-    /const\s+worldGrid\s*=\s*document\.getElementById\("canvas-world-grid"\)/,
-    "expected app.js to bind the canvas world grid element",
-  );
-  assert.match(
-    appSource,
-    /function\s+applyWorldGridViewport\(\)[\s\S]+viewport\.x[\s\S]+viewport\.y[\s\S]+viewport\.zoom/,
-    "expected world grid sync to derive position and size from the viewport",
-  );
-  assert.match(
-    appSource,
-    /function\s+applyViewport\(\)[\s\S]+applyWorldGridViewport\(\)/,
-    "expected applyViewport to update the grid together with the stage transform",
-  );
+test("fixed surfaces replace the canvas DOM and interaction styles (Issue #5595)", () => {
+  assert.ok(document.querySelector(".surface-area #split-surfaces"));
+  assert.equal(document.querySelector(".canvas-area"), null);
+  for (const id of ["canvas", "canvas-stage", "canvas-world-grid", "fleet-minimap", "canvas-empty-state"]) {
+    assert.equal(document.getElementById(id), null, `${id} must be removed`);
+  }
+  assert.doesNotMatch(frontendStyle, /\.canvas(?:[\s.{:]|-area|-stage|-world-grid|-empty-state)|\.fleet-minimap/);
+  assert.doesNotMatch(frontendStyle, /\.resize-handle|\.dock-target|\.titlebar(?:\:active)?\s*\{[^}]*cursor:\s*(?:grab|grabbing)\b/);
+  assert.match(frontendStyle, /\.surface-area\s*\{[^}]*grid-area:\s*surface/);
 });
-
 test("Board deep-linking survives the Active Works sidebar retirement (SPEC-2359 W-12 FR-351)", () => {
   // The sidebar Active Works command-center is removed; Board deep-linking and
   // the addressable Board timeline entries it relied on remain so the Work
@@ -918,16 +922,6 @@ test("Workspace Overview is separate from live-only Active Work", () => {
     !document.querySelector("#project-workspace-overview-button"),
     "Workspace Overview is per-project content and must live in the Sidebar, not the global Project Bar",
   );
-  assert.match(
-    appSource,
-    /function\s+openWorkspaceOverview\(/,
-    "expected a shared opener for the Sidebar entry",
-  );
-  assert.match(
-    appSource,
-    /function\s+openWorkspaceOverview\(\)\s*\{[\s\S]{0,300}?focusOrSpawnPreset\("issue"\)/,
-    "expected Workspace Overview to open the Work window instead of a drawer",
-  );
   // Issue #4777 T-1: the entry is the Issues surface of the rail.
   assert.equal(
     document.querySelector("#op-workspace-overview-entry")?.dataset.surface,
@@ -935,8 +929,8 @@ test("Workspace Overview is separate from live-only Active Work", () => {
   );
   assert.match(
     appSource,
-    /case "issues":\s*openWorkspaceOverview\(\);/,
-    "expected the Issues surface to open the overview",
+    /splitSurfaces\?\.show\(surface\)/,
+    "rail surfaces use the fixed surface host",
   );
 });
 
@@ -983,15 +977,6 @@ test("Workspace Overview uses the Quiet Work list filter + Detail layout", () =>
     /function\s+workspacesFromProjection\([^)]*\)[\s\S]+projection\.works[\s\S]+projection\.workspaces[\s\S]+projection\.work_items/,
     "expected Work Overview to render Work entries from active_work_projection",
   );
-  // SPEC-2359 US-42 — Resume action now opens the Workspace Resume
-  // Picker via `list_resumable_agents` instead of the legacy
-  // `resume_workspace` event. The picker drives the actual restart with
-  // `resume_workspace_agent` after the user selects a candidate agent.
-  assert.match(
-    workspaceOverviewSource,
-    /function\s+resumeWorkspace\([^)]*\)[\s\S]+list_resumable_agents/,
-    "expected Workspace Resume action to ask the backend to list resumable agents",
-  );
   assert.doesNotMatch(
     workspaceOverviewSource,
     /workspace-kanban-board|data-workspace-column|workspace-kanban-column/,
@@ -1006,7 +991,7 @@ test("Workspace Overview uses the Quiet Work list filter + Detail layout", () =>
 
 test("Workspace Overview root participates in full-window layout", () => {
   const fullWindowRootRule = inlineStyle.match(
-    /\.file-tree-root,[\s\S]*?\.mock-root\s*\{[^}]+\}/,
+    /\.branch-list-root,[\s\S]*?\.mock-root\s*\{[^}]+\}/,
   );
   assert.ok(fullWindowRootRule, "expected shared full-window root layout rule");
   assert.match(
@@ -1029,14 +1014,6 @@ test("Workspace Overview legacy drawer scaffold is retired", () => {
     appSource,
     /closeWorkspaceOverview|renderWorkspaceOverview|workspaceOverviewFocusTrapRelease/,
     "Workspace Overview drawer lifecycle code should not remain in app.js",
-  );
-});
-
-test("no surface presets auto-maximize — uniform 720×420 floating windows", () => {
-  assert.match(
-    appSource,
-    /function\s+isAutoMaximizedSurfacePreset\([^)]*\)\s*\{[^}]*return\s+false/,
-    "expected isAutoMaximizedSurfacePreset to always return false (auto-maximize abolished)",
   );
 });
 
@@ -1094,24 +1071,26 @@ test("Agent window chrome resolves dynamic purpose titles before legacy titles",
     /function\s+windowDisplayTitle\(windowData\)[\s\S]+dynamic_title[\s\S]+purpose_title[\s\S]+title/,
     "expected a shared display-title helper with dynamic > purpose > legacy title precedence",
   );
-  // FR-045 (anshin): the row now derives `displayTitle` from the shared helper
-  // (so the activity line can compare against it) and escapes that value into
-  // the title node. Assert both the helper binding and the escaped render.
-  assert.match(
-    projectShellSurfaceSource,
-    /const\s+displayTitle\s*=\s*windowDisplayTitle\(entry\)/,
-    "expected the Windows dropdown to bind the shared display-title helper",
-  );
-  assert.match(
-    projectShellSurfaceSource,
-    /window-list-title">\$\{escapeHtml\(displayTitle\)\}/,
-    "expected the Windows dropdown to escape the shared display-title helper output",
-  );
   assert.match(
     appSource,
     /title-text"\)\.textContent\s*=\s*windowDisplayTitle\(windowData\)/,
     "expected window titlebars to use the shared display-title helper",
   );
+});
+
+test("Agent window title starts with assigned identity before its current purpose", () => {
+  const displayTitle = new Function("windowData", "isAgentWindowPreset", "PM_WINDOW_TITLE",
+    extractFunctionBody(appSource, "windowDisplayTitle"));
+  const agentPreset = preset => ["agent", "claude", "codex"].includes(preset);
+  const data = { preset: "agent", agent_id: "codex", title: "Codex", purpose_title: "Initial task", dynamic_title: "Fix cache" };
+  assert.equal(displayTitle({ ...data, agent_name: "Lumen" }, agentPreset, "Project Manager"), "Lumen — Fix cache");
+  assert.equal(displayTitle(data, agentPreset, "Project Manager"), "Fix cache");
+  assert.equal(displayTitle({ ...data, dynamic_title: null }, agentPreset, "Project Manager"), "Initial task");
+  assert.equal(displayTitle({ preset: "agent", title: "Restore cache" }, agentPreset, "Project Manager"), "Restore cache");
+  assert.equal(displayTitle({ preset: "agent", branch: "work/task" }, agentPreset, "Project Manager"), "work/task");
+  assert.equal(displayTitle({ ...data, is_pm: true }, agentPreset, "Project Manager"), "Project Manager");
+  assert.equal(displayTitle({ ...data, agent_name: "Yuu", is_pm: true }, agentPreset, "Project Manager"), "Yuu");
+  assert.equal(displayTitle({ preset: "shell", title: "Shell" }, agentPreset, "Project Manager"), "Shell");
 });
 
 test("Branches preset is removed — branch browsing is part of the Work surface", () => {
@@ -1146,7 +1125,7 @@ test("Branches loading state becomes recoverable when the WebSocket disconnects"
   );
   assert.match(
     appSource,
-    /function\s+setConnectionState\(connected\)[\s\S]+failLoadingBranchesOnConnectionLoss\(windowId,\s*state\)[\s\S]+renderBranches\(windowId\)/,
+    /function\s+setConnectionState\(connected,\s*recoverSnapshots\s*=\s*false\)[\s\S]+failLoadingBranchesOnConnectionLoss\(windowId,\s*state\)[\s\S]+renderBranches\(windowId\)/,
     "expected socket disconnect to re-render Branches after clearing stale loading",
   );
   // SPEC-2009 FR-064: reconnect self-heal re-requests interrupted Branches
@@ -1449,34 +1428,13 @@ test("Command Rail keeps real shortcuts on its keyshortcut items (SPEC-3038 AS-1
   assert.match(workspace.getAttribute("title") ?? "", /⌘G/);
 });
 
-test("Command Rail Navigate group drops Board / Logs but keeps their access paths (SPEC-3038 2026-06-20 Update)", () => {
-  // User feedback (2026-06-20): Board / Logs are noise in the rail. They are
-  // demoted out of the rail but stay reachable via the Add Window presets, the
-  // command palette, and the ⌘B / ⌘L hotkeys — no capability is removed.
-  assert.equal(
-    document.querySelector('.op-rail .op-rail__item[data-cmd="open-board"]'),
-    null,
-    "Board must not appear as a Command Rail item",
-  );
-  assert.equal(
-    document.querySelector('.op-rail .op-rail__item[data-cmd="open-logs"]'),
-    null,
-    "Logs must not appear as a Command Rail item",
-  );
-  // Access path 1: the Add Window preset deck still offers both surfaces.
-  assert.ok(
-    document.querySelector('[data-preset="board"]'),
-    "Add Window must keep the Board preset",
-  );
-  assert.ok(
-    document.querySelector('[data-preset="logs"]'),
-    "Add Window must keep the Logs preset",
-  );
-  // Access paths 2 + 3: command palette seeds and ⌘B / ⌘L hotkeys stay wired.
-  assert.match(operatorShellSource, /id:\s*"open-board"/, "palette must keep the Board entry");
-  assert.match(operatorShellSource, /id:\s*"open-logs"/, "palette must keep the Logs entry");
-  assert.match(operatorShellSource, /hotkey\.register\("cmd\+b"/, "⌘B hotkey must stay wired");
-  assert.match(operatorShellSource, /hotkey\.register\("cmd\+l"/, "⌘L hotkey must stay wired");
+test("Board and Logs retain their rail, palette and hotkey access paths (#4777)", () => {
+  assert.ok(document.querySelector('.op-rail__surface[data-surface="board"]'));
+  assert.ok(document.querySelector('.op-rail__item[data-cmd="open-logs"]'));
+  assert.match(operatorShellSource, /id:\s*"open-board"/);
+  assert.match(operatorShellSource, /id:\s*"open-logs"/);
+  assert.match(operatorShellSource, /hotkey\.register\("cmd\+b"/);
+  assert.match(operatorShellSource, /hotkey\.register\("cmd\+l"/);
 });
 
 test("Command Rail retires the pseudo kbd badges (SPEC-3038 FR-012)", () => {
@@ -1494,11 +1452,10 @@ test("Command Rail items are icon buttons with accessible names and flyout label
   // Issue #4777 T-1: the PM and the surface entries are labelled buttons,
   // not icon-only ones; surface-rail.test.mjs owns their contract.
   const items = Array.from(
-    document.querySelectorAll(".op-rail .op-rail__item:not([data-surface])"),
+    document.querySelectorAll(".op-rail .op-rail__item:not([data-surface]):not(.op-rail__surface)"),
   );
-  // Navigate 2 (Start Work + Workspace) + Windows 5 + System 1 = 8 after the
-  // 2026-06-20 Update removed Board / Logs from the rail.
-  assert.ok(items.length >= 8, `expected >=8 rail items, got ${items.length}`);
+  // System keeps its notification and palette controls.
+  assert.equal(items.length, 2);
   for (const item of items) {
     assert.ok(
       item.getAttribute("aria-label"),
@@ -1573,60 +1530,11 @@ test("Command Rail is always visible — hover-reveal chrome is fully retired (S
   assert.match(rail.getAttribute("aria-label") ?? "", /command rail/i);
 });
 
-test("workspace windows retain titlebar docking without a tab strip", () => {
-  assert.doesNotMatch(
-    appSource,
-    /class="window-tab-strip"|className\s*=\s*"window-tab-strip"/,
-    "window tab strip is retired in favor of the rail",
-  );
-  assert.match(
-    appSource,
-    /function\s+titlebarDockTargetAt\(/,
-    "expected ungrouped windows to find dock targets from titlebar drag",
-  );
-  assert.match(
-    windowDockingSource,
-    /export\s+const\s+TITLEBAR_DOCK_HIT_HEIGHT\s*=\s*38/,
-    "expected dock hit-testing to be constrained to the titlebar height",
-  );
-  assert.match(
-    windowDockingSource,
-    /point\.y\s*<=\s*geometry\.y\s*\+\s*titlebarHeight/,
-    "expected body/canvas drops to avoid the dock path",
-  );
-  assert.match(
-    appSource,
-    /function\s+updateTitlebarDockPreview\(/,
-    "expected titlebar drag to update dock target hover preview",
-  );
-  assert.match(
-    appSource,
-    /function\s+clearTitlebarDockPreview\(/,
-    "expected dock target preview to be cleared after drop or cancel",
-  );
-  assert.match(
-    appSource,
-    /dragState\.dockTargetId[\s\S]+kind:\s*"dock_window_tab"[\s\S]+target_id:\s*dragState\.dockTargetId/,
-    "expected titlebar drag pointerup to dock only when a titlebar target was hit",
-  );
-  assert.match(
-    appSource,
-    /kind:\s*"dock_window_tab"/,
-    "expected tab drop to send dock_window_tab",
-  );
-  assert.match(
-    inlineStyle,
-    /\.workspace-window\.dock-target\s+\.titlebar/,
-    "expected dockable titlebar targets to have a visible preview state",
-  );
-  assert.match(
-    inlineStyle,
-    /\.workspace-window\.dock-target\s*\{/,
-    "expected dockable targets to outline the whole window, not just the titlebar",
-  );
-
+test("fixed window headers offer no titlebar drag, docking, or ungroup controls", () => {
+  assert.doesNotMatch(appSource, /titlebarDockTargetAt|updateTitlebarDockPreview|dock_window_tab/);
+  assert.doesNotMatch(appSource, /data-action="ungroup"|class="window-tab-strip"/);
+  assert.doesNotMatch(inlineStyle, /\.workspace-window\.dock-target|\.titlebar(?:\:active)?\s*\{[^}]*cursor:\s*(?:grab|grabbing)\b/);
 });
-
 test("modal buttons follow the ghost / primary / destructive hierarchy (SPEC-3038 FR-011 / US-5)", () => {
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
   // Base wizard buttons become ghost — the solid dark-block treatment is
@@ -1661,7 +1569,7 @@ test("modal buttons follow the ghost / primary / destructive hierarchy (SPEC-303
   );
 });
 
-test("the permanent canvas hint bar is retired; guidance lives in the hotkey overlay (SPEC-3038 US-4)", () => {
+test("retired canvas gestures are absent from the hotkey overlay", () => {
   assert.equal(document.querySelector(".hint"), null, ".hint must be removed");
   assert.equal(document.getElementById("connection-dot"), null);
   assert.equal(document.getElementById("connection-label"), null);
@@ -1673,8 +1581,8 @@ test("the permanent canvas hint bar is retired; guidance lives in the hotkey ove
     .textContent.replace(/\s+/g, " ");
   for (const phrase of ["Pan canvas", "Zoom canvas", "Move window"]) {
     assert.ok(
-      overlayText.includes(phrase),
-      `hotkey overlay must carry canvas guidance: ${phrase}`,
+      !overlayText.includes(phrase),
+      `retired canvas guidance must be absent: ${phrase}`,
     );
   }
   assert.doesNotMatch(inlineStyle, /\.hint\s*\{/);
@@ -1702,47 +1610,10 @@ test("Status Strip spells out WORK and drops the cryptic T clock label (SPEC-303
   );
 });
 
-test("empty canvas shows a first-window call to action (SPEC-3038 AS-4.5)", () => {
-  const empty = document.getElementById("canvas-empty-state");
-  assert.ok(empty, "expected #canvas-empty-state");
-  assert.ok(
-    empty.hasAttribute("hidden"),
-    "empty state ships hidden until the workspace reports zero windows",
-  );
-  // SPEC-3245 Stage E: only the normal Workspace and Add Window actions remain.
-  assert.equal(
-    empty.querySelector("#canvas-empty-start-work"),
-    null,
-    "Start Work action must be removed (SPEC-3245)",
-  );
-  assert.equal(
-    empty.querySelector("#canvas-empty-intake"),
-    null,
-    "deprecated Intake action must be removed",
-  );
-  assert.ok(
-    empty.querySelector("#canvas-empty-open-workspace"),
-    "expected an Open Issues (Execute) action",
-  );
-  assert.ok(
-    empty.querySelector("#canvas-empty-add-window"),
-    "expected an Add window action",
-  );
-  assert.match(
-    appSource,
-    /function\s+updateCanvasEmptyState\(\)[\s\S]{0,300}?windowMap\.size/,
-    "app.js must toggle the empty state from the live window count",
-  );
-  assert.doesNotMatch(appSource, /canvas-empty-start-work/, "Start Work wiring must be removed");
-  assert.doesNotMatch(
-    appSource,
-    /canvas-empty-intake/,
-    "deprecated Intake action wiring must be removed",
-  );
-  assert.match(appSource, /canvas-empty-open-workspace/, "Open Issues action must be wired");
-  assert.match(appSource, /canvas-empty-add-window/, "Add window action must be wired");
+test("canvas empty-state CTA is retired", () => {
+  assert.equal(document.getElementById("canvas-empty-state"), null);
+  assert.doesNotMatch(appSource, /updateCanvasEmptyState|canvas-empty-open-workspace|canvas-empty-add-window/);
 });
-
 test("renderWorkspace refreshes operator telemetry when windows mount/unmount (SPEC-3038)", () => {
   const body = extractFunctionBody(appSource, "renderWorkspace");
   // Issue #3365: the recompute is the render guard's `recompute` hook, which
@@ -1751,82 +1622,30 @@ test("renderWorkspace refreshes operator telemetry when windows mount/unmount (S
   assert.match(
     body,
     /recompute:\s*recomputeOperatorTelemetry/,
-    "window-count badge + empty state must update when windows mount/unmount",
+    "operator telemetry must update when windows mount/unmount",
   );
 });
 
-test("SPEC-3038 (2026-06-20): Windows badge counts windows across all project tabs", () => {
+test("#4777: retired Windows badge has no exclusive telemetry count", () => {
   const body = extractFunctionBody(appSource, "recomputeOperatorTelemetry");
-  assert.match(
-    body,
-    /windows:\s*allProjectWindowIds\(\)\.length/,
-    "the rail Windows badge must count the cross-tab open-window total",
-  );
-  assert.doesNotMatch(
-    body,
-    /windows:\s*windowMap\.size/,
-    "windowMap.size only counts windows mounted in visited tabs and undercounts the badge",
-  );
+  assert.equal(/windows:\s*allProjectWindowIds\(\)\.length/.test(body), false);
+  const keyBody = extractFunctionBody(appSource, "operatorTelemetryRenderKey");
+  assert.equal(/counts\?\.windows/.test(keyBody), false);
 });
 
-test("SPEC-3038 (2026-06-20): Windows popover renders the cross-tab window-list model", () => {
-  assert.match(
-    projectShellSurfaceSource,
-    /import\s*\{\s*groupProjectWindowList\s*\}\s*from\s*"\/window-list-model\.js"/,
-    "project-shell-surface must import the cross-tab window-list model",
-  );
-  const body = extractFunctionBody(projectShellSurfaceSource, "renderWindowList");
-  assert.match(
-    body,
-    /groupProjectWindowList\(getAppState\(\),\s*windowListEntries\)/,
-    "renderWindowList must source rows from the cross-tab model, not activeWorkspace() alone",
-  );
-  assert.match(
-    body,
-    /window-list-group/,
-    "renderWindowList must render per-project group headers for multi-project shells",
-  );
+test("fixed rail surfaces have no canvas close, minimize or saved-placement rendering (Issue #4777 AC13/14)", () => {
+  assert.equal(document.getElementById("window-close-confirm-modal"), null);
+  assert.doesNotMatch(appSource, /window-close-confirm-modal|requestCloseWindow|["'](?:close_window|dock_agent_window_to_issue)["']|data-action=["'](?:close|minimize-to-issue|ungroup)["']/);
+  for (const file of readdirSync(resolve(here, "..")).filter(name => name.endsWith(".js"))) {
+    const source = readFileSync(resolve(here, "..", file), "utf8");
+    assert.equal(/\.(?:geometry|tab_group_id|tab_group_active|minimized|maximized)\b/.test(source), false, `${file}: legacy saved placement must not drive the rail UI`);
+    assert.equal(/\b(?:createCamera|renderWindowTabs|startDrag|startResize|windowGeometryLabel)\b/.test(source), false, `${file}: canvas rendering must not return`);
+  }
 });
 
-test("window close always routes through the Close Guard confirm modal (SPEC-3038 US-3)", () => {
-  // index.html ships the modal scaffold.
-  const modal = document.getElementById("window-close-confirm-modal");
-  assert.ok(modal, "expected #window-close-confirm-modal backdrop");
-  assert.ok(
-    modal.classList.contains("modal-backdrop"),
-    "close guard reuses the shared .modal-backdrop primitive",
-  );
-  assert.ok(
-    modal.querySelector(".modal-shell.window-close-confirm-shell"),
-    "close guard reuses the shared .modal-shell primitive",
-  );
-  // app.js wires both close paths through requestCloseWindow.
-  assert.match(
-    appSource,
-    /from\s+"\/window-close-confirm-modal\.js"/,
-    "app.js must import the close-confirm renderer module",
-  );
-  assert.match(
-    appSource,
-    /function\s+requestCloseWindow\(windowId\)/,
-    "expected a requestCloseWindow entrypoint",
-  );
-  assert.match(
-    appSource,
-    /closeButton\.addEventListener\("click",\s*\(event\)\s*=>\s*\{\s*event\.stopPropagation\(\);\s*requestCloseWindow\(windowData\.id\);/,
-    "titlebar × must route through requestCloseWindow",
-  );
-  assert.doesNotMatch(
-    appSource,
-    /closeButton\.addEventListener\("click",[\s\S]{0,120}?send\(\{\s*kind:\s*"close_window"/,
-    "titlebar × must not send close_window directly",
-  );
-
-});
-
-test("group activation preserves mounted terminal bodies without tab chrome", () => {
+test("surface changes preserve mounted terminal bodies without tab chrome", () => {
   assert.doesNotMatch(appSource, /window-tabs-renderer/);
-  assert.match(appSource, /class="icon-button" data-action="ungroup" aria-label="Ungroup window" title="Ungroup window"/);
+  assert.doesNotMatch(appSource, /data-action="ungroup"/);
   const ensureWindowBody = extractFunctionBody(appSource, "ensureWindow");
   const mountCalls =
     ensureWindowBody.match(/mountWindowBody\(windowData,\s*element\)/g) || [];
@@ -1970,8 +1789,8 @@ test("app state rendering dismisses Mission Briefing so startup cannot stay on s
     "expected app.js to expose a fail-open Mission Briefing dismiss helper",
   );
   assert.match(
-    appSource,
-    /function\s+renderAppState\(nextState\)\s*\{\s*dismissOperatorBriefing\(\)/,
+    extractFunctionBody(appSource, "renderAppState"),
+    /^\s*dismissOperatorBriefing\(\)/,
     "expected first app state render to unblock Welcome/Workspace surfaces",
   );
 });
@@ -1993,21 +1812,11 @@ test("components.css retires the floating window controls toolbar CSS (SPEC-2356
   assert.match(css, /\.op-rail\s*\{/);
 });
 
-test("Windows group exposes Align without resizing windows", () => {
-  const button = document.getElementById("align-button");
-  assert.ok(button, "expected Align button");
-  assert.equal(
-    button.querySelector(".op-rail__flyout-label")?.textContent?.trim(),
-    "Align",
-    "Align rail item must label its flyout",
-  );
-  assert.match(
-    appSource,
-    /alignButton\.addEventListener\("click",\s*\(\)\s*=>\s*arrangeWindows\("align"\)\)/,
-    "expected Align to reuse arrange_windows with the align mode",
-  );
+test("Windows group omits canvas arrangement commands", () => {
+  for (const id of ["tile-button", "stack-button", "align-button"]) {
+    assert.equal(document.getElementById(id), null, `${id} is retired`);
+  }
 });
-
 test("operator-shell migrates legacy chrome keys and drops the hover-reveal machinery (SPEC-3038)", () => {
   // SPEC-2356 Phase 9 (FR-032): legacy localStorage keys are removed on boot
   // and the chip-style toggles must not be referenced anywhere in
@@ -2058,7 +1867,7 @@ test("Drawer + preset modals have role/aria-modal/aria-hidden wiring", () => {
   // modal-shell with role="dialog" + aria-modal="true". Without this, screen
   // readers don't recognize the modal as a dialog and the inert state isn't
   // signaled when closed.
-  for (const id of ["branch-cleanup-modal", "migration-modal", "preset-modal", "wizard-modal"]) {
+  for (const id of ["branch-cleanup-modal", "migration-modal", "wizard-modal"]) {
     const backdrop = document.getElementById(id);
     assert.ok(backdrop, `expected modal backdrop #${id}`);
     assert.equal(
@@ -2151,11 +1960,6 @@ test("shared overlays use semantic z-index tokens in interaction order", () => {
       name: "usage popover",
       rule: componentsStyle.match(/\.op-usage-hover\s*\{[^}]*\}/)?.[0],
       token: "--z-popover",
-    },
-    {
-      name: "usage modal overlay",
-      rule: componentsStyle.match(/\.op-usage-modal-overlay\s*\{[^}]*\}/)?.[0],
-      token: "--z-modal",
     },
     {
       name: "render degradation banner",
@@ -2452,7 +2256,7 @@ test("Keyboard-navigable rows have :focus-visible outlines", () => {
   // treatment. Source-of-truth audit: every selector in app.js that
   // sets `tabIndex = 0` and `role="button"` must be in the CSS group.
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
-  for (const selector of [".project-tab", ".file-tree-row", ".branch-row"]) {
+  for (const selector of [".project-tab", ".branch-row"]) {
     const re = new RegExp(`:root\\[data-theme\\] \\${selector}:focus-visible`);
     assert.match(
       css,
@@ -2470,12 +2274,12 @@ test("Launch wizard open errors render in wizard modal and close locally", () =>
   );
   // Issue #2698 PR 1 (B7) — the applier defers via
   // `wizardInteractionGuard.defer(...)` before mutating the error
-  // state. SPEC-3064 Phase 3 (E5): the app.js case arm delegates into
-  // the surface applier, which populates `launchWizardOpenError`.
+  // state. The app.js case commits a shared snapshot; its synchronous
+  // subscriber delegates to the surface applier without changing the guard.
   assert.match(
     appSource,
-    /case\s+"launch_wizard_open_error":[\s\S]{0,300}?applyLaunchWizardOpenErrorEvent\(event\);\s*break;/,
-    "expected launch_wizard_open_error events to delegate into the wizard surface",
+    /case\s+"launch_wizard_open_error":[\s\S]{0,300}?launchWizardOpenErrorModel\.update\([\s\S]{0,120}?\);\s*break;/,
+    "expected launch_wizard_open_error events to commit shared state",
   );
   assert.match(
     launchWizardSource,
@@ -2577,44 +2381,6 @@ test("Launch wizard renders a backend-gated Back control in the footer", () => {
     launchWizardSource,
     /wizardBackButton\.addEventListener\("click",\s*\(\)\s*=>\s*\{[\s\S]*?kind:\s*"back"/,
     "expected Back to dispatch the canonical backend action",
-  );
-});
-
-test("File tree rows are keyboard-navigable (tabindex + role + keydown)", () => {
-  // <div>-based rows can't be Tab'd to or activated with the keyboard
-  // unless explicitly opted in. Add tabindex, role="button", and a
-  // keydown handler that mirrors the click handler for Enter/Space.
-  // Without all three, keyboard-only users couldn't browse the file
-  // tree — only mouse users could.
-  assert.match(fileTreeSurfaceSource, /row\.tabIndex\s*=\s*0/, "expected file tree row tabindex=0");
-  assert.match(
-    fileTreeSurfaceSource,
-    /row\.setAttribute\("role",\s*"button"\)/,
-    "expected file tree row role='button'",
-  );
-  assert.match(
-    fileTreeSurfaceSource,
-    /row\.addEventListener\("keydown",[\s\S]*event\.key === "Enter" \|\| event\.key === " "[\s\S]*activate\(\)/,
-    "expected file tree row keydown handler invoking the click activate path on Enter/Space",
-  );
-});
-
-test("File tree directory rows expose collapse state via aria-expanded", () => {
-  // The file tree shows directories with ▾/▸ caret glyphs to indicate
-  // expand/collapse state visually. Without aria-expanded, screen
-  // readers can't tell whether a directory is open or closed, so the
-  // user has to guess via context. File (non-directory) rows must
-  // explicitly removeAttribute so a row that was a directory and
-  // became a file (via state change) doesn't keep the marker.
-  assert.match(
-    fileTreeSurfaceSource,
-    /isDirectory[\s\S]*row\.setAttribute\("aria-expanded",\s*expanded\s*\?\s*"true"\s*:\s*"false"\)/,
-    "expected directory rows to set aria-expanded based on expanded state",
-  );
-  assert.match(
-    fileTreeSurfaceSource,
-    /row\.removeAttribute\("aria-expanded"\)/,
-    "expected non-directory rows to remove aria-expanded",
   );
 });
 
@@ -2911,7 +2677,6 @@ test("Selected list rows mark active item with aria-current", () => {
   // surfaces extracted from app.js count too.
   const rowSurfacesSource = [
     appAndProjectTabsSource,
-    fileTreeSurfaceSource,
     boardLogsSurfaceSource,
     knowledgeKanbanSurfaceSource,
     profileWindowSurfaceSource,
@@ -2945,11 +2710,7 @@ test("Error regions declare role=\"alert\" so screen readers announce them", () 
   }
 });
 
-test("Wizard and preset modals activate focus-trap on open and release on close (app.js inline)", () => {
-  // The preset modal is rendered inline in app.js; the wizard renderer
-  // moved to launch-wizard-surface.js (SPEC-3064 E5). Both need
-  // closure-scoped trap-release variables. Pin both pairs.
-  assert.match(appSource, /import\s*\{\s*createFocusTrap\s*\}\s*from\s*"\/focus-trap\.js"/);
+test("Wizard activates focus-trap on open and releases it on close", () => {
   assert.match(
     launchWizardSource,
     /import\s*\{\s*createFocusTrap\s*\}\s*from\s*"\/focus-trap\.js"/,
@@ -2966,18 +2727,7 @@ test("Wizard and preset modals activate focus-trap on open and release on close 
     /typeof\s+wizardFocusTrapRelease\s*===\s*"function"\s*\)\s*\{\s*wizardFocusTrapRelease\(\)/,
     "wizard must release focus trap on close",
   );
-  // Preset
-  assert.match(appSource, /let\s+presetModalFocusTrapRelease\s*=\s*null/);
-  assert.match(
-    appSource,
-    /presetModalFocusTrapRelease\s*=\s*createFocusTrap\(presetShell,\s*\{\s*document\s*\}\)/,
-    "preset modal must activate focus trap on the shell",
-  );
-  assert.match(
-    appSource,
-    /typeof\s+presetModalFocusTrapRelease\s*===\s*"function"\s*\)\s*\{\s*presetModalFocusTrapRelease\(\)/,
-    "preset modal must release focus trap on close",
-  );
+
 });
 
 test("Drawer modal renderers activate focus-trap on open and release on close", () => {
@@ -3177,24 +2927,6 @@ test("Drawer modal renderers move focus into dialog on fresh open", () => {
   }
 });
 
-test("Preset (Add Window) modal manages focus on open and restores on close", () => {
-  // The "+" Add Window modal opens via openModal()/closeModal() in app.js.
-  // Verify the same focus-management pattern is wired: capture trigger,
-  // move focus to modal-shell on open, restore on close.
-  assert.match(appSource, /let\s+presetModalFocusReturn\s*=\s*null/);
-  assert.match(appSource, /presetModalFocusReturn\s*=\s*document\.activeElement/);
-  assert.match(
-    appSource,
-    /presetShell\.focus\(\{\s*preventScroll:\s*true\s*\}\)/,
-    "expected preset modal shell focus on open with preventScroll",
-  );
-  assert.match(
-    appSource,
-    /presetModalFocusReturn\.focus\(\{\s*preventScroll:\s*true\s*\}\)/,
-    "expected preset modal restore focus on close with preventScroll",
-  );
-});
-
 test("Wizard modal manages focus on open and restores on close", () => {
   // The wizard modal's renderer lives in launch-wizard-surface.js
   // (SPEC-3064 E5), so focus management is wired there. Verify the same
@@ -3244,7 +2976,7 @@ test("Drawer modals close on Escape — keyboard parity with backdrop click", ()
   );
   assert.match(
     projectShellSurfaceSource,
-    /migrationModal\s*&&\s*migrationModal\.classList\.contains\("open"\)[\s\S]*migrationModalState\.stage\s*===\s*"error"[\s\S]*migrationModalState\.open\s*=\s*false/,
+    /migrationModal\s*&&\s*migrationModal\.classList\.contains\("open"\)[\s\S]*migrationModel\.read\(\)\.stage\s*===\s*"error"[\s\S]*migrationModel\.update\([\s\S]*open:\s*false/,
     "expected Esc on the migration modal error stage to dismiss the dialog without backend skip",
   );
   assert.match(
@@ -3264,36 +2996,7 @@ test("Drawer modals close on Escape — keyboard parity with backdrop click", ()
     /wizardModal\.classList\.contains\("open"\)[\s\S]*sendWizardAction\(\{\s*kind:\s*"cancel"/,
     "expected Esc to send cancel when wizard modal is open",
   );
-  // SPEC-3064 Phase 3 (E7): the Windows dropdown Esc branch delegates into
-  // the project shell surface, which owns the dropdown state.
-  assert.match(
-    projectShellSurfaceSource,
-    /if\s*\(windowListOpen\)\s*\{[\s\S]*windowListOpen\s*=\s*false[\s\S]*windowListButton\.focus/,
-    "expected Esc to close window list dropdown and restore focus to trigger",
-  );
-  // SPEC-2008 camera-focus: the Windows dropdown Esc branch is now guarded so
-  // a bare Esc that the dropdown did NOT consume can fall through to the
-  // camera overview (enterOverview) below it.
-  assert.match(
-    appSource,
-    /if\s*\(handleWindowListEscape\(event\)\)\s*\{\s*return;\s*\}/,
-    "expected the global Esc handler to delegate the Windows dropdown branch into the surface",
-  );
-  // SPEC-2356 — preset modal Esc-close: closes via closeModal() which
-  // handles both the .open class flip and focus restore.
-  assert.match(
-    appSource,
-    /if\s*\(modal\.classList\.contains\("open"\)\)\s*\{[\s\S]*closeModal\(\)/,
-    "expected Esc to call closeModal when preset modal is open",
-  );
-  // SPEC-2008 camera-focus: a bare Esc that nothing else consumed zooms the
-  // camera out to frame all windows (overview), but only when no text entry /
-  // focused terminal owns the keystroke (vim, TUI apps rely on Esc).
-  assert.match(
-    appSource,
-    /if\s*\(event\.defaultPrevented\s*\|\|\s*isTextEntryFocused\(\)\)\s*\{\s*return;\s*\}\s*enterOverview\(\)/,
-    "expected an unconsumed Esc to enter camera overview, guarded by isTextEntryFocused",
-  );
+  assert.doesNotMatch(appSource, /enterOverview\(/);
 });
 
 test("Drawer modal renderers toggle aria-hidden alongside .open class", () => {
@@ -3438,15 +3141,14 @@ test("FR-039 (安心): WAITING cell drives a LOUD waiting alert pulse like ERROR
     /\.op-status-strip__cell--waiting\.op-status-strip__cell--alert\s+\.op-status-strip__value/,
     "WAITING cell needs an --alert pulse rule mirroring ERROR",
   );
-  // The window rim + minimap dot must render the waiting telemetry state.
+  // The window rim must render the waiting telemetry state.
   assert.match(css, /\[data-agent-state="waiting"\]\s*\{/);
-  assert.match(css, /\.fleet-minimap__cell\[data-telemetry="waiting"\]::after/);
   // applyTelemetryCounts must route the waiting count into the WAITING cell.
   assert.match(operatorShellSource, /op-strip-waiting/);
   assert.match(operatorShellSource, /counts\.waiting/);
 });
 
-test("active work projection only upgrades live work to RUNNING telemetry", () => {
+test("active work projection cannot upgrade absent agents to RUNNING telemetry", () => {
   const fnMatch = appSource.match(
     /function\s+recomputeOperatorTelemetry[\s\S]*?(?=\n\s+function\s+\w)/,
   );
@@ -3455,10 +3157,10 @@ test("active work projection only upgrades live work to RUNNING telemetry", () =
     "expected recomputeOperatorTelemetry definition in app.js",
   );
   const body = fnMatch[0];
-  assert.match(
+  assert.doesNotMatch(
     body,
-    /counts\.running\s*=\s*Math\.max\(counts\.running,\s*activeAgents\s*\|\|\s*activeWorks\.length\)/,
-    "active work projection should lift live work into RUNNING telemetry",
+    /counts\.running\s*=\s*Math\.max/,
+    "historical Work must not lift absent agents into RUNNING telemetry",
   );
   assert.doesNotMatch(
     body,
@@ -3472,24 +3174,10 @@ test("active work projection only upgrades live work to RUNNING telemetry", () =
   );
 });
 
-test("FR-044 (安心) / SPEC #3885 FR-015: window chrome carries RESTART, minimize and Issue popup — never STOP", () => {
-  // SPEC #3885 FR-015 (user ruling 2026-09-03): the agent-stop button left the
-  // titlebar; stopping an agent is offered only in the Issue row's ⋯ menu. The
-  // same slot now holds the minimize (return to the Issue row) and Issue popup
-  // controls, both hidden unless the window belongs to an Issue.
-  assert.doesNotMatch(appSource, /data-action="stop"[^>]*aria-label="Stop agent"/);
-  assert.match(
-    appSource,
-    /data-action="minimize-to-issue"[^>]*aria-label="Return to Issue list"[^>]*hidden/,
-  );
+test("FR-044 (安心) / SPEC #3885 FR-015: fixed surface controls retain agent RESTART and Issue navigation without canvas minimize", () => {
+  assert.doesNotMatch(appSource, /data-action="(?:stop|minimize-to-issue)"/);
   assert.match(appSource, /data-action="open-issue"[^>]*aria-label="Open Issue"[^>]*hidden/);
   assert.match(appSource, /data-action="restart"[^>]*aria-label="Restart agent"/);
-  // The titlebar minimize reuses the FR-012 fold-back path; the popup opens the
-  // owning Issue's detail.
-  assert.match(
-    appSource,
-    /minimizeToIssueButton\.addEventListener\("click"[\s\S]{0,320}runIssueWindowHeaderAction\(\s*"return-to-list"/,
-  );
   assert.match(
     appSource,
     /openIssueButton\.addEventListener\("click"[\s\S]{0,320}runIssueWindowHeaderAction\(\s*"open-issue"/,
@@ -3505,10 +3193,10 @@ test("FR-044 (安心) / SPEC #3885 FR-015: window chrome carries RESTART, minimi
   assert.match(appSource, /updateWindowKillSwitchControls/);
 });
 
-test("FR-042 (安心): STOP ALL is reachable from the rail and the palette with a confirm", () => {
+test("#4777: STOP ALL is absent from the rail and remains in the palette with a confirm", () => {
   const railItem = document.querySelector('.op-rail__item[data-cmd="stop-all-windows"]');
-  assert.ok(railItem, "expected a Stop all agents rail item");
-  assert.equal(railItem.getAttribute("aria-label"), "Stop all agents");
+  assert.equal(Boolean(railItem), false, "Stop all agents must be absent from the rail");
+  assert.equal(Boolean(document.querySelector(".op-rail__item--stop-all")), false);
   // op:command + palette both route to requestStopAllWindows, which confirms
   // and emits stop_all_windows.
   assert.match(appSource, /case "stop-all-windows":/);
@@ -3762,7 +3450,7 @@ test("non-terminal surface bodies still follow the overall theme (FR-013 boundar
   // Console / Mock / Profile) must keep tracking the active theme via --color-surface so tabbed windows
   // still flip body color when a non-terminal tab is selected.
   const otherSurfaceRule =
-    /(?:\.surface-(?:file-tree|agent-kanban|branches|board|logs|knowledge|index|work|console|mock|profile)\s+\.window-body,?\s*)+\{[^}]*background:\s*var\(\s*--color-surface\s*\)/;
+    /(?:\.surface-(?:agent-kanban|branches|board|logs|knowledge|index|work|mock|profile)\s+\.window-body,?\s*)+\{[^}]*background:\s*var\(\s*--color-surface\s*\)/;
   assert.match(
     inlineStyle,
     otherSurfaceRule,
@@ -3778,7 +3466,6 @@ test("mountWindowBody clears every known surface class before applying the activ
   for (const surfaceClass of [
     "surface-terminal",
     "surface-agent-kanban",
-    "surface-file-tree",
     "surface-branches",
     "surface-board",
     "surface-logs",
@@ -3786,7 +3473,6 @@ test("mountWindowBody clears every known surface class before applying the activ
     "surface-index",
     "surface-work",
     "surface-profile",
-    "surface-console",
     "surface-mock",
   ]) {
     assert.match(
@@ -3799,7 +3485,6 @@ test("mountWindowBody clears every known surface class before applying the activ
 
 test("every readable non-terminal surface participates in the opaque window chrome grammar", () => {
   for (const surface of [
-    "file-tree",
     "branches",
     "board",
     "logs",
@@ -3807,7 +3492,6 @@ test("every readable non-terminal surface participates in the opaque window chro
     "index",
     "work",
     "profile",
-    "console",
     "mock",
   ]) {
     assert.match(
@@ -4016,12 +3700,12 @@ test("Agent Kanban Launch Agent action opens pending Launch Agent wizard with la
   );
   assert.match(
     appSource,
-    /case\s+"launch_wizard_open_error":[\s\S]{0,220}?agentKanbanPendingPlacement\.clear\(\);[\s\S]{0,120}?applyLaunchWizardOpenErrorEvent\(event\);/,
+    /case\s+"launch_wizard_open_error":[\s\S]{0,220}?agentKanbanPendingPlacement\.clear\(\);[\s\S]{0,120}?launchWizardOpenErrorModel\.update\(/,
     "backend wizard open errors must clear stale Kanban placement targets",
   );
   assert.match(
     appSource,
-    /case\s+"launch_wizard_state":[\s\S]{0,220}?agentKanbanPendingPlacement\.clear\(\);[\s\S]{0,120}?applyLaunchWizardStateEvent\(event\);/,
+    /case\s+"launch_wizard_state":[\s\S]{0,220}?agentKanbanPendingPlacement\.clear\(\);[\s\S]{0,120}?launchWizardStateModel\.update\(/,
     "backend wizard state must clear Kanban placement targets now owned by the launch session",
   );
 });
@@ -4103,15 +3787,12 @@ test("Board workspace id sync avoids stringify and reuses active Work id cache",
     "workspace_state id derivation must not remap active_work_projection on every render",
   );
 
-  const receiveBody = extractFunctionBody(appSource, "receive");
-  const activeProjectionCase = receiveBody.match(
-    /case\s+"active_work_projection":[\s\S]*?break;/,
-  );
-  assert.ok(activeProjectionCase, "expected active_work_projection receive case");
-  const cacheIndex = activeProjectionCase[0].indexOf(
+  const projectionRender = extractFunctionBody(appSource, "renderActiveWorkProjection");
+  assert.match(appSource, /activeWorkProjectionModel\.subscribe\(state => state, renderActiveWorkProjection\)/);
+  const cacheIndex = projectionRender.indexOf(
     "cacheActiveWorkProjectionWorkspaceIds(activeWorkProjection)",
   );
-  const syncIndex = activeProjectionCase[0].indexOf("syncCurrentProjectWorkspaceIds(");
+  const syncIndex = projectionRender.indexOf("syncCurrentProjectWorkspaceIds(");
   assert.ok(
     cacheIndex >= 0,
     "active_work_projection must update the cached active Work id set",
@@ -4121,7 +3802,7 @@ test("Board workspace id sync avoids stringify and reuses active Work id cache",
     "active_work_projection must sync Board ids after refreshing the cache",
   );
   assert.doesNotMatch(
-    activeProjectionCase[0],
+    projectionRender,
     /currentProjectWorkspaceId\s*=\s*deriveCurrentProjectWorkspaceIds/,
     "active_work_projection must not bypass the shared sync helper",
   );
@@ -4196,7 +3877,7 @@ test("Recent Projects render key ignores workspace state", () => {
   }
 });
 
-test("viewport-only workspace_state skips unchanged window reconciliation", () => {
+test("unchanged workspace_state skips window reconciliation without applying a camera", () => {
   const renderWorkspaceBody = extractFunctionBody(appSource, "renderWorkspace");
   // Issue #3365: the rendered-key slot lives inside workspaceRenderSync so an
   // exception mid-sync leaves the key uncommitted (the next workspace_state
@@ -4221,20 +3902,6 @@ test("viewport-only workspace_state skips unchanged window reconciliation", () =
     /function\s+workspaceWindowsRenderKey\s*\(/,
     "app.js must define a Workspace Windows render key helper",
   );
-  assert.match(
-    appSource,
-    /let\s+viewportDomApplied\s*=\s*false\s*;/,
-    "app.js must track whether the viewport DOM has been initialized",
-  );
-
-  const nextViewportIndex = renderWorkspaceBody.indexOf(
-    "const nextViewport = viewportSyncState.applyServerViewport",
-  );
-  const viewportChangedIndex = renderWorkspaceBody.indexOf(
-    "const viewportChanged = !sameViewportValues(viewport, nextViewport);",
-  );
-  const assignViewportIndex = renderWorkspaceBody.indexOf("viewport = nextViewport;");
-  const applyViewportIndex = renderWorkspaceBody.indexOf("applyViewport();");
   const keyIndex = renderWorkspaceBody.indexOf("workspaceRenderSync.render({");
   const guardIndex = renderWorkspaceBody.indexOf(
     "key: workspaceWindowsRenderKey(workspace)",
@@ -4243,8 +3910,6 @@ test("viewport-only workspace_state skips unchanged window reconciliation", () =
     "classifyProjectWindowVisibility",
   );
   const ensureIndex = renderWorkspaceBody.indexOf("ensureWindow(windowData)");
-  const focusIndex = renderWorkspaceBody.indexOf("focusWindowLocally(topmostId)");
-  const applyCalls = [...renderWorkspaceBody.matchAll(/applyViewport\(\);/g)];
   const syncGuardIndex = workspaceRenderSyncSource.indexOf('guard("sync"');
   const recomputeGuardIndex = workspaceRenderSyncSource.indexOf('guard("recompute"');
   const afterSyncGuardIndex = workspaceRenderSyncSource.indexOf('guard("after_sync"');
@@ -4252,38 +3917,10 @@ test("viewport-only workspace_state skips unchanged window reconciliation", () =
     "renderedKey = key;",
   );
 
-  assert.notEqual(
-    nextViewportIndex,
-    -1,
-    "renderWorkspace must store the applied server viewport before DOM writes",
-  );
-  assert.ok(
-    viewportChangedIndex > nextViewportIndex,
-    "renderWorkspace must compare the current viewport with the applied server viewport",
-  );
-  assert.ok(
-    assignViewportIndex > viewportChangedIndex,
-    "renderWorkspace must compare before replacing the current viewport reference",
-  );
-  assert.equal(
-    applyCalls.length,
-    1,
-    "renderWorkspace must keep server viewport DOM writes behind one guarded apply call",
-  );
-  assert.ok(
-    applyViewportIndex > assignViewportIndex,
-    "changed server viewport must assign the new viewport before applying DOM writes",
-  );
-  assert.match(
-    renderWorkspaceBody.slice(assignViewportIndex, keyIndex),
-    /if\s*\(\s*!viewportDomApplied\s*\|\|\s*viewportChanged\s*\)\s*\{\s*applyViewport\(\);\s*\}/,
-    "unchanged server viewport must skip applyViewport only after the first DOM apply",
-  );
-  assert.ok(keyIndex > applyViewportIndex, "window key guard must run after viewport");
   assert.ok(guardIndex > keyIndex, "renderWorkspace must guard on the window key");
   assert.ok(
-    guardIndex < classifyIndex && guardIndex < ensureIndex && guardIndex < focusIndex,
-    "reconciliation and focus activation must run inside the guarded render call",
+    guardIndex < classifyIndex && guardIndex < ensureIndex,
+    "reconciliation must run inside the guarded render call",
   );
   assert.ok(
     commitWindowKeyIndex > syncGuardIndex &&
@@ -4338,39 +3975,6 @@ test("maximized viewport sync machinery is removed in favor of the per-viewer ca
   );
 });
 
-test("clamped no-op zoom returns before local viewport apply and persist work", () => {
-  const zoomBody = extractFunctionBody(appSource, "zoomCanvasAt");
-  assert.match(
-    appSource,
-    /function\s+sameViewportValues\s*\(/,
-    "app.js must define a semantic viewport equality helper",
-  );
-  const nextViewportIndex = zoomBody.indexOf("const nextViewport = {");
-  const guardIndex = zoomBody.indexOf("if (sameViewportValues(viewport, nextViewport))");
-  const assignIndex = zoomBody.indexOf("viewport = nextViewport;");
-  const recordIndex = zoomBody.indexOf("recordLocalViewportEdit();");
-  const applyIndex = zoomBody.indexOf("applyViewport();");
-  const persistIndex = zoomBody.indexOf("persistViewport();");
-
-  assert.notEqual(nextViewportIndex, -1, "zoomCanvasAt must compute next viewport first");
-  assert.ok(guardIndex > nextViewportIndex, "no-op guard must inspect the computed viewport");
-  assert.ok(
-    guardIndex < assignIndex
-      && guardIndex < recordIndex
-      && guardIndex < applyIndex
-      && guardIndex < persistIndex,
-    "clamped no-op zoom must return before assignment, local edit tracking, viewport writes, and persist scheduling",
-  );
-  assert.match(
-    zoomBody.slice(guardIndex, assignIndex),
-    /return\s*;/,
-    "same viewport guard must return before changed-zoom apply/persist sequence",
-  );
-  assert.ok(
-    assignIndex < recordIndex && recordIndex < applyIndex && applyIndex < persistIndex,
-    "changed zoom must still assign next viewport before the existing apply/persist sequence",
-  );
-});
 
 test("Workspace Windows render key ignores viewport and includes window shell fields", () => {
   const keyBody = extractFunctionBody(appSource, "workspaceWindowsRenderKey");
@@ -4392,18 +3996,9 @@ test("Workspace Windows render key ignores viewport and includes window shell fi
     "dynamic_title_detail",
     "purpose_title",
     "agent_id",
+    "agent_name",
     "agent_color",
     "status",
-    "geometry",
-    "x",
-    "y",
-    "width",
-    "height",
-    "minimized",
-    "maximized",
-    "z_index",
-    "tab_group_id",
-    "tab_group_active",
   ]) {
     assert.match(
       keyBody,
@@ -4452,207 +4047,6 @@ test("Workspace Windows render key avoids JSON stringify allocation", () => {
   );
 });
 
-test("Window List skips unchanged row rebuilds after updating open state", () => {
-  // SPEC-3064 Phase 3 (E7): the Window List dropdown renderer, its render
-  // key, and its rendered-key slot live in the project shell surface.
-  const renderWindowListBody = extractFunctionBody(
-    projectShellSurfaceSource,
-    "renderWindowList",
-  );
-  assert.match(
-    projectShellSurfaceSource,
-    /let\s+renderedWindowListKey\s*=/,
-    "the project shell surface must track the last rendered Window List row key",
-  );
-  assert.match(
-    projectShellSurfaceSource,
-    /function\s+windowListRenderKey\s*\(/,
-    "the project shell surface must define a Window List render key helper",
-  );
-
-  const hiddenIndex = renderWindowListBody.indexOf("windowListPanel.hidden");
-  const ariaIndex = renderWindowListBody.indexOf("aria-expanded");
-  const keyIndex = renderWindowListBody.indexOf(
-    "const nextWindowListKey = windowListRenderKey();",
-  );
-  const closedGuardIndex = renderWindowListBody.indexOf("if (!windowListOpen)");
-  const closedSentinelIndex = renderWindowListBody.indexOf(
-    'renderedWindowListKey = "__closed__";',
-  );
-  const guardIndex = renderWindowListBody.indexOf(
-    "if (renderedWindowListKey === nextWindowListKey)",
-  );
-  const clearIndex = renderWindowListBody.indexOf("windowListPanel.innerHTML = \"\";");
-
-  assert.notEqual(hiddenIndex, -1, "renderWindowList must update panel hidden state");
-  assert.notEqual(ariaIndex, -1, "renderWindowList must update trigger aria-expanded");
-  assert.notEqual(closedGuardIndex, -1, "renderWindowList must have a closed fast path");
-  assert.notEqual(
-    closedSentinelIndex,
-    -1,
-    "closed Window List fast path must store a stable sentinel key",
-  );
-  assert.ok(
-    closedGuardIndex > hiddenIndex && closedGuardIndex > ariaIndex,
-    "closed Window List fast path must run after chrome hidden/expanded updates",
-  );
-  assert.ok(
-    closedGuardIndex < keyIndex,
-    "closed Window List fast path must return before key generation",
-  );
-  assert.ok(
-    closedSentinelIndex > closedGuardIndex && closedSentinelIndex < keyIndex,
-    "closed Window List fast path must store the sentinel before any key generation",
-  );
-  assert.match(
-    renderWindowListBody.slice(closedGuardIndex, keyIndex),
-    /return\s*;/,
-    "closed Window List fast path must return before windowListRenderKey()",
-  );
-  assert.ok(
-    keyIndex > hiddenIndex && keyIndex > ariaIndex,
-    "open Window List key must run after open state updates",
-  );
-  assert.ok(guardIndex > keyIndex, "renderWindowList must guard on the Window List key");
-  assert.ok(
-    guardIndex < clearIndex,
-    "unchanged Window List key must return before row clearing/rebuild",
-  );
-  assert.match(
-    renderWindowListBody.slice(guardIndex, clearIndex),
-    /return\s*;/,
-    "unchanged Window List key guard must return before clearing rows",
-  );
-
-  const toggleWindowListBody = extractFunctionBody(
-    projectShellSurfaceSource,
-    "toggleWindowList",
-  );
-  const invalidateIndex = toggleWindowListBody.indexOf("renderedWindowListKey = \"\";");
-  const renderIndex = toggleWindowListBody.indexOf("renderWindowList();");
-  const requestIndex = toggleWindowListBody.indexOf("requestWindowList();");
-  assert.notEqual(invalidateIndex, -1, "toggleWindowList must invalidate the Window List key");
-  assert.ok(
-    invalidateIndex < renderIndex && renderIndex < requestIndex,
-    "opening Window List must render current rows before requesting backend entries",
-  );
-});
-
-test("Window List row source rebuild avoids mapped intermediate arrays", () => {
-  const renderWindowListBody = extractFunctionBody(
-    projectShellSurfaceSource,
-    "renderWindowList",
-  );
-  assert.doesNotMatch(
-    renderWindowListBody,
-    /workspaceWindows\.map\s*\(/,
-    "Window List row rebuild must not allocate a mapped workspace-window lookup source",
-  );
-  assert.doesNotMatch(
-    renderWindowListBody,
-    /windowListEntries[\s\S]*?\.map\s*\(/,
-    "Window List row rebuild must not map backend entries before filtering",
-  );
-  assert.doesNotMatch(
-    renderWindowListBody,
-    /\.filter\s*\(/,
-    "Window List row rebuild must avoid chained filter allocation",
-  );
-  // SPEC-3038 (2026-06-20): rows now come from the cross-tab window-list
-  // model grouped by project tab, rendered with direct loops (no inline alloc).
-  assert.match(
-    renderWindowListBody,
-    /for\s*\(\s*const\s+group\s+of\s+model\.groups\s*\)/,
-    "Window List row rebuild must iterate the cross-tab model groups with a direct loop",
-  );
-  assert.match(
-    renderWindowListBody,
-    /for\s*\(\s*const\s+entry\s+of\s+group\.entries\s*\)/,
-    "Window List row rebuild must derive per-group entries with a direct loop",
-  );
-});
-
-test("Window List render key ignores viewport and includes row shell fields", () => {
-  const keyBody = extractFunctionBody(
-    projectShellSurfaceSource,
-    "windowListRenderKey",
-  );
-  // appendRenderKeyPart stays in app.js (shared with the render keys that
-  // remained there) and reaches the surface through the deps bag.
-  assert.match(
-    appSource,
-    /function\s+appendRenderKeyPart\s*\(/,
-    "app.js must expose the primitive render-key append helper",
-  );
-  assert.match(
-    keyBody,
-    /appendRenderKeyPart\s*\(/,
-    "Window List key must append primitive fields directly",
-  );
-  assert.doesNotMatch(
-    keyBody,
-    /JSON\.stringify\s*\(/,
-    "Window List key must not serialize an object graph while open",
-  );
-  assert.doesNotMatch(
-    keyBody,
-    /\.map\s*\(/,
-    "Window List key must not allocate mapped arrays while open",
-  );
-  assert.match(
-    keyBody,
-    /active_tab_id/,
-    "Window List key must include active tab identity",
-  );
-  assert.match(
-    keyBody,
-    /windowListEntries/,
-    "Window List key must include server-provided window_list entries",
-  );
-  assert.match(
-    keyBody,
-    /groupProjectWindowList\s*\(/,
-    "Window List key must include the cross-tab window-list model identity/order",
-  );
-  assert.match(
-    keyBody,
-    /runtimeStateForWindow\s*\(/,
-    "Window List key must include runtime state used by status chips",
-  );
-  for (const field of [
-    "id",
-    "preset",
-    "title",
-    "dynamic_title",
-    "dynamic_title_detail",
-    "purpose_title",
-    "agent_id",
-    "agent_color",
-    "status",
-    "geometry",
-    "x",
-    "y",
-    "width",
-    "height",
-    "minimized",
-    "maximized",
-    "z_index",
-    "tab_group_id",
-    "tab_group_active",
-  ]) {
-    assert.match(
-      keyBody,
-      new RegExp(`\\b${field}\\b`),
-      `Window List key must include ${field}`,
-    );
-  }
-  assert.doesNotMatch(
-    keyBody,
-    /\bviewport\b/,
-    "Window List key must ignore viewport-only state",
-  );
-});
-
 test("Static project chrome renderers guard unchanged DOM writes", () => {
   assert.match(
     appSource,
@@ -4673,8 +4067,8 @@ test("Static project chrome renderers guard unchanged DOM writes", () => {
   );
   assert.match(
     projectShellSurfaceSource,
-    /let\s+renderedActionAvailabilityKey\s*=/,
-    "the project shell surface must track the last rendered action availability key",
+    /let\s+renderedProjectPickerKey\s*=/,
+    "the project shell surface must track the last rendered picker key",
   );
 
   const renderAppVersionBody = extractFunctionBody(appSource, "renderAppVersion");
@@ -4727,23 +4121,7 @@ test("Static project chrome renderers guard unchanged DOM writes", () => {
     "renderProjectOnboarding must return before unchanged onboarding DOM writes",
   );
 
-  const updateActionAvailabilityBody = extractFunctionBody(
-    projectShellSurfaceSource,
-    "updateActionAvailability",
-  );
-  const actionKeyIndex = updateActionAvailabilityBody.indexOf(
-    "const nextActionAvailabilityKey = actionAvailabilityRenderKey(activeTab);",
-  );
-  const actionGuardIndex = updateActionAvailabilityBody.indexOf(
-    "if (renderedActionAvailabilityKey === nextActionAvailabilityKey)",
-  );
-  const disabledIndex = updateActionAvailabilityBody.indexOf("addButton.disabled");
-  assert.ok(
-    actionKeyIndex !== -1 &&
-      actionGuardIndex > actionKeyIndex &&
-      actionGuardIndex < disabledIndex,
-    "updateActionAvailability must return before unchanged disabled-state DOM writes",
-  );
+
 });
 
 test("App version label opens latest release notes when an update is available", () => {
@@ -4787,17 +4165,7 @@ test("Static project chrome keys ignore workspace geometry and include visible t
     );
   }
 
-  const actionKeyBody = extractFunctionBody(
-    projectShellSurfaceSource,
-    "actionAvailabilityRenderKey",
-  );
-  assert.match(
-    actionKeyBody,
-    /activeTab/,
-    "Action Availability key must include active-tab availability",
-  );
-
-  for (const keyBody of [pickerKeyBody, onboardingKeyBody, actionKeyBody]) {
+  for (const keyBody of [pickerKeyBody, onboardingKeyBody]) {
     for (const workspaceField of ["viewport", "windows", "geometry"]) {
       assert.doesNotMatch(
         keyBody,
@@ -4828,7 +4196,6 @@ test("Static project chrome reuses the renderAppState active tab lookup", () => 
   const renderAppStateBody = extractFunctionBody(appSource, "renderAppState");
   const tabLookupIndex = renderAppStateBody.indexOf("const tab = activeProjectTab();");
   const pickerCallIndex = renderAppStateBody.indexOf("renderProjectPicker(tab);");
-  const actionCallIndex = renderAppStateBody.indexOf("updateActionAvailability(tab);");
   const onboardingCallIndex = renderAppStateBody.indexOf("renderProjectOnboarding(tab);");
   const workspaceCallIndex = renderAppStateBody.indexOf(
     "renderWorkspace(tab?.workspace || emptyWorkspace());",
@@ -4836,7 +4203,6 @@ test("Static project chrome reuses the renderAppState active tab lookup", () => 
   assert.ok(
     tabLookupIndex >= 0 &&
       pickerCallIndex > tabLookupIndex &&
-      actionCallIndex > tabLookupIndex &&
       onboardingCallIndex > tabLookupIndex &&
       workspaceCallIndex > tabLookupIndex,
     "renderAppState must resolve the active tab once and pass it through static chrome and workspace renderers",
@@ -4846,11 +4212,7 @@ test("Static project chrome reuses the renderAppState active tab lookup", () => 
     projectShellSurfaceSource,
     "projectPickerRenderKey",
   );
-  const actionKeyBody = extractFunctionBody(
-    projectShellSurfaceSource,
-    "actionAvailabilityRenderKey",
-  );
-  for (const keyBody of [pickerKeyBody, actionKeyBody]) {
+  for (const keyBody of [pickerKeyBody]) {
     assert.doesNotMatch(
       keyBody,
       /activeProjectTab\s*\(\s*\)/,
@@ -4888,7 +4250,6 @@ test("Per-window renderer guards unchanged DOM writes after mount and preset syn
   const titleIndex = ensureWindowBody.indexOf(".title-text");
   const roleBadgeIndex = ensureWindowBody.indexOf("setWindowRoleBadge");
   const agentColorIndex = ensureWindowBody.indexOf("agentColor");
-  const styleIndex = ensureWindowBody.indexOf("element.style.zIndex");
   const statusIndex = ensureWindowBody.indexOf("applyStatus");
   const fitIndex = ensureWindowBody.indexOf("scheduleTerminalFit");
 
@@ -4904,7 +4265,6 @@ test("Per-window renderer guards unchanged DOM writes after mount and preset syn
     ["title", titleIndex],
     ["role badge", roleBadgeIndex],
     ["agent color", agentColorIndex],
-    ["style", styleIndex],
     ["status", statusIndex],
     ["terminal fit", fitIndex],
   ]) {
@@ -4944,11 +4304,6 @@ test("Per-window render key covers DOM shell fields and removal cleanup", () => 
   );
   assert.match(
     keyBody,
-    /windowGroupId\s*\(\s*windowData\s*\)/,
-    "per-window key must derive the tab group for tab strip inputs",
-  );
-  assert.match(
-    keyBody,
     /appendRenderKeyPart\s*\(/,
     "per-window key must append primitive key fields directly",
   );
@@ -4980,15 +4335,6 @@ test("Per-window render key covers DOM shell fields and removal cleanup", () => 
     "agent_id",
     "agent_color",
     "status",
-    "geometry",
-    "x",
-    "y",
-    "width",
-    "height",
-    "z_index",
-    "tab_group_id",
-    "tab_group_active",
-    "tabs",
   ]) {
     assert.match(
       keyBody,
@@ -5024,26 +4370,13 @@ test("Per-window render key avoids JSON stringify and mapped tab allocation", ()
     /windowTabsFor\s*\(\s*windowData\s*\)/,
     "per-window key must avoid allocating a filtered tab array",
   );
-  assert.match(
-    keyBody,
-    /for\s*\(\s*const\s+tab\s+of\s+activeWorkspace\s*\(\s*\)\.windows\s*\|\|\s*\[\]\s*\)/,
-    "per-window key must iterate workspace tab candidates directly",
-  );
-  assert.match(
-    keyBody,
-    /windowGroupId\s*\(\s*tab\s*\)\s*!==\s*tabGroupId[\s\S]+continue\s*;/,
-    "per-window key must keep only tabs in the same group",
-  );
+  assert.doesNotMatch(keyBody, /windowGroupId|tabGroupId|activeWorkspace/);
   for (const field of [
     "runtime_state",
     "detail",
     "display_title",
     "title_tooltip",
     "role_badge",
-    "geometry_revision",
-    "tabs",
-    "tab_group_id",
-    "tab_group_active",
   ]) {
     assert.match(
       keyBody,
@@ -5059,18 +4392,9 @@ test("Per-window render key avoids JSON stringify and mapped tab allocation", ()
   );
 });
 
-// SPEC-2008 camera-focus (UX amendment 2026-06-20): single click focuses
-// WITHOUT moving the camera; only a deliberate double click frames it; the
-// manual resize handle is restored.
-test("window template restores the manual resize handle as a window-body sibling", () => {
+test("fixed window template keeps actions without a resize handle", () => {
   const ensureWindowBody = extractFunctionBody(appSource, "ensureWindow");
-  // The resize handle is a sibling div of the window body, NOT a window-action
-  // button (window-actions stays close-only).
-  assert.match(
-    ensureWindowBody,
-    /<div class="window-body"><\/div>\s*<div class="resize-handle"><\/div>/,
-    "the resize handle must be a sibling div after the window body",
-  );
+  assert.doesNotMatch(ensureWindowBody, /resize-handle|resizeHandle/);
   // SPEC-2008 retired maximize/minimize; SPEC-2356 Anshin (FR-044) kept RESTART
   // beside close, and SPEC #3885 FR-015 replaced the agent-STOP button with the
   // Issue controls (minimize back to the row, open the Issue). Window-actions
@@ -5079,13 +4403,12 @@ test("window template restores the manual resize handle as a window-body sibling
     /<div class="window-actions">[\s\S]*?<\/div>/,
   );
   assert.ok(windowActions, "window-actions block must exist");
-  assert.match(windowActions[0], /data-action="close"/, "close must remain");
+  assert.doesNotMatch(windowActions[0], /data-action="(?:close|minimize-to-issue)"/, "fixed surfaces have no canvas close or minimize");
   assert.doesNotMatch(
     windowActions[0],
     /data-action="stop"/,
     "the agent-STOP button moved to the Issue row menu (SPEC #3885 FR-015)",
   );
-  assert.match(windowActions[0], /data-action="minimize-to-issue"/, "minimize must be present");
   assert.match(windowActions[0], /data-action="open-issue"/, "the Issue popup must be present");
   assert.match(windowActions[0], /data-action="restart"/, "RESTART must be present");
   assert.doesNotMatch(
@@ -5093,83 +4416,8 @@ test("window template restores the manual resize handle as a window-body sibling
     /data-action="(maximize|minimize)"/,
     "window-actions must never reintroduce maximize/minimize buttons",
   );
-  // The handle is wired to begin a local geometry edit and arm the resize state
-  // (camera is untouched; only the window geometry changes).
-  const handleWiringIndex = ensureWindowBody.indexOf(
-    'resizeHandle.addEventListener("pointerdown"',
-  );
-  assert.notEqual(handleWiringIndex, -1, "resize handle must wire pointerdown");
-  const handleWiring = ensureWindowBody.slice(handleWiringIndex);
-  assert.match(
-    handleWiring,
-    /beginLocalGeometryEdit\(/,
-    "resize pointerdown must begin a local geometry edit",
-  );
-  assert.match(
-    handleWiring,
-    /resizeState\s*=\s*\{/,
-    "resize pointerdown must arm the resize state",
-  );
-  // The resize handle must NOT fly the camera — no frameWindow on resize.
-  assert.doesNotMatch(
-    handleWiring.slice(0, handleWiring.indexOf("});")),
-    /frameWindow\(/,
-    "resizing a window must never move the camera",
-  );
 });
 
-test("resize geometry enforces the 420x260 floor and writes inline window size", () => {
-  const applyBody = extractFunctionBody(appSource, "applyResizePointermove");
-  // The pointer-state → geometry helper owns the min floor (default 420x260);
-  // applyResizePointermove writes the result to the element's inline size.
-  assert.match(
-    applyBody,
-    /resizeGeometryFromPointerState\(/,
-    "resize apply must derive geometry from the shared pointer-state helper",
-  );
-  assert.match(
-    applyBody,
-    /element\.style\.width\s*=\s*`\$\{width\}px`/,
-    "resize apply must write the inline window width",
-  );
-  assert.match(
-    applyBody,
-    /element\.style\.height\s*=\s*`\$\{height\}px`/,
-    "resize apply must write the inline window height",
-  );
-});
-
-test("titlebar click focuses on single click and only frames on double click", () => {
-  const clickBody = extractFunctionBody(appSource, "handleTitlebarClick");
-  // A double-click window + threshold gate the framing gesture.
-  assert.match(
-    appSource,
-    /const\s+TITLEBAR_DOUBLE_CLICK_MS\s*=\s*\d+\s*;/,
-    "a double-click threshold must gate the framing gesture",
-  );
-  assert.match(
-    clickBody,
-    /lastTitlebarClick[\s\S]*now\s*-\s*lastTitlebarClick\.at\s*<=\s*TITLEBAR_DOUBLE_CLICK_MS/,
-    "handleTitlebarClick must detect a double click within the threshold",
-  );
-  // Double click → frame (camera moves). Single click → focus only (no camera).
-  const doubleIndex = clickBody.indexOf("isDoubleClick");
-  const frameIndex = clickBody.indexOf("frameWindow(windowId)");
-  const focusIndex = clickBody.indexOf("focusWindowRemotely(windowId)");
-  assert.ok(doubleIndex !== -1 && frameIndex !== -1 && focusIndex !== -1,
-    "handleTitlebarClick must branch double→frame, single→focus");
-  assert.ok(
-    frameIndex < focusIndex,
-    "the double-click frame branch must precede the single-click focus fallback",
-  );
-  // The single-click path uses focusWindowRemotely WITHOUT center, so no bounds
-  // and no camera move.
-  assert.doesNotMatch(
-    clickBody,
-    /focusWindowRemotely\(\s*windowId\s*,\s*\{\s*center/,
-    "a single titlebar click must not center (move) the camera",
-  );
-});
 
 test("body and terminal single click focus the window without moving the camera", () => {
   // focusWindowRemotely is highlight + z-order only and never moves the
@@ -5220,7 +4468,7 @@ test("Focus class updates skip unchanged focus and avoid all-window scans", () =
   );
 });
 
-test("Focus class updates touch previous/current elements and keep no-topmost reset", () => {
+test("Focus class updates touch only previous and current elements", () => {
   const focusBody = extractFunctionBody(appSource, "focusWindowLocally");
   assert.match(
     focusBody,
@@ -5243,12 +4491,7 @@ test("Focus class updates touch previous/current elements and keep no-topmost re
     "focusWindowLocally must add focus to the requested element",
   );
 
-  const renderWorkspaceBody = extractFunctionBody(appSource, "renderWorkspace");
-  assert.match(
-    renderWorkspaceBody,
-    /focusedId\s*=\s*null\s*;/,
-    "renderWorkspace must still clear focusedId when no topmost active window exists",
-  );
+
 });
 
 test("Workspace visibility classification reuses direct id sets", () => {
@@ -5268,9 +4511,7 @@ test("Workspace visibility classification reuses direct id sets", () => {
     /workspace\.windows\.map\s*\(\s*\(?\s*windowData\s*\)?\s*=>\s*windowData\.id\s*\)/,
     "renderWorkspace must not allocate an active window id array before classification",
   );
-  // Issue #3365: the set is assigned inside the guarded sync callback (the
-  // declaration lives outside so afterSync can reuse it), and topmost focus
-  // reads it optionally because a failed sync may have left it unset.
+  // Issue #3365: derive membership once inside the guarded sync callback.
   assert.match(
     renderWorkspaceBody,
     /activeWindowIdSet\s*=\s*workspaceWindowIdSet\s*\(\s*workspace\s*\)/,
@@ -5281,11 +4522,7 @@ test("Workspace visibility classification reuses direct id sets", () => {
     /activeWindowIdSet\s*,[\s\S]*allProjectWindowIdSet:\s*allProjectWindowIdSet\s*\(\s*\)/,
     "renderWorkspace must pass id sets to classifyProjectWindowVisibility",
   );
-  assert.match(
-    renderWorkspaceBody,
-    /topmostId\s*&&\s*activeWindowIdSet\?\.has\s*\(\s*topmostId\s*\)/,
-    "renderWorkspace must reuse the active id set for topmost focus membership",
-  );
+
 });
 
 test("Runtime status updates skip unchanged DOM and dependent surface writes", () => {
@@ -5310,7 +4547,6 @@ test("Runtime status updates skip unchanged DOM and dependent surface writes", (
   const chipIndex = statusBody.indexOf("chip.classList.remove(");
   const overlayIndex = statusBody.indexOf("const overlay = element.querySelector");
   const telemetryIndex = statusBody.indexOf("recomputeOperatorTelemetry");
-  const windowListIndex = statusBody.lastIndexOf("renderWindowList()");
 
   assert.notEqual(keyIndex, -1, "applyStatus must compute a runtime status key");
   assert.notEqual(guardIndex, -1, "applyStatus must guard unchanged runtime status");
@@ -5318,7 +4554,6 @@ test("Runtime status updates skip unchanged DOM and dependent surface writes", (
     ["status chip class writes", chipIndex],
     ["overlay lookup/writes", overlayIndex],
     ["telemetry recompute", telemetryIndex],
-    ["Window List refresh", windowListIndex],
   ]) {
     assert.notEqual(index, -1, `applyStatus must still contain ${label}`);
     assert.ok(guardIndex < index, `unchanged runtime status must return before ${label}`);
@@ -5330,19 +4565,16 @@ test("Runtime status updates skip unchanged DOM and dependent surface writes", (
   );
 });
 
-test("Runtime status updates repaint the Window List when the target window is hidden", () => {
+test("Runtime status updates publish to catalog subscribers before an unmounted target returns", () => {
   const statusBody = extractFunctionBody(appSource, "applyStatus");
   const branchMatch = statusBody.match(
     /if\s*\(\s*!element\s*\)\s*\{([\s\S]*?)return\s*;\s*\}/,
   );
   assert.ok(branchMatch, "applyStatus must handle status events for unmounted windows");
 
-  const branchBody = branchMatch[1];
-  assert.match(
-    branchBody,
-    /renderWindowList\s*\(\s*\)\s*;/,
-    "hidden target status updates must still refresh the Window List",
-  );
+  assert.ok(statusBody.indexOf("publishWindowCatalogRuntime(windowId, status)") < statusBody.indexOf(branchMatch[0]),
+    "hidden target status updates must reach both catalog views before returning");
+  assert.doesNotMatch(statusBody, /renderWindowList\s*\(/);
 
 });
 
@@ -5438,15 +4670,15 @@ test("Terminal output decode is deferred out of the receive path", () => {
   );
 });
 
-test("Hidden window output is gated while Agents retain shared preview buffers", () => {
+test("Hidden window output is gated while PM and Agents retain their VT buffers", () => {
   const batcherConfig = appSource.match(
     /const\s+terminalOutputBatcher\s*=\s*createTerminalOutputBatcher\(\{([\s\S]*?)\n\s{6}\}\);/,
   );
   assert.ok(batcherConfig, "app.js must configure the terminal output batcher");
   assert.match(
     batcherConfig[1],
-    /canWrite:\s*\(windowId\)\s*=>\s*\(agentsHost\s*&&\s*agentsSurface\?\.contains\(windowId\)\)\s*\|\|\s*canRefreshTerminalViewport\(windowId\)/,
-    "Agents must keep shared Issue preview buffers current while other hidden windows retain output gating",
+    /canWrite:\s*\(windowId\)\s*=>\s*\{\s*const runtime = terminalMap\.get\(windowId\);\s*return runtime\?\.isReady === true\s*&& runtime\.snapshotWriteCoordinator\?\.shouldDeferOutput\(\) !== true\s*&& \(pmChatViews\.has\(windowId\)\s*\|\|\s*\(worksHost\s*&&\s*worksSurface\?\.contains\(windowId\)\)\s*\|\|\s*canRefreshTerminalViewport\(windowId\)\)/,
+    "ready PM and Agents must consume output while missing/unfit/barrier and other hidden windows retain output gating",
   );
 
   const renderWorkspaceBody = extractFunctionBody(appSource, "renderWorkspace");
@@ -5560,17 +4792,6 @@ test("Operator telemetry key avoids JSON stringify allocation", () => {
   );
 });
 
-test("SPEC-3038 (2026-06-20): telemetry key includes windows so the badge updates on non-agent window changes", () => {
-  // Without `windows` in the cache key, adding/removing a surface (non-agent)
-  // window leaves the agent counts unchanged, so applyOperatorTelemetryCounts
-  // short-circuits and the rail Windows badge never refreshes.
-  const keyBody = extractFunctionBody(appSource, "operatorTelemetryRenderKey");
-  assert.match(
-    keyBody,
-    /appendRenderKeyPart\(parts,\s*"windows"\)/,
-    "telemetry render key must include the windows count",
-  );
-});
 
 // SPEC-2356 — branch telemetry forwards only `branches` through the guarded
 // applyOperatorTelemetryCounts helper; the dead Sidebar Layers `git` counter is
@@ -5578,18 +4799,23 @@ test("SPEC-3038 (2026-06-20): telemetry key includes windows so the badge update
 test("branch_entries telemetry uses the guarded helper without the retired git layer (SPEC-2356)", () => {
   const branchCase = appSource.match(/case\s+"branch_entries":[\s\S]*?break;/);
   assert.ok(branchCase, "expected branch_entries receive case");
+  assert.match(branchCase[0], /branchEntriesViewModel\.update\(/);
+  assert.doesNotMatch(branchCase[0], /renderBranches\(|applyOperatorTelemetryCounts\(/);
+  assert.match(appSource, /branchEntriesViewModel\.subscribe\(state => state, renderBranchEntries\)/);
+  const view = extractFunctionBody(appSource, "renderBranchEntries");
+  assert.match(view, /renderBranches\(windowId\)[\s\S]*applyOperatorTelemetryCounts\(/);
   assert.match(
-    branchCase[0],
+    view,
     /applyOperatorTelemetryCounts\(\{\s*branches:\s*branchesCount,\s*\}\)/,
     "branch telemetry must route through the guarded applyOperatorTelemetryCounts helper",
   );
   assert.doesNotMatch(
-    branchCase[0],
+    view,
     /git:\s*branchesCount/,
     "the dead Sidebar Layers git counter must no longer be forwarded",
   );
   assert.doesNotMatch(
-    branchCase[0],
+    view,
     /window\.__operatorShell\?\.applyTelemetryCounts/,
     "branch telemetry must not call applyTelemetryCounts directly",
   );
@@ -5656,7 +4882,7 @@ test("SPEC #3206 v2: the System rail group carries the notification bell with an
   const groups = Array.from(document.querySelectorAll(".op-rail > .op-rail__group")).map(
     (group) => group.getAttribute("aria-label"),
   );
-  assert.deepEqual(groups, ["Navigate", "Surfaces", "Windows", "Agents", "System"]);
+  assert.deepEqual(groups, ["Navigate", "Surfaces", "System"]);
 });
 
 test("SPEC #3206 v2: bell → op:command toggle-notifications → drawer toggle, Esc closes, badge is wired (FR-009 / FR-014)", () => {
@@ -5743,10 +4969,9 @@ test("SPEC #3206 v2: the --z-* ladder keeps the persistent drawer below the tran
 });
 
 // SPEC-4777 T-3: the Windows rail must reveal legacy grouped windows.
-test("window framing activates a hidden group member after the split route", () => {
+test("window navigation publishes the selected pane without changing layout", () => {
   const body = extractFunctionBody(appSource, "frameWindow");
-  assert.match(body, /windowData\.tab_group_id && !windowData\.tab_group_active/);
-  assert.match(body, /pendingFrameWindowId\s*=\s*windowId/);
-  assert.match(body, /kind:\s*"activate_window_tab",\s*id:\s*windowId/);
-  assert.ok(body.indexOf('splitSurfaces?.isOpen()') < body.indexOf('windowData.tab_group_id && !windowData.tab_group_active'));
+  assert.match(body, /navigation:\s*\{/);
+  assert.match(body, /windowId, notifyFocus, serial:/);
+  assert.doesNotMatch(body, /activate_window_tab|splitSurfaces\.close|pendingFrameWindowId/);
 });

@@ -13,11 +13,63 @@
 //! an Issue that belongs to no spec must still register (#4680 AC-4).
 
 use std::{
+    num::NonZeroU64,
     path::Path,
     time::{Duration, SystemTime},
 };
 
 use serde::{Deserialize, Serialize};
+
+/// Issue #5349 AC-8: evidence for one PM Issue registration. The survey
+/// timestamp remains the hook prerequisite; it cannot stand in for the
+/// explicit owner/search/split decision carried by `issue.create`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IssueOwnerCheck {
+    // The custom deserializer makes the key mandatory while allowing an
+    // explicit null to record that no spec owns the area.
+    #[serde(deserialize_with = "required_owner_spec")]
+    pub owner_spec: Option<NonZeroU64>,
+    #[serde(default)]
+    pub search_queries: Vec<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+fn required_owner_spec<'de, D>(deserializer: D) -> Result<Option<NonZeroU64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<NonZeroU64>::deserialize(deserializer)
+}
+
+pub const OWNER_CHECK_RECOVERY: &str = r#"PM issue.create requires params.owner_check evidence. After issue.spec.list, search, read all addenda/corrections/comments, and check current develop/code/tests/merged PRs/closed Issues, update the existing owner's FR/AC or justify an independently deliverable child. No owner: {"owner_spec":null,"search_queries":["actual search query"]}. Child of an existing owner: {"owner_spec":3431,"reason":"why a separate child is necessary"}. Record the rationale and search queries in one to three lines."#;
+
+impl IssueOwnerCheck {
+    pub fn validate(&self) -> Result<(), String> {
+        if self
+            .search_queries
+            .iter()
+            .any(|query| query.trim().is_empty())
+        {
+            return Err(format!(
+                "owner_check.search_queries must contain nonempty strings. {OWNER_CHECK_RECOVERY}"
+            ));
+        }
+        if self.owner_spec.is_none() && self.search_queries.is_empty() {
+            return Err(format!("owner_check.search_queries is required when owner_spec is null. {OWNER_CHECK_RECOVERY}"));
+        }
+        if self.owner_spec.is_some()
+            && self
+                .reason
+                .as_deref()
+                .is_none_or(|reason| reason.trim().is_empty())
+        {
+            return Err(format!("owner_check.reason is required for a child of an existing owner. {OWNER_CHECK_RECOVERY}"));
+        }
+        Ok(())
+    }
+}
 
 /// How long one survey covers. A PM cycle is five minutes and a registration
 /// normally follows its survey within the same cycle, so an hour is generous

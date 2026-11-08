@@ -1,0 +1,792 @@
+{
+  "Context": "Owned candidate6 GUI; all12 groups committed steady dark diagnostic; entire native-capture CPU window excluded from acceptance",
+  "Pid": 61488,
+  "ExpectedStartFileTime": "134366651059148644",
+  "Image": "E:\\gwt\\work\\issue-5658\\target\\debug\\gwt.exe",
+  "DarkCpuStartUtc": "2026-10-16T23:13:17.8417132Z",
+  "CaptureDeadlineUtc": "2026-10-16T23:17:17Z",
+  "Method": "MiniDumpNormal|MiniDumpWithThreadInfo0x1000; exact native PID/start/image validation; post-capture same-start survival; offline LLDB native PDB reader only",
+  "SuccessfulCaptures": 4,
+  "SkippedCaptureAttempts": 1,
+  "Captures": [
+    {
+      "Pid": 61488,
+      "StartFileTime": "134366651059148644",
+      "DumpPath": "E:\\gwt\\work\\issue-5658\\target\\issue-5658-debugger\\steady-61488-normal-0.dmp",
+      "DumpBytes": 929420,
+      "DumpFlags": "0x1000 (MiniDumpNormal | MiniDumpWithThreadInfo)",
+      "AliveAfterCapture": true,
+      "Sample": 0,
+      "CapturedAtUtc": "2026-10-17T08:15:53.8882656+09:00",
+      "CaptureElapsedMs": 851.701
+    },
+    {
+      "Pid": 61488,
+      "StartFileTime": "134366651059148644",
+      "DumpPath": "E:\\gwt\\work\\issue-5658\\target\\issue-5658-debugger\\steady-61488-normal-1.dmp",
+      "DumpBytes": 956546,
+      "DumpFlags": "0x1000 (MiniDumpNormal | MiniDumpWithThreadInfo)",
+      "AliveAfterCapture": true,
+      "Sample": 1,
+      "CapturedAtUtc": "2026-10-17T08:15:56.4500191+09:00",
+      "CaptureElapsedMs": 127.0413
+    },
+    {
+      "Pid": 61488,
+      "StartFileTime": "134366651059148644",
+      "DumpPath": "E:\\gwt\\work\\issue-5658\\target\\issue-5658-debugger\\steady-61488-normal-2.dmp",
+      "DumpBytes": 943594,
+      "DumpFlags": "0x1000 (MiniDumpNormal | MiniDumpWithThreadInfo)",
+      "AliveAfterCapture": true,
+      "Sample": 2,
+      "CapturedAtUtc": "2026-10-17T08:15:57.9545528+09:00",
+      "CaptureElapsedMs": 169.7367
+    },
+    {
+      "Pid": 61488,
+      "StartFileTime": "134366651059148644",
+      "DumpPath": "E:\\gwt\\work\\issue-5658\\target\\issue-5658-debugger\\steady-61488-normal-3.dmp",
+      "DumpBytes": 909154,
+      "DumpFlags": "0x1000 (MiniDumpNormal | MiniDumpWithThreadInfo)",
+      "AliveAfterCapture": true,
+      "Sample": 3,
+      "CapturedAtUtc": "2026-10-17T08:16:00.0886574+09:00",
+      "CaptureElapsedMs": 132.1856
+    },
+    {
+      "Sample": 4,
+      "CapturedAtUtc": "2026-10-17T08:17:53.5718407+09:00",
+      "Skipped": "Strict authorized deadline; insufficient margin",
+      "Pid": 61488,
+      "StartFileTime": "134366651059148644"
+    }
+  ],
+  "IntervalStartUtc": "2026-10-17T08:15:53.8882656+09:00",
+  "IntervalEndUtc": "2026-10-17T08:16:00.0886574+09:00",
+  "IntervalSeconds": 7.0,
+  "ThreadCpuLimitation": "First/last dump common TIDs with matching thread creation time only; capture pauses disrupt scheduling; no percentage claim; transient usage worker may not appear in CPU delta",
+  "ThreadCpu": [
+    {
+      "tid": 44332,
+      "name": "runtime-namespace-gc",
+      "kernel_seconds": 0.6875,
+      "user_seconds": 0.5,
+      "cpu_seconds": 1.1875
+    },
+    {
+      "tid": 67396,
+      "name": "gwt-agent-capacity",
+      "kernel_seconds": 0.3125,
+      "user_seconds": 0.1875,
+      "cpu_seconds": 0.5
+    },
+    {
+      "tid": 38720,
+      "name": "gwt-monitor-runtime",
+      "kernel_seconds": 0.25,
+      "user_seconds": 0.1875,
+      "cpu_seconds": 0.4375
+    },
+    {
+      "tid": 64552,
+      "name": "main",
+      "kernel_seconds": 0.0,
+      "user_seconds": 0.21875,
+      "cpu_seconds": 0.21875
+    },
+    {
+      "tid": 43712,
+      "name": "tokio-rt-worker",
+      "kernel_seconds": 0.109375,
+      "user_seconds": 0.0,
+      "cpu_seconds": 0.109375
+    },
+    {
+      "tid": 51096,
+      "name": "tokio-rt-worker",
+      "kernel_seconds": 0.0625,
+      "user_seconds": 0.046875,
+      "cpu_seconds": 0.109375
+    },
+    {
+      "tid": 27832,
+      "name": "tokio-rt-worker",
+      "kernel_seconds": 0.046875,
+      "user_seconds": 0.03125,
+      "cpu_seconds": 0.078125
+    },
+    {
+      "tid": 35396,
+      "name": "tokio-rt-worker",
+      "kernel_seconds": 0.03125,
+      "user_seconds": 0.015625,
+      "cpu_seconds": 0.046875
+    },
+    {
+      "tid": 44016,
+      "name": "tokio-rt-worker",
+      "kernel_seconds": 0.046875,
+      "user_seconds": 0.0,
+      "cpu_seconds": 0.046875
+    }
+  ],
+  "Frames": [
+    {
+      "Sample": 0,
+      "TID": 64552,
+      "Name": "main",
+      "LeafFrames": [
+        {
+          "function": "NtUserGetMessage",
+          "module": "win32u.dll",
+          "pc": "0x7fffcd4c1364"
+        },
+        {
+          "function": "GetMessageW",
+          "module": "user32.dll",
+          "pc": "0x7fffcf2aaea2"
+        },
+        {
+          "function": "windows::Win32::UI::WindowsAndMessaging::GetMessageW",
+          "module": "gwt.exe",
+          "pc": "0x7ff76a3a9cd5"
+        }
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::main",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\main.rs",
+          "line": 10893
+        }
+      ]
+    },
+    {
+      "Sample": 0,
+      "TID": 67396,
+      "Name": "gwt-agent-capacity",
+      "LeafFrames": [
+        {
+          "function": "NtWaitForSingleObject",
+          "module": "ntdll.dll",
+          "pc": "0x7fffd0221dd4"
+        },
+        {
+          "function": "WaitForSingleObjectEx",
+          "module": "KERNELBASE.dll",
+          "pc": "0x7fffcd91be9f"
+        },
+        {
+          "function": "std::sys::pal::windows::time::WaitableTimer::wait",
+          "module": "gwt.exe",
+          "pc": "0x7ff76d8f49ea"
+        }
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::main::closure$12",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\main.rs",
+          "line": 10627
+        }
+      ]
+    },
+    {
+      "Sample": 0,
+      "TID": 38720,
+      "Name": "gwt-monitor-runtime",
+      "LeafFrames": [
+        {
+          "function": "NtWaitForSingleObject",
+          "module": "ntdll.dll",
+          "pc": "0x7fffd0221dd4"
+        },
+        {
+          "function": "WaitForSingleObjectEx",
+          "module": "KERNELBASE.dll",
+          "pc": "0x7fffcd91be9f"
+        },
+        {
+          "function": "std::sys::pal::windows::time::WaitableTimer::wait",
+          "module": "gwt.exe",
+          "pc": "0x7ff76d8f49ea"
+        }
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::monitor_duplicate_runtime::spawn::closure$0<gwt::main::closure_env$13>",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\monitor_duplicate_runtime.rs",
+          "line": 48
+        }
+      ]
+    },
+    {
+      "Sample": 0,
+      "TID": 6916,
+      "Name": "gwt-index-refresh-drain",
+      "LeafFrames": [
+        {
+          "function": "NtWaitForSingleObject",
+          "module": "ntdll.dll",
+          "pc": "0x7fffd0221dd4"
+        },
+        {
+          "function": "WaitForSingleObjectEx",
+          "module": "KERNELBASE.dll",
+          "pc": "0x7fffcd91be9f"
+        },
+        {
+          "function": "std::sys::pal::windows::time::WaitableTimer::wait",
+          "module": "gwt.exe",
+          "pc": "0x7ff76d8f49ea"
+        }
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::project_index_bootstrap::refresh_broker_drain_loop",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\project_index_bootstrap.rs",
+          "line": 1318
+        },
+        {
+          "function": "gwt::project_index_bootstrap::ensure_refresh_broker_drain::closure$0::closure$0",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\project_index_bootstrap.rs",
+          "line": 1293
+        }
+      ]
+    },
+    {
+      "Sample": 1,
+      "TID": 64552,
+      "Name": "main",
+      "LeafFrames": [
+        {
+          "function": "NtUserGetMessage",
+          "module": "win32u.dll",
+          "pc": "0x7fffcd4c1364"
+        },
+        {
+          "function": "GetMessageW",
+          "module": "user32.dll",
+          "pc": "0x7fffcf2aaea2"
+        },
+        {
+          "function": "windows::Win32::UI::WindowsAndMessaging::GetMessageW",
+          "module": "gwt.exe",
+          "pc": "0x7ff76a3a9cd5"
+        }
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::main",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\main.rs",
+          "line": 10893
+        }
+      ]
+    },
+    {
+      "Sample": 1,
+      "TID": 67396,
+      "Name": "gwt-agent-capacity",
+      "LeafFrames": [
+        {
+          "function": "NtWaitForSingleObject",
+          "module": "ntdll.dll",
+          "pc": "0x7fffd0221dd4"
+        },
+        {
+          "function": "WaitForSingleObjectEx",
+          "module": "KERNELBASE.dll",
+          "pc": "0x7fffcd91be9f"
+        },
+        {
+          "function": "std::sys::pal::windows::time::WaitableTimer::wait",
+          "module": "gwt.exe",
+          "pc": "0x7ff76d8f49ea"
+        }
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::main::closure$12",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\main.rs",
+          "line": 10627
+        }
+      ]
+    },
+    {
+      "Sample": 1,
+      "TID": 38720,
+      "Name": "gwt-monitor-runtime",
+      "LeafFrames": [
+        {
+          "function": "NtWaitForSingleObject",
+          "module": "ntdll.dll",
+          "pc": "0x7fffd0221dd4"
+        },
+        {
+          "function": "WaitForSingleObjectEx",
+          "module": "KERNELBASE.dll",
+          "pc": "0x7fffcd91be9f"
+        },
+        {
+          "function": "std::sys::pal::windows::time::WaitableTimer::wait",
+          "module": "gwt.exe",
+          "pc": "0x7ff76d8f49ea"
+        }
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::monitor_duplicate_runtime::spawn::closure$0<gwt::main::closure_env$13>",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\monitor_duplicate_runtime.rs",
+          "line": 48
+        }
+      ]
+    },
+    {
+      "Sample": 1,
+      "TID": 6916,
+      "Name": "gwt-index-refresh-drain",
+      "LeafFrames": [
+        {
+          "function": "NtWaitForSingleObject",
+          "module": "ntdll.dll",
+          "pc": "0x7fffd0221dd4"
+        },
+        {
+          "function": "WaitForSingleObjectEx",
+          "module": "KERNELBASE.dll",
+          "pc": "0x7fffcd91be9f"
+        },
+        {
+          "function": "std::sys::pal::windows::time::WaitableTimer::wait",
+          "module": "gwt.exe",
+          "pc": "0x7ff76d8f49ea"
+        }
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::project_index_bootstrap::refresh_broker_drain_loop",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\project_index_bootstrap.rs",
+          "line": 1318
+        },
+        {
+          "function": "gwt::project_index_bootstrap::ensure_refresh_broker_drain::closure$0::closure$0",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\project_index_bootstrap.rs",
+          "line": 1293
+        }
+      ]
+    },
+    {
+      "Sample": 1,
+      "TID": 4316,
+      "Name": "tokio-rt-worker",
+      "LeafFrames": [
+        {
+          "function": "NtCreateFile",
+          "module": "ntdll.dll",
+          "pc": "0x7fffd02227f4"
+        },
+        {
+          "function": "GetDriveTypeW",
+          "module": "KERNELBASE.dll",
+          "pc": "0x7fffcd926217"
+        },
+        {
+          "function": "CreateFileW",
+          "module": "KERNELBASE.dll",
+          "pc": "0x7fffcd927887"
+        }
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt_agent::session_ledger::candidate_metadata",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt-agent\\src\\session_ledger.rs",
+          "line": 196
+        },
+        {
+          "function": "gwt_agent::session_ledger::load_sessions_shared::closure$0",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt-agent\\src\\session_ledger.rs",
+          "line": 270
+        },
+        {
+          "function": "gwt_agent::session_ledger::load_sessions_shared",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt-agent\\src\\session_ledger.rs",
+          "line": 266
+        },
+        {
+          "function": "gwt::session_ledger_cache::SessionLedgerCache::load_shared",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\session_ledger_cache.rs",
+          "line": 32
+        },
+        {
+          "function": "gwt::usage_poller::collect_sessions",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\usage_poller.rs",
+          "line": 511
+        },
+        {
+          "function": "gwt::usage_poller::impl$0::poll_once::async_fn$0",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\usage_poller.rs",
+          "line": 257
+        },
+        {
+          "function": "gwt::usage_poller::impl$0::poll_in_background::async_fn$0::closure$0",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\usage_poller.rs",
+          "line": 237
+        }
+      ]
+    },
+    {
+      "Sample": 2,
+      "TID": 64552,
+      "Name": "main",
+      "LeafFrames": [
+        {
+          "function": "NtUserGetMessage",
+          "module": "win32u.dll",
+          "pc": "0x7fffcd4c1364"
+        },
+        {
+          "function": "GetMessageW",
+          "module": "user32.dll",
+          "pc": "0x7fffcf2aaea2"
+        },
+        {
+          "function": "windows::Win32::UI::WindowsAndMessaging::GetMessageW",
+          "module": "gwt.exe",
+          "pc": "0x7ff76a3a9cd5"
+        }
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::main",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\main.rs",
+          "line": 10893
+        }
+      ]
+    },
+    {
+      "Sample": 2,
+      "TID": 67396,
+      "Name": "gwt-agent-capacity",
+      "LeafFrames": [
+        {
+          "function": "NtWaitForSingleObject",
+          "module": "ntdll.dll",
+          "pc": "0x7fffd0221dd4"
+        },
+        {
+          "function": "WaitForSingleObjectEx",
+          "module": "KERNELBASE.dll",
+          "pc": "0x7fffcd91be9f"
+        },
+        {
+          "function": "std::sys::pal::windows::time::WaitableTimer::wait",
+          "module": "gwt.exe",
+          "pc": "0x7ff76d8f49ea"
+        }
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::main::closure$12",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\main.rs",
+          "line": 10627
+        }
+      ]
+    },
+    {
+      "Sample": 2,
+      "TID": 38720,
+      "Name": "gwt-monitor-runtime",
+      "LeafFrames": [
+        {
+          "function": "RtlAllocateHeap",
+          "module": "ntdll.dll",
+          "pc": "0x7fffd00f20f5"
+        },
+        {
+          "function": "RtlAllocateHeap",
+          "module": "ntdll.dll",
+          "pc": "0x7fffd00f200b"
+        },
+        {
+          "function": "alloc::alloc::alloc",
+          "module": "gwt.exe",
+          "pc": "0x7ff76d8f6f81"
+        }
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::session_inventory::read_entries",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\session_inventory.rs",
+          "line": 1066
+        },
+        {
+          "function": "gwt::session_inventory::read_candidates_with_liveness<gwt::session_inventory::read_candidates_scope_with_snapshot::closure_env$0>",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\session_inventory.rs",
+          "line": 971
+        },
+        {
+          "function": "gwt::session_inventory::read_candidates_scope_with_snapshot",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\session_inventory.rs",
+          "line": 895
+        },
+        {
+          "function": "gwt::session_inventory::ProjectSessionCensus::capture",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\session_inventory.rs",
+          "line": 373
+        },
+        {
+          "function": "gwt::monitor_duplicate_runtime::reconcile_projects::closure$1",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\monitor_duplicate_runtime.rs",
+          "line": 101
+        },
+        {
+          "function": "gwt::monitor_duplicate_runtime::reconcile_projects",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\monitor_duplicate_runtime.rs",
+          "line": 101
+        },
+        {
+          "function": "gwt::monitor_duplicate_runtime::spawn::closure$0<gwt::main::closure_env$13>",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\monitor_duplicate_runtime.rs",
+          "line": 72
+        }
+      ]
+    },
+    {
+      "Sample": 2,
+      "TID": 6916,
+      "Name": "gwt-index-refresh-drain",
+      "LeafFrames": [
+        {
+          "function": "NtWaitForSingleObject",
+          "module": "ntdll.dll",
+          "pc": "0x7fffd0221dd4"
+        },
+        {
+          "function": "WaitForSingleObjectEx",
+          "module": "KERNELBASE.dll",
+          "pc": "0x7fffcd91be9f"
+        },
+        {
+          "function": "std::sys::pal::windows::time::WaitableTimer::wait",
+          "module": "gwt.exe",
+          "pc": "0x7ff76d8f49ea"
+        }
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::project_index_bootstrap::refresh_broker_drain_loop",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\project_index_bootstrap.rs",
+          "line": 1318
+        },
+        {
+          "function": "gwt::project_index_bootstrap::ensure_refresh_broker_drain::closure$0::closure$0",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\project_index_bootstrap.rs",
+          "line": 1293
+        }
+      ]
+    },
+    {
+      "Sample": 2,
+      "TID": 27832,
+      "Name": "tokio-rt-worker",
+      "LeafFrames": [
+        {
+          "function": "NtCreateUserProcess",
+          "module": "ntdll.dll",
+          "pc": "0x7fffd0223764"
+        },
+        {
+          "function": "CreateProcessInternalW",
+          "module": "KERNELBASE.dll",
+          "pc": "0x7fffcd98080a"
+        },
+        {
+          "function": "CreateProcessW",
+          "module": "KERNELBASE.dll",
+          "pc": "0x7fffcd97d656"
+        }
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt_skills::settings_local::managed_hook_config_is_git_tracked",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt-skills\\src\\settings_local.rs",
+          "line": 673
+        },
+        {
+          "function": "gwt::cli::hook::health::expected_hook_bin_for_config_path",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\cli\\hook\\health.rs",
+          "line": 838
+        },
+        {
+          "function": "gwt::cli::hook::health::audit_hook_json_config",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\cli\\hook\\health.rs",
+          "line": 851
+        },
+        {
+          "function": "gwt::cli::hook::health::audit_managed_hook_configs",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\cli\\hook\\health.rs",
+          "line": 773
+        },
+        {
+          "function": "gwt::cli::hook::health::cached_surface_audit",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\cli\\hook\\health.rs",
+          "line": 589
+        },
+        {
+          "function": "gwt::cli::hook::health::read_managed_hook_health_with",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\cli\\hook\\health.rs",
+          "line": 302
+        },
+        {
+          "function": "gwt::cli::hook::health::ManagedHookFailureSnapshot::read_health",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\cli\\hook\\health.rs",
+          "line": 243
+        },
+        {
+          "function": "gwt::app_runtime::workspace_views::managed_hook_health_view_for_worktree",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\app_runtime\\workspace_views.rs",
+          "line": 633
+        },
+        {
+          "function": "gwt::app_runtime::workspace_views::attach_managed_hook_health_to_active_works",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\app_runtime\\workspace_views.rs",
+          "line": 660
+        },
+        {
+          "function": "gwt::app_runtime::workspace_views::prepare_active_work_projection",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\app_runtime\\workspace_views.rs",
+          "line": 3236
+        },
+        {
+          "function": "gwt::app_runtime::workspace_views::impl$4::spawn_active_work_projection_prepare::closure$1",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\app_runtime\\workspace_views.rs",
+          "line": 4154
+        },
+        {
+          "function": "gwt::app_runtime::impl$2::try_spawn::closure$0<gwt::app_runtime::workspace_views::impl$4::spawn_active_work_projection_prepare::closure_env$1>",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\app_runtime\\mod.rs",
+          "line": 478
+        }
+      ]
+    },
+    {
+      "Sample": 3,
+      "TID": 64552,
+      "Name": "main",
+      "LeafFrames": [
+        {
+          "function": "NtUserGetMessage",
+          "module": "win32u.dll",
+          "pc": "0x7fffcd4c1364"
+        },
+        {
+          "function": "GetMessageW",
+          "module": "user32.dll",
+          "pc": "0x7fffcf2aaea2"
+        },
+        {
+          "function": "windows::Win32::UI::WindowsAndMessaging::GetMessageW",
+          "module": "gwt.exe",
+          "pc": "0x7ff76a3a9cd5"
+        }
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::main",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\main.rs",
+          "line": 10893
+        }
+      ]
+    },
+    {
+      "Sample": 3,
+      "TID": 67396,
+      "Name": "gwt-agent-capacity",
+      "LeafFrames": [
+        {
+          "function": "NtWaitForSingleObject",
+          "module": "ntdll.dll",
+          "pc": "0x7fffd0221dd4"
+        },
+        {
+          "function": "WaitForSingleObjectEx",
+          "module": "KERNELBASE.dll",
+          "pc": "0x7fffcd91be9f"
+        },
+        {
+          "function": "std::sys::pal::windows::time::WaitableTimer::wait",
+          "module": "gwt.exe",
+          "pc": "0x7ff76d8f49ea"
+        }
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::main::closure$12",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\main.rs",
+          "line": 10627
+        }
+      ]
+    },
+    {
+      "Sample": 3,
+      "TID": 38720,
+      "Name": "gwt-monitor-runtime",
+      "LeafFrames": [
+        {
+          "function": "NtWaitForSingleObject",
+          "module": "ntdll.dll",
+          "pc": "0x7fffd0221dd4"
+        },
+        {
+          "function": "WaitForSingleObjectEx",
+          "module": "KERNELBASE.dll",
+          "pc": "0x7fffcd91be9f"
+        },
+        {
+          "function": "std::sys::pal::windows::time::WaitableTimer::wait",
+          "module": "gwt.exe",
+          "pc": "0x7ff76d8f49ea"
+        }
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::monitor_duplicate_runtime::spawn::closure$0<gwt::main::closure_env$13>",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\monitor_duplicate_runtime.rs",
+          "line": 48
+        }
+      ]
+    },
+    {
+      "Sample": 3,
+      "TID": 6916,
+      "Name": "gwt-index-refresh-drain",
+      "LeafFrames": [
+        {
+          "function": "NtWaitForSingleObject",
+          "module": "ntdll.dll",
+          "pc": "0x7fffd0221dd4"
+        },
+        {
+          "function": "WaitForSingleObjectEx",
+          "module": "KERNELBASE.dll",
+          "pc": "0x7fffcd91be9f"
+        },
+        {
+          "function": "std::sys::pal::windows::time::WaitableTimer::wait",
+          "module": "gwt.exe",
+          "pc": "0x7ff76d8f49ea"
+        }
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::project_index_bootstrap::refresh_broker_drain_loop",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\project_index_bootstrap.rs",
+          "line": 1318
+        },
+        {
+          "function": "gwt::project_index_bootstrap::ensure_refresh_broker_drain::closure$0::closure$0",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\project_index_bootstrap.rs",
+          "line": 1293
+        }
+      ]
+    }
+  ]
+}

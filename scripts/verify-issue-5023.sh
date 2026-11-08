@@ -17,12 +17,48 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 1
 fi
 
+# Each suite/theme owns its backend and every report source (including Q&A
+# and peer messages). Canonical verification registers these eight commands
+# separately: the embedded reporter writes one result per Playwright process.
+if [ "${1:-}" != --fixture ]; then
+  if [ -n "${GWT_HEADED_E2E_REPORT:-}" ]; then
+    echo 'Canonical verification requires --fixture <suite> <chromium-project> per command' >&2
+    exit 1
+  fi
+  for CHECK_SUITE in pm-chat pm-layout pm-english release-notes; do
+    for CHECK_PROJECT in chromium-dark chromium-light; do
+      bash "$REPO_ROOT/scripts/verify-issue-5023.sh" --fixture "$CHECK_SUITE" "$CHECK_PROJECT" "$@"
+    done
+  done
+  exit 0
+fi
+CHECK_SUITE="${2:-}"
+CHECK_PROJECT="${3:-}"
+case "$CHECK_SUITE" in
+  pm-chat|pm-layout|pm-english|release-notes) ;;
+  *) echo 'Unknown Issue #5023 fixture suite' >&2; exit 1 ;;
+esac
+case "$CHECK_PROJECT" in
+  chromium-dark|chromium-light) ;;
+  *) echo 'Unknown Issue #5023 fixture Chromium project' >&2; exit 1 ;;
+esac
+shift 3
+printf 'Fixture: %s / %s\n' "$CHECK_SUITE" "$CHECK_PROJECT"
+
 CHECK_HOME="$(mktemp -d -t gwt-issue-5023-home.XXXXXX)"
 URL_FILE="$CHECK_HOME/url"
 LOG_FILE="$CHECK_HOME/startup.log"
 mkdir -p "$CHECK_HOME/.gwt"
 if [ -d "$HOME/.gwt/runtime" ]; then
-  ln -s "$HOME/.gwt/runtime" "$CHECK_HOME/.gwt/runtime"
+  if command -v cygpath >/dev/null 2>&1; then
+    # MSYS ln can copy directories; a junction keeps this cache input linked.
+    CHECK_RUNTIME_SOURCE="$(cygpath -w "$HOME/.gwt/runtime")" \
+      CHECK_RUNTIME_LINK="$(cygpath -w "$CHECK_HOME/.gwt/runtime")" \
+      powershell.exe -NoProfile -Command \
+      'New-Item -ItemType Junction -Path $env:CHECK_RUNTIME_LINK -Target $env:CHECK_RUNTIME_SOURCE -ErrorAction Stop | Out-Null'
+  else
+    ln -s "$HOME/.gwt/runtime" "$CHECK_HOME/.gwt/runtime"
+  fi
 fi
 jq -n --arg root "$REPO_ROOT" \
   '{tabs:[{id:"issue-5023",title:"Issue 5023",project_root:$root,kind:"git"}],recent_projects:[]}' \
@@ -35,6 +71,16 @@ CHECK_REPO_HASH="$(
 # browser-check-agent-seed-begin
 CHECK_PROJECT_STATE="$CHECK_HOME/.gwt/projects/${CHECK_REPO_HASH:?Resolve project_store.hash first}/project-state"
 mkdir -p "$CHECK_PROJECT_STATE"
+# The current card reuses the shared budget/TTL PR cache. Keep this isolated
+# release observation fresh without reaching the user's remote repository.
+cat > "$CHECK_HOME/.gwt/config.toml" <<'TOML'
+[pr_inventory]
+cache_ttl_secs = 3600
+checks_refresh_secs = 3600
+TOML
+jq -n --arg observed "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  '{fetched_at:$observed,rows:[{number:5352,title:"Release v9.117.2",url:"https://github.com/akiojin/gwt/pull/5352",headRefName:"develop",baseRefName:"main",isDraft:false,updatedAt:$observed,createdAt:$observed,mergeable:"UNKNOWN",mergeStateStatus:"UNKNOWN",statusCheckRollup:[]}]}' \
+  > "$CHECK_HOME/.gwt/projects/$CHECK_REPO_HASH/pr-inventory-cache.json"
 jq -n --arg root "$REPO_ROOT" \
   '{settings:{auto_start:false},registration:{session_id:"pm-reports-fixture",agent_id:"codex",worktree_path:$root,created_at:"2026-10-11T00:00:00Z"}}' \
   > "$CHECK_PROJECT_STATE/pm.json"
@@ -61,24 +107,40 @@ jq -n --arg project "$REPO_ROOT" --arg repo_hash "$CHECK_REPO_HASH" \
 
 # browser-check-hook-authority-begin
 CHECKOUT_LOCAL_HOOK_PATTERN='(^|[/\\])target[/\\]([^/\\]+[/\\])*(debug|release)[/\\]gwtd(\.exe)?([^[:alnum:]_.-]|$)'
+
 is_checkout_local_hook_bin() {
-  [ -n "$1" ] && printf '%s\n' "$1" | grep -qiE -- "$CHECKOUT_LOCAL_HOOK_PATTERN"
+  [ -n "$1" ] \
+    && printf '%s\n' "$1" | grep -qiE -- "$CHECKOUT_LOCAL_HOOK_PATTERN"
 }
+
 CHECK_HOOK_BIN="${GWT_HOOK_BIN:-}"
-if is_checkout_local_hook_bin "$CHECK_HOOK_BIN"; then CHECK_HOOK_BIN=""; fi
-if [ -n "$CHECK_HOOK_BIN" ] && [ "$CHECK_HOOK_BIN" != gwtd ] && [ ! -x "$CHECK_HOOK_BIN" ]; then
+if is_checkout_local_hook_bin "$CHECK_HOOK_BIN"; then
+  CHECK_HOOK_BIN=""
+fi
+if [ -n "$CHECK_HOOK_BIN" ] && [ "$CHECK_HOOK_BIN" != "gwtd" ] \
+  && [ ! -x "$CHECK_HOOK_BIN" ]; then
   CHECK_HOOK_BIN=""
 fi
 if [ -z "$CHECK_HOOK_BIN" ]; then
-  PATH_HOOK_BIN="$(command -v gwtd 2>/dev/null || true)"
-  if [ -n "$PATH_HOOK_BIN" ] && ! is_checkout_local_hook_bin "$PATH_HOOK_BIN"; then
-    CHECK_HOOK_BIN=gwtd
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "browser-check preflight failed: jq is required to parse hook.doctor evidence; install jq (for example: brew install jq) and rerun" >&2
+    exit 1
+  fi
+  if ! CHECK_HOOK_RESOLVER="$(
+    cd "$REPO_ROOT" && printf '%s\n' '{"schema_version":1,"operation":"hook.doctor","params":{}}' \
+      | env -u GWT_BIN_PATH -u GWT_HOOK_BIN "$CHECKOUT_GWTD"
+  )" || ! CHECK_HOOK_BIN="$(
+    printf '%s' "$CHECK_HOOK_RESOLVER" \
+      | jq -er 'select(.ok == true) | .output | fromjson | .managed_hook_bin | strings | select(length > 0)'
+  )"; then
+    echo "browser-check managed-hook fallback resolver failed: rebuild checkout gwt/gwtd and rerun" >&2
+    exit 1
+  fi
+  if is_checkout_local_hook_bin "$CHECK_HOOK_BIN"; then
+    echo "browser-check managed-hook fallback resolver returned a checkout-local binary" >&2
+    exit 1
   fi
 fi
-if [ -z "$CHECK_HOOK_BIN" ] && [ -x /Applications/GWT.app/Contents/MacOS/gwtd ]; then
-  CHECK_HOOK_BIN=/Applications/GWT.app/Contents/MacOS/gwtd
-fi
-CHECK_HOOK_BIN="${CHECK_HOOK_BIN:-gwtd}"
 # browser-check-hook-authority-end
 
 # Audit the managed hook fallback with the real HOME, as required by browser-check.
@@ -167,13 +229,15 @@ if [ -z "$CHECK_URL" ] || grep -qi 'another tray-resident gwt instance is alread
 fi
 printf '%s\n' "$CHECK_URL" > "$URL_FILE"
 if [ "$CHECK_LAUNCH" = 1 ]; then
-  # Save while the first app is alive, then verify the same history after a
-  # real app shutdown/relaunch (not merely a browser reload).
-  printf '%s\n' '{"schema_version":1,"operation":"pm.report.post","params":{"kind":"decision","body":"# Persisted before restart\n\nThis report survives the application restart."}}' \
-    | env -u GWT_SESSION_ID -u GWT_SESSION_RUNTIME_PATH -u GWT_HOOK_FORWARD_URL \
-      -u GWT_HOOK_FORWARD_TOKEN -u GWT_PANE_WS_URL -u GWT_BIN_PATH \
-      HOME="$CHECK_HOME" USERPROFILE="$CHECK_HOME" "$CHECKOUT_GWTD" \
-    | jq -e 'select(.ok == true) | .output | fromjson | select(.ok == true) | .report.id' >/dev/null
+  if [ "$CHECK_SUITE" = pm-chat ]; then
+    # Save while the first app is alive, then verify the same history after a
+    # real app shutdown/relaunch (not merely a browser reload).
+    printf '%s\n' '{"schema_version":1,"operation":"pm.report.post","params":{"kind":"decision","body":"# Persisted before restart\n\nThis report survives the application restart."}}' \
+      | env -u GWT_SESSION_ID -u GWT_SESSION_RUNTIME_PATH -u GWT_HOOK_FORWARD_URL \
+        -u GWT_HOOK_FORWARD_TOKEN -u GWT_PANE_WS_URL -u GWT_BIN_PATH \
+        HOME="$CHECK_HOME" USERPROFILE="$CHECK_HOME" "$CHECKOUT_GWTD" \
+      | jq -e 'select(.ok == true) | .output | fromjson | select(.ok == true) | .report.id' >/dev/null
+  fi
   cleanup_browser_check
   cp "$LOG_FILE" "$CHECK_HOME/startup-before-restart.log"
   : > "$URL_FILE"
@@ -202,5 +266,5 @@ GWT_PLAYWRIGHT_BASE_URL="$CHECK_URL" GWT_PLAYWRIGHT_CHECK_HOME="$CHECK_HOME" \
   GWT_PLAYWRIGHT_PROJECT_ROOT="$REPO_ROOT" \
   bash "$REPO_ROOT/scripts/run-visual-tests.sh" \
     --workers=1 --output "$CHECK_HOME/playwright-artifacts" \
-    crates/gwt/playwright/tests/pm-chat-live.spec.ts \
-    crates/gwt/playwright/tests/release-notes-live.spec.ts "$@"
+    "crates/gwt/playwright/tests/$CHECK_SUITE-live.spec.ts" \
+    --project="$CHECK_PROJECT" "$@"

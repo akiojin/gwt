@@ -213,6 +213,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn compose_yaml_roundtrip_preserves_values() {
+        let yaml = r#"
+services:
+  app:
+    image: alpine:3.18
+    ports: ["8080:80"]
+    volumes:
+      - source: .
+        target: /workspace
+        read_only: true
+    environment:
+      ENABLED: "true"
+      CODE: "0123"
+    command: |
+      echo hello
+      echo world
+"#;
+        let original: Value = serde_yaml::from_str(yaml).unwrap();
+        let serialized = serde_yaml::to_string(&original).unwrap();
+        let restored: Value = serde_yaml::from_str(&serialized).unwrap();
+        assert_eq!(restored, original);
+        let environment = &restored["services"]["app"]["environment"];
+        assert_eq!(environment["ENABLED"].as_str(), Some("true"));
+        assert_eq!(environment["CODE"].as_str(), Some("0123"));
+
+        let services = parse_compose_content(&serialized).unwrap();
+        assert_eq!(services[0].image.as_deref(), Some("alpine:3.18"));
+        assert_eq!(services[0].ports, vec!["8080:80"]);
+        assert_eq!(services[0].volumes[0].mode.as_deref(), Some("ro"));
+    }
+
+    #[test]
     fn parse_simple_compose() {
         let yaml = r#"
 services:

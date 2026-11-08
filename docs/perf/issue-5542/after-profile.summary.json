@@ -1,0 +1,20 @@
+{
+  "workers": 12,
+  "duration_seconds": 60.05551410000771,
+  "rounds": 12,
+  "binary": "E:\\gwt\\work\\issue-5542\\target\\issue-5542-after.exe",
+  "test_budget_override_ms": null,
+  "binary_sha256": "1d44e05ccc856597fd517013e2453052a28a53b9a133ef121ba12e0c144ac93e",
+  "source_sha": "490a2b310ca3e4440144faa2bc59b58a60af3ab2",
+  "receiver_sha256": "6111276fdbfaa3cf564070d235761369a3397258f18e638132de5cbdb5d78343",
+  "workload": "isolated cold-process transport; not a real agent fleet",
+  "modes": {
+    "current": {
+      "samples": 144,
+      "failures": 0,
+      "p50_ms": 7.1834999999999996,
+      "p95_ms": 22.744899999999998,
+      "max_ms": 259.93260000000004
+    }
+  }
+}

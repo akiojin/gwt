@@ -28,6 +28,7 @@ const ROOT_MODULES = new Set([
   "hub-app.js",
   // SPEC-2008 Phase 38 — Agent Kanban window surface.
   "agent-kanban-surface.js",
+  "agent-activity-model.js",
   // SPEC-2013 2026-06-16 amendment — quiet Agent completion notices.
   "agent-completion-notifications.js",
   "project-page-metadata.js",
@@ -45,25 +46,19 @@ const ROOT_MODULES = new Set([
   "branch-list-state.js",
   // SPEC-3064 Phase 3 (E6b) — Branches window & branch cleanup surface.
   "branches-cleanup-surface.js",
-  // SPEC-2008 Phase 29: latch canvas wheel pan/zoom mode per gesture.
-  "canvas-wheel-gesture.js",
-  // SPEC-2008 Camera Focus: rail-safe viewport framing math.
-  "camera-framing.js",
   // SPEC-2013 FR-012 — confirm modal shown when closing a project tab
   // while one or more agent panes are still running.
   "close-project-confirm-modal.js",
-  "window-close-confirm-modal.js",
+  "project-execution-policy-model.js",
   // Issue #2704 — terminal-focus guard for modal-friendly workspace renders.
   "clone-modal-focus-guard.js",
   "custom-agent-env-editor.js",
   // SPEC-3064 Phase 3 (E6a) — File Tree window surface.
-  "file-tree-surface.js",
-  // SPEC-2008 camera-focus / FR-094 — always-on Fleet Minimap carrier.
-  "fleet-minimap.js",
   // Issue #4777 T-1 — rail surface selection (Issues / Agents / Board / Settings).
   "surface-rail.js",
   "split-surfaces.js",
   "agents-surface.js",
+  "works-surface.js",
   "terminal-text-preview.js",
   "focus-trap.js",
   "startup-metrics.js",
@@ -82,6 +77,7 @@ const ROOT_MODULES = new Set([
   "interaction-guard.js",
   // SPEC-3064 Phase 3 (E6d) — Knowledge Bridge (Kanban) window surface.
   "knowledge-kanban-surface.js",
+  "control-explanations.js",
   "migration-modal.js",
   "operator-shell.js",
   "project-clone-modal.js",
@@ -103,9 +99,9 @@ const ROOT_MODULES = new Set([
   // SPEC #2780 — Release Notes window opened from #app-version label.
   "release-notes-window.js",
   // SPEC-2809 — Console window per-kind tab live tail.
-  "console-window.js",
   // SPEC-3064 Phase 3 (E4) — Settings windows surface.
   "settings-surface.js",
+  "hook-center-panel.js",
   "socket-receive-dispatcher.js",
   "ui-state-store.js",
   "ui-content.js",
@@ -125,12 +121,6 @@ const ROOT_MODULES = new Set([
   "ui-trace-profiler.js",
   "ui-trace-wiring.js",
   "update-cta.js",
-  // Issue #2698 PR 2 (B1) — throttle update_viewport WS sends.
-  "viewport-persist-throttle.js",
-  "viewport-sync.js",
-  "window-list-model.js",
-  "window-geometry-sync.js",
-  "window-docking.js",
   "issue-other-surface.js",
   // SPEC-2359 US-42 — Workspace Resume Picker modal renderer.
   "workspace-resume-picker-modal.js",

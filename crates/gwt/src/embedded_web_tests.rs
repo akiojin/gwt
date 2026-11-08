@@ -151,10 +151,6 @@ fn frontend_bundle_source() -> &'static str {
         // app.js.
         include_str!("../web/launch-wizard-surface.js"),
         "\n",
-        // SPEC-3064 Phase 3 (E6a) — File Tree window surface moved out of
-        // app.js.
-        include_str!("../web/file-tree-surface.js"),
-        "\n",
         // SPEC-3064 Phase 3 (E6b) — Branches window & cleanup surface moved
         // out of app.js.
         include_str!("../web/branches-cleanup-surface.js"),
@@ -256,7 +252,7 @@ fn embedded_web_issue_monitor_is_integrated_into_the_issue_surface() {
     );
     assert!(
         !index_html().contains("data-preset=\"issue_monitor\""),
-        "Add Window must expose only the canonical Issue entrypoint"
+        "the retired issue_monitor preset must not be exposed"
     );
     let surface_js = root_js_module_source("/knowledge-kanban-surface.js");
     assert!(
@@ -289,12 +285,17 @@ fn embedded_web_issue_monitor_is_integrated_into_the_issue_surface() {
 }
 
 #[test]
-fn embedded_web_issue_surface_exposes_monitor_priority_and_concurrency_controls() {
+fn embedded_web_issue_surface_exposes_monitor_priority_and_project_controls() {
     let surface_js = root_js_module_source("/knowledge-kanban-surface.js");
+    let settings_js = settings_surface_js();
 
     assert!(
-        surface_js.contains("set_issue_monitor_max_active_agents"),
-        "Issue Monitor must let users change max active agents"
+        surface_js.contains("settings:open")
+            && surface_js.contains(r#"section: "issues""#)
+            && settings_js.contains("set_issue_monitor_autonomous_mode")
+            && settings_js.contains("set_issue_monitor_enabled")
+            && !settings_js.contains("set_issue_monitor_max_active_agents"),
+        "Issues must delegate project controls to Settings without duplicate capacity editing"
     );
     assert!(
         surface_js.contains("issue_monitor_queue_move"),
@@ -315,7 +316,7 @@ fn embedded_web_issue_surface_exposes_monitor_priority_and_concurrency_controls(
         surface_js.contains("Agent settings")
             && surface_js.contains("Project Agent settings")
             && surface_js.contains("issue_monitor_configure_profile"),
-        "Issue surface must expose global Agent settings plus row shortcut configuration"
+        "Issue surface must retain row Agent settings and shortcut configuration"
     );
     assert!(
         surface_js.contains("exclusion_reason") && surface_js.contains("Unknown (${state})"),
@@ -326,20 +327,21 @@ fn embedded_web_issue_surface_exposes_monitor_priority_and_concurrency_controls(
 #[test]
 fn embedded_web_issue_monitor_allowed_labels_reuses_operator_controls() {
     let surface_js = root_js_module_source("/knowledge-kanban-surface.js");
+    let settings_js = settings_surface_js();
     assert!(
-        surface_js.contains("set_issue_monitor_allowed_labels")
-            && surface_js.contains("allowed_labels")
+        settings_js.contains("set_issue_monitor_allowed_labels")
+            && settings_js.contains("allowed_labels")
             && surface_js.contains("label_excluded_count")
             && surface_js.contains("label_excluded_issues"),
-        "Issue Monitor must edit the allowed labels and display server exclusion evidence"
+        "Settings must edit allowed labels while Issues retains server exclusion evidence"
     );
     assert!(
-        surface_js
-            .contains(r#"<details class="knowledge-monitor-labels knowledge-monitor-candidate">"#)
-            && surface_js.contains("knowledge-monitor-pool-field")
-            && surface_js.contains("Empty list allows all labels")
-            && surface_js.contains("any listed label on this terminal"),
-        "allowed labels must use existing Operator controls and explain empty/any-of admission"
+        settings_js.contains(r#"field(group("Target"), "Allowed labels", "text""#)
+            && settings_js.contains("settings-field")
+            && settings_js.contains("settings-input")
+            && !surface_js
+                .contains(r#"<details class="knowledge-monitor-labels knowledge-monitor-candidate">"#),
+        "allowed labels must use existing Operator Settings controls instead of inline Issue details"
     );
 }
 
@@ -563,11 +565,6 @@ fn embedded_web_terminal_context_menu_pastes_text_and_images() {
         "expected app.js to install the terminal context menu controller",
     );
     assert!(
-        html.contains("canvas.addEventListener(\"contextmenu\"")
-            && html.contains("event.preventDefault();"),
-        "expected non-terminal canvas contextmenu to remain suppressed",
-    );
-    assert!(
         html.contains("terminal.paste(text)"),
         "expected context menu text paste to flow through xterm paste",
     );
@@ -613,7 +610,7 @@ fn embedded_web_terminal_writes_refresh_viewport_after_xterm_parse() {
     // short-circuit on a background tab leaves xterm with stale cell
     // metrics and dead scrollback wheel until the next OS resize.
     let snapshot_write = regex::Regex::new(
-            r"(?s)createTerminalSnapshotWriteCoordinator\(\{[\s\S]*?onLatestSnapshotWritten:\s*\(\)\s*=>\s*\{[\s\S]*?try\s*\{[\s\S]*?forceTerminalViewportRefresh\(windowId,\s*\{\s*shouldPersistGeometry:\s*true\s*\}\);[\s\S]*?\}\s*finally\s*\{[\s\S]*?flushDeferredTerminalWrites\(windowId,\s*runtime\);",
+            r"(?s)createTerminalSnapshotWriteCoordinator\(\{[\s\S]*?onLatestSnapshotWritten:\s*\(\)\s*=>\s*\{[\s\S]*?try\s*\{\s*terminalOutputBatcher\.finishSnapshot\(windowId\);\s*forceTerminalViewportRefresh\(windowId,\s*\{\s*shouldPersistGeometry:\s*true\s*\}\);[\s\S]*?\}\s*finally\s*\{[\s\S]*?terminalOutputBatcher\.schedulePending\(windowId\);",
         )
         .expect("valid regex");
     let snapshot_activation = regex::Regex::new(
@@ -676,9 +673,9 @@ fn embedded_web_terminal_writes_refresh_viewport_after_xterm_parse() {
         "expected document visibility restore to re-arm visible terminal refreshes",
     );
     assert!(
-        html.contains("clearTerminalOutputBeforeSnapshot({")
-            && html.contains("clearBatchedOutput: (id) => terminalOutputBatcher.clear(id)"),
-        "expected snapshot receipt to clear every pre-boundary terminal output queue",
+        html.contains("terminalOutputBatcher.beginSnapshot(windowId);")
+            && html.contains("terminalOutputBatcher.finishSnapshot(windowId);"),
+        "expected snapshot receipt to discard old output and completion to resume its bounded suffix",
     );
     assert!(
         html.contains("terminalViewportRefreshScheduler?.clear(windowId);"),
@@ -698,21 +695,11 @@ fn embedded_web_terminal_writes_refresh_viewport_after_xterm_parse() {
             ),
             "expected terminal output refresh to avoid geometry refits on every PTY chunk",
         );
-    // SPEC-2008 camera-focus: maximize/minimize were removed. Windows always
-    // render at their own world geometry, so geometry-persist is gated purely
-    // on a real dimension change (Tile/Stack/Align). The old
-    // restore-from-minimized branch (wasMinimized / windowData.minimized) no
-    // longer exists. Issue #3364 folded the intermediate `dimensionsChanged`
-    // into `shouldPersistTerminalGeometry` (conflict suppression moved to the
-    // renderWorkspace pre-pass).
+    // Fixed panes fit the terminal grid without persisting old canvas geometry.
     assert!(
-        html.contains("const previousWidth = parseFloat(element.style.width")
-            && html.contains("const previousHeight = parseFloat(element.style.height")
-            && html.contains("const shouldPersistTerminalGeometry =")
-            && html.contains("previousWidth !== windowData.geometry.width")
-            && html.contains("scheduleTerminalFit(windowData.id, shouldPersistTerminalGeometry)"),
-        "expected terminals to persist fitted geometry to backend on window \
-             resize (Tile/Stack/Align)",
+        html.contains("scheduleTerminalFit(windowData.id, true)")
+            && html.contains("send(updateTerminalGridMessage(windowId, cols, rows))"),
+        "expected fitted terminals to update their grid in the fixed surface host",
     );
     assert!(
         !html.contains("element.classList.contains(\"minimized\")")
@@ -730,19 +717,23 @@ fn embedded_web_terminal_runtime_buffers_writes_until_initial_fit_handshake() {
     // cols/rows) get written into xterm's default 80×24 grid and
     // stay layout-locked there until the next manual resize.
     let html = frontend_bundle_source();
-    // The rAF must dispatch to completeInitialFitHandshake — keeping
-    // the handshake idempotent and gated on real layout (see helper
-    // below). Agents tabs keep a layout box while hidden; ordinary hidden
+    // The initial-fit reservation must dispatch to completeInitialFitHandshake,
+    // including when rAF stalls, keeping the handshake gated on real layout (see helper
+    // below). Works caches keep a layout box while hidden; ordinary hidden
     // windows still wait for reveal. Inlining replay before fit would
-    // defeat the deferredWrites buffer (CodeRabbit PR #2693 concern).
+    // defeat the bounded output queue (CodeRabbit PR #2693 concern).
     let create_runtime_handshake = regex::Regex::new(
-            r#"(?s)isReady: false,\s*deferredWrites: \[\],[\s\S]*?handshakeAttempts: 0,[\s\S]*?\};\s*terminalMap\.set\(windowId, runtime\);\s*decoderMap\.set\(windowId, new TextDecoder\(\)\);[\s\S]*?requestAnimationFrame\(\(\) => completeInitialFitHandshake\(windowId\)\);"#,
+            r#"(?s)isReady: false,[\s\S]*?handshakeAttempts: 0,[\s\S]*?\};\s*terminalMap\.set\(windowId, runtime\);\s*decoderMap\.set\(windowId, new TextDecoder\(\)\);[\s\S]*?scheduleInitialFitHandshake\(windowId\);\s*return runtime;"#,
+        )
+        .expect("valid regex");
+    let scheduled_handshake = regex::Regex::new(
+            r#"(?s)function scheduleInitialFitHandshake\(windowId\) \{[\s\S]*?runtime\.initialFitCancel = scheduleTerminalInitialFit\(\(\) => \{\s*runtime\.initialFitCancel = null;\s*if \(terminalMap\.get\(windowId\) === runtime\) completeInitialFitHandshake\(windowId\);"#,
         )
         .expect("valid regex");
     // The helper must (a) bail on hidden windows outside the measurable
-    // Agents tab layout, and (b) mark ready only after activation succeeds.
+    // Works cache layout, and (b) mark ready only after activation succeeds.
     let handshake_helper = regex::Regex::new(
-            r#"(?s)function completeInitialFitHandshake\(windowId\) \{[\s\S]*?if \(!runtime \|\| runtime\.isReady\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?if \(!\(agentsHost && agentsSurface\?\.contains\(windowId\)\) && !canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?const activation = runTerminalActivationSequence\(\{[\s\S]*?\}\);\s*if \(!activation\.ran\) \{[\s\S]*?retryInitialFitHandshake\(windowId, runtime,[\s\S]*?return;[\s\S]*?\}\s*runtime\.handshakeAttempts = 0;\s*runtime\.isReady = true;[\s\S]*?if \(pendingSnapshotMap\.has\(windowId\)\) \{\s*runtime\.snapshotWriteCoordinator\.start\(\);\s*\}[\s\S]*?const pending = pendingOutputMap\.get\(windowId\);[\s\S]*?flushDeferredTerminalWrites\(windowId, runtime\);"#,
+            r#"(?s)function completeInitialFitHandshake\(windowId\) \{[\s\S]*?if \(!runtime \|\| runtime\.isReady\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?if \(!\(worksHost && worksSurface\?\.contains\(windowId\)\) && !canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?const activation = runTerminalActivationSequence\(\{[\s\S]*?\}\);\s*if \(!activation\.ran\) \{[\s\S]*?retryInitialFitHandshake\(windowId, runtime,[\s\S]*?return;[\s\S]*?\}\s*runtime\.handshakeAttempts = 0;\s*runtime\.isReady = true;[\s\S]*?if \(pendingSnapshotMap\.has\(windowId\)\) \{\s*runtime\.snapshotWriteCoordinator\.start\(\);\s*\}[\s\S]*?terminalOutputBatcher\.schedulePending\(windowId\);"#,
         )
         .expect("valid regex");
     // Hidden → visible activation path also needs to drive the
@@ -753,7 +744,7 @@ fn embedded_web_terminal_runtime_buffers_writes_until_initial_fit_handshake() {
         )
         .expect("valid regex");
     let write_gate = regex::Regex::new(
-            r#"(?s)function writeOutput\(windowId, base64\) \{[\s\S]*?if \(\s*runtime\.isReady === false\s*\|\|\s*runtime\.snapshotWriteCoordinator\?\.shouldDeferOutput\(\) === true\s*\) \{\s*runtime\.deferredWrites\.push\(base64\);\s*return;\s*\}"#,
+            r#"(?s)canWrite: \(windowId\) => \{\s*const runtime = terminalMap\.get\(windowId\);\s*return runtime\?\.isReady === true\s*&& runtime\.snapshotWriteCoordinator\?\.shouldDeferOutput\(\) !== true"#,
         )
         .expect("valid regex");
     let snapshot_gate = regex::Regex::new(
@@ -766,17 +757,25 @@ fn embedded_web_terminal_runtime_buffers_writes_until_initial_fit_handshake() {
             "expected createTerminalRuntime to dispatch its initial-fit handshake through completeInitialFitHandshake instead of inlining the replay (FR-057, CodeRabbit fix)",
         );
     assert!(
+            scheduled_handshake.is_match(html),
+            "expected the frame/timer reservation to dispatch the initial-fit handshake only for the current runtime (Issue #5016 CFIT)",
+        );
+    assert!(
             handshake_helper.is_match(html),
-            "expected completeInitialFitHandshake to defer ordinary hidden windows, permit measurable Agents tabs, and only set isReady=true after activation succeeds (FR-057)",
+            "expected completeInitialFitHandshake to defer ordinary hidden windows, permit measurable Works caches, and only set isReady=true after activation succeeds (FR-057)",
         );
     assert!(
             reveal_completes_handshake.is_match(html),
-            "expected scheduleTerminalFocusActivation to invoke completeInitialFitHandshake on hidden -> visible so windows created hidden can still drain deferredWrites (FR-057, CodeRabbit fix)",
+            "expected scheduleTerminalFocusActivation to invoke completeInitialFitHandshake on hidden -> visible so windows created hidden can drain bounded output (FR-057, CodeRabbit fix)",
         );
     assert!(
             write_gate.is_match(html),
-            "expected writeOutput to push to runtime.deferredWrites when runtime.isReady === false (FR-057)",
+            "expected the bounded queue to write only after real initial fit and snapshot completion (FR-057)",
         );
+    assert!(
+        !html.contains("pendingOutputMap") && !html.contains("deferredWrites"),
+        "expected one bounded RAW queue across missing, unfit and hidden terminals",
+    );
     assert!(
             snapshot_gate.is_match(html),
             "expected replaceTerminalSnapshot to re-queue into pendingSnapshotMap when runtime.isReady === false (FR-057)",
@@ -805,7 +804,7 @@ fn embedded_web_terminal_runtime_buffers_writes_until_initial_fit_handshake() {
     // resize-recovers-on-move signature documented in
     // .gwt/work/memory.md 2026-05-13.
     let layout_box_gate = regex::Regex::new(
-            r#"(?s)function completeInitialFitHandshake\(windowId\) \{[\s\S]*?if \(!\(agentsHost && agentsSurface\?\.contains\(windowId\)\) && !canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?if \(!terminalContainerHasLayoutBox\(windowId\)\) \{\s*retryInitialFitHandshake\(windowId, runtime,[\s\S]*?\);\s*return;\s*\}"#,
+            r#"(?s)function completeInitialFitHandshake\(windowId\) \{[\s\S]*?if \(!\(worksHost && worksSurface\?\.contains\(windowId\)\) && !canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?if \(!terminalContainerHasLayoutBox\(windowId\)\) \{\s*retryInitialFitHandshake\(windowId, runtime,[\s\S]*?\);\s*return;\s*\}"#,
         )
         .expect("valid regex");
     assert!(
@@ -928,205 +927,6 @@ fn embedded_web_plain_redraw_does_not_clear_authoritative_pending_refresh() {
         !html[scheduler_start..force_refresh_start].contains("viewportRefreshPending = false"),
         "plain scheduled redraw must not clear authoritative pending refresh state (SPEC-2008 FR-122)",
     );
-}
-
-#[test]
-fn embedded_web_window_pointer_events_finalize_resize_on_mismatch() {
-    // SPEC-2008 Phase 26.C / FR-059 — Windows WebView2 occasionally
-    // emits pointerup / pointercancel with a pointerId that does not
-    // match the one captured at pointerdown. The previous handlers
-    // gated finishWindowResize behind a strict pointerId equality
-    // check, so a mismatched pointerup left resizeState alive until
-    // the 30 second staleness guard finally cleaned it up. This
-    // contract pins the fallback: any window-level pointerup or
-    // pointercancel that fires while a resize is pending must finalize
-    // the original gesture immediately via forceResetResizeState.
-    let html = frontend_bundle_source();
-    let pointerup_fallback = regex::Regex::new(
-            r#"(?s)window\.addEventListener\("pointerup", \(event\) => \{[\s\S]*?if \(resizeState\) \{[\s\S]*?if \(resizeState\.pointerId === event\.pointerId\) \{[\s\S]*?finishWindowResize\(event\.pointerId,\s*event\);[\s\S]*?\} else \{[\s\S]*?forceResetResizeState\("window pointerup pointerId mismatch"\);"#,
-        )
-        .expect("valid regex");
-    let pointercancel_fallback = regex::Regex::new(
-            r#"(?s)window\.addEventListener\("pointercancel", \(event\) => \{[\s\S]*?if \(resizeState && resizeState\.pointerId !== event\.pointerId\) \{[\s\S]*?forceResetResizeState\("window pointercancel pointerId mismatch"\);[\s\S]*?return;[\s\S]*?\}[\s\S]*?finishWindowResize\(event\.pointerId,\s*event\);"#,
-        )
-        .expect("valid regex");
-
-    assert!(
-            pointerup_fallback.is_match(html),
-            "expected window pointerup to fall back to forceResetResizeState when pointerId mismatches (FR-059)",
-        );
-    assert!(
-            pointercancel_fallback.is_match(html),
-            "expected window pointercancel to fall back to forceResetResizeState when pointerId mismatches (FR-059)",
-        );
-
-    let force_reset_start = html
-        .find("function forceResetResizeState(reason)")
-        .expect("forceResetResizeState must exist");
-    let next_function_start = html[force_reset_start..]
-        .find("function scheduleTerminalViewportRefresh(")
-        .map(|offset| force_reset_start + offset)
-        .expect("scheduleTerminalViewportRefresh must follow forceResetResizeState");
-    let force_reset_body = &html[force_reset_start..next_function_start];
-    assert!(
-        force_reset_body.contains("finishWindowResize(previous.pointerId);"),
-        "pointerId mismatch must finalize and persist the latest resize geometry",
-    );
-    assert!(
-        !force_reset_body.contains("clearLocalGeometryEdit("),
-        "pointerId mismatch must not discard the local geometry guard before a stale snapshot arrives",
-    );
-}
-
-#[test]
-fn embedded_web_terminal_resize_coalesces_fit_and_restores_focus_on_release() {
-    let html = frontend_bundle_source();
-    let direct_pointermove_fit = regex::Regex::new(
-            r"element\.style\.height = `\$\{clamp\((?s:.*?)\)\}px`;\s*fitTerminal\(resizeState\.id,\s*false\);",
-        )
-        .expect("valid regex");
-    // Issue #3364 — the finalizer commits through the shared
-    // commitWindowGeometryGesture path (guard + optimistic model/minimap
-    // sync + unconditional send) instead of a raw sendGeometry.
-    let resize_finalizer = regex::Regex::new(
-            r"function finishWindowResize\(pointerId,\s*event = null\) \{(?s:.*?)syncResizeStatePointerEvent\(resizeState,\s*event\);(?s:.*?)cancelTerminalResizeFit\(\);(?s:.*?)fitTerminal\(resizeState\.id,\s*false\);(?s:.*?)commitWindowGeometryGesture\((?s:.*?)runtime\?\.terminal\.focus\(\);(?s:.*?)resizeState = null;",
-        )
-        .expect("valid regex");
-
-    assert!(
-        html.contains("function scheduleTerminalResizeFit(windowId)")
-            && html.contains("function cancelTerminalResizeFit()"),
-        "expected terminal resize fits to be requestAnimationFrame-coalesced",
-    );
-    assert!(
-        !direct_pointermove_fit.is_match(html),
-        "expected pointermove resize to avoid direct terminal fit/geometry churn",
-    );
-    assert!(
-        resize_finalizer.is_match(html),
-        "expected resize finalizer to cancel pending fit, sync once, and restore terminal focus",
-    );
-}
-
-#[test]
-fn embedded_web_window_resize_cancellation_uses_shared_finalizer() {
-    let html = frontend_bundle_source();
-
-    assert!(
-        html.contains("function finishWindowResize(pointerId, event = null)"),
-        "expected all floating window resize completion paths to share one finalizer",
-    );
-    assert!(
-        html.contains("finishWindowResize(event.pointerId, event);"),
-        "expected pointerup resize path to use the shared finalizer with release coordinates",
-    );
-    assert!(
-        html.contains("window.addEventListener(\"pointercancel\", (event) => {")
-            && html.contains("finishWindowResize(event.pointerId, event);"),
-        "expected pointercancel to finalize resize state with release coordinates",
-    );
-    // SPEC-2008 camera-focus follow-up: the per-window resize handle is back, so
-    // its `lostpointercapture` listener funnels into the shared finalizer too.
-    assert!(
-        html.contains("resizeHandle.addEventListener(\"lostpointercapture\", (event) => {")
-            && html.contains("finishWindowResize(event.pointerId, event);"),
-        "expected lost pointer capture to finalize resize state with release coordinates",
-    );
-    assert!(
-        html.contains("if (!terminalMap.has(windowId)) {\n          return;\n        }"),
-        "expected terminal resize fit scheduling to skip non-terminal panel windows",
-    );
-}
-
-/// SPEC-2014 Phase C4: 高頻度な pointermove を直接 DOM mutation に
-/// 流し込まず、`requestAnimationFrame` で 1 フレーム 1 回に絞り込んで
-/// いることを bundle 上で固定する。Windows WebView2 で layout reflow が
-/// pointermove 速度に追従できず render thread が枯渇する症状を回避するため。
-#[test]
-fn embedded_web_resize_pointermove_is_coalesced_via_request_animation_frame() {
-    let html = frontend_bundle_source();
-    let direct_pointermove_width = regex::Regex::new(
-            r"if\s*\(resizeState && resizeState\.pointerId === event\.pointerId\)\s*\{\s*const element = windowMap\.get\(resizeState\.id\)",
-        )
-        .expect("valid regex");
-    assert!(
-            !direct_pointermove_width.is_match(html),
-            "expected pointermove resize handler to stop directly mutating element.style; the coalesced applyResizePointermove path must replace it"
-        );
-    assert!(
-        html.contains("function scheduleResizePointermoveApply()"),
-        "expected a rAF scheduler that coalesces pointermove-driven DOM writes"
-    );
-    assert!(
-        html.contains("function cancelResizePointermoveApply()"),
-        "expected the coalescing scheduler to be cancellable on resize teardown"
-    );
-    assert!(
-        html.contains("function applyResizePointermove(state)"),
-        "expected a pure helper that translates resizeState into element.style.width/height"
-    );
-    assert!(
-        html.contains("resizeState.latestClientX = event.clientX;"),
-        "expected pointermove to store the latest client coordinates on resizeState"
-    );
-    assert!(
-            html.contains("scheduleResizePointermoveApply();"),
-            "expected pointermove to schedule the coalesced apply rather than write to the DOM directly"
-        );
-    assert!(
-        html.contains("resizeState.applyFrame = requestAnimationFrame(")
-            && html.contains("cancelAnimationFrame(resizeState.applyFrame);")
-            && html.contains("resizeState.applyFrame = null;"),
-        "expected resizeState to carry an applyFrame slot so the rAF handle can be cancelled"
-    );
-}
-
-/// SPEC-2014 Phase C1: Windows WebView2 で pointerup / pointercancel /
-/// lostpointercapture のいずれも届かないケースで Wizard / Terminal が永久に
-/// 固まらないよう、resizeState には auto-clear する staleness guard と
-/// 二重 resize 検知時の forceReset が組み込まれていなければならない。
-///
-/// SPEC-2008 camera-focus follow-up: per-window manual resize (resize handle +
-/// resize-START session 構築) はユーザー要望で復活した。framing は camera で
-/// 行うが、端を掴んでの手動リサイズも残す。したがって staleness guard / force
-/// reset の安全網と resize-START 経路の両方が bundle に存在しなければならない。
-#[test]
-fn embedded_web_resize_state_guards_against_lost_pointer_end_events() {
-    let html = frontend_bundle_source();
-
-    assert!(
-            html.contains("function scheduleResizeStalenessGuard(pointerId)"),
-            "expected a staleness guard scheduler that triggers when pointerup/cancel/lostpointercapture all miss"
-        );
-    assert!(
-        html.contains("function cancelResizeStalenessGuard()"),
-        "expected the staleness guard to be cancellable on the normal resize teardown path"
-    );
-    assert!(
-        html.contains("function forceResetResizeState(reason)"),
-        "expected a force-reset helper that clears stale resizeState when a new resize starts"
-    );
-    assert!(
-            html.contains(
-                "forceResetResizeState(\"new resize started before previous one finished\");",
-            ),
-            "expected new pointerdown to force-reset any leaked previous resizeState before opening a new session"
-        );
-    assert!(
-            html.contains("startedAt: performance.now(),"),
-            "expected resizeState to carry a startedAt timestamp so the staleness guard can log elapsed time"
-        );
-    assert!(
-        html.contains("stalenessTimer: scheduleResizeStalenessGuard(event.pointerId),"),
-        "expected the resize start path to schedule the staleness guard"
-    );
-    assert!(
-            html.contains("try {\n              resizeHandle.setPointerCapture(event.pointerId);")
-                && html.contains(
-                    "console.warn(\n                \"[resize] setPointerCapture failed, falling back to window-bound pointer events\"",
-                ),
-            "expected setPointerCapture to be wrapped in try/catch with a warning fallback for WebView2 edge cases"
-        );
 }
 
 #[test]
@@ -1303,6 +1103,7 @@ fn embedded_web_static_asset_manifest_is_complete() {
         ("/styles/tokens.css", CSS, MUTABLE),
         ("/styles/typography.css", CSS, MUTABLE),
         ("/styles/components.css", CSS, MUTABLE),
+        ("/styles/works-agents.css", CSS, MUTABLE),
         ("/styles/app.css", CSS, MUTABLE),
         ("/assets/fonts/MonaSans.woff2", FONT, IMMUTABLE),
         ("/assets/fonts/HubotSans-Regular.woff2", FONT, IMMUTABLE),
@@ -1383,99 +1184,57 @@ fn embedded_web_root_js_modules_use_js_content_type_and_mutable_cache() {
 }
 
 #[test]
-fn embedded_web_canvas_wheel_routing_is_installed_through_named_handler() {
-    let html = frontend_bundle_source();
-
-    assert!(
-        html.contains("function handleCanvasWheelEvent(event)"),
-        "expected canvas wheel routing to live in a named handler",
-    );
-    assert!(
-        html.contains("function installCanvasWheelRouting()"),
-        "expected wheel routing bootstrap to be isolated behind an installer",
-    );
-    assert!(
-            html.contains("document.addEventListener(\"wheel\", handleCanvasWheelEvent, { capture: true, passive: false })"),
-            "expected capture-phase wheel routing to be installed through the named handler",
-        );
-}
-
-#[test]
-fn embedded_web_canvas_wheel_gesture_classifier_is_served_and_imported() {
+fn embedded_web_fixed_surfaces_retire_canvas_assets_and_interactions() {
+    let html = frontend_styles_bundle();
     let js = app_js();
-    let asset = root_js_module_assets()
+    let paths: Vec<_> = root_js_module_assets()
         .iter()
-        .find(|asset| asset.path == "/canvas-wheel-gesture.js")
-        .expect("expected canvas wheel gesture classifier asset");
-
-    assert_eq!(asset.marker, "createCanvasWheelGestureClassifier");
-    assert!(
-        js.contains("from \"/canvas-wheel-gesture.js\""),
-        "expected app.js to import the canvas wheel gesture classifier",
-    );
-    assert!(
-        js.contains("canvasWheelGestureClassifier.classify(event)"),
-        "expected canvas wheel routing to classify the whole wheel gesture before routing",
-    );
-}
-
-#[test]
-fn embedded_web_canvas_stage_keeps_transform_layer_hint_opt_in() {
-    let html = frontend_styles_bundle();
-
-    assert!(
-        html.contains(".canvas-stage"),
-        "expected embedded html to define the canvas stage surface",
-    );
-    assert!(
-        !html.contains("will-change: transform"),
-        "expected canvas stage css to avoid pinning the transform layer hint",
-    );
-}
-
-#[test]
-fn embedded_web_canvas_apply_viewport_debounces_raster_hint_reset() {
-    let js = app_js();
-    let apply_viewport = regex::Regex::new(
-            r#"(?s)function applyViewport\(\)\s*\{\s*stage\.style\.transform = `translate\(\$\{viewport\.x\}px, \$\{viewport\.y\}px\) scale\(\$\{viewport\.zoom\}\)`;\s*applyWorldGridViewport\(\);\s*stage\.style\.willChange = "transform";\s*if \(viewportRasterTimer !== null\) \{\s*clearTimeout\(viewportRasterTimer\);\s*\}\s*viewportRasterTimer = setTimeout\(\(\) => \{\s*stage\.style\.willChange = "auto";\s*viewportRasterTimer = null;\s*\}, 300\);[\s\S]*?\}"#,
-        )
-        .expect("valid regex");
-
-    assert!(
-        js.contains("let viewportRasterTimer = null;"),
-        "expected viewport apply flow to keep a dedicated raster debounce timer",
-    );
-    assert!(
-            apply_viewport.is_match(js),
-            "expected viewport application to opt into the transform layer only during motion and reset it after 300ms",
+        .map(|asset| asset.path)
+        .collect();
+    assert!(html.contains("class=\"surface-area\""));
+    assert!(html.contains("id=\"split-surfaces\""));
+    for legacy in [
+        "id=\"canvas\"",
+        "canvas-stage",
+        "canvas-world-grid",
+        "fleet-minimap",
+        "canvas-empty-state",
+        ".resize-handle",
+        ".dock-target",
+    ] {
+        assert!(
+            !html.contains(legacy),
+            "retired canvas surface must be absent: {legacy}"
         );
-}
-
-#[test]
-fn embedded_web_canvas_grid_tracks_viewport_as_world_space_cue() {
-    let html = frontend_styles_bundle();
-    let js = app_js();
-
-    assert!(
-        html.contains("id=\"canvas-world-grid\""),
-        "expected canvas to expose a dedicated world-space grid layer",
-    );
-    assert!(
-        html.contains(".canvas-world-grid"),
-        "expected embedded html to define the world-space grid CSS",
-    );
-    assert!(
-        js.contains("const worldGrid = document.getElementById(\"canvas-world-grid\")"),
-        "expected frontend to bind the world-space grid element",
-    );
-    assert!(
-        js.contains("function applyWorldGridViewport()"),
-        "expected grid viewport sync to live behind a named helper",
-    );
-    assert!(
-        js.contains("applyWorldGridViewport();"),
-        "expected applyViewport to update the grid whenever viewport state changes",
-    );
+    }
+    for asset in [
+        "/canvas-wheel-gesture.js",
+        "/fleet-minimap.js",
+        "/window-docking.js",
+        "/camera-framing.js",
+        "/window-geometry-sync.js",
+        "/viewport-persist-throttle.js",
+        "/viewport-sync.js",
+    ] {
+        assert!(
+            !paths.contains(&asset),
+            "retired canvas asset must be unregistered: {asset}"
+        );
+    }
+    for legacy in [
+        "handleCanvasWheelEvent",
+        "installCanvasWheelRouting",
+        "applyViewport",
+        "applyWorldGridViewport",
+        "finishWindowResize",
+        "resize-handle",
+        "data-action=\"ungroup\"",
+    ] {
+        assert!(
+            !js.contains(legacy),
+            "retired canvas interaction must be absent: {legacy}"
+        );
+    }
 }
 
 #[test]
@@ -1545,7 +1304,7 @@ fn embedded_web_project_bar_omits_index_status_badge() {
 }
 
 #[test]
-fn embedded_web_window_state_visualization_normalizes_runtime_state_and_separates_geometry() {
+fn embedded_web_window_state_visualization_uses_runtime_state_without_canvas_geometry() {
     let js = app_js();
     // SPEC-3015: the pure runtime-state helpers moved to the extracted
     // window-runtime-state.js root module; app.js keeps the call sites.
@@ -1556,23 +1315,14 @@ fn embedded_web_window_state_visualization_normalizes_runtime_state_and_separate
         "expected the extracted module to expose a runtime-state normalization helper",
     );
     assert!(
-        js.contains("function windowGeometryLabel(windowData)"),
-        "expected embedded js to expose a dedicated geometry label helper",
+        !js.contains("function windowGeometryLabel(windowData)"),
+        "fixed rail surfaces must not expose a saved canvas geometry label helper",
     );
     assert!(
         runtime_js.contains("export function windowRuntimeLabel(status)"),
         "expected the extracted module to expose a dedicated runtime label helper",
     );
-    // SPEC-3064 Phase 3 (E7): the Window List dropdown renderer moved to the
-    // project shell surface; the geometry/runtime label separation is pinned
-    // against the extracted module while windowGeometryLabel stays in app.js.
     let shell_js = project_shell_surface_js();
-    assert!(
-            shell_js.contains("const geometryLabel = windowGeometryLabel(entry);")
-                && shell_js.contains("const runtimeState = runtimeStateForWindow(entry);")
-                && shell_js.contains("const runtimeLabel = windowRuntimeLabel(runtimeState);"),
-            "expected window list rendering to derive geometry and runtime labels through separate helpers",
-        );
     assert!(
         !js.contains("function windowStateLabel(windowData)")
             && !shell_js.contains("function windowStateLabel(windowData)"),
@@ -1603,10 +1353,9 @@ fn embedded_web_agent_color_styles_define_palette_and_accent_surfaces() {
         "expected embedded html to map serialized AgentColor values to the shared CSS variable",
     );
     assert!(
-            html.contains(".workspace-window[data-agent-color]::before")
-                && html.contains(".window-list-row[data-agent-color]::before"),
-            "expected embedded html to expose agent-color accent bars for workspace windows and the window list",
-        );
+        html.contains(".workspace-window[data-agent-color]::before"),
+        "expected embedded html to expose agent-color accent bars for workspace windows",
+    );
     assert!(
         html.contains(".agent-dot"),
         "expected embedded html to style the shared agent color dot surface",
@@ -1621,10 +1370,6 @@ fn embedded_web_agent_color_is_bound_for_windows_wizard_and_board() {
         html.contains("if (windowData.agent_color)")
             && html.contains("element.dataset.agentColor = windowData.agent_color"),
         "expected embedded bundle to bind workspace window colors from windowData.agent_color",
-    );
-    assert!(
-        html.contains("row.dataset.agentColor = entry.agent_color"),
-        "expected embedded bundle to bind window list rows from entry.agent_color",
     );
     assert!(
         html.contains("card.dataset.agentColor = entry.agent_color"),
@@ -1711,26 +1456,16 @@ fn embedded_web_window_role_badges_identify_every_window_surface() {
     let js = app_js();
 
     assert!(
-        html.contains(".window-role-badge") && html.contains(".window-list-role"),
-        "expected role badge styling for titlebars and the window list",
+        html.contains(".window-role-badge"),
+        "expected role badge styling for titlebars",
     );
     assert!(
         js.contains("function presetRoleLabel(preset)"),
         "expected a shared presetRoleLabel helper",
     );
     for label in [
-        "Shell",
-        "Claude",
-        "Codex",
-        "Agent",
-        "File Tree",
-        "Branches",
-        "Settings",
-        "Profile",
-        "Logs",
-        "Issue",
+        "Shell", "Claude", "Codex", "Agent", "Branches", "Settings", "Profile", "Logs", "Issue",
         "Board",
-        "PR",
     ] {
         assert!(
             js.contains(label),
@@ -1792,13 +1527,8 @@ fn embedded_web_window_worktree_form_module_is_registered_and_wired() {
         "app.js must put data-worktree-form and the titlebar worktree badge on workspace windows"
     );
     assert!(
-        shell_js.contains("window-list-worktree"),
-        "window list rows must render worktree form"
-    );
-    assert!(
-        styles.contains(".window-worktree-badge")
-            && styles.contains(".fleet-minimap__cell[data-worktree-symbol]::before"),
-        "titlebar/list/minimap worktree badge styling must ship in embedded CSS"
+        styles.contains(".window-worktree-badge"),
+        "titlebar worktree badge styling must ship in embedded CSS"
     );
     let consumer_wiring = format!("{js}\n{shell_js}");
     for legacy in [
@@ -1825,10 +1555,17 @@ fn embedded_web_window_worktree_form_module_is_registered_and_wired() {
 }
 
 #[test]
-fn embedded_web_apply_status_keeps_window_list_and_badges_in_sync() {
+fn embedded_web_apply_status_keeps_catalog_and_badges_in_sync() {
     let js = app_js();
+    let apply_status_source = js
+        .split("function applyStatus(")
+        .nth(1)
+        .expect("applyStatus function")
+        .split("\n      function ")
+        .next()
+        .expect("applyStatus body");
     let apply_status = regex::Regex::new(
-            r#"(?s)function applyStatus\(windowId,\s*status,\s*detail\)\s*\{.*?const runtimeState = normalizeWindowRuntimeState\(status,\s*windowData\?\.preset\);.*?windowRuntimeStateMap\.set\(windowId,\s*status\);.*?label\.textContent = windowRuntimeLabel\(runtimeState\);.*?renderWindowList\(\);"#,
+            r#"(?s)const runtimeState = normalizeWindowRuntimeState\(status,\s*windowData\?\.preset\);.*?windowRuntimeStateMap\.set\(windowId,\s*status\);\s*publishWindowCatalogRuntime\(windowId, status\);.*?if \(!element\) \{\s*return;.*?label\.textContent = windowRuntimeLabel\(runtimeState\);"#,
         )
         .expect("valid regex");
 
@@ -1839,42 +1576,14 @@ fn embedded_web_apply_status_keeps_window_list_and_badges_in_sync() {
         "expected embedded js to keep one source-state map, normalize display consumers, and expose raw focus state",
     );
     assert!(
-            apply_status.is_match(js),
-            "expected applyStatus to retain source state, normalize display state once, and re-render the window list",
+            apply_status.is_match(apply_status_source),
+            "expected applyStatus to publish shared catalog state before an unmounted return and update mounted badges",
         );
-}
-
-#[test]
-fn embedded_web_window_list_selection_frames_window_via_camera() {
-    // SPEC-3064 Phase 3 (E7): the Window List dropdown renderer moved from
-    // app.js to the project shell surface; the selection contract is pinned
-    // against the extracted module.
-    //
-    // SPEC-2008 camera-focus / FR-094: maximize/minimize/restore were removed.
-    // Selecting a window from the switcher flies the local camera to frame the
-    // chosen window (frameWindow), which applies local focus + sends
-    // focus_window for highlight — there is no center/restore handshake.
-    let js = project_shell_surface_js();
-
-    assert!(
-        js.contains("frameWindow(entry.id);"),
-        "expected window list selection to frame the chosen window via the camera",
-    );
-    assert!(
-        !js.contains("send({ kind: \"restore_window\", id: entry.id });")
-            && !js.contains("focusWindowRemotely(entry.id, { center: true });"),
-        "expected window list selection to drop the maximize/restore + center handshake \
-             under camera-focus",
-    );
 }
 
 #[test]
 fn embedded_web_programmatic_terminal_focus_reactivates_xterm_after_render() {
     let js = app_js();
-    let render_activation = regex::Regex::new(
-            r#"(?s)const topmostId = topmostWindowId\(workspace\);.*?focusWindowLocally\(topmostId\);.*?scheduleTerminalFocusActivation\(topmostId,\s*\{[\s\S]*?shouldPersistGeometry:\s*false,?[\s\S]*?\}\);"#,
-        )
-        .expect("valid regex");
     // SPEC-2008 Phase 26.B / FR-056: activation must delegate to
     // runTerminalActivationSequence so the render-before-fit ordering
     // is enforced. The previous Phase 24 ordering (fitTerminal → then
@@ -1901,10 +1610,6 @@ fn embedded_web_programmatic_terminal_focus_reactivates_xterm_after_render() {
             activation_helper.is_match(js),
             "expected programmatic terminal activation to refit, refresh, pass computed shouldFocus, and opt into grid-change geometry sync after render",
         );
-    assert!(
-            render_activation.is_match(js),
-            "expected workspace render to reactivate the topmost terminal without echoing geometry into backend resize broadcasts",
-        );
 }
 
 #[test]
@@ -1912,25 +1617,28 @@ fn embedded_web_socket_protocol_wiring_uses_named_handlers() {
     let html = frontend_bundle_source();
 
     assert!(
-        html.contains("function handleSocketOpen()"),
+        html.contains("function handleSocketOpen(recoverSnapshots = false)"),
         "expected socket open flow to live in a named handler",
     );
+
     assert!(
         html.contains("function handleSocketMessage(event)"),
         "expected socket message flow to live in a named handler",
     );
     assert!(
-        html.contains("function handleSocketClose()"),
+        html.contains("function handleSocketClose(recoverSnapshots = false)"),
         "expected socket close flow to live in a named handler",
     );
     assert!(
-        html.contains("function installSocketEventHandlers(activeSocket)"),
+        html.contains(
+            "function installSocketEventHandlers(activeSocket, recoverSnapshots = false)"
+        ),
         "expected socket listener registration to be isolated behind an installer",
     );
     assert!(
-        html.contains("[\"open\", handleSocketOpen]")
+        html.contains("[\"open\", () => handleSocketOpen(recoverSnapshots)]")
             && html.contains("[\"message\", handleSocketMessage]")
-            && html.contains("[\"close\", handleSocketClose]")
+            && html.contains("[\"close\", () => handleSocketClose(recoverSnapshots)]")
             && html.contains("activeSocket.addEventListener(kind, (event) => {")
             && html.contains("if (socket === activeSocket) handler(event);"),
         "expected named socket handlers to ignore events from replaced connections",
@@ -1940,21 +1648,21 @@ fn embedded_web_socket_protocol_wiring_uses_named_handlers() {
 #[test]
 fn embedded_web_socket_open_replays_frontend_ready_before_flushing_pending_messages() {
     let html = frontend_bundle_source();
-    // Readiness must precede queue replay, and replay must match the immutable
-    // connection scope. Other projects retain their own pending messages.
+    // Readiness and the ephemeral attention report precede queue replay, and
+    // replay must match the immutable connection scope.
     let open_flow = regex::Regex::new(
-        r#"function handleSocketOpen\(\)\s*\{[\s\S]*?setConnectionState\(true\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*recoveryCenterController\?\.reconnect\(\);\s*for \(let index = 0; index < pendingMessages\.length;\) \{\s*const pending = pendingMessages\[index\];\s*if \(pending\.projectKey !== socketProjectKey\) \{\s*index \+= 1;\s*continue;\s*\}\s*pendingMessages\.splice\(index, 1\);\s*socket\.send\(JSON\.stringify\(pending\.message\)\);\s*\}"#,
+        r#"function handleSocketOpen\(recoverSnapshots = false\)\s*\{[\s\S]*?setConnectionState\(true, recoverSnapshots\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*closeProjectController\.reconnect\(\);\s*if \(socketProjectKey\) projectPageMetadata\.reportAttention\(\);\s*recoveryCenterController\?\.reconnect\(\);\s*for \(let index = 0; index < pendingMessages\.length;\) \{\s*const pending = pendingMessages\[index\];\s*if \(pending\.projectKey !== socketProjectKey\) \{\s*index \+= 1;\s*continue;\s*\}\s*pendingMessages\.splice\(index, 1\);\s*if \(recoverSnapshots === true && pending\.message\.kind === "load_knowledge_bridge"\) \{\s*const state = knowledgeBridgeStateMap\.get\(pending\.message\.id\);\s*if \(state\?\.loadQueued && state\.loadRequestId === pending\.message\.request_id\s*&& \(activeWorkspace\(\)\?\.windows \|\| \[\]\)\.some\(entry => entry\.id === pending\.message\.id\)\) continue;\s*\}\s*socket\.send\(JSON\.stringify\(pending\.message\)\);\s*\}"#,
     )
     .expect("valid regex");
 
     assert!(
-        html.contains("function connectSocket()"),
+        html.contains("function connectSocket(force = false)"),
         "expected socket transport bootstrap helper in embedded html",
     );
     assert!(
             html.contains("socket = projectKey ? new WebSocket(websocketUrl(projectKey)) : hubSocket;")
                 && html.contains("setConnectionState(false);")
-                && html.contains("installSocketEventHandlers(socket);"),
+                && html.contains("installSocketEventHandlers(socket, force === true);"),
             "expected socket bootstrap to create the websocket, reset connection state, and install handlers",
         );
     assert!(
@@ -1977,24 +1685,35 @@ fn embedded_web_socket_open_replays_frontend_ready_before_flushing_pending_messa
 #[test]
 fn embedded_web_workspace_state_announces_startup_auto_resume_ready_after_render() {
     let html = frontend_bundle_source();
-    let readiness_flow = regex::Regex::new(
-            r#"case\s+"workspace_state":\s*\{[\s\S]*?projectWorkspaceShell\.renderAppState\(event\.workspace\);[\s\S]*?sendStartupAutoResumeReady\(\);[\s\S]*?break;"#,
-        )
-        .expect("valid regex");
+    let subscription = js_braced_block_after(
+        html,
+        "workspaceStateModel.subscribe(state => state, snapshot => ",
+    )
+    .expect("shared workspace state subscription");
+    let mut remaining = subscription;
+    for step in [
+        "projectError = \"\";",
+        "frontendUnits.projectWorkspaceShell.renderAppState(snapshot.workspace, true);",
+        "projectPageMetadata.setProjectName(activeProjectTab()?.title);",
+        "updatePmLauncher(activeWorkspace());",
+        "resolvePendingWindowFrames();",
+        "sendStartupAutoResumeReady();",
+        "startupMetrics.onWorkspaceRendered();",
+    ] {
+        remaining = remaining
+            .split_once(step)
+            .unwrap_or_else(|| panic!("workspace subscription must preserve ordered step: {step}"))
+            .1;
+    }
 
     assert!(
         html.contains("function sendStartupAutoResumeReady()"),
         "expected a named one-shot startup auto-resume readiness helper",
     );
     assert!(
-        html.contains("kind: \"startup_auto_resume_ready\"")
-            && html.contains("bounds: visibleBounds()"),
-        "expected readiness payload to carry the current visible canvas bounds",
+        html.contains("kind: \"startup_auto_resume_ready\""),
+        "expected readiness to announce the mounted surfaces without layout coordinates",
     );
-    assert!(
-            readiness_flow.is_match(html),
-            "expected workspace_state hydration to render before announcing startup auto-resume readiness",
-        );
 }
 
 #[test]
@@ -2025,13 +1744,10 @@ fn embedded_web_websocket_contract_stays_host_neutral_for_browser_and_native_mod
 #[test]
 fn embedded_web_workspace_state_renders_active_workspace_through_app_state_helper() {
     let html = frontend_bundle_source();
-    // SPEC-2359 US-37: workspace_state case wraps in a block to
-    // populate the Workspace Overview Completed column from
-    // event.workspace.tabs[active].workspace.work_items before
-    // breaking. Tolerate the optional `{` and additional code
-    // between renderAppState and break.
+    // SPEC #5016: the receiver commits data; its synchronous subscription
+    // retains app-state rendering and the startup readiness ordering above.
     let workspace_state_flow = regex::Regex::new(
-            r#"case\s*"workspace_state":\s*\{?\s*projectError\s*=\s*"";\s*(?:renderAppState|frontendUnits\.projectWorkspaceShell\.renderAppState)\(event\.workspace\);[\s\S]*?\bbreak;"#,
+            r#"case\s*"workspace_state":\s*\{\s*workspaceStateModel\.update\(\(\) => \(\{ workspace: event\.workspace \}\)\);\s*break;"#,
         )
         .expect("valid regex");
 
@@ -2040,15 +1756,14 @@ fn embedded_web_workspace_state_renders_active_workspace_through_app_state_helpe
         "expected workspace rendering fallback helper in embedded html",
     );
     assert!(
-        html.contains("function renderAppState(nextState)"),
+        html.contains("function renderAppState(nextState, incomingRuntimeStatus = false)"),
         "expected app state rendering to live in a named helper",
     );
     assert!(
             html.contains("const tab = activeProjectTab();")
                 && html.contains("renderProjectOnboarding(tab);")
-                && html.contains("renderWorkspace(tab?.workspace || emptyWorkspace());")
-                && html.contains("renderWindowList();"),
-            "expected app state rendering to drive onboarding, workspace, and window list updates from the active tab",
+                && html.contains("renderWorkspace(tab?.workspace || emptyWorkspace());"),
+            "expected app state rendering to drive onboarding and workspace updates from the active tab",
         );
     assert!(
         html.contains("function renderWorkspace(workspace)"),
@@ -2056,7 +1771,7 @@ fn embedded_web_workspace_state_renders_active_workspace_through_app_state_helpe
     );
     assert!(
             workspace_state_flow.is_match(html),
-            "expected workspace_state events to clear project errors and re-render through the app-state workspace helper",
+            "expected workspace_state events to commit a fresh shared receipt before subscribed rendering",
         );
 }
 
@@ -2219,7 +1934,6 @@ fn embedded_web_root_js_module_registry_covers_app_imports() {
         "/branch-cleanup-modal.js",
         "/close-project-confirm-modal.js",
         "/migration-modal.js",
-        "/window-docking.js",
         "/board-surface.js",
         "/update-cta.js",
         "/theme-manager.js",
@@ -2378,7 +2092,7 @@ fn embedded_web_knowledge_bridge_surface_uses_cache_backed_contract() {
         html.contains(
             "[\"issue\", \"issue_monitor\", \"spec\", \"work\", \"workspace\", \"branches\"].includes(preset)",
         ) && html.contains("return \"issue\";"),
-        "expected legacy SPEC, Issue Monitor and Workspace presets to open the unified Issue view",
+        "expected Issue and legacy aliases to share Issue knowledge contracts",
     );
 }
 
@@ -2406,12 +2120,9 @@ fn embedded_web_knowledge_bridge_surface_uses_semantic_search_contract() {
     assert!(
         knowledge_status_block.contains("!issueSurface && state.searching")
             && knowledge_status_block.contains("Searching semantic index"),
-        "expected Issue/SPEC semantic progress to stay invisible while preserving PR behavior",
+        "expected semantic progress to stay invisible on the Issue/SPEC surface",
     );
-    let direct_send_block = html
-        .split("function sendKnowledgeSemanticSearchNow")
-        .nth(1)
-        .and_then(|tail| tail.split("const uiTraceWiring").next())
+    let direct_send_block = js_braced_block_after(html, "function sendKnowledgeSemanticSearchNow(")
         .expect("semantic direct-send helper");
     assert!(
         direct_send_block.contains("activeSocket.readyState !== WebSocket.OPEN")
@@ -2434,8 +2145,8 @@ fn embedded_web_index_window_exposes_project_index_search_contract() {
     let html = frontend_bundle_source();
 
     assert!(
-        html.contains("data-preset=\"index\""),
-        "expected Add Window modal to expose an Index preset",
+        html.contains("data-cmd=\"open-index\""),
+        "expected sidebar to expose the Index command",
     );
     assert!(
         html.contains("search_project_index"),
@@ -2573,24 +2284,12 @@ fn embedded_web_knowledge_bridge_correlates_detail_selection_without_resetting_r
     let load_request_block = html
         .split("function requestKnowledgeBridge")
         .nth(1)
-        .and_then(|tail| {
-            tail.split("function scheduleKnowledgeRelatedWorkRefresh")
-                .next()
-        })
+        .and_then(|tail| tail.split("\n      }").next())
         .expect("knowledge load request block");
-    let pr_compatibility_block = load_request_block
-        .split("if (normalizeKnowledgeKind(state.kind) === \"pr\") {")
-        .nth(1)
-        .and_then(|tail| tail.split("\n        }").next())
-        .expect("PR compatibility reset block");
     assert!(
         load_request_block.contains("state.loadSelectionGeneration = state.selectionGeneration;")
-            && load_request_block
-                .matches("state.detailRequestId = 0;")
-                .count()
-                == 1
-            && pr_compatibility_block.contains("state.detailRequestId = 0;"),
-        "expected Issue/SPEC refresh to preserve an independently correlated detail request while PR keeps its legacy full-view reset",
+            && !load_request_block.contains("state.detailRequestId = 0;"),
+        "expected refresh to preserve an independently correlated detail request",
     );
     assert!(
         html.contains("const matchesLoadRequest =") && html.contains("if (matchesLoadRequest)"),
@@ -2872,7 +2571,7 @@ fn embedded_web_board_message_body_renders_markdown_with_plaintext_fallback() {
         "Board plaintext fallback must preserve newlines, got: {plaintext_block}",
     );
     assert!(
-        html.contains("createKnowledgeMarkdownBody(entry, \"board-message-body\")"),
+        html.contains("renderUiContent(document, entry.content, \"board-message-body\")"),
         "Board body must render via the shared Markdown renderer",
     );
     assert!(
@@ -3002,7 +2701,7 @@ fn embedded_web_profile_surface_uses_config_backed_contract() {
             && html.contains("state.draft && profileDraftIsDirty(state)")
             && html.contains("profileDraftIsDirty(state)")
             && html.contains(
-                "((wasSaveInFlight && profileHasEditableFocus(event.id)) || hasNewerDraft)",
+                "((wasSaveInFlight && profileHasEditableFocus(windowId)) || hasNewerDraft)",
             ),
         "expected delayed Profile save snapshots to preserve newer draft edits before re-rendering",
     );
@@ -3037,36 +2736,33 @@ fn embedded_web_logs_surface_uses_cache_backed_contract() {
 }
 
 #[test]
-fn embedded_web_add_window_modal_hides_direct_terminal_presets() {
-    let html = frontend_bundle_source();
-
-    assert!(
-        !html.contains(r#"data-preset="shell""#)
-            && !html.contains(r#"data-preset="claude""#)
-            && !html.contains(r#"data-preset="codex""#),
-        "expected Add window modal to hide Shell/Claude/Codex direct terminal presets",
-    );
-    assert!(
-            !html.contains(r#"data-preset="branches""#),
-            "expected Add window modal to not have a standalone Branches preset — branch browsing is part of the Work surface",
+fn embedded_web_sidebar_replaces_retired_window_navigation() {
+    let html = index_html();
+    for id in [
+        "preset-modal",
+        "add-button",
+        "window-list-button",
+        "window-list-panel",
+        "op-rail-window-count",
+    ] {
+        assert!(
+            !html.contains(&format!("id=\"{id}\"")),
+            "retired navigation {id} must be absent"
         );
-}
-
-#[test]
-fn embedded_web_add_window_modal_omits_the_retired_improvement_inbox() {
-    let html = frontend_bundle_source();
-
-    assert!(
-        !html.contains(r#"data-preset="improvement""#),
-        "the retired Improvement Inbox preset must not appear in the Add window modal",
-    );
+    }
+    for command in ["open-logs", "open-index", "open-profile"] {
+        assert!(
+            html.contains(&format!("data-cmd=\"{command}\"")),
+            "sidebar must expose {command}"
+        );
+    }
 }
 
 #[test]
 fn embedded_web_launch_wizard_actions_flow_through_named_transport() {
     let html = frontend_bundle_source();
-    let submit_bounds = regex::Regex::new(
-            r#"function sendWizardAction\(action,\s*\{\s*queueIfDisconnected\s*=\s*true\s*\}\s*=\s*\{\}\)\s*\{\s*const message\s*=\s*\{\s*kind:\s*"launch_wizard_action",\s*action,\s*bounds:\s*visibleBounds\(\),\s*\};"#,
+    let submit_action = regex::Regex::new(
+            r#"function sendWizardAction\(action,\s*\{\s*queueIfDisconnected\s*=\s*true\s*\}\s*=\s*\{\}\)\s*\{\s*const message\s*=\s*\{\s*kind:\s*"launch_wizard_action",\s*action,\s*\};"#,
         )
         .expect("valid regex");
     let footer_close_control = regex::Regex::new(
@@ -3108,8 +2804,8 @@ fn embedded_web_launch_wizard_actions_flow_through_named_transport() {
         "expected issue launch wizard entrypoint to send the canonical frontend event payload",
     );
     assert!(
-            submit_bounds.is_match(html),
-            "expected wizard actions to be normalized through launch_wizard_action and always attach visible bounds",
+            submit_action.is_match(html),
+            "expected wizard actions to be normalized through launch_wizard_action without layout coordinates",
         );
     assert!(
         !html.contains(r#"id="wizard-close-button""#) && !html.contains("wizardCloseButton"),
@@ -3167,15 +2863,23 @@ fn embedded_web_launch_wizard_actions_flow_through_named_transport() {
     // delegate. A null tombstone must not clear an open-error modal
     // during reconnect.
     let wizard_state = regex::Regex::new(
-        r#"function applyLaunchWizardStateEvent\(event\)\s*\{[\s\S]*?wizardInteractionGuard\.defer\([\s\S]*?if\s*\(shouldClearLaunchWizardPendingAction\(event\.wizard\)\)\s*\{\s*clearLaunchWizardPendingAction\(\);\s*\}\s*clearLaunchWizardOpening\(\);\s*if\s*\(event\.wizard\)\s*\{[\s\S]*?launchWizardOpenError\s*=\s*null;[\s\S]*?\}\s*launchWizard\s*=\s*event\.wizard;\s*renderLaunchWizard\(\);"#,
+        r#"function applyLaunchWizardStateEvent\(event\)\s*\{[\s\S]*?wizardInteractionGuard\.defer\([\s\S]*?if\s*\(shouldClearLaunchWizardPendingAction\(event\.wizard\)\)\s*\{\s*clearLaunchWizardPendingAction\(\);\s*\}\s*clearLaunchWizardOpening\(\);\s*if\s*\(event\.wizard\)\s*\{[\s\S]*?launchWizardOpenError\s*=\s*null;[\s\S]*?\}\s*launchWizard\s*=\s*event\.wizard;\s*publishLaunchWizardVisibility\(\);\s*renderLaunchWizard\(\);"#,
     )
     .expect("valid regex");
     let wizard_state_delegate = regex::Regex::new(
-            r#"case\s*"launch_wizard_state":[\s\S]{0,300}?applyLaunchWizardStateEvent\(event\);\s*break;"#,
+            r#"case\s*"launch_wizard_state":[\s\S]{0,300}?launchWizardStateModel\.update\([\s\S]{0,120}?\);\s*break;"#,
         )
         .expect("valid regex");
     assert!(
-        wizard_state.is_match(html) && wizard_state_delegate.is_match(html),
+        wizard_state.is_match(html)
+            && wizard_state_delegate.is_match(html)
+            && html.contains("const launchWizardStateModel = createUiStateStore(null);")
+            && js_braced_block_after(
+                html,
+                "launchWizardStateModel.subscribe(state => state, state => "
+            )
+            .expect("shared launch wizard state subscription")
+            .contains("if (state) applyLaunchWizardStateEvent(state);"),
         "expected launch wizard state updates to hydrate the shared wizard renderer",
     );
 }
@@ -3342,7 +3046,7 @@ fn embedded_web_frontend_units_group_stateful_surfaces() {
                 && html.contains("boardSurface,")
                 && html.contains("logsSurface,")
                 && html.contains("knowledgeSettingsSurface,"),
-            "expected frontend unit registry to expose the extracted transport, workspace, terminal, wizard, tree, Profile, Board, Logs, and knowledge/settings surfaces",
+            "expected frontend unit registry to expose the extracted transport, workspace, terminal, wizard, branches, Profile, Board, Logs, and knowledge/settings surfaces",
         );
     assert!(
         !html.contains("window.__POC__"),
@@ -3353,25 +3057,20 @@ fn embedded_web_frontend_units_group_stateful_surfaces() {
 #[test]
 fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
     let html = frontend_bundle_source();
-    // SPEC-2359 US-37: workspace_state case wraps in a block to
-    // populate the Workspace Overview Completed column from
-    // event.workspace.tabs[active].workspace.work_items. Tolerate
-    // the optional `{` and additional code between renderAppState
-    // and break.
+    // SPEC #5016: workspace hydration now reaches the shell through a
+    // shared model subscription rather than direct receiver rendering.
     let workspace_event = regex::Regex::new(
-            r#"case\s*"workspace_state":\s*\{?\s*projectError\s*=\s*"";\s*frontendUnits\.projectWorkspaceShell\.renderAppState\(event\.workspace\);[\s\S]*?\bbreak;"#,
+            r#"case\s*"workspace_state":\s*\{\s*workspaceStateModel\.update\(\(\) => \(\{ workspace: event\.workspace \}\)\);\s*break;"#,
         )
         .expect("valid regex");
     let terminal_event = regex::Regex::new(
             r#"case\s*"terminal_output":\s*applyPmWindowReceiveEvent\(event\);\s*break;\s*case\s*"terminal_snapshot":\s*applyPmWindowReceiveEvent\(event\);\s*break;"#,
         )
         .expect("valid regex");
-    // SPEC-3064 Phase 3 (E6e): the profile_snapshot body lives in the
-    // profile window surface applier; the app.js case arm delegates.
-    let profile_event = regex::Regex::new(
-            r#"function applyProfileReceiveEvent\(event\)\s*\{[\s\S]*?case\s*"profile_snapshot":\s*\{\s*const state = ensureProfileState\(event\.id\);[\s\S]*?renderProfile\(event\.id\);\s*break;\s*\}"#,
-        )
-        .expect("valid regex");
+    // Keep the embedded model/subscription wiring smoke here; the frontend
+    // pull-render contract enforces the semantic receiver DOM boundary.
+    let profile_model =
+        regex::Regex::new(r#"const profileModel\s*=\s*createUiStateStore\("#).expect("valid regex");
     let profile_event_delegate = regex::Regex::new(
         r#"case\s*"profile_snapshot":[\s\S]{0,300}?applyProfileReceiveEvent\(event\);\s*break;"#,
     )
@@ -3380,14 +3079,15 @@ fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
     // defer through `wizardInteractionGuard.defer(...)` before
     // mutating module state. SPEC-3064 Phase 3 (E5): the guarded
     // mutation lives in the launch wizard surface appliers; the
-    // receive() case arms are thin delegates into them. A null
+    // receive() updates the state/error models, whose subscribers delegate to
+    // the same guarded surface applier. A null
     // tombstone must not clear an open-error modal during reconnect.
     let wizard_event = regex::Regex::new(
-        r#"function applyLaunchWizardStateEvent\(event\)[\s\S]*?if\s*\(shouldClearLaunchWizardPendingAction\(event\.wizard\)\)\s*\{\s*clearLaunchWizardPendingAction\(\);\s*\}\s*clearLaunchWizardOpening\(\);\s*if\s*\(event\.wizard\)\s*\{[\s\S]*?launchWizardOpenError\s*=\s*null;[\s\S]*?\}\s*launchWizard\s*=\s*event\.wizard;\s*renderLaunchWizard\(\);"#,
+        r#"function applyLaunchWizardStateEvent\(event\)[\s\S]*?if\s*\(shouldClearLaunchWizardPendingAction\(event\.wizard\)\)\s*\{\s*clearLaunchWizardPendingAction\(\);\s*\}\s*clearLaunchWizardOpening\(\);\s*if\s*\(event\.wizard\)\s*\{[\s\S]*?launchWizardOpenError\s*=\s*null;[\s\S]*?\}\s*launchWizard\s*=\s*event\.wizard;\s*publishLaunchWizardVisibility\(\);\s*renderLaunchWizard\(\);"#,
     )
     .expect("valid regex");
     let wizard_event_delegate = regex::Regex::new(
-            r#"case\s*"launch_wizard_state":[\s\S]{0,300}?applyLaunchWizardStateEvent\(event\);\s*break;"#,
+            r#"case\s*"launch_wizard_state":[\s\S]{0,300}?launchWizardStateModel\.update\([\s\S]{0,120}?\);\s*break;"#,
         )
         .expect("valid regex");
     let wizard_open_error_event = regex::Regex::new(
@@ -3395,16 +3095,25 @@ fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
         )
         .expect("valid regex");
     let wizard_open_error_delegate = regex::Regex::new(
-            r#"case\s*"launch_wizard_open_error":[\s\S]{0,300}?applyLaunchWizardOpenErrorEvent\(event\);\s*break;"#,
+            r#"case\s*"launch_wizard_open_error":[\s\S]{0,300}?launchWizardOpenErrorModel\.update\([\s\S]{0,120}?\);\s*break;"#,
         )
         .expect("valid regex");
+    let wizard_open_error_subscription = js_braced_block_after(
+        html,
+        "launchWizardOpenErrorModel.subscribe(error => error, error => ",
+    )
+    .expect("shared launch wizard error subscription");
 
     assert!(
         html.contains("frontendUnits.socketTransport.connect();"),
         "expected frontend bootstrap to connect through the socket transport unit",
     );
     assert!(
-        workspace_event.is_match(html),
+        workspace_event.is_match(html)
+            && html.contains("const workspaceStateModel = createUiStateStore(null);")
+            && html.contains(
+                "frontendUnits.projectWorkspaceShell.renderAppState(snapshot.workspace, true);"
+            ),
         "expected workspace_state events to flow through the project workspace shell unit",
     );
     assert!(
@@ -3424,16 +3133,31 @@ fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
         "expected shared window subscriptions to retain the named terminal host delivery contract",
     );
     assert!(
-        profile_event.is_match(html) && profile_event_delegate.is_match(html),
-        "expected profile snapshot events to flow through the dedicated profile surface unit",
+        profile_model.is_match(html)
+            && html.contains("profileModel.update(")
+            && html.contains("profileModel.subscribe(")
+            && profile_event_delegate.is_match(html),
+        "expected profile snapshot events to flow through shared model subscriptions in the dedicated surface",
     );
     assert!(
-        wizard_event.is_match(html) && wizard_event_delegate.is_match(html),
+        wizard_event.is_match(html)
+            && wizard_event_delegate.is_match(html)
+            && html.contains("const launchWizardStateModel = createUiStateStore(null);")
+            && js_braced_block_after(
+                html,
+                "launchWizardStateModel.subscribe(state => state, state => "
+            )
+            .expect("shared launch wizard state subscription")
+            .contains("if (state) applyLaunchWizardStateEvent(state);"),
         "expected launch wizard state events to render through the wizard surface unit",
     );
     assert!(
-        wizard_open_error_event.is_match(html) && wizard_open_error_delegate.is_match(html),
-        "expected launch wizard open errors to render through the wizard surface unit",
+        wizard_open_error_event.is_match(html)
+            && wizard_open_error_delegate.is_match(html)
+            && html.contains("const launchWizardOpenErrorModel = createUiStateStore(null);")
+            && wizard_open_error_subscription
+                .contains("if (error) applyLaunchWizardOpenErrorEvent(error);"),
+        "expected launch wizard open errors to render through shared state and the wizard surface unit",
     );
 }
 
@@ -3459,39 +3183,6 @@ fn embedded_web_inline_module_script_stays_under_phase_1b_budget() {
     );
 }
 
-/// SPEC-2008 FR-032: wheel routing must follow the opt-out model.
-///
-/// Only `.surface-terminal` may consume wheel events for canvas pan or
-/// xterm scrollback. All other surfaces (panels and modals) must let the
-/// browser handle wheel natively. The legacy whitelist helper
-/// `findNativeWheelScrollSurface` must be retired so newly added panel
-/// surfaces never need to remember to register themselves.
-#[test]
-fn embedded_web_wheel_routing_uses_terminal_only_opt_out() {
-    let js = app_js();
-
-    assert!(
-            !js.contains("function findNativeWheelScrollSurface"),
-            "expected the per-class wheel scroll whitelist helper to be removed in favor of an opt-out model",
-        );
-    assert!(
-        !js.contains("findNativeWheelScrollSurface("),
-        "expected no remaining call sites for the retired wheel scroll whitelist helper",
-    );
-    assert!(
-        js.contains("function handleCanvasWheelEvent"),
-        "expected canvas wheel handler to remain as the single routing entrypoint",
-    );
-    assert!(
-            js.contains("targetElement.closest(\".surface-terminal\")"),
-            "expected canvas wheel handler to special-case `.surface-terminal` for the opt-out routing model",
-        );
-    assert!(
-            js.contains("targetElement.closest(\".workspace-window\")"),
-            "expected canvas wheel handler to recognize panel windows so native scroll is preserved inside them",
-        );
-}
-
 /// SPEC-2008 FR-033: every panel surface must share the same window
 /// background, titlebar background, and body background. Three CSS rules
 /// participate in this unification:
@@ -3509,7 +3200,6 @@ fn embedded_web_panel_surfaces_share_opaque_window_chrome_and_body() {
     let html = frontend_styles_bundle();
 
     let panel_surfaces = [
-        ".surface-file-tree",
         ".surface-branches",
         ".surface-board",
         ".surface-logs",
@@ -3520,11 +3210,11 @@ fn embedded_web_panel_surfaces_share_opaque_window_chrome_and_body() {
 
     for (anchor, role) in [
         (
-            ".workspace-window.surface-file-tree,",
+            ".workspace-window.surface-branches,",
             "workspace-window background",
         ),
-        (".surface-file-tree .titlebar,", "titlebar background"),
-        (".surface-file-tree .window-body,", "window-body background"),
+        (".surface-branches .titlebar,", "titlebar background"),
+        (".surface-branches .window-body,", "window-body background"),
     ] {
         let rule_start = html
             .find(anchor)
@@ -3689,7 +3379,6 @@ fn embedded_web_panel_surfaces_compose_with_layout_primitives() {
     let scroll_adopters = [
         "knowledge-detail-scroll workspace-scroll",
         "board-timeline-scroll board-scroll-surface workspace-scroll",
-        "file-tree-scroll workspace-scroll",
         "branch-scroll workspace-scroll",
     ];
     for needle in scroll_adopters {
@@ -3786,7 +3475,6 @@ fn embedded_web_window_surface_enum_aligns_with_js_preset_surface() {
 
     let pairs: &[(WindowSurface, &str)] = &[
         (WindowSurface::Terminal, "terminal"),
-        (WindowSurface::FileTree, "file-tree"),
         // Branches and Work redirect to Knowledge in JS. Their enum variants
         // remain for persisted backend compatibility without a separate UI.
         (WindowSurface::Profile, "profile"),
@@ -3795,7 +3483,6 @@ fn embedded_web_window_surface_enum_aligns_with_js_preset_surface() {
         (WindowSurface::Knowledge, "knowledge"),
         (WindowSurface::Index, "index"),
         (WindowSurface::AgentKanban, "agent-kanban"),
-        (WindowSurface::Console, "console"),
         (WindowSurface::Mock, "mock"),
     ];
 
@@ -3945,7 +3632,7 @@ fn embedded_web_app_js_uses_modal_shell_selector() {
 
 /// SPEC-2008 FR-050 Phase 24: an OS host window (WebView) `resize` event
 /// must fan out per-terminal `fitTerminal()` so xterm.js cols/rows stay
-/// aligned with the new viewport, and `UpdateWindowGeometry` must be sent
+/// aligned with the new viewport, and `UpdateTerminalGrid` must be sent
 /// for each visible terminal so the backend PTY cols/rows match. Without
 /// this fan-out the wrap stays stuck until the user resizes a single
 /// terminal manually.
@@ -3975,20 +3662,12 @@ fn embedded_web_host_window_resize_fans_out_terminal_fit() {
         "expected attachHostResizeReflow to route fit requests through the shared \
              terminal fit scheduler while preserving fitTerminal semantics; body: {body}",
     );
-    // SPEC-2008 camera-focus: maximize was removed, so the host-resize
-    // beforeFan no longer re-syncs maximized windows. It now refreshes the
-    // window list (rail/overview) so the new viewport size is reflected.
-    assert!(
-        body.contains("renderWindowList()"),
-        "expected attachHostResizeReflow.beforeFan to refresh the window list, body: {body}",
-    );
 }
 
 /// SPEC-2008 FR-051 Phase 24: `canRefreshTerminalViewport` must reject
-/// hidden terminals (display:none-equivalent `.hidden` attribute set when
-/// a window-tab is non-active) so a fit during the hidden phase cannot
-/// pollute xterm.js with cols/rows = 0. The check must consider both
-/// minimized and the DOM `element.hidden` flag.
+/// hidden terminal hosts so a fit during the hidden phase cannot
+/// pollute xterm.js with cols/rows = 0. Surface ownership and actual DOM
+/// layout determine visibility independently of retired saved placement.
 #[test]
 fn embedded_web_can_refresh_terminal_viewport_skips_hidden_tabs() {
     let js = app_js();
@@ -4004,8 +3683,8 @@ fn embedded_web_can_refresh_terminal_viewport_skips_hidden_tabs() {
     let body = &after[..end_offset];
     // After SPEC-2008 Phase 24 follow-up, the predicate delegates to
     // `viewportEligibleForRefresh` in `terminal-viewport-reflow.js`.
-    // Behaviour (.hidden short-circuit + minimised short-circuit) is
-    // pinned by `__tests__/terminal-viewport-reflow.test.mjs`; this
+    // DOM visibility behaviour is pinned by
+    // `__tests__/terminal-viewport-reflow.test.mjs`; this
     // Rust contract only confirms the wiring stays in the bundle.
     assert!(
         body.contains("viewportEligibleForRefresh({"),
@@ -4013,9 +3692,8 @@ fn embedded_web_can_refresh_terminal_viewport_skips_hidden_tabs() {
              (SPEC-2008 FR-051 + Phase 24 follow-up); body: {body}",
     );
     assert!(
-        body.contains("windowMap.get(windowId)") && body.contains("workspaceWindowById"),
-        "expected predicate to forward both the DOM element and the workspace window \
-             so the helper can short-circuit on .hidden / minimized; body: {body}",
+        body.contains("windowMap.get(windowId)") && !body.contains("workspaceWindowById"),
+        "expected predicate to forward the DOM element without saved placement state; body: {body}",
     );
 }
 
@@ -4027,10 +3705,9 @@ fn embedded_web_can_refresh_terminal_viewport_skips_hidden_tabs() {
 #[test]
 fn embedded_web_tab_visibility_transition_triggers_terminal_focus_activation() {
     let js = app_js();
-    // SPEC-2008 camera-focus: maximize was removed, so the visibility loop no
-    // longer ends with a maximized-viewport sync. It now recomputes operator
-    // telemetry (rail window-count badge / empty-canvas state) after mounting
-    // every window and applying its visibility transition. Issue #3365: the
+    // Surface hosts own which windows are presented. The catalog loop
+    // recomputes operator telemetry after mounting each live window and
+    // clearing stale child visibility. Issue #3365: the
     // loop is a per-window `isolate` callback inside workspaceRenderSync so
     // one poisoned window cannot block the others, and the telemetry
     // recompute is the guard's `recompute` hook (guaranteed even on a failed
@@ -4057,8 +3734,8 @@ fn embedded_web_tab_visibility_transition_triggers_terminal_focus_activation() {
              so element.hidden mutation + reveal hook share one helper; body: {body}",
     );
     assert!(
-        body.contains("visibleWindowData(windowData)"),
-        "expected the loop to compute shouldHide from visibleWindowData; body: {body}",
+        body.contains("shouldHide: false") && !body.contains("visibleWindowData"),
+        "expected catalog mounts to leave visibility to the surface host; body: {body}",
     );
     assert!(
         body.contains("onReveal: () => activateTerminalOnReveal(windowData.id)"),
@@ -4128,7 +3805,7 @@ fn embedded_web_completed_work_resume_surfaces_open_input_capable_sessions() {
         "expected the Work Resume picker to exclude fresh-start metadata and open sessions as plain input-capable resumes",
     );
     assert!(
-        wizard.contains("export function launchWizardStartMethodIntent")
+        wizard.contains("function launchWizardStartMethodIntent")
             && wizard.contains("button.dataset.executionIntent = startMethodIntent")
             && !wizard.contains("History only"),
         "expected legacy conversation methods in the Launch Wizard to reopen conversations without an observation-only notice",
@@ -4224,7 +3901,7 @@ fn embedded_web_issue_related_work_resume_is_correlated_and_recoverable() {
                 || settled_feedback.contains("event.message"))
             && settled_feedback.contains("dismissible: true")
             && settled_feedback.contains("timeoutMs: 0")
-            && settled_feedback.contains("scheduleKnowledgeRelatedWorkRefresh()"),
+            && settled_feedback.contains("scheduleKnowledgeRelatedWorkRefresh(true)"),
         "only an exactly-settled shipped Resume error may show sticky feedback and schedule a cache-first Related Work refresh",
     );
     assert_eq!(
@@ -4239,7 +3916,7 @@ fn embedded_web_issue_related_work_resume_is_correlated_and_recoverable() {
     );
     assert_eq!(
         error_case
-            .matches("scheduleKnowledgeRelatedWorkRefresh()")
+            .matches("scheduleKnowledgeRelatedWorkRefresh(true)")
             .count(),
         1,
         "the shipped Resume error case must not refresh outside the exact-settle guard",
@@ -4250,7 +3927,7 @@ fn embedded_web_issue_related_work_resume_is_correlated_and_recoverable() {
         .and_then(|tail| tail.split("function applyLocalKnowledgeFilter").next())
         .expect("bounded Related Work refresh scheduler");
     assert!(
-        regex::Regex::new(r"requestKnowledgeBridge\(windowId,\s*knowledgeKind,\s*false\)",)
+        regex::Regex::new(r"requestKnowledgeBridge\(windowId,\s*state\.kind,\s*false\)",)
             .expect("cache-first refresh regex")
             .is_match(related_refresh),
         "the shipped Related Work refresh scheduler must stay cache-first",
@@ -4319,29 +3996,31 @@ fn embedded_web_retires_the_autonomous_notifications_log_region() {
 
 #[test]
 fn embedded_web_issue_monitor_candidate_pool_contract() {
-    let surface = root_js_module_source("/knowledge-kanban-surface.js");
+    let surface = settings_surface_js();
     for contract in [
-        "knowledge-monitor-pool",
-        "knowledge-monitor-candidate",
+        "settings-section",
+        "settings-field",
         "issue_monitor_profiles_set",
         "Add candidate",
         "prefer_for",
-        "usage_threshold_percent",
+        "agent_member_id",
+        "Only selected members using that tool are tried in order",
+        "tools never switch automatically",
     ] {
         assert!(
             surface.contains(contract),
             "missing pool contract: {contract}"
         );
     }
-    let css = static_asset_text("/styles/app.css");
-    let pool_styles = css
-        .split("/* Issue #4530 candidate pool */")
-        .nth(1)
-        .expect("pool styles");
-    assert!(pool_styles.contains("var(--color-border)"));
-    assert!(pool_styles.contains("var(--type-"));
-    assert!(!pool_styles.contains("rgba("));
-    assert!(!pool_styles.contains("rgb("));
+    assert!(!surface.contains("usage_threshold_percent"));
+    assert!(!surface.contains("Usage threshold (%)"));
+    let css = static_asset_text("/styles/components.css");
+    let control_styles = js_braced_block_after(css, ":root[data-theme] .settings-input")
+        .expect("Settings input styles");
+    assert!(control_styles.contains("var(--color-border)"));
+    assert!(control_styles.contains("var(--type-"));
+    assert!(!control_styles.contains("rgba("));
+    assert!(!control_styles.contains("rgb("));
 }
 
 #[test]
@@ -4360,7 +4039,7 @@ fn embedded_web_pm_chat_is_bound_to_registered_pm_session() {
     assert!(js.contains("view.controller.update(state)"));
     assert!(js.contains("view.unsubscribe()"));
     assert!(js.contains("view.controller.dispose()"));
-    assert!(js.contains("kind: \"load_pm_reports\", id: windowData.id"));
+    assert!(js.contains("requestPmReports(windowData.id, resync)"));
     assert!(js.contains("window.setInterval(requestVisiblePmReports, 5000)"));
     assert!(js.contains("case \"pm_reports\""));
     assert!(

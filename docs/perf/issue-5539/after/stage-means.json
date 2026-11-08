@@ -1,0 +1,215 @@
+{
+  "themes": [
+    {
+      "mean_request_wall_ms": 551.3689250000004,
+      "theme": "dark",
+      "stages": [
+        {
+          "target": "phase:search.admission",
+          "mean_ms": 37.065535,
+          "count": 20
+        },
+        {
+          "target": "phase:search.assemble",
+          "mean_ms": 0.044525,
+          "count": 20
+        },
+        {
+          "target": "phase:search.git_context",
+          "mean_ms": 2.2317849999999995,
+          "count": 20
+        },
+        {
+          "target": "phase:search.runner_transport",
+          "mean_ms": 424.86910000000006,
+          "count": 20
+        },
+        {
+          "target": "phase:search.runner.assemble",
+          "mean_ms": 0.006069999999999999,
+          "count": 20
+        },
+        {
+          "target": "phase:search.runner.index_read",
+          "mean_ms": 156.88754999999998,
+          "count": 20
+        },
+        {
+          "target": "phase:search.runner.model_load",
+          "mean_ms": 0.0,
+          "count": 20
+        },
+        {
+          "target": "phase:search.runner.query",
+          "mean_ms": 160.71989,
+          "count": 20
+        },
+        {
+          "target": "phase:search.runner.query_encode",
+          "mean_ms": 105.26513500000001,
+          "count": 20
+        },
+        {
+          "target": "phase:search.runtime",
+          "mean_ms": 34.09135,
+          "count": 20
+        },
+        {
+          "target": "phase:search.scope_context",
+          "mean_ms": 14.353725,
+          "count": 20
+        },
+        {
+          "target": "phase:search.search_and_repair",
+          "mean_ms": 493.8853700000001,
+          "count": 20
+        },
+        {
+          "target": "route:search",
+          "mean_ms": 544.89775,
+          "count": 20
+        },
+        {
+          "target": "route:search.warm",
+          "mean_ms": 544.6298350000001,
+          "count": 20
+        }
+      ],
+      "gui_average_one_core_percent": 80.32250242483026,
+      "gui_cpu_seconds_per_request": 0.62109375,
+      "concurrent": {
+        "interaction": {
+          "wall_ms": 190.20219999999972,
+          "pending_searches": 8
+        },
+        "sent": 8,
+        "typed_errors": 0,
+        "pending": 0,
+        "controls": [
+          {
+            "kind": "system_settings",
+            "wall_ms": 12.354999999999563,
+            "pending_searches": 8
+          },
+          {
+            "kind": "custom_agent_preset_list",
+            "wall_ms": 12.415400000001682,
+            "pending_searches": 8
+          }
+        ],
+        "success": 8
+      },
+      "cpu_window_wall_seconds": 15.465,
+      "gui_cpu_seconds": 12.421875,
+      "p95_request_wall_ms": 924.7401000000027,
+      "sequential_count": 20
+    },
+    {
+      "mean_request_wall_ms": 504.98970500000024,
+      "theme": "light",
+      "stages": [
+        {
+          "target": "phase:search.admission",
+          "mean_ms": 18.692530000000005,
+          "count": 20
+        },
+        {
+          "target": "phase:search.assemble",
+          "mean_ms": 0.04157000000000001,
+          "count": 20
+        },
+        {
+          "target": "phase:search.git_context",
+          "mean_ms": 2.6546650000000005,
+          "count": 20
+        },
+        {
+          "target": "phase:search.runner_transport",
+          "mean_ms": 409.600785,
+          "count": 20
+        },
+        {
+          "target": "phase:search.runner.assemble",
+          "mean_ms": 0.006165,
+          "count": 20
+        },
+        {
+          "target": "phase:search.runner.index_read",
+          "mean_ms": 173.76182999999997,
+          "count": 20
+        },
+        {
+          "target": "phase:search.runner.model_load",
+          "mean_ms": 0.0,
+          "count": 20
+        },
+        {
+          "target": "phase:search.runner.query",
+          "mean_ms": 147.77838500000001,
+          "count": 20
+        },
+        {
+          "target": "phase:search.runner.query_encode",
+          "mean_ms": 85.950945,
+          "count": 20
+        },
+        {
+          "target": "phase:search.runtime",
+          "mean_ms": 21.495074999999996,
+          "count": 20
+        },
+        {
+          "target": "phase:search.scope_context",
+          "mean_ms": 2.39567,
+          "count": 20
+        },
+        {
+          "target": "phase:search.search_and_repair",
+          "mean_ms": 466.64599,
+          "count": 20
+        },
+        {
+          "target": "route:search",
+          "mean_ms": 493.5218349999999,
+          "count": 20
+        },
+        {
+          "target": "route:search.warm",
+          "mean_ms": 493.25512499999996,
+          "count": 20
+        }
+      ],
+      "gui_average_one_core_percent": 84.42315323060645,
+      "gui_cpu_seconds_per_request": 0.63828125,
+      "concurrent": {
+        "interaction": {
+          "wall_ms": 122.83590000000186,
+          "pending_searches": 8
+        },
+        "sent": 8,
+        "typed_errors": 0,
+        "pending": 0,
+        "controls": [
+          {
+            "kind": "system_settings",
+            "wall_ms": 10.196100000001024,
+            "pending_searches": 8
+          },
+          {
+            "kind": "custom_agent_preset_list",
+            "wall_ms": 10.241300000001502,
+            "pending_searches": 8
+          }
+        ],
+        "success": 8
+      },
+      "cpu_window_wall_seconds": 15.121,
+      "gui_cpu_seconds": 12.765625,
+      "p95_request_wall_ms": 740.5259000000005,
+      "sequential_count": 20
+    }
+  ],
+  "run_id": "4a7ca315866b492e99cda61396a6f05e",
+  "scope": "Sequential CPU snapshot intervals only; phase means use emitted samples, with counts retained. Raw search samples retain all observed warmup, sequential, concurrent and UI phases.",
+  "perf_source": "target/issue-5539-home-4a7ca315866b492e99cda61396a6f05e/.gwt/logs/perf/perf-2026-10-15.jsonl"
+}

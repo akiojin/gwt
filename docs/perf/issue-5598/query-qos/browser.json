@@ -1,0 +1,312 @@
+{
+  "schema_version": 1,
+  "purpose": "Compact projection of the manual headed Chromium dark/light run after single-query QoS; not the canonical verify.run record.",
+  "registration": {
+    "manual_headed_pass_count": 2,
+    "canonical_verify_run_gate": "pending",
+    "user_verification_result": "n/a (autonomous)",
+    "headed_execution_reported_by": "parent execution agent; original run completed 2 Playwright tests successfully"
+  },
+  "boundary": {
+    "fixture_scope": "memory",
+    "fixture_documents": 1,
+    "model": "real intfloat/multilingual-e5-base",
+    "sequential_requests_per_theme": 20,
+    "concurrent_requests_per_theme": 8,
+    "primary_12_distinct_issue_burst_acceptance": "not measured by this browser fixture",
+    "concurrent_latency_threshold_assertion": "controls and health-panel interaction <= 2000 ms; no <= 3000 ms assertion for the eight search response walls"
+  },
+  "artifact_root": "crates/gwt/playwright/test-results/issue-5539-after-12f8b8611a604a129161fb9bdabcb1ce",
+  "provenance": {
+    "checkout_evidence": {
+      "path": "crates/gwt/playwright/test-results/issue-5539-after-12f8b8611a604a129161fb9bdabcb1ce/checkout-evidence.json",
+      "sha256": "badd79255aa773182832a9ab4847a680634e1da00b6cfe17fe665bcd2dfd111a"
+    },
+    "captured_utc": "2026-10-16T04:28:07.6254981Z",
+    "head": "0b087f0b79dd5578dacadea51165caf467e43598",
+    "source_state": "working tree includes uncommitted Issue #5598 changes; source digests alone do not prove compiler input correspondence",
+    "process_id": 38792,
+    "binaries": [
+      {
+        "sha256": "289a6e9190d0ea54bb442277148510e32a12fd49a24c29336ae5f9a0d30afbc3",
+        "path": "E:\\gwt\\work\\issue-5598\\target\\debug\\gwt.exe",
+        "bytes": 104849920,
+        "last_write_utc": "2026-10-16T04:20:00.4460577Z"
+      },
+      {
+        "sha256": "3a28d7b25cc5c2dc9bdc257bbc0845a957bbd8846546a94738aa9e94f56cb6e0",
+        "path": "E:\\gwt\\work\\issue-5598\\target\\debug\\gwtd.exe",
+        "bytes": 65567232,
+        "last_write_utc": "2026-10-16T04:19:13.6685802Z"
+      }
+    ],
+    "runtime_runner": {
+      "sha256": "efd8f94c0c9113ceb8d244a6c11586e643ece8d2a0cd1acfa33363aa359d4914",
+      "path": "E:\\gwt\\work\\issue-5598\\target\\issue-5539-home-12f8b8611a604a129161fb9bdabcb1ce\\.gwt\\runtime\\runners\\chroma_index_runner-efd8f94c0c9113ce.py",
+      "bytes": 395021,
+      "last_write_utc": "2026-10-16T04:27:24.1989364Z"
+    },
+    "harness": [
+      {
+        "sha256": "5c71ee7f806c03348cb6b15b02014a4083ee818291783225de7e8dbc212a3aa5",
+        "path": "E:\\gwt\\work\\issue-5598\\crates\\gwt\\playwright\\tests\\search-route-live.spec.ts",
+        "bytes": 14277,
+        "last_write_utc": "2026-10-16T02:17:16.4032561Z"
+      },
+      {
+        "sha256": "6caf5345a35f4cba31ffb264942204d17fe251ca01bebfc6f74d005164a74d6b",
+        "path": "E:\\gwt\\work\\issue-5598\\scripts\\diagnostics\\issue-5539-browser-check.ps1",
+        "bytes": 13948,
+        "last_write_utc": "2026-10-16T03:32:30.4351731Z"
+      }
+    ],
+    "index_memory": {
+      "path": "crates/gwt/playwright/test-results/issue-5539-after-12f8b8611a604a129161fb9bdabcb1ce/index-memory.json",
+      "sha256": "fd1882deb4306e9a965e13a64cc16dcb9326cf168db1925235694c8856f550d6"
+    }
+  },
+  "themes": [
+    {
+      "theme": "dark",
+      "manual_headed_result": "pass",
+      "checks": {
+        "sequential_20_successful": true,
+        "sequential_p95_at_most_2000_ms": true,
+        "concurrent_8_successful": true,
+        "concurrent_completed_without_timeout": true,
+        "two_controls_within_2000_ms_while_search_pending": true,
+        "real_health_panel_interaction_within_2000_ms_while_search_pending": true,
+        "console_and_page_errors_empty": true,
+        "search_failures_empty": true
+      },
+      "warmup": {
+        "request_id": 553901,
+        "wall_ms": 606.2317000000003,
+        "result_count": 1
+      },
+      "sequential": {
+        "count": 20,
+        "p95_ms": 589.3047000000006,
+        "threshold_ms": 2000,
+        "wall_ms": [
+          358.4364000000005,
+          251.79800000000068,
+          323.0394000000015,
+          395.9822000000004,
+          243.59700000000157,
+          326.935300000001,
+          215.48840000000018,
+          478.80119999999806,
+          239.5157999999974,
+          429.0771999999997,
+          539.1278999999995,
+          233.9838000000018,
+          346.3724999999977,
+          246.45030000000042,
+          484.9314000000013,
+          647.477899999998,
+          588.4979000000021,
+          589.3047000000006,
+          448.0167000000001,
+          227.05200000000332
+        ],
+        "gui_cpu": {
+          "cpu_seconds": 8.53125,
+          "wall_seconds": 11.944
+        },
+        "snapshots": {
+          "start": {
+            "timestamp_utc": "2026-10-16T04:28:34.8379451Z",
+            "started_utc": "2026-10-16T04:28:02.9320460Z",
+            "cpu_seconds": 11.578125,
+            "process_id": 38792
+          },
+          "end": {
+            "timestamp_utc": "2026-10-16T04:28:46.7810695Z",
+            "started_utc": "2026-10-16T04:28:02.9320460Z",
+            "cpu_seconds": 20.109375,
+            "process_id": 38792
+          }
+        }
+      },
+      "concurrent": {
+        "sent_count": 8,
+        "success_count": 8,
+        "wall_ms": [
+          322.92199999999866,
+          507.21120000000155,
+          870.5499000000018,
+          1031.5697999999975,
+          1161.4045000000006,
+          1464.0437999999995,
+          1649.988699999998,
+          1934.3904999999977
+        ],
+        "maximum_ms": 1934.3904999999977,
+        "timed_out": false,
+        "pending_request_ids": [],
+        "controls": [
+          {
+            "kind": "system_settings",
+            "wall_ms": 17.3804999999993,
+            "pending_searches": 8
+          },
+          {
+            "kind": "custom_agent_preset_list",
+            "wall_ms": 17.43489999999656,
+            "pending_searches": 8
+          }
+        ],
+        "health_panel_interaction": {
+          "wall_ms": 232.54010000000198,
+          "pending_searches": 8
+        },
+        "gui_cpu": {
+          "cpu_seconds": 6.0625,
+          "wall_seconds": 7.121
+        }
+      },
+      "console_and_page_errors": [],
+      "search_failures": [],
+      "source_attachments": {
+        "route": {
+          "path": "crates/gwt/playwright/test-results/issue-5539-after-12f8b8611a604a129161fb9bdabcb1ce/browser/search-route-live-real-sea-d295a-es-keep-controls-responsive-chromium-dark/after-dark-search-route.json",
+          "sha256": "88f600f260aa6c4bd38cc80535d648dd588e0114d17ca9a1f05049d4f5ce8d68"
+        },
+        "errors": {
+          "path": "crates/gwt/playwright/test-results/issue-5539-after-12f8b8611a604a129161fb9bdabcb1ce/browser/search-route-live-real-sea-d295a-es-keep-controls-responsive-chromium-dark/after-dark-search-errors.json",
+          "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+        },
+        "failures": {
+          "path": "crates/gwt/playwright/test-results/issue-5539-after-12f8b8611a604a129161fb9bdabcb1ce/browser/search-route-live-real-sea-d295a-es-keep-controls-responsive-chromium-dark/after-dark-search-failures.json",
+          "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+        },
+        "protocol": {
+          "path": "crates/gwt/playwright/test-results/issue-5539-after-12f8b8611a604a129161fb9bdabcb1ce/browser/search-route-live-real-sea-d295a-es-keep-controls-responsive-chromium-dark/after-dark-search-protocol.json",
+          "sha256": "6c7ba17e0f2c9615c133aff249ceab0adb948fc8e935317551c7c7f2e364c72c"
+        }
+      }
+    },
+    {
+      "theme": "light",
+      "manual_headed_result": "pass",
+      "checks": {
+        "sequential_20_successful": true,
+        "sequential_p95_at_most_2000_ms": true,
+        "concurrent_8_successful": true,
+        "concurrent_completed_without_timeout": true,
+        "two_controls_within_2000_ms_while_search_pending": true,
+        "real_health_panel_interaction_within_2000_ms_while_search_pending": true,
+        "console_and_page_errors_empty": true,
+        "search_failures_empty": true
+      },
+      "warmup": {
+        "request_id": 553901,
+        "wall_ms": 528.8195999999998,
+        "result_count": 1
+      },
+      "sequential": {
+        "count": 20,
+        "p95_ms": 238.65730000000076,
+        "threshold_ms": 2000,
+        "wall_ms": [
+          203.77400000000125,
+          193.59850000000006,
+          211.70600000000013,
+          210.65700000000106,
+          201.91840000000047,
+          202.1358999999993,
+          205.31490000000122,
+          230.76080000000002,
+          232.05090000000018,
+          200.01709999999912,
+          193.28799999999865,
+          205.71600000000035,
+          260.8909999999996,
+          238.65730000000076,
+          213.91289999999935,
+          188.8760000000002,
+          219.6735000000008,
+          225.3081000000002,
+          201.32540000000154,
+          210.390199999998
+        ],
+        "gui_cpu": {
+          "cpu_seconds": 8.421875,
+          "wall_seconds": 7.884
+        },
+        "snapshots": {
+          "start": {
+            "timestamp_utc": "2026-10-16T04:29:12.1872488Z",
+            "started_utc": "2026-10-16T04:28:02.9320460Z",
+            "cpu_seconds": 39.15625,
+            "process_id": 38792
+          },
+          "end": {
+            "timestamp_utc": "2026-10-16T04:29:20.0713135Z",
+            "started_utc": "2026-10-16T04:28:02.9320460Z",
+            "cpu_seconds": 47.578125,
+            "process_id": 38792
+          }
+        }
+      },
+      "concurrent": {
+        "sent_count": 8,
+        "success_count": 8,
+        "wall_ms": [
+          638.8125,
+          1091.4929999999986,
+          1262.8387000000002,
+          1712.7752,
+          1915.4657000000007,
+          2362.076499999999,
+          2878.4122000000025,
+          3457.5250000000015
+        ],
+        "maximum_ms": 3457.5250000000015,
+        "timed_out": false,
+        "pending_request_ids": [],
+        "controls": [
+          {
+            "kind": "system_settings",
+            "wall_ms": 11.183199999999488,
+            "pending_searches": 8
+          },
+          {
+            "kind": "custom_agent_preset_list",
+            "wall_ms": 11.230999999999767,
+            "pending_searches": 8
+          }
+        ],
+        "health_panel_interaction": {
+          "wall_ms": 570.7253999999994,
+          "pending_searches": 8
+        },
+        "gui_cpu": {
+          "cpu_seconds": 5.71875,
+          "wall_seconds": 11.007
+        }
+      },
+      "console_and_page_errors": [],
+      "search_failures": [],
+      "source_attachments": {
+        "route": {
+          "path": "crates/gwt/playwright/test-results/issue-5539-after-12f8b8611a604a129161fb9bdabcb1ce/browser/search-route-live-real-sea-d295a-es-keep-controls-responsive-chromium-light/after-light-search-route.json",
+          "sha256": "51a9b22d15d790809db77ec7c654ccd5207c1c463629f26152e57525abae43ff"
+        },
+        "errors": {
+          "path": "crates/gwt/playwright/test-results/issue-5539-after-12f8b8611a604a129161fb9bdabcb1ce/browser/search-route-live-real-sea-d295a-es-keep-controls-responsive-chromium-light/after-light-search-errors.json",
+          "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+        },
+        "failures": {
+          "path": "crates/gwt/playwright/test-results/issue-5539-after-12f8b8611a604a129161fb9bdabcb1ce/browser/search-route-live-real-sea-d295a-es-keep-controls-responsive-chromium-light/after-light-search-failures.json",
+          "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+        },
+        "protocol": {
+          "path": "crates/gwt/playwright/test-results/issue-5539-after-12f8b8611a604a129161fb9bdabcb1ce/browser/search-route-live-real-sea-d295a-es-keep-controls-responsive-chromium-light/after-light-search-protocol.json",
+          "sha256": "2a53d0a17175bc28a508c3e0890203c488db2284fd6dee65bf55fb4a989e0caa"
+        }
+      }
+    }
+  ]
+}

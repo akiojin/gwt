@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "issue": 5385,
+  "gui_pid": 32708,
+  "gui_started_at": "2026-10-15T06:33:37.3790587Z",
+  "gui_version": "9.121.1",
+  "gui_sha256": "3d35cf1b0264d3e6c7176fd5bc4757b11b730fdd47297e79b0d04ffb9aae5243",
+  "release_tag": "v9.121.1",
+  "release_commit": "ed1f5d7feb4c0a7ba80cf0a72e6a990e890fa4db",
+  "baseline_commit": "8418ac1512385a8e6745faee12d972f314e5e933",
+  "os": "Microsoft Windows NT 10.0.26300.0",
+  "logical_processors": 32,
+  "duration_seconds": 3600,
+  "interval_seconds": 60,
+  "rss_budget_bytes": 2147483648,
+  "cpu_budget_cores": 1,
+  "rss_definition": "GUI process WorkingSet64 only; excludes agent and WebView child processes",
+  "cpu_definition": "Delta GUI TotalProcessorTime.TotalSeconds / delta monotonic elapsed seconds; not divided by logical CPU count",
+  "pane_port": 56997,
+  "pane_listener_pid": 32708,
+  "pane_listener_verified_at": "2026-10-15T06:51:13.8933476Z",
+  "dependency_commits": [
+    {
+      "issue": 5381,
+      "commit": "8aafdcc8c",
+      "pr": 5407
+    },
+    {
+      "issue": 5383,
+      "commit": "f7bed6d09",
+      "pr": 5405
+    },
+    {
+      "issue": 5384,
+      "commit": "d75e42b32",
+      "pr": 5409
+    }
+  ],
+  "agent_processes_verified_at": "2026-10-15T06:51:57.7876071Z",
+  "agent_processes": [
+    {
+      "ProcessId": 37268,
+      "ParentProcessId": 18108,
+      "Name": "claude.exe",
+      "created_at": "2026-10-15T06:34:41.7744770Z"
+    },
+    {
+      "ProcessId": 31064,
+      "ParentProcessId": 29096,
+      "Name": "claude.exe",
+      "created_at": "2026-10-15T06:34:42.0349320Z"
+    },
+    {
+      "ProcessId": 16932,
+      "ParentProcessId": 22544,
+      "Name": "claude.exe",
+      "created_at": "2026-10-15T06:34:42.0982040Z"
+    },
+    {
+      "ProcessId": 7072,
+      "ParentProcessId": 33380,
+      "Name": "claude.exe",
+      "created_at": "2026-10-15T06:34:42.1153960Z"
+    },
+    {
+      "ProcessId": 29976,
+      "ParentProcessId": 31812,
+      "Name": "codex.exe",
+      "created_at": "2026-10-15T06:35:53.6161270Z"
+    },
+    {
+      "ProcessId": 22564,
+      "ParentProcessId": 23492,
+      "Name": "codex.exe",
+      "created_at": "2026-10-15T06:40:17.4504090Z"
+    },
+    {
+      "ProcessId": 30528,
+      "ParentProcessId": 31528,
+      "Name": "codex.exe",
+      "created_at": "2026-10-15T06:40:18.4829930Z"
+    },
+    {
+      "ProcessId": 4940,
+      "ParentProcessId": 36384,
+      "Name": "codex.exe",
+      "created_at": "2026-10-15T06:40:21.6794120Z"
+    },
+    {
+      "ProcessId": 38268,
+      "ParentProcessId": 12220,
+      "Name": "codex.exe",
+      "created_at": "2026-10-15T06:40:24.9255400Z"
+    },
+    {
+      "ProcessId": 3456,
+      "ParentProcessId": 12256,
+      "Name": "codex.exe",
+      "created_at": "2026-10-15T06:40:29.1368820Z"
+    },
+    {
+      "ProcessId": 38440,
+      "ParentProcessId": 2644,
+      "Name": "codex.exe",
+      "created_at": "2026-10-15T06:40:29.7591550Z"
+    },
+    {
+      "ProcessId": 26420,
+      "ParentProcessId": 26848,
+      "Name": "claude.exe",
+      "created_at": "2026-10-15T06:40:44.9946280Z"
+    },
+    {
+      "ProcessId": 29240,
+      "ParentProcessId": 29528,
+      "Name": "codex.exe",
+      "created_at": "2026-10-15T06:41:36.3954040Z"
+    }
+  ]
+}

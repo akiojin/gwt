@@ -1,0 +1,365 @@
+{
+  "schema_version": 1,
+  "gui_pid": 31116,
+  "description": "Read-only existing completed GUI-handler profiler rows; wall milliseconds for handlers >50ms, not CPU or stack samples.",
+  "source": "C:\\Users\\AkioJinsenji秦泉寺章夫\\.gwt\\logs\\perf\\perf-2026-10-16.jsonl",
+  "rows": [
+    {
+      "schema_version": 1,
+      "type": "gui_dispatch_summary",
+      "timestamp": "2026-10-16T18:00:59.590328400Z",
+      "stream": "ui",
+      "target": "handler:AgentFrontend",
+      "value": 11889.649199999998,
+      "unit": "ms",
+      "dispatch": {
+        "pid": 31116,
+        "count": 68,
+        "total_ms": 11889.649199999998,
+        "p95_ms": 209.8906,
+        "max_ms": 242.03040000000001,
+        "pending_max": 142,
+        "pending_unknown_count": 0,
+        "window_ms": 60002.367399999996,
+        "dropped_windows": 0,
+        "window_ended_at": "2026-10-16T18:00:59.590328400Z"
+      }
+    },
+    {
+      "schema_version": 1,
+      "type": "gui_dispatch_summary",
+      "timestamp": "2026-10-16T18:00:59.590328400Z",
+      "stream": "ui",
+      "target": "handler:BoardProjectionRefreshed",
+      "value": 110.7952,
+      "unit": "ms",
+      "dispatch": {
+        "pid": 31116,
+        "count": 2,
+        "total_ms": 110.7952,
+        "p95_ms": 57.2599,
+        "max_ms": 57.2599,
+        "pending_max": 28,
+        "pending_unknown_count": 0,
+        "window_ms": 60002.367399999996,
+        "dropped_windows": 0,
+        "window_ended_at": "2026-10-16T18:00:59.590328400Z"
+      }
+    },
+    {
+      "schema_version": 1,
+      "type": "gui_dispatch_summary",
+      "timestamp": "2026-10-16T18:00:59.590328400Z",
+      "stream": "ui",
+      "target": "handler:IssueMonitorCapacityChanged",
+      "value": 418.97839999999997,
+      "unit": "ms",
+      "dispatch": {
+        "pid": 31116,
+        "count": 7,
+        "total_ms": 418.97839999999997,
+        "p95_ms": 68.23519999999999,
+        "max_ms": 68.23519999999999,
+        "pending_max": 46,
+        "pending_unknown_count": 0,
+        "window_ms": 60002.367399999996,
+        "dropped_windows": 0,
+        "window_ended_at": "2026-10-16T18:00:59.590328400Z"
+      }
+    },
+    {
+      "schema_version": 1,
+      "type": "gui_dispatch_summary",
+      "timestamp": "2026-10-16T18:00:59.590328400Z",
+      "stream": "ui",
+      "target": "handler:ProviderUsageSnapshot",
+      "value": 164.11290000000002,
+      "unit": "ms",
+      "dispatch": {
+        "pid": 31116,
+        "count": 2,
+        "total_ms": 164.11290000000002,
+        "p95_ms": 89.1383,
+        "max_ms": 89.1383,
+        "pending_max": 50,
+        "pending_unknown_count": 0,
+        "window_ms": 60002.367399999996,
+        "dropped_windows": 0,
+        "window_ended_at": "2026-10-16T18:00:59.590328400Z"
+      }
+    },
+    {
+      "schema_version": 1,
+      "type": "gui_dispatch_summary",
+      "timestamp": "2026-10-16T18:01:59.603792400Z",
+      "stream": "ui",
+      "target": "handler:AgentFrontend",
+      "value": 11573.242400000003,
+      "unit": "ms",
+      "dispatch": {
+        "pid": 31116,
+        "count": 66,
+        "total_ms": 11573.242400000003,
+        "p95_ms": 219.6332,
+        "max_ms": 224.49849999999998,
+        "pending_max": 158,
+        "pending_unknown_count": 0,
+        "window_ms": 60013.4636,
+        "dropped_windows": 0,
+        "window_ended_at": "2026-10-16T18:01:59.603792400Z"
+      }
+    },
+    {
+      "schema_version": 1,
+      "type": "gui_dispatch_summary",
+      "timestamp": "2026-10-16T18:01:59.603792400Z",
+      "stream": "ui",
+      "target": "handler:IssueMonitorCapacityChanged",
+      "value": 590.4446,
+      "unit": "ms",
+      "dispatch": {
+        "pid": 31116,
+        "count": 9,
+        "total_ms": 590.4446,
+        "p95_ms": 99.8261,
+        "max_ms": 99.8261,
+        "pending_max": 150,
+        "pending_unknown_count": 0,
+        "window_ms": 60013.4636,
+        "dropped_windows": 0,
+        "window_ended_at": "2026-10-16T18:01:59.603792400Z"
+      }
+    },
+    {
+      "schema_version": 1,
+      "type": "gui_dispatch_summary",
+      "timestamp": "2026-10-16T18:01:59.603792400Z",
+      "stream": "ui",
+      "target": "handler:ProviderUsageSnapshot",
+      "value": 162.4198,
+      "unit": "ms",
+      "dispatch": {
+        "pid": 31116,
+        "count": 2,
+        "total_ms": 162.4198,
+        "p95_ms": 89.9831,
+        "max_ms": 89.9831,
+        "pending_max": 134,
+        "pending_unknown_count": 0,
+        "window_ms": 60013.4636,
+        "dropped_windows": 0,
+        "window_ended_at": "2026-10-16T18:01:59.603792400Z"
+      }
+    },
+    {
+      "schema_version": 1,
+      "type": "gui_dispatch_summary",
+      "timestamp": "2026-10-16T18:02:59.606225400Z",
+      "stream": "ui",
+      "target": "handler:AgentFrontend",
+      "value": 11982.714300000001,
+      "unit": "ms",
+      "dispatch": {
+        "pid": 31116,
+        "count": 66,
+        "total_ms": 11982.714300000001,
+        "p95_ms": 227.8122,
+        "max_ms": 245.5223,
+        "pending_max": 200,
+        "pending_unknown_count": 0,
+        "window_ms": 60002.4333,
+        "dropped_windows": 0,
+        "window_ended_at": "2026-10-16T18:02:59.606225400Z"
+      }
+    },
+    {
+      "schema_version": 1,
+      "type": "gui_dispatch_summary",
+      "timestamp": "2026-10-16T18:02:59.606225400Z",
+      "stream": "ui",
+      "target": "handler:ClientPaneSnapshotRepair",
+      "value": 300.492,
+      "unit": "ms",
+      "dispatch": {
+        "pid": 31116,
+        "count": 2,
+        "total_ms": 300.492,
+        "p95_ms": 173.369,
+        "max_ms": 173.369,
+        "pending_max": 72,
+        "pending_unknown_count": 0,
+        "window_ms": 60002.4333,
+        "dropped_windows": 0,
+        "window_ended_at": "2026-10-16T18:02:59.606225400Z"
+      }
+    },
+    {
+      "schema_version": 1,
+      "type": "gui_dispatch_summary",
+      "timestamp": "2026-10-16T18:02:59.606225400Z",
+      "stream": "ui",
+      "target": "handler:IssueMonitorCapacityChanged",
+      "value": 405.5209,
+      "unit": "ms",
+      "dispatch": {
+        "pid": 31116,
+        "count": 7,
+        "total_ms": 405.5209,
+        "p95_ms": 68.4312,
+        "max_ms": 68.4312,
+        "pending_max": 76,
+        "pending_unknown_count": 0,
+        "window_ms": 60002.4333,
+        "dropped_windows": 0,
+        "window_ended_at": "2026-10-16T18:02:59.606225400Z"
+      }
+    },
+    {
+      "schema_version": 1,
+      "type": "gui_dispatch_summary",
+      "timestamp": "2026-10-16T18:02:59.606225400Z",
+      "stream": "ui",
+      "target": "handler:ProviderUsageSnapshot",
+      "value": 153.4801,
+      "unit": "ms",
+      "dispatch": {
+        "pid": 31116,
+        "count": 2,
+        "total_ms": 153.4801,
+        "p95_ms": 81.2334,
+        "max_ms": 81.2334,
+        "pending_max": 43,
+        "pending_unknown_count": 0,
+        "window_ms": 60002.4333,
+        "dropped_windows": 0,
+        "window_ended_at": "2026-10-16T18:02:59.606225400Z"
+      }
+    },
+    {
+      "schema_version": 1,
+      "type": "gui_dispatch_summary",
+      "timestamp": "2026-10-16T18:03:59.621908700Z",
+      "stream": "ui",
+      "target": "handler:AgentFrontend",
+      "value": 9508.150300000001,
+      "unit": "ms",
+      "dispatch": {
+        "pid": 31116,
+        "count": 57,
+        "total_ms": 9508.150300000001,
+        "p95_ms": 215.2897,
+        "max_ms": 276.26469999999995,
+        "pending_max": 807,
+        "pending_unknown_count": 0,
+        "window_ms": 60015.6835,
+        "dropped_windows": 0,
+        "window_ended_at": "2026-10-16T18:03:59.621908700Z"
+      }
+    },
+    {
+      "schema_version": 1,
+      "type": "gui_dispatch_summary",
+      "timestamp": "2026-10-16T18:03:59.621908700Z",
+      "stream": "ui",
+      "target": "handler:IssueMonitorCapacityChanged",
+      "value": 330.49870000000004,
+      "unit": "ms",
+      "dispatch": {
+        "pid": 31116,
+        "count": 6,
+        "total_ms": 330.49870000000004,
+        "p95_ms": 58.5033,
+        "max_ms": 58.5033,
+        "pending_max": 129,
+        "pending_unknown_count": 0,
+        "window_ms": 60015.6835,
+        "dropped_windows": 0,
+        "window_ended_at": "2026-10-16T18:03:59.621908700Z"
+      }
+    },
+    {
+      "schema_version": 1,
+      "type": "gui_dispatch_summary",
+      "timestamp": "2026-10-16T18:03:59.621908700Z",
+      "stream": "ui",
+      "target": "handler:ProviderUsageSnapshot",
+      "value": 153.44299999999998,
+      "unit": "ms",
+      "dispatch": {
+        "pid": 31116,
+        "count": 2,
+        "total_ms": 153.44299999999998,
+        "p95_ms": 85.47109999999999,
+        "max_ms": 85.47109999999999,
+        "pending_max": 57,
+        "pending_unknown_count": 0,
+        "window_ms": 60015.6835,
+        "dropped_windows": 0,
+        "window_ended_at": "2026-10-16T18:03:59.621908700Z"
+      }
+    },
+    {
+      "schema_version": 1,
+      "type": "gui_dispatch_summary",
+      "timestamp": "2026-10-16T18:04:59.632094100Z",
+      "stream": "ui",
+      "target": "handler:AgentFrontend",
+      "value": 9537.872000000001,
+      "unit": "ms",
+      "dispatch": {
+        "pid": 31116,
+        "count": 58,
+        "total_ms": 9537.872000000001,
+        "p95_ms": 212.07319999999999,
+        "max_ms": 249.01309999999998,
+        "pending_max": 168,
+        "pending_unknown_count": 0,
+        "window_ms": 60010.1852,
+        "dropped_windows": 0,
+        "window_ended_at": "2026-10-16T18:04:59.632094100Z"
+      }
+    },
+    {
+      "schema_version": 1,
+      "type": "gui_dispatch_summary",
+      "timestamp": "2026-10-16T18:04:59.632094100Z",
+      "stream": "ui",
+      "target": "handler:IssueMonitorCapacityChanged",
+      "value": 404.9448,
+      "unit": "ms",
+      "dispatch": {
+        "pid": 31116,
+        "count": 7,
+        "total_ms": 404.9448,
+        "p95_ms": 69.06760000000001,
+        "max_ms": 69.06760000000001,
+        "pending_max": 77,
+        "pending_unknown_count": 0,
+        "window_ms": 60010.1852,
+        "dropped_windows": 0,
+        "window_ended_at": "2026-10-16T18:04:59.632094100Z"
+      }
+    },
+    {
+      "schema_version": 1,
+      "type": "gui_dispatch_summary",
+      "timestamp": "2026-10-16T18:04:59.632094100Z",
+      "stream": "ui",
+      "target": "handler:ProviderUsageSnapshot",
+      "value": 163.6333,
+      "unit": "ms",
+      "dispatch": {
+        "pid": 31116,
+        "count": 2,
+        "total_ms": 163.6333,
+        "p95_ms": 94.9515,
+        "max_ms": 94.9515,
+        "pending_max": 53,
+        "pending_unknown_count": 0,
+        "window_ms": 60010.1852,
+        "dropped_windows": 0,
+        "window_ended_at": "2026-10-16T18:04:59.632094100Z"
+      }
+    }
+  ]
+}

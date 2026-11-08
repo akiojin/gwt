@@ -1,0 +1,12 @@
+project pass=1 root="E:/gwt" wall_seconds=1.276664 cpu_seconds=0.906250 sessions=12 uncertainties=5
+project pass=1 root="E:/160-Idina" wall_seconds=0.959423 cpu_seconds=0.796875 sessions=1 uncertainties=5
+project pass=1 root="E:/KeibaSuite" wall_seconds=0.960224 cpu_seconds=0.765625 sessions=1 uncertainties=5
+project pass=1 root="E:/unity-cli" wall_seconds=1.158978 cpu_seconds=0.703125 sessions=1 uncertainties=5
+project pass=1 root="E:/llmlb" wall_seconds=0.893099 cpu_seconds=0.671875 sessions=1 uncertainties=5
+machine pass=1 wall_seconds=2.001964 cpu_seconds=0.875000 sessions=16 uncertainties=0
+project pass=2 root="E:/gwt" wall_seconds=1.304433 cpu_seconds=0.796875 sessions=12 uncertainties=5
+project pass=2 root="E:/160-Idina" wall_seconds=1.713646 cpu_seconds=0.796875 sessions=1 uncertainties=5
+project pass=2 root="E:/KeibaSuite" wall_seconds=0.917975 cpu_seconds=0.656250 sessions=1 uncertainties=5
+project pass=2 root="E:/unity-cli" wall_seconds=1.021041 cpu_seconds=0.656250 sessions=1 uncertainties=5
+project pass=2 root="E:/llmlb" wall_seconds=0.967959 cpu_seconds=0.609375 sessions=1 uncertainties=5
+machine pass=2 wall_seconds=1.413858 cpu_seconds=0.968750 sessions=16 uncertainties=0

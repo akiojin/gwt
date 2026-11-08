@@ -46,6 +46,161 @@ async function messages(page: Page, kind: string) {
   ), kind);
 }
 
+test("Work detail preserves all six managed hook states and pending metadata", async ({ page }) => {
+  await boot(page);
+  await page.locator(".issue-other-summary").click();
+  await row(page, "other-paused").click();
+  const section = page.locator('.workspace-overview-detail-pane [data-section="managed-hooks"]');
+  await expect(section).toHaveCount(0);
+  for (const [status, label] of [
+    ["ready", "Ready"], ["needs_attention", "Needs attention"],
+    ["self_healed", "Self healed"], ["degraded", "Degraded"],
+    ["inactive", "Inactive"], ["waiting_for_first_hook_event", "Waiting for first hook event"],
+  ]) {
+    await page.evaluate(status => {
+      const fixture = window as any;
+      const work = fixture.__otherProjection.active_works.find((work: any) => work.id === "other-paused");
+      work.managed_hook_health = { status, last_event: "PreToolUse", last_event_at: "2026-11-03T00:00:00Z" };
+      fixture.__otherEmit({ kind: "active_work_projection", projection: fixture.__otherProjection });
+    }, status);
+    await expect(section).toHaveAttribute("data-status", status);
+    await expect(section.locator("dd")).toHaveText([label, "PreToolUse", "2026-11-03T00:00:00Z"]);
+    await expect(section.locator("dt")).toHaveText(["Status", "Last event", "Last event at"]);
+    await expect(row(page, "other-paused").locator(".workspace-overview-hook-health"))
+      .toHaveCount(status === "degraded" ? 1 : 0);
+  }
+  await page.evaluate(() => {
+    const fixture = window as any;
+    const work = fixture.__otherProjection.active_works.find((work: any) => work.id === "other-paused");
+    work.managed_hook_health = {
+      status: "ready", pending_discussion: { proposal_label: "Proposal A", next_question: "Choose a repair path" },
+      pending_goal: { condition: "Verify managed hooks" },
+    };
+    fixture.__otherEmit({ kind: "active_work_projection", projection: fixture.__otherProjection });
+  });
+  await expect(section.locator("dt")).toHaveText(["Status", "Discussion", "Goal"]);
+  await expect(section.locator("dd")).toHaveText(["Ready", "Proposal A", "Verify managed hooks"]);
+  await expect(section.locator("p")).toHaveText("Choose a repair path");
+  await page.screenshot({ path: test.info().outputPath("managed-hook-health.png") });
+});
+
+test("Work projection snapshots and patches update Other while retaining session history", async ({ page }, info) => {
+  await boot(page);
+  const other = page.locator("details.issue-other-group");
+  await other.locator("summary").click();
+  await row(page, "other-paused").click();
+  await expect(other.locator('[data-action="resume-session"]')).toBeVisible();
+  await page.evaluate(() => {
+    const fixture = window as any;
+    const projection = structuredClone(fixture.__otherProjection);
+    projection.active_works.find((work: any) => work.id === "other-paused").title = "Snapshot work";
+    fixture.__otherEmit({ kind: "active_work_projection", projection });
+  });
+  await expect(row(page, "other-paused")).toContainText("Snapshot work");
+  await page.evaluate(() => {
+    const fixture = window as any;
+    const projection = structuredClone(fixture.__otherProjection);
+    const work = projection.active_works.find((work: any) => work.id === "other-paused");
+    work.title = "Patched work";
+    delete work.works[0].agents[0].sessions;
+    fixture.__otherEmit({ kind: "active_work_projection_patch", projection });
+  });
+  await expect(row(page, "other-paused")).toContainText("Patched work");
+  await expect(other).toHaveAttribute("open");
+  await other.locator('[data-action="resume-session"]').click();
+  await expect.poll(() => messages(page, "resume_workspace_agent")).toEqual([
+    expect.objectContaining({ session_id: "ledger-other", agent_session_id: "conversation-other" }),
+  ]);
+  await page.screenshot({ path: info.outputPath("work-projection-patch.png") });
+  await page.evaluate(() => (window as any).__otherEmit({ kind: "active_work_projection", projection: null }));
+  await expect(row(page, "other-paused")).toHaveCount(0);
+  await expect(other.locator('[data-action="resume-session"]')).toHaveCount(0);
+});
+
+test("Status bridge shares canonical Issue state with the Monitor strip", async ({ page }, info) => {
+  await boot(page);
+  const other = page.locator("details.issue-other-group");
+  await other.locator("summary").click();
+  const search = page.locator(".knowledge-search");
+  await search.focus();
+  const otherNode = await other.elementHandle();
+  for (const enabled of [true, false]) {
+    await page.evaluate(enabled => (window as any).__operatorShell.applyIssueMonitorStatus({
+      enabled, autonomous_mode: enabled, state: "idle", queue_len: 0, active_count: 0, max_active_agents: 2,
+    }), enabled);
+    await expect(page.locator('[data-action="monitor-toggle"]')).toHaveText(enabled ? "Stop" : "Start");
+    await expect(page.locator('[data-action="monitor-autonomous"]')).toHaveAttribute("aria-checked", String(enabled));
+    await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText(enabled ? "Idle Q0 A0/2" : "Off");
+    await expect(search).toBeFocused();
+    await expect(other).toHaveAttribute("open");
+    expect(await other.evaluate((node, original) => node === original, otherNode)).toBe(true);
+  }
+  await page.evaluate(() => (window as any).__otherEmit({ kind: "issue_monitor_status", status: {
+    enabled: true, autonomous_mode: true, state: "active", queue_len: 3, active_count: 1, max_active_agents: 2,
+  } }));
+  await expect(page.locator('[data-action="monitor-toggle"]')).toHaveText("Stop");
+  await expect(page.locator('[data-action="monitor-autonomous"]')).toHaveAttribute("aria-checked", "true");
+  await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText("Run Q3 A1/2");
+  expect(await messages(page, "set_issue_monitor_enabled")).toEqual([]);
+  await page.screenshot({ path: info.outputPath("issue-status-bridge.png"), fullPage: true });
+  if (process.env.GWT_PLAYWRIGHT_CHECK_HOME) {
+    await page.screenshot({ path: `${process.env.GWT_PLAYWRIGHT_CHECK_HOME}/issue-status-bridge-${info.project.name}.png`, fullPage: true });
+  }
+});
+
+test("Issue list snapshots refresh a queued query through shared views", async ({ page }, info) => {
+  await boot(page);
+  await page.locator(".knowledge-row[data-issue-number='4556'] .knowledge-row-select").click();
+  await page.locator(".issue-other-summary").click();
+  const other = page.locator("details.issue-other-group");
+  await other.evaluate(node => { (window as any).__klistOther = node; });
+  await page.evaluate(() => { (window as any).__otherHoldSearch = true; });
+  const search = page.locator(".knowledge-search");
+  await search.fill("Integrate");
+  await expect.poll(() => messages(page, "search_knowledge_bridge")).not.toHaveLength(0);
+  const entry = page.locator(".knowledge-row[data-issue-number='4556']");
+  const emitList = async (title: string, overrides = {}) => page.evaluate(({ title, overrides }) => {
+    const fixture = window as any;
+    fixture.__otherEmit({ kind: "knowledge_entries", id: "tab-other::issue-1", knowledge_kind: "issue",
+      request_id: fixture.__otherLoadRequest.request_id, refresh_enabled: true, selected_number: null,
+      entries: [{ number: 4556, title, state: "open", labels: [], is_spec: false,
+        linked_branch_count: 1, match_score: 100,
+        related_work_refs: [{ id: "linked-visible", branch: "feature/linked", updated_at: "" }] }],
+      ...overrides });
+  }, { title, overrides });
+  const latest = '<img src=x> Integrate latest';
+  for (const title of ["Integrate first snapshot", latest]) {
+    await emitList(title);
+    await expect(entry.locator(".knowledge-row-title")).toHaveText(title);
+    await expect(search).toBeFocused();
+    await expect(entry.locator(".knowledge-row-select")).toHaveAttribute("aria-current", "true");
+    await expect(other).toHaveAttribute("open");
+    expect(await other.evaluate(node => node === (window as any).__klistOther)).toBe(true);
+  }
+  await entry.evaluate(node => { (window as any).__klistRow = node; });
+  await emitList(latest);
+  await emitList("Integrate stale request", { request_id: -1 });
+  await emitList("Integrate other window", { id: "closed-issue-window" });
+  await emitList("Integrate wrong kind", { knowledge_kind: "board" });
+  // A later message on the same FIFO proves all rejected replies were consumed.
+  const processed = page.waitForEvent("dialog");
+  await page.evaluate(() => (window as any).__otherEmit({
+    kind: "workspace_projection_prune_error", message: "Issue list snapshots processed",
+  }));
+  const dialog = await processed;
+  expect(dialog.message()).toBe("Work Projection Prune error: Issue list snapshots processed");
+  await dialog.dismiss();
+  await expect(entry.locator(".knowledge-row-title")).toHaveText(latest);
+  expect(await entry.evaluate(node => node === (window as any).__klistRow)).toBe(true);
+  await expect(entry.locator("img, script")).toHaveCount(0);
+  await search.fill("");
+  await expect(entry.locator(".knowledge-row-title")).toHaveText(latest);
+  await expect(search).toBeFocused();
+  await expect(other).toHaveAttribute("open");
+  await expect(row(page, "other-paused")).toBeVisible();
+  await page.screenshot({ path: info.outputPath("issue-list-shared-snapshot.png") });
+});
+
 test("Other stays authoritative under search and queue columns, with no Workspace surface", async ({ page }) => {
   await boot(page);
   const other = page.locator("details.issue-other-group");
@@ -93,6 +248,49 @@ test("Other disclosure survives a cache refresh between pointerdown and pointeru
   await expect(row(page, "other-paused")).toBeVisible();
 });
 
+test("Remote branch snapshots replace Other rows and preserve branch launch", async ({ page }, info) => {
+  await boot(page);
+  await page.locator(".issue-other-summary").click();
+  const emitBranches = async (id: string, branches: string[]) => {
+    const processed = page.waitForEvent("dialog");
+    await page.evaluate(({ id, branches }) => {
+      const fixture = window as any;
+      fixture.__otherEmit({ kind: "remote_start_work_branches", id, branches });
+      // Observe completion on the same receive FIFO before negative assertions.
+      fixture.__otherEmit({ kind: "workspace_projection_prune_error", message: "Remote snapshot processed" });
+    }, { id, branches });
+    const dialog = await processed;
+    expect(dialog.message()).toBe("Work Projection Prune error: Remote snapshot processed");
+    await dialog.dismiss();
+  };
+  await emitBranches("closed-issue-window", ["origin/feature/ignored"]);
+  await expect(row(page, "remote-start:feature/ignored")).toHaveCount(0);
+  await expect(row(page, "remote-start:feature/remote")).toBeVisible();
+
+  await emitBranches("tab-other::issue-1", [
+    "origin/feature/other", "origin/feature/linked",
+    "origin/feature/replacement", "origin/feature/replacement",
+  ]);
+  await expect(row(page, "remote-start:feature/remote")).toHaveCount(0);
+  await expect(row(page, "remote-start:feature/other")).toHaveCount(0);
+  await expect(row(page, "remote-start:feature/linked")).toHaveCount(0);
+  await expect(page.locator(".issue-other-summary")).toHaveText("Other (2)");
+  const replacement = row(page, "remote-start:feature/replacement");
+  await expect(replacement).toHaveCount(1);
+  await expect(replacement.locator(".workspace-overview-remote")).toHaveText("Remote");
+  await replacement.click();
+  await expect(replacement).toHaveAttribute("aria-selected", "true");
+  await page.screenshot({ path: info.outputPath("remote-branch-snapshot.png") });
+  await replacement.locator('[data-action="launch-workspace-row"]').click();
+  await expect.poll(() => messages(page, "open_launch_wizard")).toEqual([
+    expect.objectContaining({ branch_name: "feature/replacement" }),
+  ]);
+  await emitBranches("tab-other::issue-1", []);
+  await expect(replacement).toHaveCount(0);
+  await expect(row(page, "other-paused")).toBeVisible();
+  await expect(page.locator(".issue-other-summary")).toHaveText("Other (1)");
+});
+
 test("Other keeps branch launch, conversation resume and backend-approved cleanup reachable", async ({ page }) => {
   await boot(page);
   await page.locator(".issue-other-summary").click();
@@ -126,6 +324,27 @@ test("a persisted work preset restores the Issue list with collapsed Other", asy
   await expect(row(page, "other-paused")).toBeVisible();
 });
 
+test("restored Issue work stays visible and permits close only for the exact orphan Work", async ({ page }) => {
+  await boot(page);
+  await page.locator(".knowledge-row[data-issue-number='4556'] .knowledge-row-select").click();
+  const cards = page.locator(".knowledge-related-work");
+  await expect(cards).toHaveCount(3);
+  await expect(cards.nth(0)).toContainText("Recovered Issue work");
+  await expect(cards.nth(0).getByRole("button", { name: "Done", exact: true })).toBeEnabled();
+  await expect(cards.nth(0).getByRole("button", { name: "Discard", exact: true })).toBeEnabled();
+  await expect(cards.nth(1).getByRole("button", { name: "Done unavailable: live_agent", exact: true })).toBeDisabled();
+  await expect(cards.nth(1).getByRole("button", { name: "Discard unavailable: live_agent", exact: true })).toBeDisabled();
+  await expect(cards.nth(2).locator(".workspace-detail-work-actions")).toHaveCount(0);
+  await expect.poll(() => messages(page, "close_work")).toEqual([]);
+
+  await cards.nth(0).getByRole("button", { name: "Done", exact: true }).click();
+  await expect.poll(() => messages(page, "close_work")).toEqual([
+    { kind: "close_work", work_id: "child-issue-orphan", close_kind: "done" },
+  ]);
+  await expect(cards.nth(0).locator(".workspace-detail-work-actions")).toHaveCount(0);
+  await page.screenshot({ path: test.info().outputPath("issue-orphan-work.png") });
+});
+
 async function installBackend(page: Page, preset: string) {
   const projectKey = new URL(liveUrl || APP_URL).pathname.split("/")[2];
   await page.addInitScript(({ preset, projectKey }) => {
@@ -152,7 +371,13 @@ async function installBackend(page: Page, preset: string) {
       unassigned_agents: [], journal_entries: [],
       active_works: [
         { id: "linked-visible", title: "Linked issue", linked_issue_numbers: [4556],
-          branch: "feature/linked", status_category: "active", lifecycle_state: "active", agents: [], works: [] },
+          branch: "feature/linked", status_category: "active", lifecycle_state: "active", agents: [],
+          works: [
+            { id: "child-issue-orphan", title: "Recovered Issue work", lifecycle_state: "paused",
+              status_category: "idle", manual_close_allowed: true, agents: [] },
+            { id: "child-issue-live", title: "Running Issue work", lifecycle_state: "active",
+              status_category: "active", manual_close_allowed: false, close_blocked_reason: "live_agent", agents: [] },
+          ] },
         { id: "linked-uncached", title: "Issue outside cached results", linked_issue_numbers: [9999],
           branch: "feature/uncached", status_category: "idle", lifecycle_state: "paused", agents: [], works: [] },
         { id: "unknown-authority", title: "Unknown owner", branch: "feature/unknown", agents: [], works: [] },
@@ -203,19 +428,35 @@ async function installBackend(page: Page, preset: string) {
         const message = JSON.parse(raw);
         fixture.__otherMessages.push(message);
         if (message.kind === "frontend_ready") {
+          fixture.__otherProjection = projection;
+          fixture.__otherEmit = (payload: unknown) => this.emit(payload);
           this.emit(workspace);
           this.emit({ kind: "active_work_projection", projection });
         } else if (message.kind === "request_remote_start_work_branches") {
           this.emit({ kind: "remote_start_work_branches", id: message.id,
             branches: ["origin/feature/linked", "origin/feature/other", "origin/feature/remote"] });
         } else if (["load_knowledge_bridge", "search_knowledge_bridge"].includes(message.kind)) {
+          if (message.kind === "load_knowledge_bridge") fixture.__otherLoadRequest = message;
+          if (message.kind === "search_knowledge_bridge" && fixture.__otherHoldSearch) return;
           this.emit({ kind: "knowledge_entries", id: message.id, knowledge_kind: message.knowledge_kind,
             request_id: message.request_id, entries: message.query ? [] : entries,
             selected_number: message.query ? null : 4556, refresh_enabled: true, empty_message: null });
         } else if (message.kind === "select_knowledge_bridge_entry") {
           this.emit({ kind: "knowledge_detail", id: message.id, knowledge_kind: message.knowledge_kind,
             request_id: message.request_id, detail: { number: message.number, title: "Integrate Other",
-              state: "open", labels: [], sections: [], related_works: [] } });
+              state: "open", labels: [], sections: [], related_works: [
+                { id: "child-issue-orphan", title: "Recovered Issue work", status_category: "idle" },
+                { id: "child-issue-live", title: "Running Issue work", status_category: "active" },
+                { id: "unmatched-issue-work", title: "Unmatched Issue work", status_category: "idle" },
+              ].map(work => ({ ...work, branch: "feature/linked", agents: [] })) } });
+        } else if (message.kind === "close_work") {
+          const work = projection.active_works.flatMap(workspace => workspace.works)
+            .find(work => work.id === message.work_id);
+          if (work?.manual_close_allowed) {
+            work.lifecycle_state = message.close_kind;
+            work.manual_close_allowed = false;
+            this.emit({ kind: "active_work_projection", projection });
+          }
         }
       }
       close() { this.readyState = 3; this.dispatchEvent(new CloseEvent("close")); }

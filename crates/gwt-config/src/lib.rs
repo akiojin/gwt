@@ -10,6 +10,7 @@ pub mod board_config;
 pub mod build_artifact_gc_config;
 pub mod error;
 pub mod github_budget_config;
+pub mod home;
 pub mod locale;
 pub mod profile;
 pub mod settings;

@@ -2,11 +2,17 @@ pub mod agent_backend_dispatch;
 pub mod agent_capability;
 pub mod agent_capacity;
 pub mod agent_maintenance;
+pub mod agent_names;
 pub(crate) mod agent_project_state;
+pub mod agent_registry_import;
 pub mod agent_resource_policy;
+pub mod docker_launch;
+pub mod launch_runtime;
 pub mod pane_runtime;
 pub mod session_finalizer;
 pub mod session_launch;
+#[cfg(windows)]
+pub(crate) mod verification_cap_relief;
 #[doc(hidden)]
 pub use agent_project_state::validated_project_state_root_for_session_recovery;
 pub mod autonomous_handoff;
@@ -14,6 +20,7 @@ pub mod backend_service;
 pub mod board_audience;
 pub mod board_discussion_sync;
 pub mod board_provider;
+pub mod board_read_receipts;
 pub mod board_remote;
 pub mod branch_cleanup;
 pub mod branch_list;
@@ -28,8 +35,6 @@ pub mod daemon_supervisor;
 mod discussion_resume;
 pub mod disk_space;
 pub mod error_report;
-pub mod file_content;
-pub mod file_tree;
 pub mod gui_single_instance;
 pub mod handlers;
 pub mod index_resources;
@@ -39,43 +44,60 @@ pub mod index_worker;
 pub mod issue_cache;
 pub mod issue_monitor;
 pub mod issue_monitor_authz;
+pub mod issue_monitor_ci;
 pub mod issue_monitor_gate;
 pub mod issue_monitor_review;
 pub mod issue_monitor_settlement;
 pub mod issue_monitor_worker;
 pub mod knowledge_bridge;
 pub mod launch_wizard;
+pub mod machine_agent_admission;
+pub mod machine_agent_settings;
 pub mod managed_assets;
 pub mod memory_pressure;
 pub mod migration;
+pub mod mobile_connection;
+pub mod mobile_coordinator;
+pub mod mobile_host;
+#[doc(hidden)]
+pub mod mobile_input_permit;
 pub mod monitor_duplicate_runtime;
 pub mod native_app;
 pub mod native_notification_permission;
-pub(crate) mod path_filter;
+pub mod native_notifications;
 #[doc(hidden)]
 pub mod perf;
 pub mod persistence;
 pub mod pm_conversation;
+pub mod pm_current;
+pub mod pm_planning;
+pub mod pm_policy;
 pub mod pm_registry;
 pub mod preset;
 pub mod process;
 pub mod profile_dispatch;
+pub mod project_execution_policy;
+pub mod project_notifications;
 pub mod project_open_control;
 pub mod project_runtime;
+pub mod project_store_maintenance;
 pub mod project_transport;
 pub mod protocol;
 pub mod provider_reset;
 pub mod pty_start_gate;
 pub mod recovery_delivery;
 pub mod runtime_daemon_events;
+pub mod runtime_gc;
 pub mod session_inventory;
 pub mod spec_tasks;
 pub mod spotlight;
 pub mod start_work;
 pub mod system_settings;
+pub mod update_control;
 pub mod update_drain;
+pub mod update_settings;
 pub mod web_protocol_enums;
-pub mod window_canvas;
+pub mod window_registry;
 pub mod window_state;
 pub mod work_notes;
 pub(crate) mod workspace_update_receipt;
@@ -100,7 +122,8 @@ pub use agent_project_state::{
     apply_authenticated_workspace_update,
     apply_bound_authenticated_blocked_build_abort_terminalization,
     apply_bound_authenticated_work_terminalization, apply_bound_authenticated_workspace_update,
-    apply_bound_authenticated_workspace_update_with_operation_id, continue_authenticated_execution,
+    apply_bound_authenticated_workspace_update_with_operation_id,
+    continuation_requires_new_session, continue_authenticated_execution,
     describe_authenticated_host_contract, observe_agent_runtime,
     prepare_resume_producing_authority, probe_authenticated_execution_binding,
     probe_authenticated_prepared_execution_binding, probe_bound_authenticated_work_materialization,
@@ -138,12 +161,6 @@ pub use custom_agents_service::{
     update_custom_agent, CustomAgentsServiceError,
 };
 pub use daemon_runtime::{HookForwardTarget, RuntimeHookEvent, RuntimeHookEventKind};
-pub use file_content::{
-    file_kind, read_binary_chunk, read_text_file, write_binary_byte, write_text_file, BinaryChunk,
-    ContentLimits, Encoding, ExpectedMetadata, FileContentError, FileKind, Newline, TextResult,
-    WriteOutcome,
-};
-pub use file_tree::{list_directory_entries, FileTreeEntry, FileTreeEntryKind};
 pub use gwt_agent::{ClaudeCodeOpenaiCompatInput, PresetDefinition, PresetId};
 pub use index_search::{search_project_index, work_advisory};
 pub use index_worker::{
@@ -160,14 +177,15 @@ pub use index_worker::{
 };
 pub use issue_monitor::{
     acknowledge_autonomous_handoff_user_prompt_submit_from_prefs,
-    bind_autonomous_handoff_delivery_target_from_prefs, clear_issue_monitor_authority_fence,
-    clear_wait_on_record, decide_merged_issue_settlement, declare_wait_on_record,
-    delegation_recorded, establish_issue_monitor_authority_fence, invalidate_wait_on_record,
+    append_issue_monitor_requeue_reason, bind_autonomous_handoff_delivery_target_from_prefs,
+    clear_issue_monitor_authority_fence, clear_wait_on_record, decide_merged_issue_settlement,
+    declare_wait_on_record, establish_issue_monitor_authority_fence, invalidate_wait_on_record,
     is_auto_improve_candidate, is_legacy_git_launch_failure_for_project,
     issue_monitor_authority_fence_path, issue_monitor_launch_delivery_requeue_reason,
     issue_monitor_launch_plan, issue_monitor_launch_profile_pool_summary,
     issue_monitor_launch_profile_summary, issue_monitor_launch_prompt,
-    issue_monitor_launch_prompt_with_requeue_reason, issue_monitor_prefs_path_for_repo_path,
+    issue_monitor_launch_prompt_for_base, issue_monitor_launch_prompt_with_requeue_reason,
+    issue_monitor_owner_branch_delivery, issue_monitor_prefs_path_for_repo_path,
     load_issue_monitor_authority_fence, load_issue_monitor_prefs,
     mark_autonomous_handoff_delivered_from_prefs,
     mark_autonomous_handoff_delivery_ambiguous_from_prefs, merge_issue_monitor_profiles_set,
@@ -252,9 +270,9 @@ pub use persistence::{
     load_session_state, load_workspace_state, migrate_legacy_workspace_state,
     pause_process_windows_for_restore, project_title_from_path, save_session_state,
     save_workspace_state, save_workspace_state_durable, workspace_state_path, AgentKanbanLane,
-    CanvasViewport, PersistedSessionState, PersistedSessionTabState, PersistedWindowCanvasState,
-    PersistedWindowState, ProjectKind, RecentProjectEntry, WindowGeometry, WindowPlacement,
-    WindowProcessStatus, WindowState, WindowWorktreeForm,
+    PersistedSessionState, PersistedSessionTabState, PersistedWindowRegistry, PersistedWindowState,
+    ProjectKind, RecentProjectEntry, WindowPlacement, WindowProcessStatus, WindowState,
+    WindowSurfaceOwner, WindowWorktreeForm,
 };
 pub use preset::{
     detect_shell_program, resolve_launch_spec, LaunchSpec, PresetResolveError, ShellProgram,
@@ -262,19 +280,20 @@ pub use preset::{
 };
 pub use protocol::{
     ActiveWorkAgentView, ActiveWorkCleanupCandidateView, ActiveWorkItemView,
-    ActiveWorkProjectionView, ActiveWorkspaceWorkView, AppStateView, ArrangeMode,
-    AttachmentProgressPhase, BackendEvent, BranchEntriesPhase, ContinueWorkOutcomeKind,
-    CustomAgentErrorCode, FileAttachment, FileContentErrorKind, FileContentMode,
-    FileContentSaveErrorKind, FocusCycleDirection, FrontendEvent, GitHubRepositorySearchResultView,
-    HubProjectView, HubStateView, IndexSearchMatchMode, IndexSearchResult, IndexSearchScope,
-    IndexSearchTarget, LogScopeSelection, ManagedHookHealthView, ManagedHookPendingDiscussionView,
-    ManagedHookPendingGoalView, ManagedHookSlowHandlerView, PmAgentOption, ProfileEntryView,
-    ProfileEnvEntryView, ProfileSnapshotView, ProjectTabView, RecentProjectView,
-    RecoveryCenterItemState, RecoveryCenterItemView, RecoveryCenterLoadStatus, RunningAgentSummary,
-    UiTraceEntry, UiTracePayload, WorkAgentView, WorkEventView, WorkItemView,
+    ActiveWorkProjectionView, ActiveWorkspaceWorkView, AgentAssignmentHistoryView,
+    AgentPastContributorView, AgentRosterMemberView, AgentRosterView, AgentWorkFactsView,
+    AppStateView, AttachmentProgressPhase, BackendEvent, BranchEntriesPhase, ContentLimits,
+    ContinueWorkOutcomeKind, CustomAgentErrorCode, FileAttachment, FocusCycleDirection,
+    FrontendEvent, GitHubRepositorySearchResultView, HubProjectView, HubStateView,
+    IndexSearchMatchMode, IndexSearchResult, IndexSearchScope, IndexSearchTarget,
+    LocalAgentActivityAgentView, LocalAgentActivityView, LogScopeSelection, ManagedHookHealthView,
+    ManagedHookPendingDiscussionView, ManagedHookPendingGoalView, ManagedHookSlowHandlerView,
+    PmAgentOption, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView, ProjectTabView,
+    RecentProjectView, RecoveryCenterItemState, RecoveryCenterItemView, RecoveryCenterLoadStatus,
+    RunningAgentSummary, UiTraceEntry, UiTracePayload, WorkAgentView, WorkEventView, WorkItemView,
     WorkspaceExecutionContainerView, WorkspaceExecutionDiagnosisView, WorkspaceHistoryAgentView,
     WorkspaceHistoryEventView, WorkspaceHistorySessionView, WorkspaceHistoryView,
     WorkspaceJournalEntryView, WorkspaceResumeSource, WorkspaceStateNoticeKind,
     WorkspaceStateNoticeView, WorkspaceView,
 };
-pub use window_canvas::WindowCanvasState;
+pub use window_registry::WindowRegistry;

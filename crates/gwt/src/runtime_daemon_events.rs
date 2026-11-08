@@ -23,6 +23,8 @@ pub const ISSUE_MONITOR_CONTROL_REJECTED_ERROR: &str =
     "issue monitor control rejected before commit";
 pub const ISSUE_MONITOR_CONTROL_BUSY_ERROR: &str =
     "issue monitor control rejected: admission is full";
+pub const ISSUE_MONITOR_CONTROL_SCAN_ALREADY_IN_FLIGHT_ERROR: &str =
+    "issue monitor control rejected: scan_already_in_flight";
 /// Captured source for the private `agent_failed_from_launch` notification.
 /// Its discriminator makes an older daemon reject the fenced notification.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -342,9 +344,15 @@ pub fn decode_runtime_daemon_event(
                 waiting: payload.waiting,
             })
         }
-        ISSUE_MONITOR_CHANNEL => {
+        ISSUE_MONITOR_CHANNEL | ISSUE_MONITOR_CONTROL_CHANNEL => {
             let payload: IssueMonitorPayload = serde_json::from_value(payload).ok()?;
-            if payload.source_pid == current_pid {
+            if channel == ISSUE_MONITOR_CONTROL_CHANNEL {
+                // Authenticated commands can originate in the same owner process.
+                // Observer notifications retain their separate echo suppression.
+                if payload.event != "control" {
+                    return None;
+                }
+            } else if payload.source_pid == current_pid {
                 return None;
             }
             let mut event = serde_json::json!({

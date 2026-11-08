@@ -19,6 +19,199 @@ const indexHtml = readFileSync(resolve(here, "../index.html"), "utf8");
 const appCss = readFileSync(resolve(here, "../styles/app.css"), "utf8");
 const componentsCss = readFileSync(resolve(here, "../styles/components.css"), "utf8");
 
+function createManualCheckFixture() {
+  const fixture = createFixture();
+  const { document } = parseHTML(indexHtml);
+  fixture.document = document;
+  fixture.options.document = document;
+  fixture.controller = createUpdateCtaController(fixture.options);
+  return fixture;
+}
+
+test("manual update check sits beside the version and coalesces clicks until the result", () => {
+  const fixture = createManualCheckFixture();
+  const button = fixture.document.getElementById("update-check-button");
+  assert.ok(button);
+  assert.equal(fixture.document.getElementById("app-version").nextElementSibling.id, "update-check");
+  const status = fixture.document.getElementById("update-check-status");
+  assert.equal(status.getAttribute("role"), "status");
+  assert.equal(status.getAttribute("aria-live"), "polite");
+  assert.match(appSource, /case "update_check_result":/);
+  assert.match(appSource, /handleUpdateCheckResult\(event\)/);
+  const style = appCss.match(/\.update-check-status\s*\{[^}]+\}/)?.[0];
+  assert.ok(style);
+  assert.match(style, /var\(--color-text-muted\)/);
+  assert.doesNotMatch(style, /#[0-9a-f]{3,8}\b|rgba?\(/i);
+  assert.match(style, /white-space:\s*nowrap/);
+  assert.match(style, /text-overflow:\s*ellipsis/);
+  const detail = fixture.document.getElementById("update-check-detail");
+  assert.ok(detail, "full update details need their own notice card");
+  assert.equal(detail.parentElement.id, "operator-notice-stack");
+  assert.equal(detail.hidden, true);
+  const detailStyle = appCss.match(/\.update-check-detail\s*\{[^}]+\}/)?.[0];
+  assert.ok(detailStyle);
+  assert.match(detailStyle, /pointer-events:\s*auto/);
+  assert.match(detailStyle, /var\(--color-surface-elevated\)/);
+  assert.doesNotMatch(detailStyle, /position:\s*(?:fixed|absolute)|#[0-9a-f]{3,8}\b|rgba?\(/i);
+
+  button.click();
+  button.click();
+  assert.deepEqual(fixture.sent, [{ kind: "check_for_updates" }]);
+  assert.equal(button.disabled, true);
+  assert.equal(status.textContent, "Checking…");
+  fixture.controller.handleUpdateCheckResult({ checking: false, result: { state: "up_to_date" } });
+  assert.equal(button.disabled, false);
+  assert.equal(status.textContent, "Up to date");
+  button.click();
+  assert.equal(fixture.sent.length, 2);
+});
+
+test("manual update check displays errors and the rate-limit retry deadline", () => {
+  const fixture = createManualCheckFixture();
+  fixture.controller.handleUpdateCheckResult({
+    checking: false,
+    result: { state: "failed", message: "GitHub rate limit", retry_at: "2026-11-05T10:00:00Z" },
+  });
+  assert.match(fixture.document.getElementById("update-check-status").textContent, /GitHub rate limit.*2026-11-05T10:00:00Z/);
+  const detail = fixture.document.getElementById("update-check-detail");
+  assert.equal(detail.hidden, false);
+  assert.equal(fixture.document.getElementById("update-check-reason").textContent, "Check failed: GitHub rate limit — Retry after 2026-11-05T10:00:00Z");
+  assert.equal(fixture.document.getElementById("update-check-button").disabled, false);
+  fixture.controller.handleUpdateCheckResult({ checking: false, result: { state: "failed", message: "Network unavailable" } });
+  assert.equal(fixture.document.getElementById("update-check-status").textContent, "Check failed: Network unavailable");
+  assert.equal(fixture.document.getElementById("update-check-reason").textContent, "Check failed: Network unavailable");
+  fixture.controller.handleUpdateCheckResult({ checking: false, result: { state: "up_to_date" } });
+  assert.equal(detail.hidden, true);
+});
+
+test("manual update check offers mismatch retry through the existing modal and manual installation", () => {
+  const fixture = createManualCheckFixture();
+  fixture.controller.handleUpdateCheckResult({
+    checking: false,
+    result: { state: "available", current: "9.149.5", latest: "9.150.0", release_url: "https://github.com/akiojin/gwt/releases/tag/v9.150.0", asset_url: "https://github.com/akiojin/gwt/releases/download/v9.150.0/gwt.dmg" },
+    previous_failure: { outcome: "failure", to_version: "9.150.0", observed_version: "9.149.0" },
+  });
+  assert.match(fixture.document.getElementById("update-check-status").textContent, /Update available: v9.150.0/);
+  assert.equal(fixture.document.getElementById("update-check-failure").textContent, "Previous update failed: expected v9.150.0, observed v9.149.0 after restart.");
+  const detail = fixture.document.getElementById("update-check-detail");
+  assert.equal(detail.hidden, false);
+  assert.equal(detail.contains(fixture.document.getElementById("update-check-failure")), true);
+  const install = fixture.document.getElementById("update-check-install");
+  assert.equal(install.hidden, false);
+  assert.equal(detail.contains(install), true);
+  assert.equal(install.href, "https://github.com/akiojin/gwt/releases/tag/v9.150.0");
+  assert.deepEqual(fixture.sent, [], "checking alone must not download or apply");
+  const retry = fixture.document.getElementById("update-check-retry");
+  assert.equal(retry.hidden, false);
+  assert.equal(detail.contains(retry), true);
+  retry.click();
+  assert.equal(fixture.document.getElementById("update-modal").dataset.state, "downloading");
+  assert.deepEqual(fixture.sent, [{ kind: "apply_update_start" }]);
+  fixture.controller.handleUpdateCheckResult({ checking: false, result: { state: "up_to_date" }, previous_failure: null });
+  assert.equal(retry.hidden, true);
+  assert.equal(install.hidden, true);
+  assert.equal(fixture.document.getElementById("update-check-failure").hidden, true);
+});
+
+test("manual discovery during a download keeps the active update identity until another Check", () => {
+  const fixture = createManualCheckFixture();
+  fixture.controller.handleUpdateState({ state: "available", current: "9.149.0", latest: "9.150.0" });
+  fixture.document.getElementById("update-cta").click();
+  const activeModal = fixture.document.getElementById("update-modal");
+
+  fixture.controller.handleUpdateCheckResult({
+    checking: false,
+    offer_update: false,
+    result: { state: "available", current: "9.149.0", latest: "9.151.0", asset_url: "https://github.com/akiojin/gwt/releases/download/v9.151.0/gwt.dmg" },
+    previous_failure: { outcome: "failure", to_version: "9.151.0", observed_version: "9.149.0" },
+  });
+
+  assert.equal(fixture.document.getElementById("update-modal") === activeModal, true, "manual discovery must preserve the active modal");
+  assert.equal(activeModal.dataset.state, "downloading");
+  assert.equal(activeModal.dataset.version, "9.150.0");
+  assert.equal(fixture.document.getElementById("update-cta").dataset.status, "applying");
+  assert.equal(fixture.versionUpdates.at(-1).latest, "9.150.0");
+  assert.match(fixture.document.getElementById("update-check-status").textContent, /Update available: v9.151.0.*Check again after the current download finishes/);
+  assert.equal(fixture.document.getElementById("update-check-retry").hidden, true);
+  assert.deepEqual(fixture.sent, [{ kind: "apply_update_start" }]);
+});
+
+test("manual sync restores the checking latch without claiming an unobserved result", () => {
+  const fixture = createManualCheckFixture();
+  const button = fixture.document.getElementById("update-check-button");
+  const label = fixture.document.getElementById("update-check-status");
+  button.click();
+  fixture.controller.handleUpdateCheckResult({ checking: true, offer_update: false, result: null, previous_failure: null });
+  assert.equal(button.disabled, true);
+  assert.equal(label.textContent, "Checking…");
+  fixture.controller.handleUpdateCheckResult({ checking: false, offer_update: false, result: null, previous_failure: null });
+  assert.equal(button.disabled, false);
+  assert.equal(label.textContent, "");
+  assert.equal(label.dataset.state, "idle");
+  button.click();
+  assert.equal(fixture.sent.length, 2);
+});
+
+test("manual unavailable outcomes retract idle offers and preserve the active download", () => {
+  const fixture = createManualCheckFixture();
+  const controller = fixture.controller;
+  const available = { state: "available", current: "9.149.0", latest: "9.150.0", asset_url: "https://github.com/akiojin/gwt/releases/download/v9.150.0/gwt.dmg" };
+  controller.handleUpdateState(available);
+  controller.handleUpdateCheckResult({ checking: false, offer_update: true, result: { ...available, asset_url: null } });
+  assert.equal(Boolean(fixture.document.getElementById("update-cta")), false);
+  assert.match(fixture.document.getElementById("update-check-status").textContent, /v9.150.0.*[Nn]o applicable asset/);
+  assert.equal(fixture.versionUpdates.at(-1).latest, null);
+  controller.handleUpdateState(available);
+  controller.handleUpdateCheckResult({ checking: false, offer_update: true, result: { state: "up_to_date" } });
+  assert.equal(Boolean(fixture.document.getElementById("update-cta")), false);
+  assert.equal(fixture.versionUpdates.at(-1).latest, null);
+  controller.handleUpdateState(available);
+  fixture.document.getElementById("update-cta").click();
+  const modal = fixture.document.getElementById("update-modal");
+  controller.handleUpdateCheckResult({ checking: false, offer_update: true, result: { ...available, asset_url: null } });
+  controller.handleUpdateCheckResult({ checking: false, offer_update: false, result: { state: "up_to_date" } });
+  assert.equal(fixture.document.getElementById("update-modal") === modal, true);
+  assert.equal(modal.dataset.state, "downloading");
+  assert.equal(modal.dataset.version, "9.150.0");
+  assert.equal(fixture.document.getElementById("update-cta").dataset.status, "applying");
+  assert.deepEqual(fixture.sent, [{ kind: "apply_update_start" }]);
+});
+
+test("manual rediscovery preserves the active phase and scheduled Retry never cancels", () => {
+  const fixture = createManualCheckFixture();
+  const controller = fixture.controller;
+  const result = { state: "available", current: "9.149.0", latest: "9.150.0", asset_url: "https://github.com/akiojin/gwt/releases/download/v9.150.0/gwt.dmg" };
+  const manual = { checking: false, result, previous_failure: { outcome: "failure", to_version: "9.150.0", observed_version: "9.149.0" } };
+  controller.handleUpdateCheckResult(manual);
+  const retry = fixture.document.getElementById("update-check-retry");
+  assert.equal(retry.hidden, false);
+  controller.handleUpdateApplyPendingPersisted({ version: "9.150.0" });
+  const stagedCta = fixture.document.getElementById("update-cta");
+  controller.handleUpdateCheckResult({ ...manual, result: { ...result, latest: "9.151.0", asset_url: null } });
+  assert.equal(fixture.document.getElementById("update-cta") === stagedCta, true);
+  assert.equal(stagedCta.dataset.status, "ready");
+  assert.equal(stagedCta.textContent, "Update v9.150.0 ready — Restart now");
+  assert.deepEqual(fixture.sent, [], "assetless discovery must preserve the staged offer without a new download");
+  controller.handleUpdateCheckResult(manual);
+  assert.equal(fixture.document.getElementById("update-cta").dataset.status, "ready");
+  controller.handleUpdateAutoApply({ version: "9.150.0", phase: "scheduled", grace_secs: 60 });
+  assert.equal(retry.hidden, true);
+  controller.handleUpdateCheckResult(manual);
+  const cta = fixture.document.getElementById("update-cta");
+  assert.equal(cta.dataset.status, "scheduled");
+  assert.equal(retry.hidden, true);
+  retry.click();
+  assert.deepEqual(fixture.sent, [], "Retry must never invoke scheduled cancellation");
+  cta.click();
+  assert.deepEqual(fixture.sent, [{ kind: "cancel_update_auto_apply" }]);
+  controller.handleUpdateAutoApply({ version: "9.150.0", phase: "postponed" });
+  controller.handleUpdateCheckResult(manual);
+  assert.equal(cta.dataset.status, "draining");
+  controller.handleUpdateAutoApply({ version: "9.150.0", phase: "applying" });
+  controller.handleUpdateCheckResult(manual);
+  assert.equal(cta.dataset.status, "applying");
+});
+
 test("update_state renders one reusable update CTA", () => {
   const fixture = createFixture();
   const controller = createUpdateCtaController(fixture.options);
@@ -148,6 +341,29 @@ test("issue #4933: a newer release removes the failed update modal", () => {
   assert.match(fixture.document.getElementById("update-cta").textContent, /v9\.27\.0/);
 });
 
+test("issue #6757: up_to_date clears the failed staged target and restores the running version", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+  controller.handleUpdateState({ state: "available", current: "9.149.0", latest: "9.147.0" });
+  fixture.document.getElementById("update-cta").click();
+  controller.handleUpdateProgress({ downloaded: 100, total: 100 });
+  controller.handleUpdateReady({ version: "9.147.0" });
+  controller.handleUpdateApplyPendingPersisted({ version: "9.147.0" });
+  fixture.document.getElementById("update-cta").click();
+  assert.equal(fixture.document.getElementById("update-modal").dataset.state, "ready");
+
+  controller.handleUpdateState({ state: "up_to_date" });
+  controller.handleUpdateState({ state: "up_to_date" });
+  controller.handleIssueMonitorStatus({ update_drain: null });
+
+  assert.equal(Boolean(fixture.document.getElementById("update-cta-shell")), false);
+  assert.equal(Boolean(fixture.document.getElementById("update-modal")), false);
+  assert.deepEqual(fixture.versionUpdates.at(-1), { current: undefined, latest: null });
+  controller.handleUpdateState({ state: "available", current: "9.149.0", latest: "9.150.0" });
+  fixture.document.getElementById("update-cta").click();
+  assert.equal(fixture.document.querySelector("[data-update-modal-progress]").getAttribute("aria-valuenow"), "0");
+});
+
 test("update CTA dismiss hides available state without applying", () => {
   const fixture = createFixture();
   const controller = createUpdateCtaController(fixture.options);
@@ -223,15 +439,17 @@ test("update_state removes stale split toast and button DOM before showing CTA",
 
 test("app.js delegates update handling to the unified update CTA controller", () => {
   assert.match(appSource, /createUpdateCtaController/);
-  assert.match(appSource, /updateCtaController\.handleUpdateState\(event\)/);
+  assert.match(appSource, /handleUpdateState: applyUpdateState/);
+  assert.match(appSource, /applyUpdateState\(event\)/);
   // Phase 19 replaces showError() with handleUpdateApplyError().
-  assert.match(appSource, /updateCtaController\.handleUpdateApplyError\(/);
-  assert.match(appSource, /updateCtaController\.handleUpdateProgress\(/);
-  assert.match(appSource, /updateCtaController\.handleUpdateReady\(/);
-  assert.match(
-    appSource,
-    /updateCtaController\.handleUpdateApplyPendingPersisted\(/,
-  );
+  assert.match(appSource, /handleUpdateApplyError: applyUpdateApplyError/);
+  assert.match(appSource, /applyUpdateApplyError\(/);
+  assert.match(appSource, /handleUpdateProgress: applyUpdateProgress/);
+  assert.match(appSource, /applyUpdateProgress\(/);
+  assert.match(appSource, /handleUpdateReady: applyUpdateReady/);
+  assert.match(appSource, /applyUpdateReady\(/);
+  assert.match(appSource, /handleUpdateApplyPendingPersisted: applyUpdateApplyPendingPersisted/);
+  assert.match(appSource, /applyUpdateApplyPendingPersisted\(/);
 });
 
 test("legacy split update toast and button surfaces are removed", () => {
@@ -285,7 +503,7 @@ test("update CTA shell mounts in the shared notice host", () => {
   );
 });
 
-function createFixture({ confirmResult = true, now } = {}) {
+function createFixture({ confirmResult = true, now, scheduleFrame = callback => { callback(); return () => {}; } } = {}) {
   const { document } = parseHTML(
     '<!doctype html><html><body><div id="operator-notice-stack"></div></body></html>',
   );
@@ -299,6 +517,7 @@ function createFixture({ confirmResult = true, now } = {}) {
     versionUpdates,
     options: {
       document,
+      scheduleFrame,
       ...(now ? { now } : {}),
       send(message) {
         sent.push(message);
@@ -350,32 +569,79 @@ test("phase19: click no longer uses window.confirm and instead opens #update-mod
   );
 });
 
-test("phase19: update_progress events update modal progress bar and byte counter", () => {
+test("update progress retains an immutable snapshot before the modal mounts", () => {
   const fixture = createFixture();
   const controller = createUpdateCtaController(fixture.options);
   controller.showAvailable("9.26.0");
+  const payload = { downloaded: 1024 * 1024, total: 4 * 1024 * 1024 };
+  controller.handleUpdateProgress(payload);
+  payload.downloaded = payload.total;
+
   fixture.document.getElementById("update-cta").click();
+  const progress = fixture.document.querySelector("[data-update-modal-progress]");
+  const counter = fixture.document.querySelector("[data-update-modal-byte-counter]");
+  assert.equal(progress.getAttribute("aria-valuenow"), "25");
+  assert.equal(counter.textContent, "1.0 MB / 4.0 MB");
 
-  controller.handleUpdateProgress({
-    downloaded: 1024 * 1024,
-    total: 4 * 1024 * 1024,
-    asset: "gwt-macos-arm64.tar.gz",
-    version: "9.26.0",
-  });
-  controller.handleUpdateProgress({
-    downloaded: 3 * 1024 * 1024,
-    total: 4 * 1024 * 1024,
-    asset: "gwt-macos-arm64.tar.gz",
-    version: "9.26.0",
-  });
+  controller.handleUpdateProgress({ downloaded: 3 * 1024 * 1024, total: payload.total });
+  assert.equal(progress.getAttribute("aria-valuenow"), "75");
+  assert.equal(counter.textContent, "3.0 MB / 4.0 MB");
+});
 
+test("update progress batches the latest snapshot without delaying mount, cancel, or lifecycle transitions", () => {
+  const frames = [];
+  const fixture = createFixture({ scheduleFrame: callback => { frames.push(callback); return () => {}; } });
+  const flush = () => { for (const callback of frames.splice(0)) callback(); };
+  const controller = createUpdateCtaController(fixture.options);
+  controller.showAvailable("9.26.0");
+  const mb = 1024 * 1024;
+  const payload = { downloaded: mb, total: 4 * mb };
+  controller.handleUpdateProgress(payload);
+  payload.downloaded = 0;
+  fixture.document.getElementById("update-cta").click();
   const modal = fixture.document.getElementById("update-modal");
   const progress = modal.querySelector("[data-update-modal-progress]");
   const counter = modal.querySelector("[data-update-modal-byte-counter]");
-  assert.ok(progress, "expected progress bar element");
-  assert.ok(counter, "expected byte counter element");
-  assert.equal(progress.getAttribute("aria-valuenow"), "75");
-  assert.match(counter.textContent, /3.0\s*MB\s*\/\s*4.0\s*MB/);
+  assert.equal(progress.getAttribute("aria-valuenow"), "25", "mount reads the immutable model synchronously");
+  flush();
+  let renders = 0;
+  const setAttribute = progress.setAttribute.bind(progress);
+  progress.setAttribute = (name, value) => {
+    if (name === "aria-valuenow") renders++;
+    setAttribute(name, value);
+  };
+  for (let index = 1; index <= 50; index++) {
+    controller.handleUpdateProgress({ downloaded: index * mb, total: 100 * mb });
+  }
+  assert.equal(progress.getAttribute("aria-valuenow"), "25", "existing DOM waits for the frame");
+  assert.equal(frames.length, 1);
+  assert.equal(renders, 0);
+  flush();
+  assert.equal(renders, 1);
+  assert.equal(progress.getAttribute("aria-valuenow"), "50");
+  assert.equal(counter.textContent, "50.0 MB / 100.0 MB");
+
+  controller.handleUpdateProgress({ downloaded: 75 * mb, total: 100 * mb });
+  controller.handleUpdateReady({ version: "9.26.0" });
+  flush();
+  assert.equal(modal.dataset.state, "ready", "pending progress cannot replace the ready modal");
+  controller.beginDownloadingFor("9.26.0");
+  controller.handleUpdateProgress({ downloaded: 80 * mb, total: 100 * mb });
+  fixture.document.querySelector("[data-update-modal-cancel]").click();
+  assert.deepEqual(fixture.sent.at(-1), { kind: "cancel_update_download" }, "cancel sends synchronously");
+  assert.equal(fixture.document.getElementById("update-modal"), null);
+  flush();
+  assert.equal(fixture.document.getElementById("update-modal"), null, "pending progress cannot reopen the modal");
+  fixture.document.getElementById("update-cta").click();
+  assert.equal(fixture.document.querySelector("[data-update-modal-progress]").getAttribute("aria-valuenow"), "0");
+
+  controller.handleUpdateProgress({ downloaded: 90 * mb, total: 100 * mb });
+  controller.handleUpdateApplyError({ reason: "Fixture failure" });
+  flush();
+  assert.equal(fixture.document.getElementById("update-modal").dataset.state, "failed");
+  fixture.document.querySelector("[data-update-modal-close]").click();
+  fixture.document.getElementById("update-cta").click();
+  assert.equal(fixture.document.querySelector("[data-update-modal-progress]").getAttribute("aria-valuenow"), "90");
 });
 
 test("phase19: cancel during download sends cancel_update_download and returns CTA to available", () => {
@@ -520,14 +786,14 @@ test("phase20: ready modal copy names gwt and keeps release notes out of the act
   );
 });
 
-test("phase20: update modal css defines compact panel and link-style release notes action", () => {
+test("phase20: update modal composes shared primitives with compact Operator styling", () => {
   const modalRule = cssRule(".update-modal");
   const panelRule = cssRule(".update-modal__panel");
   const actionRule = cssRule(".update-modal__actions");
   const buttonRule = cssRule(".update-modal__btn");
   const linkRule = cssRule(".update-modal__link");
 
-  assert.match(modalRule, /background:\s*var\(--color-scrim/);
+  assert.doesNotMatch(modalRule, /position:\s*fixed|inset:|display:\s*flex/);
   assert.match(panelRule, /width:\s*min\(420px,\s*calc\(100vw - 32px\)\)/);
   assert.match(panelRule, /padding:\s*var\(--space-6\)/);
   assert.match(actionRule, /align-items:\s*center/);
@@ -551,7 +817,7 @@ test("SPEC-2780: ready modal omits release notes link when openReleaseNotes is a
   assert.equal(link, null);
 });
 
-test("phase19: [Restart now] sends apply_update_restart_now without confirmation", () => {
+test("issue #5646: Restart now previews typed impact and requires an explicit confirmation", () => {
   const fixture = createFixture();
   const controller = createUpdateCtaController(fixture.options);
   controller.showAvailable("9.26.0");
@@ -562,15 +828,123 @@ test("phase19: [Restart now] sends apply_update_restart_now without confirmation
     .querySelector("[data-update-modal-restart-now]")
     .click();
 
-  assert.deepEqual(fixture.sent, [
-    { kind: "apply_update_start" },
-    { kind: "apply_update_restart_now" },
-  ]);
+  const request = fixture.sent.at(-1);
+  assert.equal(request.kind, "get_update_restart_impact");
+  assert.equal(typeof request.request_id, "string");
+  const preview = fixture.document.getElementById("update-modal");
+  assert.equal(preview.dataset.state, "restart-preview");
+  assert.equal(preview.querySelector("[data-update-modal-confirm-restart]").disabled, true);
+  const focused = [];
+  const prototype = Object.getPrototypeOf(preview.querySelector("button"));
+  const originalFocus = prototype.focus;
+  prototype.focus = function () { focused.push(this); };
+  try {
+    controller.handleUpdateRestartImpact({
+      request_id: request.request_id,
+      blocking: [
+        { kind: "active_pane", label: "agent-one", state: "running" },
+        { kind: "active_pane", label: "agent-two", state: "starting" },
+        { kind: "pending_acquire_claim", issue_number: 42 },
+        { kind: "held_verification_lease", lease_id: "lease" },
+      ],
+      issue_numbers: [42, 43],
+    });
+  } finally {
+    prototype.focus = originalFocus;
+  }
+  const modal = fixture.document.getElementById("update-modal");
+  assert.equal(modal.dataset.state, "restart-confirm");
+  assert.match(modal.textContent, /Running \/ Starting agents: 2/);
+  assert.match(modal.textContent, /Pending claims: 1/);
+  assert.match(modal.textContent, /Verification leases: 1/);
+  assert.match(modal.textContent, /Affected Issues: #42, #43/);
+  assert.equal(focused.at(-1), modal.querySelector("[data-update-modal-wait-for-idle]"));
+  assert.equal(fixture.sent.some((event) => event.kind === "apply_update_restart_now"), false);
+  assert.ok(modal.classList.contains("modal-backdrop"));
+  const panel = modal.querySelector(".modal-shell");
+  assert.equal(panel.getAttribute("role"), "dialog");
+  assert.equal(panel.getAttribute("aria-modal"), "true");
+  assert.ok(panel.querySelector(".modal-header"));
+  assert.ok(panel.querySelector(".modal-body"));
+  assert.ok(panel.querySelector(".modal-footer"));
+  modal.querySelector("[data-update-modal-confirm-restart]").click();
+  modal.querySelector("[data-update-modal-confirm-restart]").click();
+  assert.equal(fixture.sent.filter((event) => event.kind === "apply_update_restart_now").length, 1);
   assert.equal(
     fixture.confirmCalls.length,
     0,
     "Restart now must not gate behind window.confirm",
   );
+});
+
+test("issue #5646: waiting for all agents uses the idle apply route", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+  controller.showReadyPending("9.26.0");
+  fixture.document.getElementById("update-cta").click();
+  fixture.document.querySelector("[data-update-modal-restart-now]").click();
+  controller.handleUpdateRestartImpact({
+    request_id: fixture.sent.at(-1).request_id,
+    blocking: [{ kind: "pending_acquire_claim", issue_number: 42 }],
+    issue_numbers: [42],
+  });
+  fixture.document.querySelector("[data-update-modal-wait-for-idle]").click();
+  assert.equal(fixture.sent.at(-1).kind, "apply_update_when_idle");
+  assert.equal(fixture.document.getElementById("update-modal"), null);
+  controller.handleIssueMonitorStatus({
+    update_drain: { reason: "auto", version: "9.26.0", blocking: [], since: "2026-10-16T00:00:00Z" },
+  });
+  controller.handleUpdateApplyError({ stage: "Apply after agents finish", reason: "Could not save every project drain" });
+  assert.equal(fixture.document.getElementById("update-modal")?.dataset.state, "failed");
+  assert.match(fixture.document.getElementById("update-modal").textContent, /Could not save every project drain/);
+});
+
+test("issue #5646: zero impact still confirms and missing, cancelled or obsolete previews never restart", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+  controller.showReadyPending("9.26.0");
+  fixture.document.getElementById("update-cta").click();
+  fixture.document.querySelector("[data-update-modal-restart-now]").click();
+  const firstRequest = fixture.sent.at(-1);
+  controller.handleUpdateRestartImpact({ request_id: firstRequest.request_id });
+  assert.equal(fixture.document.querySelector("[data-update-modal-confirm-restart]").disabled, true);
+  fixture.document.querySelector("[data-update-modal-confirm-restart]").click();
+  assert.equal(fixture.sent.length, 1, "missing impact cannot submit a restart");
+  fixture.document.querySelector("[data-update-modal-cancel-restart]").click();
+  controller.handleUpdateRestartImpact({ request_id: firstRequest.request_id, error: "Late failure", blocking: [], issue_numbers: [] });
+  controller.handleUpdateRestartImpact({ request_id: firstRequest.request_id, blocking: [], issue_numbers: [] });
+  assert.equal(fixture.document.getElementById("update-modal"), null);
+  fixture.document.getElementById("update-cta").click();
+  fixture.document.querySelector("[data-update-modal-restart-now]").click();
+  const secondRequest = fixture.sent.at(-1);
+  controller.handleUpdateRestartImpact({ request_id: firstRequest.request_id, blocking: [], issue_numbers: [] });
+  assert.equal(fixture.document.getElementById("update-modal").dataset.state, "restart-preview");
+  controller.handleUpdateRestartImpact({ request_id: secondRequest.request_id, blocking: [], issue_numbers: [] });
+  assert.equal(fixture.document.getElementById("update-modal-title").textContent, "Restart gwt?");
+  assert.equal(fixture.document.querySelector("[data-update-modal-confirm-restart]").disabled, false);
+  controller.handleUpdateState({ state: "available", latest: "9.27.0" });
+  controller.handleUpdateRestartImpact({ request_id: secondRequest.request_id, blocking: [], issue_numbers: [] });
+  assert.equal(fixture.document.getElementById("update-modal"), null);
+  assert.equal(fixture.sent.some((event) => event.kind === "apply_update_restart_now"), false);
+});
+
+test("issue #5646: a failed impact request removes restart confirmation and ignores its late response", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+  controller.showReadyPending("9.26.0");
+  fixture.document.getElementById("update-cta").click();
+  fixture.document.querySelector("[data-update-modal-restart-now]").click();
+  const request = fixture.sent.at(-1);
+  controller.handleUpdateRestartImpact({ request_id: request.request_id, error: "Unable to read active work", blocking: [], issue_numbers: [] });
+  controller.handleUpdateRestartImpact({ request_id: request.request_id, blocking: [], issue_numbers: [] });
+  assert.equal(fixture.document.getElementById("update-modal").dataset.state, "failed");
+  assert.equal(fixture.document.querySelector("[data-update-modal-confirm-restart]"), null);
+  assert.equal(fixture.sent.some((event) => event.kind === "apply_update_restart_now"), false);
+});
+
+test("issue #5646: app routes restart impact to the controller", () => {
+  assert.match(appSource, /case "update_restart_impact":[\s\S]{0,100}updateRestartImpactModel\.update\(\(\) => event\)/);
+  assert.match(appSource, /updateRestartImpactModel\.subscribe\(impact => impact, impact => \{\s*if \(impact\) updateCtaController\.handleUpdateRestartImpact\(impact\)/);
 });
 
 test("phase19: [Later] closes modal, sends apply_update_later, and morphs CTA to ready state", () => {
@@ -956,7 +1330,10 @@ test("issue #3906: clicking the draining CTA offers Apply now anyway through app
   assert.equal(anyway.textContent, "Apply now anyway");
   assert.match(modal.textContent, /draining/);
   anyway.click();
-  assert.deepEqual(fixture.sent, [{ kind: "apply_update_restart_now" }]);
+  assert.equal(fixture.sent.at(-1).kind, "get_update_restart_impact");
+  controller.handleUpdateRestartImpact({ request_id: fixture.sent.at(-1).request_id, blocking: [], issue_numbers: [] });
+  fixture.document.querySelector("[data-update-modal-confirm-restart]").click();
+  assert.equal(fixture.sent.at(-1).kind, "apply_update_restart_now");
 });
 
 // Issue #4376 AC-5 / AC-6: a manual Update click that is waiting for agents
@@ -1052,7 +1429,63 @@ test("issue #4076: update_auto_apply phases drive the CTA and the cancel sends c
   assert.match(cssRule(".update-cta.is-scheduled"), /var\(--color-state-needs-input\)/);
   assert.match(
     appSource,
-    /case "update_auto_apply":[\s\S]{0,200}updateCtaController\.handleUpdateAutoApply\(/,
+    /case "update_auto_apply":[\s\S]{0,200}applyUpdateAutoApply\(/,
     "app.js must hand update_auto_apply to the update CTA controller",
   );
+});
+
+test("issue #5343: elevation_required keeps the staged update manual and explains why", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+  controller.handleUpdateApplyPendingPersisted({ version: "9.106.0" });
+  controller.handleUpdateAutoApply({ version: "9.106.0", phase: "scheduled", grace_secs: 60 });
+
+  controller.handleUpdateAutoApply({ version: "9.106.0", phase: "elevation_required" });
+  controller.handleUpdateState({ state: "available", current: "9.105.0", latest: "9.106.0" });
+  controller.handleIssueMonitorStatus({ enabled: true, state: "idle" });
+
+  const cta = fixture.document.getElementById("update-cta");
+  assert.equal(cta.dataset.status, "ready");
+  assert.match(cta.textContent, /Update v9\.106\.0 ready/);
+  assert.match(cta.textContent, /Administrator privileges required/);
+  assert.match(cta.textContent, /Restart now/);
+  assert.equal(cta.title, cta.textContent);
+  assert.equal(cta.getAttribute("aria-label"), cta.textContent);
+  assert.equal(cta.disabled, false);
+  assert.equal(fixture.document.getElementById("update-modal"), null);
+  assert.deepEqual(fixture.sent, []);
+
+  cta.click();
+  const modal = fixture.document.getElementById("update-modal");
+  assert.equal(modal.dataset.state, "ready");
+  assert.equal(modal.dataset.version, "9.106.0");
+  assert.deepEqual(fixture.sent, []);
+  modal.querySelector("[data-update-modal-later]").click();
+  assert.equal(fixture.document.getElementById("update-modal"), null);
+  assert.equal(cta.dataset.status, "ready");
+  assert.match(cta.textContent, /Administrator privileges required/);
+
+  controller.handleUpdateApplyPendingPersisted({ version: "9.106.0" });
+  assert.match(cta.textContent, /Administrator privileges required/);
+  assert.equal(cta.title, cta.textContent);
+  assert.equal(cta.getAttribute("aria-label"), cta.textContent);
+  cta.click();
+  fixture.document.querySelector("[data-update-modal-restart-now]").click();
+  assert.equal(fixture.sent.at(-1).kind, "get_update_restart_impact");
+  controller.handleUpdateRestartImpact({ request_id: fixture.sent.at(-1).request_id, blocking: [], issue_numbers: [] });
+  fixture.document.querySelector("[data-update-modal-confirm-restart]").click();
+  assert.equal(fixture.sent.at(-1).kind, "apply_update_restart_now");
+});
+
+test("issue #5343: a different ready target clears the administrator reason", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+  controller.handleUpdateAutoApply({ version: "9.106.0", phase: "elevation_required" });
+
+  // cancelled assigns pendingVersion before asking showReadyPending to render.
+  controller.handleUpdateAutoApply({ version: "9.107.0", phase: "cancelled" });
+  const cta = fixture.document.getElementById("update-cta");
+  assert.equal(cta.textContent, "Update v9.107.0 ready — Restart now");
+  controller.handleUpdateApplyPendingPersisted({ version: "9.106.0" });
+  assert.equal(cta.textContent, "Update v9.106.0 ready — Restart now");
 });

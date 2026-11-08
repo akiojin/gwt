@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { gotoLiveGwt, sendLiveGwtEvent, withLiveGwtBackendLock } from "./_helpers/live-gwt";
 
@@ -10,11 +10,358 @@ test.describe("terminal-grid responsiveness (#5117)", () => {
   test.setTimeout(180_000);
   test.use({ viewport: { width: 1440, height: 900 } });
 
+  test("output advances without animation frames in an unfocused terminal window", async ({ page }, info) => {
+    await withLiveGwtBackendLock(base!, info, async () => {
+      const errors: string[] = [];
+      const created: string[] = [];
+      const theme = info.project.name.includes("light") ? "light" : "dark";
+      let observation: Record<string, any> | undefined;
+      let coldObservation: Record<string, any> | undefined;
+      page.on("pageerror", error => errors.push(error.message));
+      page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+      await gotoLiveGwt(page, base!, { enableTestBridge: true });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      try {
+        const id = await createShell(page, created);
+        const target = page.locator(`.workspace-window[data-id="${id}"]`);
+        const focusedControl = page.locator("#split-view-button");
+        await focusedControl.focus();
+        await expect(focusedControl).toBeFocused();
+        await expect(target).toBeVisible();
+        const token = `GWT_AC13_${Date.now()}`;
+        const chunks = [`\r\n${token}_FI`, `RST\r\n${token}_SECOND\r\n`, `${token}_THIRD\r\n`];
+        await page.evaluate(({ id, chunks }) => {
+          const socket = [...((window as any).__gwtPlaywrightSockets as WebSocket[])].reverse()
+            .find(candidate => candidate.readyState === WebSocket.OPEN
+              && new URL(candidate.url).pathname === "/ws"
+              && new URL(candidate.url).searchParams.has("repo_hash"));
+          if (!socket) throw new Error("no live project socket");
+          const target = document.querySelector(`.workspace-window[data-id="${id}"]`)!;
+          const originalFrame = window.requestAnimationFrame;
+          const originalCancel = window.cancelAnimationFrame;
+          const captured = new Map<number, FrameRequestCallback>();
+          let requestedFrames = 0;
+          let focusEvents = 0;
+          const onFocus = () => { focusEvents += 1; };
+          target.addEventListener("focusin", onFocus);
+          window.requestAnimationFrame = callback => {
+            const handle = -(++requestedFrames);
+            captured.set(handle, callback);
+            return handle;
+          };
+          window.cancelAnimationFrame = handle => {
+            if (!captured.delete(handle)) originalCancel.call(window, handle);
+          };
+          const expected = chunks.join("").replace(/\r/g, "").trim();
+          const startedAt = performance.now();
+          (window as any).__gwtAc13OutputFallback = {
+            sample: () => ({
+              elapsed_ms: performance.now() - startedAt,
+              ordered_output: window.__gwtTerminalTestApi.bufferText(id).includes(expected),
+              requested_frames: requestedFrames,
+              captured_frames: captured.size,
+              window_focused: target.contains(document.activeElement),
+              focus_events: focusEvents,
+              visibility_state: document.visibilityState,
+              socket_url: socket.url,
+              chunks: chunks.length,
+            }),
+            restore: () => {
+              window.requestAnimationFrame = originalFrame;
+              window.cancelAnimationFrame = originalCancel;
+              target.removeEventListener("focusin", onFocus);
+              for (const callback of captured.values()) originalFrame.call(window, callback);
+              delete (window as any).__gwtAc13OutputFallback;
+            },
+          };
+          // Controlled inbound frames use the real app's project transport and
+          // output pipeline; this is not a real-PTY throughput measurement.
+          for (const text of chunks) socket.dispatchEvent(new MessageEvent("message", {
+            data: JSON.stringify({ kind: "terminal_output", id, data_base64: btoa(text) }),
+          }));
+        }, { id, chunks });
+        // Poll from the controller because animation frames are withheld.
+        await expect.poll(async () => {
+          observation = await page.evaluate(() => (window as any).__gwtAc13OutputFallback.sample());
+          return observation!.ordered_output;
+        }, { timeout: 1_000, intervals: [25] }).toBe(true);
+        expect(observation!.elapsed_ms, "ordered canonical output within one second").toBeLessThanOrEqual(1_000);
+        expect(observation!.requested_frames, "animation callbacks were withheld").toBeGreaterThan(0);
+        expect(observation!.window_focused).toBe(false);
+        expect(observation!.focus_events, "no terminal focus restored output").toBe(0);
+        await page.evaluate(() => (window as any).__gwtAc13OutputFallback.restore());
+
+        // Reload the same real PTY with frames withheld before the app mounts
+        // its runtime. The warm probe above cannot exercise first-fit readiness.
+        await page.addInitScript(id => {
+          const originalFrame = window.requestAnimationFrame;
+          const originalCancel = window.cancelAnimationFrame;
+          const captured = new Map<number, FrameRequestCallback>();
+          let requests = 0;
+          let focusEvents = 0;
+          let first: Record<string, any> | undefined;
+          let result: Record<string, any> | undefined;
+          const onFocus = (event: FocusEvent) => {
+            if ((event.target as Element).closest(`.workspace-window[data-id="${id}"]`)) focusEvents += 1;
+          };
+          document.addEventListener("focusin", onFocus);
+          window.requestAnimationFrame = callback => {
+            captured.set(--requests, callback);
+            return requests;
+          };
+          window.cancelAnimationFrame = handle => {
+            if (!captured.delete(handle)) originalCancel.call(window, handle);
+          };
+          const check = () => {
+            if (!first || result) return;
+            const sample = { first, elapsed_ms: performance.now() - first.mountedAt,
+              ...window.__gwtTerminalTestApi.metrics(id), requested_frames: -requests,
+              focus_events: focusEvents,
+              has_prompt: /[^\n]+[>$#%]$/.test(window.__gwtTerminalTestApi.bufferText(id).trim()),
+              window_focused: !!document.querySelector(`.workspace-window[data-id="${id}"]`)?.contains(document.activeElement) };
+            if ((sample.isReady && sample.has_prompt) || sample.elapsed_ms >= 1_000) result = sample;
+          };
+          const observer = new MutationObserver(() => {
+            const metrics = window.__gwtTerminalTestApi?.metrics(id);
+            const host = document.querySelector(`.workspace-window[data-id="${id}"] .xterm`)?.parentElement;
+            if (!metrics?.hasRuntime || !host?.clientWidth || !host.clientHeight) return;
+            first = { ...metrics, mountedAt: performance.now(), width: host.clientWidth, height: host.clientHeight };
+            observer.disconnect();
+          });
+          observer.observe(document, { childList: true, subtree: true, attributes: true });
+          const timer = setInterval(check, 100);
+          (window as any).__gwtAc13ColdFit = {
+            get result() { return result; },
+            restore: () => {
+              clearInterval(timer);
+              observer.disconnect();
+              document.removeEventListener("focusin", onFocus);
+              window.requestAnimationFrame = originalFrame;
+              window.cancelAnimationFrame = originalCancel;
+              for (const callback of captured.values()) originalFrame.call(window, callback);
+              delete (window as any).__gwtAc13ColdFit;
+            },
+          };
+        }, id);
+        await page.reload();
+        await expect(target).toBeVisible();
+        await focusedControl.focus();
+        await expect(focusedControl).toBeFocused();
+        // Freeze completion on the page's clock; controller scheduling must
+        // not turn an already completed fit into a false deadline failure.
+        await page.waitForFunction(() => (window as any).__gwtAc13ColdFit.result,
+          undefined, { polling: 100, timeout: 15_000 });
+        coldObservation = await page.evaluate(() => (window as any).__gwtAc13ColdFit.result);
+        expect(coldObservation!.isReady && coldObservation!.has_prompt).toBe(true);
+        expect(coldObservation!.first.isReady, "the laid-out runtime was observed before its first fit").toBe(false);
+        expect(coldObservation!.elapsed_ms, "cold readiness and buffered snapshot within one second").toBeLessThanOrEqual(1_000);
+        expect({ cols: coldObservation!.cols, rows: coldObservation!.rows }).not.toEqual({
+          cols: coldObservation!.first.cols, rows: coldObservation!.first.rows,
+        });
+        expect(coldObservation!.window_focused).toBe(false);
+        expect(coldObservation!.focus_events).toBe(0);
+        expect(coldObservation!.requested_frames).toBeGreaterThan(0);
+      } finally {
+        await page.evaluate(() => (window as any).__gwtAc13ColdFit?.restore());
+        await page.evaluate(() => (window as any).__gwtAc13OutputFallback?.restore());
+        // rAF is restored only after measuring buffer progress. The PNG records
+        // the resumed renderer, not a paint guarantee while rAF was withheld.
+        await page.evaluate(() => new Promise<void>(resolve =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+        const screenshot = info.outputPath(`${theme}-terminal-output-fallback.png`);
+        await page.screenshot({ path: screenshot });
+        await info.attach(`${theme}-terminal-output-fallback`, { path: screenshot, contentType: "image/png" });
+        const evidence = info.outputPath(`${theme}-terminal-output-fallback.json`);
+        await writeFile(evidence, JSON.stringify({ theme, observation, coldObservation, errors }));
+        await info.attach("terminal-output-fallback-observation", { contentType: "application/json", path: evidence });
+        // Park auxiliary terminals on the empty Works host before removal so
+        // Settings does not create replacement windows during fixture teardown.
+        await page.locator('.op-rail__surface[data-surface="works"]').click();
+        if (await page.locator("#split-surfaces").getAttribute("data-split") === "true")
+          await page.locator("#split-view-button").click();
+        for (const id of created.reverse()) {
+          await sendLiveGwtEvent(page, { kind: "close_window", id });
+          await expect(page.locator(`.workspace-window[data-id="${id}"]`)).toHaveCount(0);
+        }
+      }
+      expect(errors, "console and page errors").toEqual([]);
+    });
+  });
+
+  test("unfocused terminal renders real output while another window keeps focus", async ({ page }, info) => {
+    await withLiveGwtBackendLock(base!, info, async () => {
+      const errors: string[] = [];
+      const created: string[] = [];
+      const theme = info.project.name.includes("light") ? "light" : "dark";
+      page.on("pageerror", error => errors.push(error.message));
+      page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+      await gotoLiveGwt(page, base!, { enableTestBridge: true });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await page.waitForFunction(() => (window as any).__gwtPlaywrightMessages
+        .some((entry: any) => entry.payload.kind === "workspace_state"), undefined, { timeout: 30_000 });
+      try {
+        const id = await createShell(page, created);
+        const beforeSplit = new Set((await projectWindows(page)).map(window => window.id));
+        await page.locator("#split-view-button").click();
+        const right = page.getByRole("region", { name: "Right pane", exact: true });
+        const board = right.locator('.workspace-window[data-preset="board"]');
+        await expect(board).toBeVisible();
+        for (const window of await projectWindows(page)) if (!beforeSplit.has(window.id)) created.push(window.id);
+        const peerId = (await board.getAttribute("data-id"))!;
+        const target = page.locator(`.workspace-window[data-id="${id}"]`);
+        const peer = board.locator(".board-textarea");
+        await expect(target.locator(".xterm-rows")).toBeVisible();
+        await peer.focus();
+        await expect(peer).toBeFocused();
+        const suffix = `${Date.now()}`;
+        const marker = `GWT_AC13_${suffix}`;
+        await page.evaluate(({ id, peerId, marker }) => {
+          const target = document.querySelector(`.workspace-window[data-id="${id}"]`)!;
+          const rows = target.querySelector(".xterm-rows")!;
+          const peer = document.querySelector(`.workspace-window[data-id="${peerId}"] .board-textarea`)!;
+          const socket = [...((window as any).__gwtPlaywrightSockets as WebSocket[])].reverse()
+            .find(candidate => candidate.readyState === WebSocket.OPEN
+              && new URL(candidate.url).searchParams.has("repo_hash"));
+          if (!socket) throw new Error("no live project socket");
+          let receivedAt: number | undefined;
+          let received = "";
+          let focusEvents = 0;
+          let deadline: ReturnType<typeof setInterval> | undefined;
+          const state: any = { result: null };
+          const check = () => {
+            if (receivedAt === undefined || state.result) return;
+            const elapsedMs = performance.now() - receivedAt;
+            const rendered = rows.textContent!.includes(marker);
+            if (rendered || elapsedMs >= 1_000) state.result = {
+              elapsedMs, rendered, focusEvents, peerFocused: document.activeElement === peer,
+              targetFocused: target.contains(document.activeElement), documentHidden: document.hidden,
+              bufferMatched: window.__gwtTerminalTestApi.bufferText(id).includes(marker),
+              renderedText: rows.textContent,
+            };
+          };
+          const onMessage = (event: MessageEvent) => {
+            const payload = JSON.parse(String(event.data));
+            if (!["terminal_output", "terminal_snapshot"].includes(payload.kind)
+              || payload.id !== id || receivedAt !== undefined) return;
+            received += atob(payload.data_base64);
+            if (!received.includes(marker)) {
+              received = received.slice(-marker.length);
+              return;
+            }
+            receivedAt = performance.now();
+            deadline = setInterval(check, 100);
+            check();
+          };
+          const onFocus = () => { focusEvents += 1; };
+          const observer = new MutationObserver(check);
+          observer.observe(rows, { childList: true, characterData: true, subtree: true });
+          socket.addEventListener("message", onMessage);
+          target.addEventListener("focusin", onFocus);
+          state.restore = () => {
+            clearInterval(deadline);
+            observer.disconnect();
+            socket.removeEventListener("message", onMessage);
+            target.removeEventListener("focusin", onFocus);
+          };
+          (window as any).__gwtAc13PeerPaint = state;
+        }, { id, peerId, marker });
+        // Split the Node expression so echoed input cannot satisfy
+        // the marker. This is real PTY output, with native animation scheduling.
+        await sendLiveGwtEvent(page, { kind: "terminal_input", id,
+          data: `node -p "'GWT_' + 'AC13_${suffix}'"\r` });
+        await page.waitForFunction(() => (window as any).__gwtAc13PeerPaint.result,
+          undefined, { polling: 100, timeout: 15_000 });
+        const observation = await page.evaluate(() => (window as any).__gwtAc13PeerPaint.result);
+        await info.attach("Unfocused real PTY receive to rendered rows", {
+          body: JSON.stringify({ theme, id, peerId, marker, observation }), contentType: "application/json",
+        });
+        expect(observation.bufferMatched, "actual output reached the canonical buffer").toBe(true);
+        expect(observation.rendered, "renderer rows advance without focusing the target").toBe(true);
+        expect(observation.elapsedMs, "receive to rendered rows within one second").toBeLessThanOrEqual(1_000);
+        expect(observation.documentHidden).toBe(false);
+        expect(observation.targetFocused).toBe(false);
+        expect(observation.peerFocused).toBe(true);
+        expect(observation.focusEvents).toBe(0);
+        await expect(target.locator(".xterm-rows")).toBeVisible();
+        await expect(peer).toBeFocused();
+        await info.attach("Two visible windows with peer focus", { body: await page.screenshot(), contentType: "image/png" });
+      } finally {
+        await page.evaluate(() => (window as any).__gwtAc13PeerPaint?.restore());
+        await page.locator('.op-rail__surface[data-surface="works"]').click();
+        if (await page.locator("#split-surfaces").getAttribute("data-split") === "true")
+          await page.locator("#split-view-button").click();
+        for (const id of created.reverse()) {
+          await sendLiveGwtEvent(page, { kind: "close_window", id });
+          await expect(page.locator(`.workspace-window[data-id="${id}"]`)).toHaveCount(0);
+        }
+      }
+      expect(errors, "console and page errors").toEqual([]);
+    });
+  });
+
+  test("snapshot preserves split UTF-8 output through the live terminal pipeline", async ({ page }, info) => {
+    await withLiveGwtBackendLock(base!, info, async () => {
+      const errors: string[] = [];
+      const created: string[] = [];
+      const theme = info.project.name.includes("light") ? "light" : "dark";
+      page.on("pageerror", error => errors.push(error.message));
+      page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+      await gotoLiveGwt(page, base!, { enableTestBridge: true });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      try {
+        const id = await createShell(page, created);
+        const bufferText = () => page.evaluate(id => window.__gwtTerminalTestApi.bufferText(id), id);
+        const emit = (kind: string, bytes: number[]) => page.evaluate(({ id, kind, bytes }) => {
+          const socket = [...((window as any).__gwtPlaywrightSockets as WebSocket[])].reverse()
+            .find(candidate => candidate.readyState === WebSocket.OPEN
+              && new URL(candidate.url).pathname === "/ws"
+              && new URL(candidate.url).searchParams.has("repo_hash"));
+          if (!socket) throw new Error("no live project socket");
+          socket.dispatchEvent(new MessageEvent("message", {
+            data: JSON.stringify({ kind, id, data_base64: btoa(String.fromCharCode(...bytes)) }),
+          }));
+        }, { id, kind, bytes });
+        // Controlled inbound packets exercise the real decoder, snapshot barrier
+        // and xterm buffer. This is not a natural PTY throughput measurement.
+        await emit("terminal_output", [...Buffer.from("\r\nold stream: "), 0xe3]);
+        await expect.poll(bufferText).toContain("old stream: ");
+        await emit("terminal_snapshot", [...Buffer.from("\x1b[2J\x1b[Hsnapshot: "), 0xf0, 0x9f, 0xa6]);
+        await emit("terminal_output", [0x80, ...Buffer.from(" complete\r\n")]);
+        await expect.poll(bufferText).toContain("snapshot: 🦀 complete");
+        expect(await bufferText()).not.toContain("\uFFFD");
+        expect(await bufferText()).not.toContain("old stream:");
+        // An overlong OSC snapshot carries an inert introducer, retaining only
+        // its parser context and streaming UTF-8 prefix. Its payload stays hidden.
+        await emit("terminal_snapshot", [...Buffer.from("\x1b[2J\x1b[Hosc: \x1b]_"), 0xf0, 0x9f, 0xa6]);
+        await emit("terminal_output", [0x80, 0x07, ...Buffer.from("complete 🦀\r\n")]);
+        await expect.poll(bufferText).toContain("osc: complete 🦀");
+        expect(await bufferText()).not.toContain("osc: 🦀");
+        expect(await bufferText()).not.toContain("\uFFFD");
+        // APC ignores BEL and keeps its payload hidden until ST.
+        await emit("terminal_snapshot", [...Buffer.from("\x1b[2J\x1b[Hapc: \x1b_"), 0xf0, 0x9f, 0xa6]);
+        await emit("terminal_output", [0x80, 0x07, ...Buffer.from("hidden\x1b\\complete 🦀\r\n")]);
+        await expect.poll(bufferText).toContain("apc: complete 🦀");
+        expect(await bufferText()).not.toContain("hidden");
+        expect(await bufferText()).not.toContain("apc: 🦀");
+        expect(await bufferText()).not.toContain("\uFFFD");
+        const screenshot = info.outputPath(`utf8-snapshot-${theme}.png`);
+        await page.locator(`.workspace-window[data-id="${id}"]`).screenshot({ path: screenshot });
+        await info.attach("UTF-8 snapshot continuation", { path: screenshot, contentType: "image/png" });
+      } finally {
+        await page.locator('.op-rail__surface[data-surface="works"]').click();
+        for (const id of created.reverse()) {
+          await sendLiveGwtEvent(page, { kind: "close_window", id });
+          await expect(page.locator(`.workspace-window[data-id="${id}"]`)).toHaveCount(0);
+        }
+      }
+      expect(errors, "console and page errors").toEqual([]);
+    });
+  });
+
   test("grid queue wait p95 stays within 500ms under rendering and frontend traffic", async ({ page }, info) => {
     await withLiveGwtBackendLock(base!, info, async () => {
       const errors: string[] = [];
       const outputs = new Map<string, string>();
-      const geometries = new Map<string, { x: number; y: number; width: number; height: number }>();
       const created: string[] = [];
       const sent = new Map<string, number>();
       const received = new Map<string, number>();
@@ -45,11 +392,7 @@ test.describe("terminal-grid responsiveness (#5117)", () => {
             outputs.set(event.id, (outputs.get(event.id) ?? "")
               + Buffer.from(event.data_base64, "base64").toString("utf8"));
           }
-          if (event.kind === "workspace_state") {
-            for (const tab of event.workspace.tabs ?? []) {
-              for (const window of tab.workspace?.windows ?? []) geometries.set(window.id, window.geometry);
-            }
-          }
+
         });
       });
       await gotoLiveGwt(page, base!, { enableTestBridge: true });
@@ -58,8 +401,8 @@ test.describe("terminal-grid responsiveness (#5117)", () => {
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       let verified = false;
       try {
-        const foreground = await createShell(page, created, 80);
-        const background = await createShell(page, created, 820);
+        const foreground = await createShell(page, created);
+        const background = await createShell(page, created);
         await sendLiveGwtEvent(page, { kind: "terminal_input", id: background, data:
           "node -e \"setInterval(()=>process.stdout.write('GWT_' + 'GRID_BACKGROUND_5117_' + 'x'.repeat(512) + '\\n'),100)\"\r" });
         await expect.poll(() => (outputs.get(background) ?? "").includes("GWT_GRID_BACKGROUND_5117_"),
@@ -91,16 +434,18 @@ test.describe("terminal-grid responsiveness (#5117)", () => {
             samplesBefore: processed, samplesAfter: null,
             windowRepliesBefore: received.get("window_list") ?? 0, windowRepliesAfter: null };
           burstTrace.push(trace);
-          await page.evaluate(({ id, count, burst }) => {
+          await page.evaluate(({ id, count }) => {
             const send = (detail: unknown) => window.dispatchEvent(new CustomEvent("__gwt_test_send", { detail }));
             send({ kind: "list_windows" });
             for (let index = 0; index < count; index += 1) {
               send({ kind: "update_terminal_grid", id, cols: 80 + index % 40, rows: 24 + index % 12 });
             }
             send({ kind: "update_terminal_grid", id, cols: 111, rows: 33 });
-            // Concurrent persisted frontend work alongside the streaming PTY.
-            if (burst % 10 === 0) send({ kind: "update_viewport", viewport: { x: burst % 20, y: 0, zoom: 1 } });
-          }, { id: foreground, count: gridsPerBurst, burst });
+          }, { id: foreground, count: gridsPerBurst });
+          // Exercise actual surface resize/layout alongside the streaming PTY.
+          if (burst % 10 === 0) await page.setViewportSize({
+            width: 1440 - burst % 20 * 4, height: 900 - burst % 20 * 2,
+          });
           await expect.poll(() => sent.get("update_terminal_grid") ?? 0,
             { message: `burst ${burst} reaches the project WebSocket`, timeout: 15_000 })
             .toBeGreaterThanOrEqual(sentBefore + gridsPerBurst + 1);
@@ -126,19 +471,18 @@ test.describe("terminal-grid responsiveness (#5117)", () => {
         expect(p95).toBeLessThanOrEqual(500);
         await expectPtyGrid(page, outputs, foreground, "BURST", 111, 33);
 
-        // Geometry broadcasts also fit the frontend's terminal. Assert the
-        // resulting real grid, then verify a later standalone grid replaces it.
-        const geometry = { x: 96, y: 80, width: 700, height: 440 };
-        await sendLiveGwtEvent(page, { kind: "update_window_geometry", id: foreground,
-          geometry, cols: 101, rows: 29 });
-        await expect.poll(() => geometries.get(foreground)).toEqual(geometry);
-        const shell = page.locator(`.workspace-window[data-id="${foreground}"]`);
-        await expect(shell).toHaveCSS("width", "700px");
-        await expect(shell).toHaveCSS("height", "440px");
+        // The fixed surface follows the browser viewport; its fit sends the
+        // real terminal grid. A later standalone grid must still replace it.
+        const beforeFit = await page.evaluate(id => window.__gwtTerminalTestApi.metrics(id), foreground);
+        await page.setViewportSize({ width: 1200, height: 760 });
+        await expect.poll(async () => page.evaluate(id => {
+          const metrics = window.__gwtTerminalTestApi.metrics(id);
+          return { cols: metrics.cols, rows: metrics.rows };
+        }, foreground)).not.toEqual({ cols: beforeFit.cols, rows: beforeFit.rows });
         const fitted = await page.evaluate(id => window.__gwtTerminalTestApi.metrics(id), foreground);
         expect(fitted.cols).toBeGreaterThan(0);
         expect(fitted.rows).toBeGreaterThan(0);
-        await expectPtyGrid(page, outputs, foreground, "GEOMETRY", fitted.cols, fitted.rows);
+        await expectPtyGrid(page, outputs, foreground, "REFIT", fitted.cols, fitted.rows);
         processed = (await samples()).length;
         await sendLiveGwtEvent(page, { kind: "update_terminal_grid", id: foreground, cols: 103, rows: 31 });
         await expect.poll(async () => (await samples()).length).toBeGreaterThan(processed);
@@ -159,29 +503,61 @@ test.describe("terminal-grid responsiveness (#5117)", () => {
             socketTraffic, burstTrace,
             sockets: await page.evaluate(() => ((window as any).__gwtPlaywrightSockets ?? []).map((socket: WebSocket) =>
               ({ url: socket.url, readyState: socket.readyState, bufferedAmount: socket.bufferedAmount }))), errors }) });
+        // Park auxiliary terminals on the empty Works host before removal so
+        // Settings does not create replacement windows during fixture teardown.
+        await page.locator('.op-rail__surface[data-surface="works"]').click();
+        if (await page.locator("#split-surfaces").getAttribute("data-split") === "true")
+          await page.locator("#split-view-button").click();
         for (const id of created.reverse()) {
           await sendLiveGwtEvent(page, { kind: "close_window", id });
           // Finish a successful repetition before the next page can discover
           // its old shells. Preserve the original error when the body failed.
           if (verified) await expect(page.locator(`.workspace-window[data-id="${id}"]`)).toHaveCount(0);
         }
-        await sendLiveGwtEvent(page, { kind: "update_viewport", viewport: { x: 0, y: 0, zoom: 1 } });
+        await page.setViewportSize({ width: 1440, height: 900 });
       }
     });
   });
 });
 
-async function createShell(page: Page, created: string[], x: number): Promise<string> {
-  const before = new Set(await page.locator(".workspace-window").evaluateAll(nodes =>
-    nodes.map(node => (node as HTMLElement).dataset.id)));
-  await sendLiveGwtEvent(page, { kind: "create_window", preset: "shell",
-    bounds: { x, y: 80, width: 700, height: 440 } });
-  const id = await page.waitForFunction(seen => {
-    const shell = [...document.querySelectorAll<HTMLElement>('.workspace-window[data-preset="shell"]')]
-      .find(node => !seen.includes(node.dataset.id!));
-    return shell?.dataset.id;
-  }, [...before], { timeout: 30_000 }).then(handle => handle.jsonValue());
+async function projectWindows(page: Page): Promise<Array<{ id: string; preset: string; z_index?: number }>> {
+  return page.evaluate(() => {
+    const workspace = (window as any).__gwtPlaywrightMessages.findLast((entry: any) => entry.payload.kind === "workspace_state").payload.workspace;
+    return workspace.tabs.flatMap((tab: any) => tab.workspace.windows);
+  });
+}
+
+async function showShell(page: Page, id: string) {
+  const windows = await projectWindows(page);
+  const index = windows.findIndex(window => window.id === id);
+  expect(index, "the exact Shell is in the project catalog").toBeGreaterThanOrEqual(0);
+  await sendLiveGwtEvent(page, { kind: "focus_window", id });
+  await expect.poll(async () => (await projectWindows(page)).reduce((top, window) => !top || (window.z_index || 0) > (top.z_index || 0) ? window : top, null as { id: string; preset: string; z_index?: number } | null)?.id).toBe(id);
+  await page.reload();
+  await expect(page.locator(`.split-pane .workspace-window[data-id="${id}"]`)).toBeVisible();
+}
+
+async function createShell(page: Page, created: string[]): Promise<string> {
+  const before = new Set((await projectWindows(page)).map(window => window.id));
+  await sendLiveGwtEvent(page, { kind: "create_window", preset: "shell" });
+  await expect.poll(async () => (await projectWindows(page)).filter(window => window.preset === "shell" && !before.has(window.id)))
+    .toHaveLength(1);
+  const id = (await projectWindows(page)).find(window => window.preset === "shell" && !before.has(window.id))!.id;
   created.push(id);
+  await showShell(page, id);
+  if (created.length === 2) {
+    // Shells are auxiliary Settings terminals. Keep both exact PTYs visible in
+    // separate panes so focus, viewport fitting and queue measurements remain real.
+    const beforeSplit = new Set((await projectWindows(page)).map(window => window.id));
+    await page.locator("#split-view-button").click();
+    const right = page.getByRole("region", { name: "Right pane", exact: true });
+    await expect(right.locator('.workspace-window[data-preset="board"]')).toBeVisible();
+    for (const window of await projectWindows(page)) if (!beforeSplit.has(window.id)) created.push(window.id);
+    await right.locator(".split-pane__header").click({ position: { x: 8, y: 8 } });
+    await showShell(page, created[0]);
+    await expect(page.locator('.split-pane[data-surface="settings"]:visible')).toHaveCount(2);
+    await expect(page.locator(`.split-pane .workspace-window[data-id="${id}"]`)).toBeVisible();
+  }
   await expect.poll(() => page.evaluate(id =>
     window.__gwtTerminalTestApi.bufferText(id).trim(), id), { timeout: 30_000 }).toMatch(/[^\n]+[>$#%]$/);
   return id;

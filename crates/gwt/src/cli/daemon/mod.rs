@@ -47,7 +47,9 @@ pub(super) fn parse(args: &[String]) -> Result<DaemonCommand, CliParseError> {
     match args.first().map(String::as_str) {
         None | Some("start") => {
             ensure_no_extra_args(args.get(1..).unwrap_or(&[]))?;
-            Ok(DaemonCommand::Start)
+            Ok(DaemonCommand::Start {
+                startup_intent: gwt_core::daemon::DaemonStartIntent::Standalone,
+            })
         }
         Some("status") => {
             ensure_no_extra_args(args.get(1..).unwrap_or(&[]))?;
@@ -101,7 +103,7 @@ pub(super) fn run<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     match cmd {
-        DaemonCommand::Start => start_daemon(env, out),
+        DaemonCommand::Start { startup_intent } => start_daemon(env, out, startup_intent),
         DaemonCommand::Status => report_status(env, out),
         DaemonCommand::Subscribe {
             channels,
@@ -415,7 +417,11 @@ fn format_probe_result(result: &Result<DaemonStatus, String>) -> String {
     }
 }
 
-fn start_daemon<E: CliEnv>(env: &mut E, out: &mut String) -> Result<i32, SpecOpsError> {
+fn start_daemon<E: CliEnv>(
+    env: &mut E,
+    out: &mut String,
+    startup_intent: gwt_core::daemon::DaemonStartIntent,
+) -> Result<i32, SpecOpsError> {
     let scope = resolve_scope(env)?;
     let gwt_home = gwt_core::paths::gwt_home();
     sweep_past_generation_endpoints(&scope.daemon_dir(&gwt_home));
@@ -433,6 +439,31 @@ fn start_daemon<E: CliEnv>(env: &mut E, out: &mut String) -> Result<i32, SpecOps
             // `resolve_bootstrap_action` never compares versions, so the
             // second arm is unreachable here; the GUI supervisor is the
             // version-aware caller (Issue #4038 AC-6).
+            if startup_intent == gwt_core::daemon::DaemonStartIntent::Standalone
+                && endpoint.startup_intent == gwt_core::daemon::DaemonStartIntent::GuiManaged
+            {
+                let client = crate::project_runtime::client::ProjectRuntimeClient::new(&endpoint)
+                    .map_err(config_error)?;
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|error| config_error(error.to_string()))?;
+                let reply = runtime
+                    .block_on(async {
+                        tokio::time::timeout(
+                            STATUS_PROBE_TIMEOUT,
+                            client.command(
+                                crate::project_runtime::events::OwnerCommand::PromoteStandalone,
+                            ),
+                        )
+                        .await
+                        .map_err(|_| "standalone promotion timed out".to_string())?
+                    })
+                    .map_err(config_error)?;
+                if reply["startup_intent"] != "standalone" {
+                    return Err(config_error("standalone promotion was not acknowledged"));
+                }
+            }
             out.push_str(&format!(
                 "daemon already running pid={pid} bind={bind}\n",
                 pid = endpoint.pid,
@@ -445,7 +476,7 @@ fn start_daemon<E: CliEnv>(env: &mut E, out: &mut String) -> Result<i32, SpecOps
             // flush its readiness lines while the serve loop is still
             // running. Returning the buffer-only `out` here would mean
             // those lines are visible only after shutdown.
-            server::serve_blocking(scope, endpoint_path, env.stdout())
+            server::serve_blocking(scope, endpoint_path, startup_intent, env.stdout())
         }
     }
 }
@@ -564,13 +595,23 @@ mod tests {
     #[test]
     fn parse_defaults_to_start_when_no_subcommand() {
         let cmd = parse(&[]).expect("parse");
-        assert_eq!(cmd, DaemonCommand::Start);
+        assert_eq!(
+            cmd,
+            DaemonCommand::Start {
+                startup_intent: gwt_core::daemon::DaemonStartIntent::Standalone
+            }
+        );
     }
 
     #[test]
     fn parse_recognises_start_explicitly() {
         let cmd = parse(&[s("start")]).expect("parse");
-        assert_eq!(cmd, DaemonCommand::Start);
+        assert_eq!(
+            cmd,
+            DaemonCommand::Start {
+                startup_intent: gwt_core::daemon::DaemonStartIntent::Standalone
+            }
+        );
     }
 
     #[test]
@@ -750,7 +791,7 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let temp = tempfile::TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let _gwt_home = ScopedGwtHome::set(temp.path().join("gwt-home"));
         let project_root = temp.path().join("project");
         std::fs::create_dir_all(&project_root).expect("project root");
@@ -793,7 +834,9 @@ mod tests {
         if let Some(parent) = socket.path.parent() {
             std::fs::create_dir_all(parent).expect("socket parent");
         }
-        let _listener = UnixListener::bind(&socket.path).expect("bind canonical socket");
+        let _listener =
+            UnixListener::bind(gwt_core::test_support::checked_socket_path(&socket.path))
+                .expect("bind canonical socket");
         let mut serving_out = String::new();
         run(&mut env, DaemonCommand::Status, &mut serving_out)
             .expect("status with a served socket and no descriptor");
@@ -834,7 +877,7 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let temp = tempfile::TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let _gwt_home = ScopedGwtHome::set(temp.path());
         let caller_root = temp.path().join("caller");
         let sibling_root = temp.path().join("sibling");
@@ -851,7 +894,9 @@ mod tests {
         )
         .expect("sibling scope");
         let socket_path = temp.path().join("sibling.sock");
-        let listener = UnixListener::bind(&socket_path).expect("bind sibling socket");
+        let listener =
+            UnixListener::bind(gwt_core::test_support::checked_socket_path(&socket_path))
+                .expect("bind sibling socket");
         let endpoint = DaemonEndpoint::new(
             sibling_scope.clone(),
             std::process::id(),
@@ -901,7 +946,7 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let temp = tempfile::TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let _gwt_home = ScopedGwtHome::set(temp.path().join("gwt-home"));
         let cwd_root = temp.path().join("cwd-project");
         let explicit_root = temp.path().join("explicit-project");
@@ -916,9 +961,14 @@ mod tests {
             .expect("explicit scope");
         let cwd_socket_path = temp.path().join("cwd.sock");
         let explicit_socket_path = temp.path().join("explicit.sock");
-        let cwd_listener = UnixListener::bind(&cwd_socket_path).expect("bind cwd socket");
-        let explicit_listener =
-            UnixListener::bind(&explicit_socket_path).expect("bind explicit socket");
+        let cwd_listener = UnixListener::bind(gwt_core::test_support::checked_socket_path(
+            &cwd_socket_path,
+        ))
+        .expect("bind cwd socket");
+        let explicit_listener = UnixListener::bind(gwt_core::test_support::checked_socket_path(
+            &explicit_socket_path,
+        ))
+        .expect("bind explicit socket");
         let cwd_endpoint = DaemonEndpoint::new(
             cwd_scope.clone(),
             std::process::id(),
@@ -984,7 +1034,7 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let temp = tempfile::TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let _gwt_home = ScopedGwtHome::set(temp.path().join("gwt-home"));
         let cwd_root = temp.path().join("cwd-project");
         std::fs::create_dir_all(&cwd_root).expect("cwd root");
@@ -998,7 +1048,10 @@ mod tests {
         }
 
         let cwd_socket_path = temp.path().join(format!("cwd-{case}.sock"));
-        let cwd_listener = UnixListener::bind(&cwd_socket_path).expect("bind cwd socket");
+        let cwd_listener = UnixListener::bind(gwt_core::test_support::checked_socket_path(
+            &cwd_socket_path,
+        ))
+        .expect("bind cwd socket");
         let cwd_endpoint = DaemonEndpoint::new(
             cwd_scope.clone(),
             std::process::id(),

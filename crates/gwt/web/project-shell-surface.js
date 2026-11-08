@@ -1,64 +1,8 @@
-// SPEC-3064 Phase 3 (E7) — Project & workspace shell chrome surface
-// extracted from app.js. Owns the project tab strip (close-tab confirm
-// modal + running-agent cues), the Recent Projects list (picker overlay +
-// Open Project split-button menu), the project picker / onboarding
-// renderers, the toolbar action availability, the Windows dropdown
-// (window list state + render key + renderer), the maximized-window
-// viewport sync, the Open/Clone project modal glue, the migration modal
-// glue, the window_list / clone_* / migration_* receive() bodies, and the
-// project-shell chrome listeners. Pure movement from app.js: behavior,
-// DOM output, and WS protocol are unchanged; the moved code keeps its
-// original app.js indentation. Textual changes are limited to:
-// - `appState` reads go through the `getAppState()` accessor (a local
-//   `const appState = getAppState();` prologue), because app.js reassigns
-//   `appState` on every workspace_state,
-// - `projectError` reads go through `getProjectError()` the same way,
-// - in-module references that previously went through
-//   `frontendUnits.projectWorkspaceShell.*` became direct local calls
-//   (sendOpenProjectDialog, toggleWindowList, renderWindowList),
-// - the global-Esc branches for the migration modal and the Windows
-//   dropdown moved behind handleMigrationModalEscape /
-//   handleWindowListEscape (same delegate pattern as the launch wizard
-//   surface's handleWizardEscapeKeydown),
-// - the receive() bodies for window_list / clone_* / migration_* moved
-//   behind applyWindowListEvent / applyCloneProjectReceiveEvent /
-//   applyMigrationReceiveEvent; the case arms stay in app.js as thin
-//   delegates.
-//
-// deps:
-// - send(message): forward a frontend event over the WebSocket bridge.
-// - createNode(tag, className, textContent): shared DOM helper owned by
-//   app.js (also used by Board / settings / wizard surfaces).
-// - getAppState() / getProjectError(): accessors for app.js-owned mutable
-//   shell state.
-// - activeProjectTab() / activeWorkspace(): app.js workspace selectors.
-// - windowMap: workspace window element map owned by app.js.
-// - appendRenderKeyPart(parts, value): shared render-key primitive (also
-//   used by the render keys that stayed in app.js).
-// - runtimeStateForWindow / windowDisplayTitle / windowTitleTooltip /
-//   windowRoleBadgeLabel / windowGeometryLabel / shouldShowRuntimeStatus /
-//   visibleWindowData / presetSurface: window presentation helpers owned
-//   by app.js (still used by the core window renderers there).
-// - focusWindowRemotely(windowId, opts): focus path owned by app.js.
-// - frameWindow(windowId, opts): SPEC-2008 camera-focus path owned by app.js;
-//   flies the local camera to frame a window (used by the switcher rows).
-// - scheduleTerminalFit(windowId, persist): terminal core scheduler.
-// - visibleBounds(): current visible canvas bounds in world space.
-// - addButton / tileButton / stackButton: toolbar buttons owned by app.js
-//   (their click listeners stay there).
-// - cloneProjectModal / cloneProjectDialog / migrationModal /
-//   migrationDialog: modal elements owned by app.js because the focus
-//   shortcut guard and clone-modal-focus-guard wiring also read them.
+// Project picker/onboarding, Open/Clone project dialogs and migration chrome.
+// Shared catalog navigation lives in app.js and the Agents/Works surfaces.
 import { renderMigrationModal as renderMigrationModalView } from "/migration-modal.js";
 import { renderProjectCloneModal as renderProjectCloneModalView, createFolderPickerController, createOpenProjectPathForm, createOpenProjectPathDialog } from "/project-clone-modal.js";
-import { windowRuntimeLabel } from "/window-runtime-state.js";
-import { groupProjectWindowList } from "/window-list-model.js";
-import {
-  applyWindowWorktreeData,
-  shouldShowWindowWorktreeBadge,
-  windowWorktreeBadgeView,
-  windowWorktreeForm,
-} from "/window-worktree-form.js";
+import { createUiStateStore } from "/ui-state-store.js";
 
 function shouldTriggerOpenFolderHotkey(event, { modalOpen = false } = {}) {
   const target = event?.target;
@@ -74,30 +18,14 @@ export function createProjectShellSurface({
   getAppState,
   getProjectError,
   activeProjectTab,
-  activeWorkspace,
-  windowMap,
   appendRenderKeyPart,
-  runtimeStateForWindow,
-  windowDisplayTitle,
-  windowTitleTooltip,
-  windowRoleBadgeLabel,
-  windowGeometryLabel,
-  shouldShowRuntimeStatus,
-  visibleWindowData,
-  presetSurface,
-  focusWindowRemotely,
-  // SPEC-2008 camera-focus: window-list rows teleport the camera to a window
-  // (frameWindow) instead of maximizing/restoring it.
-  frameWindow,
-  scheduleTerminalFit,
-  visibleBounds,
-  addButton,
-  tileButton,
-  stackButton,
+
+
   cloneProjectModal,
   cloneProjectDialog,
   migrationModal,
   migrationDialog,
+  scheduleFrame,
   isModalOpen = () => false,
 }) {
       const projectPicker = document.getElementById("project-picker");
@@ -115,16 +43,10 @@ export function createProjectShellSurface({
       const onboardingOpenProjectButton = document.getElementById(
         "onboarding-open-project",
       );
-      const windowListButton = document.getElementById("window-list-button");
-      const windowListPanel = document.getElementById("window-list-panel");
 
-      let windowListOpen = false;
-      let windowListEntries = [];
       let renderedRecentProjectsKey = "";
-      let renderedWindowListKey = "";
       let renderedProjectPickerKey = "";
       let renderedProjectOnboardingKey = "";
-      let renderedActionAvailabilityKey = "";
 
 
       function recentProjectsRenderKey(state) {
@@ -135,91 +57,6 @@ export function createProjectShellSurface({
             path: project?.path || "",
           })),
         );
-      }
-
-      function windowListRenderKey() {
-        const appState = getAppState();
-        // SPEC-3038 (2026-06-20): the popover is a cross-tab list; the render
-        // key must change when any project tab's windows change, not only the
-        // active tab's.
-        const model = groupProjectWindowList(appState, windowListEntries);
-        const appendEntryKey = (parts, entry) => {
-          const geometry = entry?.geometry || {};
-          const runtimeState = runtimeStateForWindow(entry);
-          appendRenderKeyPart(parts, "id");
-          appendRenderKeyPart(parts, entry?.id || "");
-          appendRenderKeyPart(parts, "preset");
-          appendRenderKeyPart(parts, entry?.preset || "");
-          appendRenderKeyPart(parts, "title");
-          appendRenderKeyPart(parts, entry?.title || "");
-          appendRenderKeyPart(parts, "dynamic_title");
-          appendRenderKeyPart(parts, entry?.dynamic_title || "");
-          appendRenderKeyPart(parts, "dynamic_title_detail");
-          appendRenderKeyPart(parts, entry?.dynamic_title_detail || "");
-          appendRenderKeyPart(parts, "purpose_title");
-          appendRenderKeyPart(parts, entry?.purpose_title || "");
-          appendRenderKeyPart(parts, "agent_id");
-          appendRenderKeyPart(parts, entry?.agent_id || "");
-          appendRenderKeyPart(parts, "agent_color");
-          appendRenderKeyPart(parts, entry?.agent_color || "");
-          appendRenderKeyPart(parts, "worktree_form");
-          appendRenderKeyPart(parts, windowWorktreeForm(entry));
-          appendRenderKeyPart(parts, "status");
-          appendRenderKeyPart(parts, entry?.status || "");
-          appendRenderKeyPart(parts, "runtime_state");
-          appendRenderKeyPart(parts, runtimeState);
-          appendRenderKeyPart(parts, "runtime_label");
-          appendRenderKeyPart(parts, windowRuntimeLabel(runtimeState));
-          appendRenderKeyPart(parts, "role_badge");
-          appendRenderKeyPart(parts, windowRoleBadgeLabel(entry) || "");
-          appendRenderKeyPart(parts, "display_title");
-          appendRenderKeyPart(parts, windowDisplayTitle(entry));
-          appendRenderKeyPart(parts, "title_tooltip");
-          appendRenderKeyPart(parts, windowTitleTooltip(entry));
-          appendRenderKeyPart(parts, "geometry");
-          appendRenderKeyPart(parts, "x");
-          appendRenderKeyPart(parts, geometry.x ?? 0);
-          appendRenderKeyPart(parts, "y");
-          appendRenderKeyPart(parts, geometry.y ?? 0);
-          appendRenderKeyPart(parts, "width");
-          appendRenderKeyPart(parts, geometry.width ?? 0);
-          appendRenderKeyPart(parts, "height");
-          appendRenderKeyPart(parts, geometry.height ?? 0);
-          appendRenderKeyPart(parts, "geometry_label");
-          appendRenderKeyPart(parts, windowGeometryLabel(entry));
-          appendRenderKeyPart(parts, "minimized");
-          appendRenderKeyPart(parts, Boolean(entry?.minimized));
-          appendRenderKeyPart(parts, "maximized");
-          appendRenderKeyPart(parts, Boolean(entry?.maximized));
-          appendRenderKeyPart(parts, "z_index");
-          appendRenderKeyPart(parts, entry?.z_index ?? 0);
-          appendRenderKeyPart(parts, "tab_group_id");
-          appendRenderKeyPart(parts, entry?.tab_group_id || "");
-          appendRenderKeyPart(parts, "tab_group_active");
-          appendRenderKeyPart(parts, Boolean(entry?.tab_group_active));
-        };
-        const parts = [];
-        appendRenderKeyPart(parts, "open");
-        appendRenderKeyPart(parts, Boolean(windowListOpen));
-        appendRenderKeyPart(parts, "active_tab_id");
-        appendRenderKeyPart(parts, appState?.active_tab_id || null);
-        appendRenderKeyPart(parts, "window_list_entries");
-        appendRenderKeyPart(parts, windowListEntries.length);
-        appendRenderKeyPart(parts, "multi_project");
-        appendRenderKeyPart(parts, Boolean(model.multiProject));
-        appendRenderKeyPart(parts, "rows");
-        appendRenderKeyPart(parts, model.count);
-        for (const group of model.groups) {
-          appendRenderKeyPart(parts, "group");
-          appendRenderKeyPart(parts, group.tabId);
-          appendRenderKeyPart(parts, group.tabTitle);
-          appendRenderKeyPart(parts, Boolean(group.isActiveTab));
-          appendRenderKeyPart(parts, group.entries.length);
-          for (const entry of group.entries) {
-            appendEntryKey(parts, entry);
-          }
-        }
-        return parts.join("");
       }
 
       function projectPickerRenderKey(activeTab = activeProjectTab()) {
@@ -251,13 +88,10 @@ export function createProjectShellSurface({
         return parts.join("");
       }
 
-      function actionAvailabilityRenderKey(activeTab = activeProjectTab()) {
-        return activeTab ? "active" : "empty";
-      }
       // SPEC-1934 US-6: state for the migration confirmation / progress modal.
       // `tabId` identifies which tab the active migration belongs to so a
       // multi-project frontend never mixes events from different repos.
-      let migrationModalState = {
+      const migrationModel = createUiStateStore({
         open: false,
         stage: "confirm", // "confirm" | "running" | "error"
         tabId: null,
@@ -270,20 +104,24 @@ export function createProjectShellSurface({
         percent: 0,
         message: "",
         recovery: "",
-      };
-      let cloneProjectModalState = {
-        open: false,
-        mode: "url",
-        url: "",
-        parentPath: "",
-        query: "",
-        repositories: [],
-        selectedRepositoryUrl: "",
-        searching: false,
-        cloning: false,
-        progress: "",
-        error: "",
-      };
+      }, { scheduleFrame });
+      let renderedMigrationSnapshot = null;
+      // Draft edits are model updates too, but do not rebuild focused inputs.
+      const cloneProjectModel = createUiStateStore({
+        form: { url: "", parentPath: "", query: "" },
+        modal: {
+          open: false,
+          mode: "url",
+          repositories: [],
+          selectedRepositoryUrl: "",
+          searching: false,
+          cloning: false,
+          progress: "",
+          error: "",
+        },
+      }, { scheduleFrame });
+      let observedCloneState = null;
+      let renderedCloneSnapshot = null;
 
       function sendOpenProjectDialog() {
         openPathDialog.open();
@@ -303,14 +141,17 @@ export function createProjectShellSurface({
             button.textContent = pending ? "Choosing folder…" : "Open Folder…";
             button.setAttribute("aria-busy", String(Boolean(pending)));
           }
-          cloneProjectModalState = { ...cloneProjectModalState, pickerPending: Boolean(pending), pickerMessage: message };
-          renderProjectCloneModal();
+          cloneProjectModel.update(current => ({ ...current,
+            modal: { ...current.modal, pickerPending: Boolean(pending), pickerMessage: message },
+          }));
         },
         onSelected: (event) => {
           if (event.purpose === "open") openPathDialog.waitForOpen(event.path, `picker:${event.request_id}`);
           if (event.purpose === "clone_parent") {
-            cloneProjectModalState = { ...cloneProjectModalState, parentPath: event.path, error: "" };
-            renderProjectCloneModal();
+            cloneProjectModel.update(current => ({
+              form: { ...current.form, parentPath: event.path },
+              modal: { ...current.modal, error: "" },
+            }));
           }
         },
       });
@@ -320,37 +161,25 @@ export function createProjectShellSurface({
       function clearPickerPending() { folderPicker.connectionLost(); }
 
       function openCloneProjectModal() {
-        cloneProjectModalState = {
-          ...cloneProjectModalState,
-          open: true,
-          error: "",
-          progress: "",
-        };
-        renderProjectCloneModal();
+        cloneProjectModel.update(current => ({ ...current,
+          modal: { ...current.modal, open: true, error: "", progress: "" },
+        }));
       }
 
       function closeCloneProjectModal() {
-        if (cloneProjectModalState.cloning) {
-          return;
-        }
-        cloneProjectModalState = {
-          ...cloneProjectModalState,
-          open: false,
-          searching: false,
-          error: "",
-          progress: "",
-        };
-        renderProjectCloneModal();
+        if (cloneProjectModel.read().modal.cloning) return;
+        cloneProjectModel.update(current => ({ ...current,
+          modal: { ...current.modal, open: false, searching: false, error: "", progress: "" },
+        }));
       }
 
       function renderProjectCloneModal() {
-        if (!cloneProjectModal || !cloneProjectDialog) {
-          return;
-        }
+        if (!cloneProjectModal || !cloneProjectDialog) return;
+        const { form, modal } = cloneProjectModel.read();
         renderProjectCloneModalView({
           modalEl: cloneProjectModal,
           dialogEl: cloneProjectDialog,
-          state: cloneProjectModalState,
+          state: { ...modal, ...form },
           createNode: (tagName, className, textContent) => {
             const node = document.createElement(tagName);
             if (className) node.className = className;
@@ -359,230 +188,54 @@ export function createProjectShellSurface({
           },
           onClose: closeCloneProjectModal,
           onModeChange: (mode) => {
-            cloneProjectModalState = {
-              ...cloneProjectModalState,
-              mode,
-              error: "",
-              progress: "",
-            };
-            renderProjectCloneModal();
+            cloneProjectModel.update(current => ({ ...current,
+              modal: { ...current.modal, mode, error: "", progress: "" },
+            }));
           },
           onUrlChange: (url) => {
-            cloneProjectModalState = { ...cloneProjectModalState, url };
+            cloneProjectModel.update(current => ({ ...current, form: { ...current.form, url } }));
           },
-          onParentSelect: () => {
-            folderPicker.begin("clone_parent");
+          onParentSelect: () => { folderPicker.begin("clone_parent"); },
+          onParentChange: (parentPath) => {
+            cloneProjectModel.update(current => ({ ...current, form: { ...current.form, parentPath } }));
           },
-          onParentChange: (parentPath) => { cloneProjectModalState = { ...cloneProjectModalState, parentPath }; },
           onSearchQueryChange: (query) => {
-            cloneProjectModalState = { ...cloneProjectModalState, query };
+            cloneProjectModel.update(current => ({ ...current, form: { ...current.form, query } }));
           },
           onSearch: () => {
-            const query = cloneProjectModalState.query.trim();
+            const query = cloneProjectModel.read().form.query.trim();
             if (!query) return;
-            cloneProjectModalState = {
-              ...cloneProjectModalState,
-              searching: true,
-              error: "",
-            };
-            renderProjectCloneModal();
+            cloneProjectModel.update(current => ({ ...current,
+              modal: { ...current.modal, searching: true, error: "" },
+            }));
             send({ kind: "github_repository_search", query });
           },
           onRepositorySelect: (url) => {
-            cloneProjectModalState = {
-              ...cloneProjectModalState,
-              selectedRepositoryUrl: url,
-              url,
-              error: "",
-            };
-            renderProjectCloneModal();
+            cloneProjectModel.update(current => ({
+              form: { ...current.form, url },
+              modal: { ...current.modal, selectedRepositoryUrl: url, error: "" },
+            }));
           },
           onClone: () => {
-            const url = (
-              cloneProjectModalState.mode === "search"
-                ? cloneProjectModalState.selectedRepositoryUrl
-                : cloneProjectModalState.url
-            ).trim();
-            const parentPath = cloneProjectModalState.parentPath.trim();
+            const { form, modal } = cloneProjectModel.read();
+            const url = (modal.mode === "search" ? modal.selectedRepositoryUrl : form.url).trim();
+            const parentPath = form.parentPath.trim();
             if (!url || !parentPath) {
-              cloneProjectModalState = {
-                ...cloneProjectModalState,
-                error: !url
+              cloneProjectModel.update(current => ({ ...current,
+                modal: { ...current.modal, error: !url
                   ? "Select or enter a repository URL."
-                  : "Choose a destination parent folder.",
-              };
-              renderProjectCloneModal();
+                  : "Choose a destination parent folder." },
+              }));
               return;
             }
-            cloneProjectModalState = {
-              ...cloneProjectModalState,
-              cloning: true,
-              progress: "Cloning repository...",
-              error: "",
-            };
-            renderProjectCloneModal();
-            send({
-              kind: "clone_project_start",
-              url,
-              parent_path: parentPath,
-            });
+            cloneProjectModel.update(current => ({ ...current,
+              modal: { ...current.modal, cloning: true, progress: "Cloning repository...", error: "" },
+            }));
+            send({ kind: "clone_project_start", url, parent_path: parentPath });
           },
         });
+        renderedCloneSnapshot = modal;
       }
-
-      function updateActionAvailability(activeTab = activeProjectTab()) {
-        const nextActionAvailabilityKey = actionAvailabilityRenderKey(activeTab);
-        if (renderedActionAvailabilityKey === nextActionAvailabilityKey) {
-          return;
-        }
-        renderedActionAvailabilityKey = nextActionAvailabilityKey;
-        const hasActiveTab = nextActionAvailabilityKey === "active";
-        addButton.disabled = !hasActiveTab;
-        tileButton.disabled = !hasActiveTab;
-        stackButton.disabled = !hasActiveTab;
-        windowListButton.disabled = !hasActiveTab;
-        if (!hasActiveTab) {
-          windowListOpen = false;
-          windowListEntries = [];
-          renderWindowList();
-        }
-      }
-
-      function escapeHtml(value) {
-        return String(value || "")
-          .replace(/&/g, "&amp;")
-          .replace(/</g, "&lt;")
-          .replace(/>/g, "&gt;")
-          .replace(/"/g, "&quot;")
-          .replace(/'/g, "&#39;");
-      }
-
-      function requestWindowList() {
-        if (!activeProjectTab()) {
-          return;
-        }
-        send({ kind: "list_windows" });
-      }
-
-      function renderWindowList() {
-        windowListPanel.hidden = !windowListOpen;
-        windowListButton.setAttribute("aria-expanded", windowListOpen ? "true" : "false");
-        if (!windowListOpen) {
-          renderedWindowListKey = "__closed__";
-          return;
-        }
-        const nextWindowListKey = windowListRenderKey();
-        if (renderedWindowListKey === nextWindowListKey) {
-          return;
-        }
-        renderedWindowListKey = nextWindowListKey;
-        // SPEC-3038 (2026-06-20): list windows from every project tab so the
-        // popover matches the cross-tab open-window badge. Multi-project
-        // shells get per-project group headers; single-project shells stay
-        // flat. The window set and order come from groupProjectWindowList.
-        const model = groupProjectWindowList(getAppState(), windowListEntries);
-        windowListPanel.innerHTML = "";
-        if (model.count === 0) {
-          const empty = document.createElement("div");
-          empty.className = "window-list-empty";
-          empty.textContent = "No windows";
-          windowListPanel.appendChild(empty);
-          return;
-        }
-        for (const group of model.groups) {
-          if (model.multiProject) {
-            const header = document.createElement("div");
-            header.className = "window-list-group";
-            header.textContent = group.tabTitle || "Project";
-            windowListPanel.appendChild(header);
-          }
-          for (const entry of group.entries) {
-            windowListPanel.appendChild(createWindowListRow(entry));
-          }
-        }
-      }
-
-      function createWindowListRow(entry) {
-        const row = document.createElement("button");
-        row.type = "button";
-        row.className = "window-list-row";
-        if (entry.agent_color) {
-          row.dataset.agentColor = entry.agent_color;
-        }
-        applyWindowWorktreeData(row, entry);
-        const geometryLabel = windowGeometryLabel(entry);
-        const runtimeState = runtimeStateForWindow(entry);
-        const runtimeLabel = windowRuntimeLabel(runtimeState);
-        const runtimeChip = shouldShowRuntimeStatus(entry)
-          ? `<span class="status-chip ${runtimeState}">
-              <span class="status-dot"></span>
-              <span class="status-label">${runtimeLabel}</span>
-            </span>`
-          : "";
-        const roleBadgeLabel = windowRoleBadgeLabel(entry);
-        const roleBadge = roleBadgeLabel
-          ? `<span class="window-role-badge window-list-role">${escapeHtml(roleBadgeLabel)}</span>`
-          : "";
-        const worktreeBadgeView = windowWorktreeBadgeView(entry);
-        const worktreeBadge = shouldShowWindowWorktreeBadge(entry)
-          ? `<span class="window-worktree-badge window-list-worktree" role="img" data-worktree-form="${escapeHtml(worktreeBadgeView.form)}" data-worktree-label="${escapeHtml(worktreeBadgeView.label)}" data-worktree-symbol="${escapeHtml(worktreeBadgeView.symbol)}" aria-label="${escapeHtml(worktreeBadgeView.ariaLabel)}" title="${escapeHtml(worktreeBadgeView.title)}">${escapeHtml(worktreeBadgeView.shortLabel)}</span>`
-          : "";
-        // FR-045 (anshin): surface the agent's live activity detail
-        // (dynamic_title_detail) as a glanceable line when it differs from the
-        // display title, so the operator can read what each pane is doing now
-        // without focusing it.
-        const displayTitle = windowDisplayTitle(entry);
-        const activityDetail = String(entry?.dynamic_title_detail || "").trim();
-        const activityLine =
-          activityDetail && activityDetail !== displayTitle
-            ? `<div class="window-list-activity">${escapeHtml(activityDetail)}</div>`
-            : "";
-        row.innerHTML = `
-          <div class="window-list-copy">
-            <div class="window-list-title">${escapeHtml(displayTitle)}</div>
-            ${activityLine}
-            <div class="window-list-meta">
-              ${worktreeBadge}
-              ${roleBadge}
-              <span class="window-list-geometry">${geometryLabel}</span>
-            </div>
-          </div>
-          ${runtimeChip}
-        `;
-        const windowListTitle = row.querySelector(".window-list-title");
-        if (windowListTitle) windowListTitle.title = windowTitleTooltip(entry);
-        // SPEC-2008 camera-focus / FR-094: the persistent switcher row flies
-        // the local camera to frame the chosen window (teleport). There is no
-        // maximize/restore anymore; frameWindow applies local focus + sends
-        // focus_window for highlight.
-        row.addEventListener("click", () => {
-          windowListOpen = false;
-          renderWindowList();
-          frameWindow(entry.id);
-        });
-        return row;
-      }
-
-      function toggleWindowList() {
-        if (windowListButton.disabled) {
-          return;
-        }
-        windowListOpen = !windowListOpen;
-        windowListEntries = [];
-        renderedWindowListKey = "";
-        renderWindowList();
-        if (windowListOpen) {
-          requestWindowList();
-        }
-      }
-
-      // SPEC-2008 camera-focus: the maximized-window viewport sync
-      // (geometryMatches / syncMaximizedWindowsToViewport /
-      // scheduleMaximizedWindowsToViewportSync /
-      // workspaceHasVisibleMaximizedWindow) was removed. Windows render at
-      // their own geometry and the camera is driven locally by app.js
-      // (frameWindow / enterOverview), so there is no shared maximized fill to
-      // reconcile per client.
 
       function renderRecentProjects({ force = false } = {}) {
         const appState = getAppState();
@@ -656,10 +309,11 @@ export function createProjectShellSurface({
             : `${tab.project_root} is not a Git workspace yet. Open another project or initialize this folder in your shell first.`;
       }
 
-      // SPEC-1934 US-6: Migration modal entry point. Re-rendered on every
-      // BackendEvent::Migration* arrival so the UI mirrors the executor state.
+      // Migration receivers and local actions commit data; this view reads
+      // the same immutable snapshot; only running progress waits for a frame.
       function renderMigrationModal() {
         if (!migrationModal || !migrationDialog) return;
+        const migrationModalState = migrationModel.read();
         renderMigrationModalView({
           modalEl: migrationModal,
           dialogEl: migrationDialog,
@@ -668,10 +322,9 @@ export function createProjectShellSurface({
           onMigrate: () => {
             if (!migrationModalState.tabId) return;
             const tabId = migrationModalState.tabId;
-            migrationModalState.stage = "running";
-            migrationModalState.phase = "validate";
-            migrationModalState.percent = 0;
-            renderMigrationModal();
+            migrationModel.update(current => ({
+              ...current, stage: "running", phase: "validate", percent: 0,
+            }));
             send({ kind: "start_migration", tab_id: tabId });
           },
           // SPEC-1934 US-7 / FR-032: only the error stage exposes a dismissal
@@ -679,100 +332,55 @@ export function createProjectShellSurface({
           // the tab keeps its pending status so the next Open Project shows
           // the Accept-only modal again.
           onClose: () => {
-            migrationModalState.open = false;
-            migrationModalState.stage = "confirm";
-            migrationModalState.message = "";
-            migrationModalState.recovery = "";
-            renderMigrationModal();
+            migrationModel.update(current => ({
+              ...current, open: false, stage: "confirm", message: "", recovery: "",
+            }));
           },
         });
-      }
-
-      // SPEC-3064 Phase 3 (E7): receive() body for window_list. The case arm
-      // stays in app.js as a thin delegate.
-      function applyWindowListEvent(event) {
-        windowListEntries = event.windows || [];
-        renderWindowList();
+        renderedMigrationSnapshot = migrationModalState;
       }
 
       // SPEC-3064 Phase 3 (E7): receive() bodies for the clone-project /
       // GitHub repository search events. The case arms stay in app.js as
       // thin delegates.
       function applyCloneProjectReceiveEvent(event) {
-        switch (event.kind) {
-          case "clone_project_parent_selected":
-            cloneProjectModalState = {
-              ...cloneProjectModalState,
-              parentPath: event.path || "",
-              error: "",
-            };
-            renderProjectCloneModal();
-            break;
-          case "github_repository_search_results":
-            if (event.query !== cloneProjectModalState.query.trim()) {
-              break;
-            }
-            cloneProjectModalState = {
-              ...cloneProjectModalState,
-              repositories: event.repositories || [],
-              selectedRepositoryUrl: "",
-              searching: false,
-              error: "",
-            };
-            renderProjectCloneModal();
-            break;
-          case "github_repository_search_error":
-            if (event.query !== cloneProjectModalState.query.trim()) {
-              break;
-            }
-            cloneProjectModalState = {
-              ...cloneProjectModalState,
-              searching: false,
-              error: event.message || "Repository search failed.",
-            };
-            renderProjectCloneModal();
-            break;
-          case "clone_project_progress":
-            cloneProjectModalState = {
-              ...cloneProjectModalState,
-              cloning: true,
-              progress: event.message || "Cloning repository...",
-              error: "",
-            };
-            renderProjectCloneModal();
-            break;
-          case "clone_project_done":
-            cloneProjectModalState = {
-              ...cloneProjectModalState,
-              open: false,
-              cloning: false,
-              searching: false,
-              progress: "",
-              error: "",
-            };
-            renderProjectCloneModal();
-            break;
-          case "clone_project_error":
-            cloneProjectModalState = {
-              ...cloneProjectModalState,
-              cloning: false,
-              progress: "",
-              error: event.message || "Clone failed.",
-            };
-            renderProjectCloneModal();
-            break;
-          default:
-            break;
-        }
+        cloneProjectModel.update(current => {
+          const { form, modal } = current;
+          switch (event.kind) {
+            case "clone_project_parent_selected":
+              return { form: { ...form, parentPath: event.path || "" },
+                modal: { ...modal, error: "" } };
+            case "github_repository_search_results":
+              if (event.query !== form.query.trim()) return current;
+              return { ...current, modal: { ...modal, repositories: event.repositories || [],
+                selectedRepositoryUrl: "", searching: false, error: "" } };
+            case "github_repository_search_error":
+              if (event.query !== form.query.trim()) return current;
+              return { ...current, modal: { ...modal, searching: false,
+                error: event.message || "Repository search failed." } };
+            case "clone_project_progress":
+              return { ...current, modal: { ...modal, cloning: true,
+                progress: event.message || "Cloning repository...", error: "" } };
+            case "clone_project_done":
+              return { ...current, modal: { ...modal, open: false, cloning: false,
+                searching: false, progress: "", error: "" } };
+            case "clone_project_error":
+              return { ...current, modal: { ...modal, cloning: false,
+                progress: "", error: event.message || "Clone failed." } };
+            default:
+              return current;
+          }
+        });
       }
 
       // SPEC-3064 Phase 3 (E7): receive() bodies for the migration events.
       // The case arms stay in app.js as thin delegates.
       function applyMigrationReceiveEvent(event) {
+        const migrationModalState = migrationModel.read();
         switch (event.kind) {
           case "migration_detected": {
             // SPEC-1934 US-6.1: server says a project tab needs migration.
-            migrationModalState = {
+            migrationModel.update(() => ({
               open: true,
               stage: "confirm",
               tabId: event.tab_id,
@@ -785,8 +393,7 @@ export function createProjectShellSurface({
               percent: 0,
               message: "",
               recovery: "",
-            };
-            renderMigrationModal();
+            }));
             break;
           }
           case "migration_progress": {
@@ -798,31 +405,29 @@ export function createProjectShellSurface({
             ) {
               break;
             }
-            migrationModalState.stage = "running";
-            migrationModalState.phase = event.phase || "confirm";
-            migrationModalState.percent = Number.isFinite(event.percent)
-              ? event.percent
-              : 0;
-            renderMigrationModal();
+            migrationModel.update(current => ({
+              ...current,
+              stage: "running",
+              phase: event.phase || "confirm",
+              percent: Number.isFinite(event.percent) ? event.percent : 0,
+            }));
             break;
           }
           case "migration_done": {
             if (migrationModalState.tabId === event.tab_id) {
-              migrationModalState.open = false;
-              migrationModalState.stage = "confirm";
-              migrationModalState.percent = 0;
-              renderMigrationModal();
+              migrationModel.update(current => ({
+                ...current, open: false, stage: "confirm", percent: 0,
+              }));
             }
             break;
           }
           case "migration_error": {
             if (migrationModalState.tabId !== event.tab_id) break;
-            migrationModalState.open = true;
-            migrationModalState.stage = "error";
-            migrationModalState.phase = event.phase || "error";
-            migrationModalState.message = event.message || "";
-            migrationModalState.recovery = event.recovery || "";
-            renderMigrationModal();
+            migrationModel.update(current => ({
+              ...current, open: true, stage: "error",
+              phase: event.phase || "error",
+              message: event.message || "", recovery: event.recovery || "",
+            }));
             break;
           }
           default:
@@ -840,32 +445,10 @@ export function createProjectShellSurface({
           // swallowed (so the user can't bypass migration), at the error
           // stage it dismisses the failure UI without flipping
           // migration_pending so the next Open Project re-presents Accept.
-          if (migrationModalState.stage === "error") {
-            migrationModalState.open = false;
-            migrationModalState.stage = "confirm";
-            migrationModalState.message = "";
-            migrationModalState.recovery = "";
-            renderMigrationModal();
-          }
-          event.preventDefault();
-          return true;
-        }
-        return false;
-      }
-
-      // SPEC-3064 Phase 3 (E7): the Windows dropdown branch of the app.js
-      // global Esc handler. Returns true when the open dropdown consumed
-      // the event.
-      function handleWindowListEscape(event) {
-        if (windowListOpen) {
-          // Close the Windows dropdown and return focus to its trigger
-          // button (matches the modal pattern of restoring focus to the
-          // element that opened the dropdown).
-          windowListOpen = false;
-          renderWindowList();
-          if (windowListButton && typeof windowListButton.focus === "function") {
-            try { windowListButton.focus({ preventScroll: true }); }
-            catch { windowListButton.focus(); }
+          if (migrationModel.read().stage === "error") {
+            migrationModel.update(current => ({
+              ...current, open: false, stage: "confirm", message: "", recovery: "",
+            }));
           }
           event.preventDefault();
           return true;
@@ -879,8 +462,7 @@ export function createProjectShellSurface({
           document.getElementById("close-project-modal")?.classList.contains("open") ||
           openPathDialog.modal.classList.contains("open") ||
           cloneProjectModal?.classList.contains("open") ||
-          migrationModal?.classList.contains("open") ||
-          windowListOpen
+          migrationModal?.classList.contains("open")
         );
       }
 
@@ -900,11 +482,7 @@ export function createProjectShellSurface({
         return true;
       }
 
-      // SPEC-3064 Phase 3 (E7): project-shell chrome listeners (picker /
-      // onboarding entry points, the Windows dropdown trigger, and the dropdown
-      // outside-click close) moved out of the app.js bootstrap. References
-      // that previously went through frontendUnits.projectWorkspaceShell.*
-      // are direct local calls here.
+      // Project picker and onboarding entry points share the existing dialogs.
       //
       // SPEC-2013 Phase 8: the standalone Open Project split-button was retired.
       // Open Folder / Clone now live inside the consolidated `Projects ▾`
@@ -919,8 +497,6 @@ export function createProjectShellSurface({
         pickerCloneProjectButton.addEventListener("click", openCloneProjectModal);
         onboardingOpenProjectButton.addEventListener("click", sendOpenProjectDialog);
 
-        windowListButton.addEventListener("click", toggleWindowList);
-
         window.addEventListener(
           "keydown",
           (event) => {
@@ -929,39 +505,47 @@ export function createProjectShellSurface({
           true,
         );
 
-        window.addEventListener("pointerdown", (event) => {
-          if (!windowListOpen) {
-            return;
-          }
-          if (
-            windowListPanel.contains(event.target) ||
-            windowListButton.contains(event.target)
-          ) {
-            return;
-          }
-          windowListOpen = false;
-          renderWindowList();
-        });
       }
 
+      // Keep open/close, actions and stage transitions synchronous. During a
+      // run, progress changes share one frame and pull the latest snapshot.
+      const unsubscribeMigration = migrationModel.subscribe(
+        state => state.open && state.stage === "running" ? null : state,
+        () => renderMigrationModal(),
+      );
+      const unsubscribeMigrationFrame = migrationModel.subscribeFrame(state => state, state => {
+        if (state !== renderedMigrationSnapshot) renderMigrationModal();
+      });
+      // Only progress-only updates wait for a frame. Picker results and
+      // actions stay synchronous, while draft-only changes never rebuild inputs.
+      const unsubscribeClone = cloneProjectModel.subscribe(state => state, state => {
+        const previous = observedCloneState;
+        observedCloneState = state;
+        if (previous && (state.modal === previous.modal || (
+          state.form === previous.form && state.modal.open && previous.modal.open
+          && state.modal.cloning && previous.modal.cloning
+          && Object.keys(state.modal).every(key => key === "progress"
+            || Object.is(state.modal[key], previous.modal[key]))
+        ))) return;
+        renderProjectCloneModal();
+      });
+      const unsubscribeCloneFrame = cloneProjectModel.subscribeFrame(state => state.modal, modal => {
+        if (modal !== renderedCloneSnapshot) renderProjectCloneModal();
+      });
+
       return {
+        dispose() { unsubscribeMigration(); unsubscribeMigrationFrame(); unsubscribeClone(); unsubscribeCloneFrame(); folderPicker.dispose(); openPathDialog.dispose(); },
         sendOpenProjectDialog,
         closeCloneProjectModal,
-        updateActionAvailability,
-        requestWindowList,
-        renderWindowList,
-        toggleWindowList,
         renderRecentProjects,
         renderProjectPicker,
         renderProjectOnboarding,
-        applyWindowListEvent,
         applyCloneProjectReceiveEvent,
         applyPickerReceiveEvent,
         applyProjectOpenReceiveEvent,
         clearPickerPending,
         applyMigrationReceiveEvent,
         handleMigrationModalEscape,
-        handleWindowListEscape,
         installProjectShellChrome,
       };
 }

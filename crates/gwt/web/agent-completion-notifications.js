@@ -1,5 +1,3 @@
-const STOP_STATES = new Set(["stopped", "exited"]);
-
 function normalizeState(value) {
   return String(value || "").toLowerCase();
 }
@@ -26,31 +24,23 @@ function projectLabel(projectTab) {
   return "Project";
 }
 
-function defaultAttentionAway(documentRef) {
-  const hidden = documentRef?.visibilityState === "hidden";
-  const focused =
-    typeof documentRef?.hasFocus === "function" ? documentRef.hasFocus() : false;
-  return hidden || !focused;
-}
-
 function defaultDesktopPermission(windowRef) {
-  const notificationApi =
-    windowRef?.Notification ||
-    (typeof globalThis !== "undefined" ? globalThis.Notification : null);
-  return notificationApi?.permission || "unsupported";
+  return windowRef?.Notification?.permission || "unsupported";
 }
 
-function defaultDesktopNotification(windowRef, notice) {
-  const notificationApi =
-    windowRef?.Notification ||
-    (typeof globalThis !== "undefined" ? globalThis.Notification : null);
-  if (!notificationApi) {
-    return;
-  }
-  new notificationApi(notice.title, {
+function defaultDesktopNotification(windowRef, notice, onActivate) {
+  const notification = new windowRef.Notification(notice.title, {
     body: notice.body,
-    tag: `gwt-agent-${notice.windowId}`,
+    tag: `gwt-notification-${notice.transition_id}`,
   });
+  notification.onclick = () => {
+    try {
+      windowRef.focus?.();
+      onActivate(notice);
+    } finally {
+      notification.close();
+    }
+  };
 }
 
 function appendStatusDetail(body, detail) {
@@ -83,120 +73,43 @@ export function notificationForTransition(input) {
   return null;
 }
 
+// The server owns runtime timing, attention suppression, and recipient election.
+// This desktop-only sink never derives notifications from runtime snapshots.
 export function createAgentCompletionNotifier({
-  document: documentRef = typeof document !== "undefined" ? document : null,
   window: windowRef = typeof window !== "undefined" ? window : null,
-  now = () => Date.now(),
-  minRunningMs = 5 * 60 * 1000,
-  isAttentionAway = () => defaultAttentionAway(documentRef),
   getDesktopNotificationPermission = () => defaultDesktopPermission(windowRef),
-  showDesktopNotification = (notice) =>
-    defaultDesktopNotification(windowRef, notice),
-  showToast = () => {},
-  onProjectUnread = () => {},
+  onActivate = () => {},
+  showDesktopNotification = (notice) => defaultDesktopNotification(windowRef, notice, onActivate),
 } = {}) {
-  const entries = new Map();
+  // Page-lifetime dedupe survives socket reconnects and window removal.
+  const seenTransitions = new Set();
 
-  function publish(notice) {
-    showToast(notice);
-    if (getDesktopNotificationPermission() === "granted") {
+  function handleIntent(notice) {
+    if (!notice || typeof notice.transition_id !== "string" || !notice.transition_id.trim()
+      || !["stopped", "error", "needs_human"].includes(notice.category)
+      || seenTransitions.has(notice.transition_id)) return null;
+    seenTransitions.add(notice.transition_id);
+    if (getDesktopNotificationPermission() !== "granted") return null;
+    try {
       showDesktopNotification(notice);
-    }
-    if (notice.projectId) {
-      onProjectUnread(notice.projectId, notice);
+      return notice;
+    } catch {
+      // A browser can expose granted permission while its OS API is unavailable.
+      windowRef?.console?.warn?.("gwt: desktop notification delivery failed");
+      return null;
     }
   }
 
-  function handleRuntimeState({
-    windowId,
-    runtimeState,
-    windowData = null,
-    projectTab = null,
-    statusDetail = "",
-  }) {
-    if (!windowId) {
-      return null;
-    }
-    const state = normalizeState(runtimeState);
-    const previous = entries.get(windowId);
-    const timestamp = now();
-
-    if (state === "running") {
-      entries.set(windowId, {
-        state,
-        runningStartedAt:
-          previous?.state === "running" && Number.isFinite(previous.runningStartedAt)
-            ? previous.runningStartedAt
-            : timestamp,
-        windowData,
-        projectTab,
-      });
-      return null;
-    }
-
-    entries.set(windowId, {
-      state,
-      runningStartedAt: null,
-      windowData,
-      projectTab,
-    });
-
-    if (previous?.state !== "running") {
-      return null;
-    }
-
-    const elapsedMs = timestamp - previous.runningStartedAt;
-    if (!Number.isFinite(elapsedMs) || elapsedMs < minRunningMs) {
-      return null;
-    }
-    if (!isAttentionAway()) {
-      return null;
-    }
-
-    const noticeBase = notificationForTransition({
-      source: "runtime",
-      state: STOP_STATES.has(state) ? "stopped" : state,
-      windowData: windowData || previous.windowData,
-      projectTab: projectTab || previous.projectTab,
-      windowId,
-    });
-    if (!noticeBase) {
-      return null;
-    }
-    const project = projectTab || previous.projectTab || null;
-    const notice = {
-      ...noticeBase,
-      windowId,
-      projectId: project?.id || null,
-      projectTitle: projectLabel(project),
-      createdAt: timestamp,
-    };
-    if (notice.kind === "agent_error") {
-      notice.body = appendStatusDetail(notice.body, statusDetail);
-    }
-    publish(notice);
-    return notice;
-  }
-
-  function forgetWindow(windowId) {
-    entries.delete(windowId);
-  }
-
-  return {
-    handleRuntimeState,
-    forgetWindow,
-    reset: () => entries.clear(),
-  };
+  return { handleIntent };
 }
 
 // SPEC-2356 Anshin Addendum (FR-040) — in-app attention toaster.
 //
-// Distinct from createAgentCompletionNotifier above, which only fires DESKTOP
-// notifications when the operator is AWAY for a sustained run. This is the
+// Distinct from the server-intent desktop sink above. This is the
 // in-app, always-on counterpart: the moment an agent transitions into a state
 // that wants the operator's eyes (needs_input / blocked / error / done), a
 // quiet in-app toast appears even while the operator is present. Clicking a
-// toast flies the camera to that window (frameWindow), so attention is one
+// toast selects that window in its surface (frameWindow), so attention is one
 // click from action. Pure controller: DOM rendering is injected via
 // `showToast`. The mapping keys off the runtime wire state, not the Living
 // Telemetry projection, so this stays independent of CSS state names.
@@ -238,32 +151,92 @@ function attentionNoticeForFlavor({ flavor, windowData, windowId, statusDetail =
 
 export function createAgentAttentionToaster({
   showToast = () => {},
+  dismissToast = () => {},
   now = () => Date.now(),
 } = {}) {
-  // Last toasted flavor per window. We only fire when the flavor CHANGES, so a
-  // string of waiting status frames does not spam the operator. Leaving the
-  // attention set (e.g. back to running/idle) clears the entry so the next
-  // entry into the same flavor toasts again.
+  // Track flavors per window and retire superseded Issue windows until catalog
+  // removal. Late frames/reconnects from an old window cannot replace or clear
+  // its successor's attention. Non-error flavors retain transition-only dedupe.
   const lastFlavor = new Map();
+  const errors = new Map();
+  // Page-lifetime high-water marks: closing a successful successor must not
+  // revive a retained older diagnostic on the next replay.
+  const latestRuntimes = new Map();
+
+  function retireErrorWindow(key, successor) {
+    const previous = errors.get(key)?.windowId;
+    if (previous && previous !== successor) lastFlavor.set(previous, `superseded:${key}`);
+  }
+
+  function resolveError(key, successor) {
+    if (!errors.has(key)) return;
+    if (successor) retireErrorWindow(key, successor);
+    errors.delete(key);
+    dismissToast(key);
+  }
 
   function handleRuntimeState({
     windowId,
     runtimeState,
     windowData = null,
     statusDetail = "",
+    projectKey = "",
+    source = "terminal_status",
+    retryable = false,
   }) {
     if (!windowId) {
       return null;
     }
     const state = normalizeState(runtimeState);
     const flavor = ATTENTION_STATES[state] || null;
+    const issue = windowData?.linked_issue_number;
+    const groupedIssue = projectKey && Number.isSafeInteger(issue) && issue > 0;
+    const errorKey = groupedIssue
+      ? `attention-${projectKey}-issue-${issue}` : `attention-${windowId}`;
+    // These timestamps are wire-only local runtime facts, including retained
+    // diagnostic panes. Learn them from snapshots before diagnostic replay so
+    // a full page reload cannot resurrect a provably older Issue window.
+    const startedAt = windowData?.runtime_started_at_ms;
+    if (groupedIssue && Number.isSafeInteger(startedAt) && startedAt > 0) {
+      const latest = latestRuntimes.get(errorKey);
+      if (latest && latest.startedAt > startedAt) return null;
+      if (!latest || startedAt > latest.startedAt) {
+        latestRuntimes.set(errorKey, { windowId, startedAt });
+        lastFlavor.delete(windowId);
+        const previousStart = errors.get(errorKey)?.startedAt;
+        if (Number.isSafeInteger(previousStart) && previousStart > 0 && previousStart < startedAt) {
+          resolveError(errorKey, windowId);
+        }
+      }
+    }
+    if (lastFlavor.get(windowId) === `superseded:${errorKey}`) return null;
+
+    // Workspace/WindowState frames project persisted status, including errors
+    // from other machines. Only the local runtime diagnostic (also replayed on
+    // reconnect) can create error attention. Do not consume its dedupe early.
+    if (flavor === "error" && source !== "terminal_status") return null;
+    if (flavor !== "error" || retryable) {
+      if (source === "terminal_status" || errors.get(errorKey)?.windowId === windowId) {
+        resolveError(errorKey, windowId);
+      }
+    }
+    if (flavor === "error") {
+      if (retryable) {
+        lastFlavor.delete(windowId);
+        return null;
+      }
+      const previous = errors.get(errorKey);
+      if (previous?.windowId === windowId && previous.detail === statusDetail) return null;
+      retireErrorWindow(errorKey, windowId);
+      errors.set(errorKey, { windowId, detail: statusDetail, startedAt });
+    }
 
     if (!flavor) {
       lastFlavor.delete(windowId);
       return null;
     }
 
-    if (lastFlavor.get(windowId) === flavor) {
+    if (flavor !== "error" && lastFlavor.get(windowId) === flavor) {
       return null;
     }
     lastFlavor.set(windowId, flavor);
@@ -277,6 +250,7 @@ export function createAgentAttentionToaster({
     if (!notice) {
       return null;
     }
+    notice.id = flavor === "error" ? errorKey : `attention-${windowId}`;
     notice.createdAt = now();
     showToast(notice);
     return notice;
@@ -284,6 +258,9 @@ export function createAgentAttentionToaster({
 
   function forgetWindow(windowId) {
     lastFlavor.delete(windowId);
+    for (const [key, error] of errors) {
+      if (error.windowId === windowId) resolveError(key);
+    }
   }
 
   return {

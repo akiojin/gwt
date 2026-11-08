@@ -1,8 +1,16 @@
 import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { gotoLiveGwt, sendLiveGwtEvent, withLiveGwtBackendLock } from "./_helpers/live-gwt";
 
 test.describe("Profile environment variable grid", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
+  let browserErrors: string[] = [];
+  test.beforeEach(({ page }) => {
+    const errors = browserErrors = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  });
+  test.afterEach(() => expect(browserErrors).toEqual([]));
 
   test("renders OS rows, auto-switches overrides, and saves added variables", async ({
     page,
@@ -186,14 +194,324 @@ test.describe("Profile environment variable grid", () => {
     expect(nameBoxAfter?.y).toBeCloseTo(nameBoxBefore?.y || 0, 1);
     await expect(editor).toHaveJSProperty("scrollTop", 0);
   });
+
+  test("keeps a newer unfocused draft when an older save ACK arrives", async ({ page }) => {
+    await installEmbeddedRoutes(page);
+    await installProfileBackend(page, { holdSaves: true });
+    await page.goto(APP_URL);
+    const profile = page.locator(".surface-profile");
+    await waitForProfileIdle(profile);
+    const value = profile.locator('.profile-env-row[data-env-key="PATH"] input');
+    await value.fill("/older/bin");
+    await value.blur();
+    await page.waitForFunction(() => window.__profileFixturePendingSaves.length === 1);
+    await value.fill("/newer/bin");
+    await value.blur();
+    await page.waitForFunction(() => window.__profileFixturePendingSaves.length === 2);
+    await expect(value).not.toBeFocused();
+
+    await page.evaluate(() => window.__profileFixtureReplyNext());
+    await expect(value).toHaveValue("/newer/bin");
+    await expect(profile.locator('.profile-env-row[data-env-key="PATH"] .profile-env-result')).toHaveText("/newer/bin");
+    await page.evaluate(() => window.__profileFixtureReplyNext());
+    await waitForProfileIdle(profile);
+    await profile.getByRole("button", { name: "Refresh profiles" }).click();
+    await waitForProfileIdle(profile);
+    await expect(value).toHaveValue("/newer/bin");
+  });
+
+  test("retains the draft and existing snapshot on a save error, then recovers", async ({ page }) => {
+    await installEmbeddedRoutes(page);
+    await installProfileBackend(page, { holdSaves: true });
+    await page.goto(APP_URL);
+    const profile = page.locator(".surface-profile");
+    await waitForProfileIdle(profile);
+    const name = profile.locator(".profile-field input").first();
+    await name.fill("unsaved-name");
+    await name.blur();
+    await page.waitForFunction(() => window.__profileFixturePendingSaves.length === 1);
+    await expect(profile.locator(".profile-status")).toHaveText("Saving profile...");
+    await page.evaluate(() => window.__profileFixtureReplyNext("fixture save failed"));
+    await expect(profile.locator(".profile-status.error")).toHaveText("fixture save failed");
+    await expect(name).toHaveValue("unsaved-name");
+    await expect(profile.locator(".profile-row.selected .profile-row-title")).toHaveText("default");
+    await expect(profile.locator('.profile-env-row[data-env-key="PATH"] .profile-env-os-value')).toHaveText("/usr/bin");
+    await name.fill("default");
+    await name.blur();
+    await profile.getByRole("button", { name: "Refresh profiles" }).click();
+    await waitForProfileIdle(profile);
+    await expect(name).toHaveValue("default");
+    await expect(profile.locator(".profile-status.error")).toHaveCount(0);
+  });
+
+  test("ordinary reconnect recovers Profile reads and preserves the unsaved draft", async ({ page }, info) => {
+    const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    test.skip(!base || !process.env.GWT_PLAYWRIGHT_CHECK_HOME, "requires an isolated checkout server");
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+    await gotoLiveGwt(page, base!, { enableTestBridge: true });
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    await sendLiveGwtEvent(page, { kind: "create_window", preset: "profile",
+      bounds: { x: 30, y: 30, width: 1200, height: 800 } });
+    const profile = page.locator('.workspace-window[data-preset="profile"]').last();
+    await waitForProfileIdle(profile);
+    const id = (await profile.getAttribute("data-id"))!;
+    await page.evaluate(id => {
+      const root = document.querySelector(`.workspace-window[data-id="${id}"]`)!;
+      const old = (window as any).__gwtPlaywrightSockets.findLast((socket: WebSocket) =>
+        socket.readyState === WebSocket.OPEN && new URL(socket.url).searchParams.has("repo_hash"));
+      if (!old) throw new Error("missing owning project socket");
+      const send = WebSocket.prototype.send;
+      const state = { old, root, input: null as HTMLTextAreaElement | null, held: [] as string[], recovered: [] as string[],
+        sequence: (window as any).__gwtPlaywrightMessageSequence,
+        restore() { WebSocket.prototype.send = send; } };
+      WebSocket.prototype.send = function (data) {
+        const request = typeof data === "string" ? JSON.parse(data) : null;
+        if (request?.id === id && ["load_profile", "save_profile"].includes(request.kind)) {
+          if (this === old) { state.held.push(request.kind); return; }
+          state.recovered.push(request.kind);
+        }
+        return send.call(this, data);
+      };
+      (window as any).__profileReconnect = state;
+      (root.querySelector('[data-action="refresh-profile"]') as HTMLButtonElement).click();
+      const input = state.input = root.querySelector(".profile-textarea") as HTMLTextAreaElement;
+      if (!input?.isConnected) throw new Error("missing mounted Profile editor after refresh");
+      input.focus();
+      input.value = "Unsent reconnect draft";
+      input.dispatchEvent(new Event("input"));
+      input.setSelectionRange(2, 7);
+    }, id);
+    try {
+      await expect.poll(() => page.evaluate(() => (window as any).__profileReconnect.held))
+        .toEqual(["load_profile", "save_profile"]);
+      await expect(profile.locator(".profile-status")).toContainText("Saving profile");
+      await page.evaluate(() => (window as any).__profileReconnect.old.close());
+      await expect.poll(() => page.evaluate(() => (window as any).__profileReconnect.recovered))
+        .toEqual(["load_profile"]);
+      await waitForLiveProfileReply(page, id, await page.evaluate(() => (window as any).__profileReconnect.sequence));
+      await waitForProfileIdle(profile);
+      expect(await page.evaluate(id => {
+        const state = (window as any).__profileReconnect;
+        const input = state.root.querySelector(".profile-textarea") as HTMLTextAreaElement;
+        return { sameRoot: state.root === document.querySelector(`.workspace-window[data-id="${id}"]`),
+          sameInput: state.input === input,
+          draft: input.value, selection: [input.selectionStart, input.selectionEnd],
+          recovered: state.recovered };
+      }, id)).toEqual({ sameRoot: true, sameInput: true, draft: "Unsent reconnect draft",
+        selection: [2, 7], recovered: ["load_profile"] });
+      await info.attach(`profile-reconnect-${theme}`, { body: await profile.screenshot({
+        mask: [profile.locator(".profile-env-grid")],
+      }), contentType: "image/png" });
+    } finally {
+      await page.evaluate(() => (window as any).__profileReconnect?.restore());
+    }
+  });
+
+  test("ordinary reconnect preserves edits after a lost rename reply", async ({ page }, info) => {
+    const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    test.skip(!base || !process.env.GWT_PLAYWRIGHT_CHECK_HOME, "requires an isolated checkout server");
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    await page.addInitScript(theme => {
+      localStorage.setItem("gwt:ui:theme", theme);
+      const add = WebSocket.prototype.addEventListener;
+      WebSocket.prototype.addEventListener = function (kind, listener: any, options) {
+        if (kind !== "message") return add.call(this, kind, listener, options);
+        return add.call(this, kind, (event: MessageEvent) => {
+          const state = (window as any).__profileRename;
+          const payload = JSON.parse(String(event.data));
+          if (state && this === state.old && payload.kind === "profile_snapshot"
+              && payload.id === state.id && payload.snapshot.selected_profile === state.dropName) {
+            state.lost = true; return;
+          }
+          if (state && this !== state.old && payload.kind === "workspace_state") state.reconnected = true;
+          if (typeof listener === "function") listener.call(this, event);
+          else listener?.handleEvent(event);
+        }, options);
+      };
+    }, theme);
+    await gotoLiveGwt(page, base!, { enableTestBridge: true });
+    await sendLiveGwtEvent(page, { kind: "create_window", preset: "profile",
+      bounds: { x: 30, y: 30, width: 1200, height: 800 } });
+    const profile = page.locator('.workspace-window[data-preset="profile"]').last();
+    await waitForProfileIdle(profile);
+    const id = (await profile.getAttribute("data-id"))!;
+    await sendLiveGwtEvent(page, { kind: "create_profile", id, name: "rename-before" });
+    const name = profile.locator(".profile-field input").first();
+    await expect(name).toHaveValue("rename-before");
+    await page.evaluate(id => {
+      const old = (window as any).__gwtPlaywrightSockets.findLast((socket: WebSocket) =>
+        socket.readyState === WebSocket.OPEN && new URL(socket.url).searchParams.has("repo_hash"));
+      if (!old) throw new Error("missing owning project socket");
+      const send = WebSocket.prototype.send;
+      const state = { old, id, dropName: "rename-after", lost: false, reconnected: false, recovered: [] as string[],
+        restore() { WebSocket.prototype.send = send; } };
+      WebSocket.prototype.send = function (data) {
+        const request = typeof data === "string" ? JSON.parse(data) : null;
+        if (this !== state.old && request?.id === id && ["load_profile", "save_profile"].includes(request.kind))
+          state.recovered.push(request.kind);
+        return send.call(this, data);
+      };
+      (window as any).__profileRename = state;
+    }, id);
+    try {
+      await name.fill("rename-after");
+      await name.blur();
+      await expect.poll(() => page.evaluate(() => (window as any).__profileRename.lost)).toBe(true);
+      await expect(profile.locator(".profile-row.selected .profile-row-title")).toHaveText("rename-before");
+      await page.evaluate(() => (window as any).__profileRename.old.close());
+      await expect.poll(() => page.evaluate(() => (window as any).__profileRename.reconnected)).toBe(true);
+      await expect(profile.locator(".profile-status")).toHaveText("Saving profile...");
+      expect(await page.evaluate(() => (window as any).__profileRename.recovered)).toEqual([]);
+      await profile.getByRole("button", { name: "Refresh profiles" }).click();
+      await waitForProfileIdle(profile);
+      await expect(name).toHaveValue("rename-after");
+      expect(await page.evaluate(() => (window as any).__profileRename.recovered)).toEqual(["load_profile"]);
+      await page.evaluate(() => {
+        const state = (window as any).__profileRename;
+        state.old = (window as any).__gwtPlaywrightSockets.findLast((socket: WebSocket) =>
+          socket.readyState === WebSocket.OPEN && new URL(socket.url).searchParams.has("repo_hash"));
+        state.dropName = "rename-final"; state.lost = false; state.reconnected = false; state.recovered = [];
+      });
+      await name.fill("rename-final");
+      await name.blur();
+      await expect.poll(() => page.evaluate(() => (window as any).__profileRename.lost)).toBe(true);
+      await name.fill("rename-after");
+      await profile.locator(".profile-textarea").fill("Newer rename draft");
+      await profile.locator(".profile-textarea").blur();
+      await expect(profile.locator(".profile-status.error")).toContainText(/not found/i);
+      const before = await profile.locator(".profile-status.error").textContent();
+      await page.evaluate(id => {
+        const state = (window as any).__profileRename;
+        state.root = document.querySelector(`.workspace-window[data-id="${id}"]`);
+        state.input = state.root.querySelector(".profile-textarea");
+        if (!state.input.isConnected) throw new Error("missing mounted error draft");
+        state.old.close();
+      }, id);
+      await expect.poll(() => page.evaluate(() => (window as any).__profileRename.reconnected)).toBe(true);
+      await expect(profile.locator(".profile-status.error")).toHaveText(before!);
+      await expect(profile.locator(".profile-textarea")).toHaveValue("Newer rename draft");
+      await expect(name).toHaveValue("rename-after");
+      expect(await page.evaluate(() => {
+        const state = (window as any).__profileRename;
+        return { sameInput: state.input === state.root.querySelector(".profile-textarea"), recovered: state.recovered };
+      })).toEqual({ sameInput: true, recovered: [] });
+      await info.attach(`profile-rename-reconnect-${theme}`, { body: await profile.screenshot({
+        mask: [profile.locator(".profile-env-grid")],
+      }), contentType: "image/png" });
+    } finally {
+      await page.evaluate(() => (window as any).__profileRename?.restore());
+    }
+  });
+
+  test("live Profile saves a marker across reload and recovers from a rename error", async ({ page }, info) => {
+    const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    test.skip(!base || !process.env.GWT_PLAYWRIGHT_CHECK_HOME, "requires an isolated live gwt backend");
+    test.setTimeout(90_000);
+    await withLiveGwtBackendLock(base!, info, async () => {
+      const theme = info.project.name.includes("light") ? "light" : "dark";
+      await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
+      await gotoLiveGwt(page, base!, { enableTestBridge: true });
+      await page.locator('.op-rail__item[data-cmd="open-profile"]').click();
+      const pane = page.locator('.workspace-window[data-preset="profile"]');
+      const profile = pane;
+      await expect(profile.getByText("Environment Variables", { exact: true })).toBeVisible();
+      // The default window is shorter than the fixed metadata plus env editor.
+      // Use normal window gestures to give the live case the fixture's height.
+      const titlebar = await pane.locator(".titlebar").boundingBox();
+      expect(titlebar).not.toBeNull();
+      await page.mouse.move(titlebar!.x + 20, titlebar!.y + 10);
+      await page.mouse.down();
+      await page.mouse.move(120, 90, { steps: 5 });
+      await page.mouse.up();
+      const handle = await pane.locator(".resize-handle").boundingBox();
+      const frame = await pane.boundingBox();
+      expect(handle).not.toBeNull();
+      expect(frame).not.toBeNull();
+      await page.mouse.move(handle!.x + handle!.width / 2, handle!.y + handle!.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(handle!.x + handle!.width / 2, handle!.y + handle!.height / 2 + 680 - frame!.height, { steps: 5 });
+      await page.mouse.up();
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      const id = await pane.getAttribute("data-id");
+      expect(id).toBeTruthy();
+      await waitForProfileIdle(profile);
+      const cursor = () => page.evaluate(() => Number((window as any).__gwtPlaywrightMessageSequence) || 0);
+      const refresh = async () => {
+        const after = await cursor();
+        await profile.getByRole("button", { name: "Refresh profiles" }).click();
+        await waitForLiveProfileReply(page, id!, after);
+        await waitForProfileIdle(profile);
+      };
+      await refresh();
+
+      const key = "GWT_PROFILE_LIVE_FIXTURE";
+      const marker = `profile-grid-${theme}`;
+      await expect(profile.locator(`.profile-env-row[data-env-key="${key}"]`)).toHaveCount(0);
+      await profile.getByRole("button", { name: "+ Add variable" }).click();
+      const keyInput = profile.locator('input[aria-label^="Environment variable key"]').last();
+      const keyCursor = await cursor();
+      await keyInput.fill(key);
+      await keyInput.blur();
+      await waitForLiveProfileReply(page, id!, keyCursor, key);
+      const value = profile.locator(`.profile-env-row[data-env-key="${key}"] input[aria-label^="Profile value"]`);
+      const saveCursor = await cursor();
+      await value.fill(marker);
+      await value.blur();
+      await waitForLiveProfileReply(page, id!, saveCursor, key, marker);
+      await waitForProfileIdle(profile);
+      await refresh();
+      await expect(value).toHaveValue(marker);
+      await page.reload();
+      await waitForLiveProfileReply(page, id!, 0, key, marker);
+      await expect(value).toHaveValue(marker);
+      await waitForProfileIdle(profile);
+
+      const name = profile.locator(".profile-field input").first();
+      const errorCursor = await cursor();
+      await name.fill("default-fixture-invalid");
+      await name.blur();
+      await waitForLiveProfileReply(page, id!, errorCursor, undefined, undefined, "profile_error");
+      await expect(profile.locator(".profile-status.error")).toContainText("default profile cannot be renamed");
+      await expect(name).toHaveValue("default-fixture-invalid");
+      await expect(value).toHaveValue(marker);
+      await name.fill("default");
+      await name.blur();
+      await refresh();
+      await expect(name).toHaveValue("default");
+      await expect(value).toHaveValue(marker);
+      await expect(profile.locator(".profile-status.error")).toHaveCount(0);
+      await profile.locator(`.profile-env-row[data-env-key="${key}"]`).scrollIntoViewIfNeeded();
+      const screenshot = info.outputPath("profile-live.png");
+      await pane.screenshot({
+        path: screenshot,
+        mask: [
+          profile.locator(".profile-env-os-value"),
+          profile.locator(`.profile-env-row:not([data-env-key="${key}"])`).locator("input, .profile-env-result"),
+          profile.locator(".profile-field input, .profile-field textarea"),
+        ],
+      });
+      await info.attach("Profiles live", { path: screenshot, contentType: "image/png" });
+    });
+  });
 });
 
 async function waitForProfileIdle(profile) {
   await expect(profile.locator(".profile-status")).toContainText(/^Active /);
 }
 
-async function installProfileBackend(page) {
-  await page.addInitScript(() => {
+async function waitForLiveProfileReply(page, id: string, after: number, key?: string, value?: string, kind = "profile_snapshot") {
+  // Return only a boolean; real OS environment values must not become artifacts.
+  await page.waitForFunction(({ id, after, key, value, kind }) =>
+    (window as any).__gwtPlaywrightMessages.some((entry: any) =>
+      entry.sequence > after && entry.payload.id === id && entry.payload.kind === kind &&
+      (!key || entry.payload.snapshot?.profiles.some((profile: any) =>
+        profile.env_vars.some((env: any) => env.key === key && (value === undefined || env.value === value))))
+    ), { id, after, key, value, kind });
+}
+
+async function installProfileBackend(page, { holdSaves = false } = {}) {
+  await page.addInitScript(({ holdSaves }) => {
     const recordedSends = [];
     window.__profileFixtureSends = recordedSends;
 
@@ -259,6 +577,13 @@ async function installProfileBackend(page) {
       ],
       merged_preview: [],
     };
+    const pendingSaves = [];
+    window.__profileFixturePendingSaves = pendingSaves;
+    window.__profileFixtureReplyNext = (error = "") => {
+      const pending = pendingSaves.shift();
+      if (!pending) throw new Error("No pending Profile save");
+      pending.socket.replyToSave(pending.message, error);
+    };
 
     class FixtureWebSocket extends EventTarget {
       static CONNECTING = 0;
@@ -288,10 +613,22 @@ async function installProfileBackend(page) {
           return;
         }
         if (message.kind === "save_profile") {
+          if (holdSaves) pendingSaves.push({ socket: this, message });
+          else this.replyToSave(message);
+        }
+      }
+
+      replyToSave(message, error = "") {
+        let payload;
+        if (error) {
+          payload = { kind: "profile_error", id: message.id, message: error };
+        } else {
           snapshot.profiles[0].env_vars = message.env_vars;
           snapshot.profiles[0].disabled_env = message.disabled_env;
-          this.emit({ kind: "profile_snapshot", id: message.id, snapshot });
+          payload = { kind: "profile_snapshot", id: message.id, snapshot };
         }
+        if (holdSaves) this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(payload) }));
+        else this.emit(payload);
       }
 
       close() {
@@ -312,5 +649,5 @@ async function installProfileBackend(page) {
       configurable: true,
       value: FixtureWebSocket,
     });
-  });
+  }, { holdSaves });
 }

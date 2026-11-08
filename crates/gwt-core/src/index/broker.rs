@@ -75,6 +75,12 @@ pub enum RefreshScope {
     Files,
     FilesDocs,
     Issues,
+    Specs,
+    Memory,
+    Discussions,
+    Board,
+    Works,
+    Reports,
 }
 
 impl RefreshScope {
@@ -83,6 +89,12 @@ impl RefreshScope {
             RefreshScope::Files => "files",
             RefreshScope::FilesDocs => "files-docs",
             RefreshScope::Issues => "issues",
+            RefreshScope::Specs => "specs",
+            RefreshScope::Memory => "memory",
+            RefreshScope::Discussions => "discussions",
+            RefreshScope::Board => "board",
+            RefreshScope::Works => "works",
+            RefreshScope::Reports => "reports",
         }
     }
 }
@@ -606,11 +618,34 @@ impl RefreshBroker {
     /// Read-only projection of every target. Never creates, appends, or
     /// rewrites durable bytes (AS-32).
     pub fn inspect(&self) -> BrokerResult<RefreshBrokerSnapshot> {
-        let mut targets: Vec<RefreshTargetSnapshot> = self
-            .list_records()?
-            .into_iter()
-            .map(|(_, record)| RefreshTargetSnapshot { record })
-            .collect();
+        let mut targets = Vec::new();
+        for (stem, mut record) in self.list_records()? {
+            if record.running.is_some() {
+                // Probe only existing files: inspect must not create even a
+                // lock file. A missing owner lock cannot have a live holder.
+                let owner = match OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(self.owner_lock_path(&stem))
+                {
+                    Ok(owner) => Some(owner),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                    Err(error) => return Err(error.into()),
+                };
+                let abandoned = match owner.as_ref() {
+                    None => true,
+                    Some(owner) => match fs2::FileExt::try_lock_exclusive(owner) {
+                        Ok(()) => true,
+                        Err(error) if is_contended(&error) => false,
+                        Err(error) => return Err(error.into()),
+                    },
+                };
+                if abandoned {
+                    recover_abandoned_record(&mut record, self.now_millis());
+                }
+            }
+            targets.push(RefreshTargetSnapshot { record });
+        }
         targets.sort_by(|left, right| {
             left.record
                 .target
@@ -618,6 +653,32 @@ impl RefreshBroker {
                 .cmp(&right.record.target.file_stem())
         });
         Ok(RefreshBrokerSnapshot { targets })
+    }
+
+    /// Requeue crash residue without disturbing a live owner's kernel lock.
+    /// Keep the latest desired epoch/snapshot, including a coalesced follow-up.
+    pub fn scan(&self) -> BrokerResult<RefreshBrokerSnapshot> {
+        for (stem, record) in self.list_records()? {
+            if record.running.is_none() {
+                continue;
+            }
+            let owner = open_lock_file(&self.owner_lock_path(&stem))?;
+            match fs2::FileExt::try_lock_exclusive(&owner) {
+                Ok(()) => {}
+                Err(error) if is_contended(&error) => continue,
+                Err(error) => return Err(error.into()),
+            }
+            // Same lock order as claim/complete; reread after acquiring both
+            // locks so a concurrent submission or completion is never lost.
+            let _state = StateLockGuard::acquire(&self.state_lock_path(&stem))?;
+            let path = self.record_path(&stem);
+            if let Some(mut record) = self.read_record(&path)? {
+                if recover_abandoned_record(&mut record, self.now_millis()) {
+                    write_json_atomic(&path, &record)?;
+                }
+            }
+        }
+        self.inspect()
     }
 
     /// Claim the most urgent runnable target, if any.
@@ -640,6 +701,11 @@ impl RefreshBroker {
             Err(error) if is_contended(&error) => return Ok(None),
             Err(error) => return Err(error.into()),
         }
+        let mut host_lock = PendingHostLock {
+            file: Some(host_lock),
+        };
+        #[cfg(test)]
+        tests::observe_acquired_host_lock(host_lock.file.as_ref().expect("acquired host lock"));
         let now = self.now_millis();
         let background_not_before = read_background_rest(&self.root)?;
         let mut candidates: Vec<(String, TargetRecord)> = self
@@ -718,7 +784,7 @@ impl RefreshBroker {
                         stem,
                         intent,
                         owner_lock: Some(owner_lock),
-                        host_lock: Some(host_lock),
+                        host_lock: host_lock.file.take(),
                         claimed_at_millis: now,
                         settled: false,
                     }));
@@ -776,6 +842,19 @@ impl RefreshBroker {
         records.sort_by(|(left, _), (right, _)| left.cmp(right));
         Ok(records)
     }
+}
+
+fn recover_abandoned_record(record: &mut TargetRecord, now: u64) -> bool {
+    let Some(running) = record.running.take() else {
+        return false;
+    };
+    record.priority = more_urgent(record.priority, running.priority);
+    record.state = RefreshTargetState::Queued;
+    record.quiet_deadline_millis = None;
+    record.follow_up_required = false;
+    record.updated_at_millis = now;
+    record.last_error = Some("refresh owner exited without settling".to_string());
+    true
 }
 
 fn is_urgent(priority: JobPriority) -> bool {
@@ -961,6 +1040,20 @@ impl Drop for RefreshClaim {
     }
 }
 
+/// An acquired host lock that has not been transferred into a claim.
+struct PendingHostLock {
+    file: Option<File>,
+}
+
+impl Drop for PendingHostLock {
+    fn drop(&mut self) {
+        if let Some(file) = &self.file {
+            // Closing one handle does not retire a lock retained by an alias.
+            let _ = fs2::FileExt::unlock(file);
+        }
+    }
+}
+
 /// Short-lived exclusive lock serializing read-modify-write of one record.
 struct StateLockGuard {
     file: File,
@@ -1021,6 +1114,20 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    type AcquiredHostLockHook = Box<dyn FnOnce(&File)>;
+
+    thread_local! {
+        static ACQUIRED_HOST_LOCK_HOOK: std::cell::RefCell<Option<AcquiredHostLockHook>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn observe_acquired_host_lock(file: &File) {
+        let hook = ACQUIRED_HOST_LOCK_HOOK.with(|hook| hook.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook(file);
+        }
+    }
+
     impl RefreshBrokerClock for AtomicU64 {
         fn now_millis(&self) -> u64 {
             self.load(Ordering::SeqCst)
@@ -1036,6 +1143,24 @@ mod tests {
             priority,
             reason: RefreshReason::DirtyEvent,
             resource_class: RefreshResourceClass::Embedding,
+        }
+    }
+
+    #[test]
+    fn every_search_scope_can_be_a_refresh_target() {
+        for name in [
+            "files",
+            "files-docs",
+            "issues",
+            "specs",
+            "memory",
+            "discussions",
+            "board",
+            "works",
+        ] {
+            let scope: RefreshScope = serde_json::from_value(serde_json::json!(name))
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(scope.as_str(), name);
         }
     }
 
@@ -1130,6 +1255,65 @@ mod tests {
         assert!(broker.claim_next().expect("reclaim during rest").is_none());
         clock.store(12_000, Ordering::SeqCst);
         assert!(broker.claim_next().expect("reclaim").is_some());
+    }
+
+    #[test]
+    fn idle_claim_releases_host_lock_with_a_retained_alias() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let clock = Arc::new(AtomicU64::new(10_000));
+        let broker = RefreshBroker::open_with_clock(
+            tmp.path().join("broker"),
+            Duration::ZERO,
+            clock.clone(),
+        )
+        .expect("open broker");
+        for repo in ["repo-a", "repo-b"] {
+            broker
+                .submit(intent(
+                    RefreshTarget::base(repo, [RefreshScope::Files]),
+                    1,
+                    JobPriority::Background,
+                ))
+                .expect("submit repo");
+        }
+        let first = broker.claim_next().expect("claim").expect("first repo");
+        clock.store(56_000, Ordering::SeqCst);
+        first.complete().expect("complete first repo");
+
+        let retained = std::rc::Rc::new(std::cell::RefCell::new(None));
+        ACQUIRED_HOST_LOCK_HOOK.with(|hook| {
+            let retained = std::rc::Rc::clone(&retained);
+            *hook.borrow_mut() = Some(Box::new(move |file| {
+                // Retain the actual acquisition's open file description without
+                // assuming any historical child process inherited this handle.
+                *retained.borrow_mut() = Some(file.try_clone().expect("clone host lock"));
+            }));
+        });
+        assert!(broker.claim_next().expect("claim during rest").is_none());
+        assert!(retained.borrow().is_some(), "the acquisition hook ran");
+        let probe = open_lock_file(&broker.root.join(HOST_OWNER_LOCK_NAME)).expect("open probe");
+        fs2::FileExt::try_lock_exclusive(&probe)
+            .expect("idle return must retire the host lock even with a retained alias");
+        fs2::FileExt::unlock(&probe).expect("unlock probe");
+
+        clock.store(101_000, Ordering::SeqCst);
+        assert!(broker.claim_next().expect("claim before rest").is_none());
+        clock.store(102_000, Ordering::SeqCst);
+        let successor = broker
+            .claim_next()
+            .expect("claim after rest")
+            .expect("second repo");
+        assert!(is_contended(
+            &fs2::FileExt::try_lock_exclusive(&probe).expect_err("successor holds host lock")
+        ));
+        drop(retained.borrow_mut().take());
+        assert!(is_contended(
+            &fs2::FileExt::try_lock_exclusive(&probe)
+                .expect_err("retired alias drop must preserve successor")
+        ));
+        successor.complete().expect("complete successor");
+        fs2::FileExt::try_lock_exclusive(&probe).expect("settled successor releases host lock");
+        fs2::FileExt::unlock(&probe).expect("unlock final probe");
     }
 
     #[test]

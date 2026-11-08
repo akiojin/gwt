@@ -133,7 +133,7 @@ pub fn board_entry_meta_line(entry: &BoardEntry) -> String {
     };
     let mut line = format!(
         "{} ({}) · {}",
-        entry.author.trim(),
+        entry.author_display_name().trim(),
         author_kind,
         entry.kind.as_str()
     );
@@ -404,6 +404,8 @@ mod tests {
         );
         // No audience / mentions -> Broadcast, placed before the origin suffix.
         assert!(line.contains("status · Broadcast · feature/x"), "{line}");
+        agent.origin_agent_name = Some("ミオ".into());
+        assert!(board_entry_meta_line(&agent).starts_with("ミオ (Codex) (agent)"));
 
         // User / system author kinds, and no origin -> Broadcast audience only.
         let user = BoardEntry::new(

@@ -323,7 +323,7 @@ fn planned_orphan_intake_path_is_not_queued_for_auto_resume_while_prune_is_block
         title: "Repo".to_string(),
         project_root: repo.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(persisted),
+        workspace: WindowRegistry::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -497,6 +497,7 @@ fn attach_registry_sessions_caps_total_agents_on_the_wire() {
             session_id: format!("rec-{index:02}"),
             window_id: None,
             agent_id: format!("custom-agent-{index:02}"),
+            agent_name: None,
             display_name: format!("Claude {index:02}"),
             affiliation_status: "assigned".to_string(),
             workspace_id: None,
@@ -582,6 +583,7 @@ fn attach_registry_sessions_keeps_latest_entry_per_agent_identity() {
             session_id: session_id.to_string(),
             window_id: None,
             agent_id: String::new(),
+            agent_name: None,
             display_name: display_name.to_string(),
             affiliation_status: "assigned".to_string(),
             workspace_id: None,
@@ -1101,6 +1103,7 @@ fn attach_registry_sessions_recomputes_agent_counters_after_identity_collapse() 
             session_id: session_id.to_string(),
             window_id: None,
             agent_id: String::new(),
+            agent_name: None,
             display_name: display_name.to_string(),
             affiliation_status: "assigned".to_string(),
             workspace_id: None,
@@ -1203,6 +1206,7 @@ fn attach_registry_sessions_drops_ghost_agents_without_identity_or_sessions() {
             session_id: session_id.to_string(),
             window_id: None,
             agent_id: String::new(),
+            agent_name: None,
             display_name: display_name.to_string(),
             affiliation_status: "assigned".to_string(),
             workspace_id: None,
@@ -1328,6 +1332,7 @@ fn attach_registry_sessions_dedupes_agents_sharing_a_conversation() {
             session_id: session_id.to_string(),
             window_id: None,
             agent_id: agent_id.to_string(),
+            agent_name: None,
             display_name: display_name.to_string(),
             affiliation_status: "assigned".to_string(),
             workspace_id: None,
@@ -1438,6 +1443,7 @@ fn attach_registry_sessions_filters_agents_from_other_workspace_rows() {
             session_id: session_id.to_string(),
             window_id: None,
             agent_id: display_name.to_ascii_lowercase().replace(' ', "-"),
+            agent_name: None,
             display_name: display_name.to_string(),
             affiliation_status: "assigned".to_string(),
             workspace_id: None,
@@ -1785,6 +1791,7 @@ fn active_works_are_sorted_by_latest_update_descending() {
         session_id: "sess-fresh".to_string(),
         window_id: None,
         agent_id: "claude".to_string(),
+        agent_name: None,
         display_name: "Claude".to_string(),
         affiliation_status: "assigned".to_string(),
         workspace_id: None,
@@ -2062,7 +2069,7 @@ fn spawn_work_merge_status_scan_skips_dirty_worktree_branch() {
     let _child = KillOnDrop(
         gwt_core::process::hidden_command("sh")
             .arg("-c")
-            .arg("sleep 30")
+            .arg("exec sleep 30")
             .current_dir(&repo)
             .spawn()
             .expect("spawn live cwd process"),
@@ -2257,6 +2264,7 @@ fn spawn_work_merge_status_scan_treats_gwt_runtime_writes_as_clean() {
         .unwrap();
     let before = gwt_core::process::thread_git_spawn_count();
     assert!(cache
+        .readiness
         .base_target(&repo, "work/gwt-writes", &tips)
         .unwrap()
         .is_some());
@@ -2306,7 +2314,7 @@ fn spawn_work_merge_status_scan_preserves_historical_merged_pr_cleanup_path() {
         &["update-ref", "refs/remotes/origin/develop", "develop"],
     );
 
-    gwt_core::workspace_projection::record_workspace_work_event(&repo, {
+    record_legacy_workspace_work_event_for_test(&repo, {
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Pr,
             "work-historical-merged-row",
@@ -2453,6 +2461,269 @@ fn work_branch_scan_targets_preserve_merged_pr_dirty_guard() {
 }
 
 #[test]
+fn work_merge_scan_unchanged_inputs_spawn_no_git() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    run_git(&repo, &["branch", "work/reuse"]);
+    run_git(
+        &repo,
+        &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+    );
+    let external_ignore = temp.path().join("external-ignore");
+    fs::write(&external_ignore, "ignored-user-change.txt\n").unwrap();
+    run_git(
+        &repo,
+        &[
+            "config",
+            "core.excludesFile",
+            external_ignore.to_str().unwrap(),
+        ],
+    );
+    fs::write(repo.join("ignored-user-change.txt"), "uncommitted\n").unwrap();
+    record_legacy_workspace_work_event_for_test(&repo, {
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            "work-reuse",
+            chrono::Utc::now(),
+        );
+        event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some("work/reuse".into()),
+                worktree_path: Some(repo.clone()),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        event
+    })
+    .expect("record work");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut context = runtime.project_context_for_root(&repo).unwrap();
+    let mut cache = super::super::WorkMergeScanCache::default();
+    let first = AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+    assert!(
+        matches!(first, UserEvent::WorkMergeStatus { merged_branches, .. } if merged_branches.contains_key("work/reuse"))
+    );
+    let before = gwt_core::process::thread_git_spawn_count();
+    let repeated = AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+    assert!(
+        matches!(repeated, UserEvent::WorkMergeStatus { merged_branches, .. } if merged_branches.contains_key("work/reuse"))
+    );
+    assert_eq!(
+        gwt_core::process::thread_git_spawn_count() - before,
+        0,
+        "a repeated unchanged scan must reuse its complete Git result; cached={:?}, observed={:?}",
+        cache.last_inputs,
+        cache.inputs.current_revision()
+    );
+
+    // Compare the pre-change worker body with the warm input cache on the
+    // same immutable repository, retaining #5116's warm SHA-pair cache.
+    let targets = super::super::work_branch_scan_targets(
+        &gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(&repo).unwrap(),
+    );
+    let control = capture_tracing_events(|| {
+        for _ in 0..10 {
+            let _ = AppRuntime::measure_work_merge_status_scan(
+                repo.clone(),
+                &mut cache.readiness,
+                &targets,
+                HashSet::new(),
+            );
+            gwt_git::refs::branch_tip_subjects(&repo).unwrap();
+        }
+    });
+    let treatment = capture_tracing_events(|| {
+        for _ in 0..10 {
+            AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+            assert!(!cache.measured);
+        }
+    });
+    let counts = |events: &[CapturedTracingEvent]| {
+        let mut labels = std::collections::BTreeMap::<String, usize>::new();
+        for event in events.iter().filter(|event| {
+            event.target == "gwt.process.summary"
+                && event
+                    .fields
+                    .get("phase")
+                    .is_some_and(|phase| phase == "start")
+        }) {
+            *labels.entry(event.fields["label"].clone()).or_default() += 1;
+        }
+        labels
+    };
+    let control = counts(&control);
+    let treatment = counts(&treatment);
+    assert_eq!(
+        control.get("git --no-optional-locks status --porcelain=v1"),
+        Some(&10)
+    );
+    assert!(treatment.is_empty());
+    println!(
+        "merge_scan_process_measurement={}",
+        serde_json::json!({
+            "requests": 10,
+            "scope": "unchanged local merge and tip scans; remote PR-title TTL excluded",
+            "control": control, "treatment": treatment,
+            "normalization": "multiply by 12 for 120 unchanged requests/hour; not a fleet-hour observation"
+        })
+    );
+
+    // Reopening clears the UI's tip subjects. The new generation must run
+    // the worker's tip-subject measurement even when Git inputs are unchanged.
+    context.generation += 1;
+    AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+    assert!(
+        cache.measured,
+        "reopened project must republish tip subjects"
+    );
+    let before = gwt_core::process::thread_git_spawn_count();
+    AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+    assert!(!cache.measured);
+    assert_eq!(gwt_core::process::thread_git_spawn_count(), before);
+
+    let revision = cache.inputs.current_revision().unwrap();
+    fs::write(&external_ignore, "").unwrap();
+    assert_ne!(
+        cache.inputs.observe(&repo, std::slice::from_ref(&repo)),
+        Some(revision),
+        "an external ignore edit must invalidate the dirty verdict"
+    );
+    let external_dirty = AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+    assert!(
+        matches!(external_dirty, UserEvent::WorkMergeStatus { dirty_branches, .. }
+        if dirty_branches.contains("work/reuse"))
+    );
+    fs::write(&external_ignore, "ignored-user-change.txt\n").unwrap();
+    AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+
+    let revision = cache.inputs.current_revision().unwrap();
+    fs::write(repo.join("user-change.txt"), "uncommitted\n").unwrap();
+    // test-hygiene: allow-wall-clock-deadline Real notify-to-Git invalidation contract; only bounds a hung OS delivery probe.
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while cache.inputs.current_revision() == Some(revision) {
+        assert!(
+            // test-hygiene: allow-wall-clock-deadline Real OS delivery liveness bound, not a latency or ordering assertion.
+            std::time::Instant::now() < deadline,
+            "dirty edit must invalidate scan"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let dirty = AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+    assert!(
+        matches!(dirty, UserEvent::WorkMergeStatus { merged_branches, dirty_branches, .. }
+        if merged_branches.is_empty() && dirty_branches.contains("work/reuse"))
+    );
+
+    run_git(&repo, &["branch", "work/absent"]);
+    let absent = temp.path().join("absent");
+    record_legacy_workspace_work_event_for_test(&repo, {
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            "work-absent",
+            chrono::Utc::now(),
+        );
+        event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some("work/absent".into()),
+                worktree_path: Some(absent.clone()),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        event
+    })
+    .unwrap();
+    // Start watching after this scenario's refs and projection are in place.
+    cache = super::super::WorkMergeScanCache::default();
+    let missing = AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+    assert!(
+        matches!(missing, UserEvent::WorkMergeStatus { dirty_branches, .. }
+        if dirty_branches.contains("work/absent"))
+    );
+    let before = gwt_core::process::thread_git_spawn_count();
+    AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+    assert_eq!(
+        gwt_core::process::thread_git_spawn_count(),
+        before,
+        "an unchanged absent worktree must reuse its conservative dirty verdict"
+    );
+    run_git(
+        &repo,
+        &["worktree", "add", absent.to_str().unwrap(), "work/absent"],
+    );
+    let recreated = AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+    assert!(
+        cache.measured,
+        "worktree reappearance must invalidate reuse"
+    );
+    assert!(
+        matches!(recreated, UserEvent::WorkMergeStatus { merged_branches, .. }
+        if merged_branches.contains_key("work/absent"))
+    );
+}
+
+#[test]
+fn work_merge_scan_coalesces_requests_while_worker_is_active() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let context = runtime.project_context_for_root(&repo).unwrap();
+    let mut worker = runtime
+        .work_merge_scan_queue
+        .workers
+        .request(context.clone())
+        .unwrap();
+    for _ in 0..10 {
+        runtime.spawn_work_merge_status_scan_with_pr_titles(repo.clone(), true);
+    }
+    assert!(
+        !runtime.work_merge_status_cache.borrow()[&repo]
+            .lock()
+            .unwrap()
+            .measured,
+        "a burst cannot start a competing Git worker"
+    );
+    assert!(runtime.work_merge_scan_queue.take_pr_request(&context));
+    assert!(!runtime.work_merge_scan_queue.take_pr_request(&context));
+    assert_eq!(worker.finish_pass(), Some(context.clone()));
+    let mut reopened = context.clone();
+    reopened.generation += 1;
+    assert!(runtime
+        .work_merge_scan_queue
+        .request(reopened.clone(), true)
+        .is_none());
+    assert!(
+        !runtime.work_merge_scan_queue.take_pr_request(&context),
+        "old generations cannot consume reopened PR requests"
+    );
+    assert!(runtime.work_merge_scan_queue.take_pr_request(&reopened));
+    assert_eq!(worker.finish_pass(), Some(reopened));
+    assert_eq!(
+        worker.finish_pass(),
+        None,
+        "the burst becomes one follow-up"
+    );
+}
+
+#[test]
 fn spawn_work_merge_status_scan_clears_stale_cache_when_no_targets_remain() {
     let _env_lock = env_test_lock()
         .lock()
@@ -2521,7 +2792,7 @@ fn apply_work_merge_status_caches_no_changes_cleanup_readiness() {
     init_repo(&repo);
     let worktree = repo.join("work/no-changes");
     fs::create_dir_all(&worktree).expect("create worktree");
-    gwt_core::workspace_projection::record_workspace_work_event(&repo, {
+    record_legacy_workspace_work_event_for_test(&repo, {
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Update,
             "work-no-changes-row",
@@ -2609,21 +2880,20 @@ fn client_pane_snapshot_repair_replies_with_snapshots_for_known_panes_only() {
         &[WindowPreset::Shell],
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
     let shell_id = combined_window_id("tab-1", "shell-1");
     insert_test_pane_runtime(&mut runtime, &shell_id);
-    runtime
-        .runtimes
-        .get(&shell_id)
-        .expect("runtime")
-        .pane
-        .lock()
-        .expect("pane lock")
-        .process_bytes(b"hello-repair");
+    process_test_owner_output(&mut runtime, &shell_id, b"hello-repair");
 
-    let events = runtime.client_pane_snapshot_repair_events(
+    let mut events = runtime.client_pane_snapshot_repair_events(
         "client-9",
         &[shell_id.clone(), "tab-1::missing-pane".to_string()],
     );
+    events.extend(drain_owner_snapshot_completions(&mut runtime));
+    let events = events
+        .into_iter()
+        .filter(|event| matches!(event.event, BackendEvent::TerminalSnapshot { .. }))
+        .collect::<Vec<_>>();
 
     assert_eq!(events.len(), 1, "unknown panes produce no repair events");
     assert!(
@@ -2643,6 +2913,7 @@ fn client_pane_snapshot_repair_replies_with_snapshots_for_known_panes_only() {
         }
         other => panic!("expected TerminalSnapshot, got {other:?}"),
     }
+    close_test_owner_runtime(&mut runtime, &shell_id);
 }
 
 // Issue #4095 AC-1 / AC-2: a snapshot serialized while the PTY reader is ahead
@@ -2674,10 +2945,14 @@ fn pane_snapshot_never_replays_spinner_redraw_chunks_it_already_contains() {
         .next()
         .expect("agent window");
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
     insert_test_pane_runtime(&mut runtime, &window_id);
     let (incarnation, pane) = {
         let window_runtime = runtime.runtimes.get(&window_id).expect("runtime");
-        (window_runtime.incarnation, Arc::clone(&window_runtime.pane))
+        (
+            window_runtime.incarnation,
+            owner_runtime_probe(&runtime, &window_id).pane,
+        )
     };
 
     let repair_queue = ClientQueue::default();
@@ -2695,21 +2970,32 @@ fn pane_snapshot_never_replays_spinner_redraw_chunks_it_already_contains() {
         // The event loop lags behind the reader for chunks 8..=19.
         let reader_ahead = (8..=19).contains(&index);
         if index == 19 {
-            for event in runtime
-                .client_pane_snapshot_repair_events("client-1", std::slice::from_ref(&window_id))
-            {
-                repair_queue.enqueue(&prepare_outbound_event(&event));
-            }
-            for event in runtime.frontend_sync_events("client-2") {
-                resync_queue.enqueue(&prepare_outbound_event(&event));
+            let mut events = runtime
+                .client_pane_snapshot_repair_events("client-1", std::slice::from_ref(&window_id));
+            events.extend(runtime.frontend_sync_events("client-2"));
+            events.extend(drain_owner_snapshot_completions(&mut runtime));
+            for event in events {
+                match &event.target {
+                    DispatchTarget::Client(client) if client == "client-1" => {
+                        repair_queue.enqueue(&prepare_outbound_event(&event))
+                    }
+                    DispatchTarget::Client(client) if client == "client-2" => {
+                        resync_queue.enqueue(&prepare_outbound_event(&event))
+                    }
+                    _ => false,
+                };
             }
             resync_connected = true;
         }
         if !reader_ahead || index == 19 {
             for (data, seq) in undispatched.drain(..) {
-                for event in
-                    runtime.handle_runtime_output_event(window_id.clone(), incarnation, data, seq)
-                {
+                for event in runtime.handle_runtime_output_event(
+                    window_id.clone(),
+                    incarnation,
+                    data,
+                    seq,
+                    None,
+                ) {
                     let prepared = prepare_outbound_event(&event);
                     repair_queue.enqueue(&prepared);
                     if resync_connected {
@@ -2742,24 +3028,347 @@ fn pane_snapshot_never_replays_spinner_redraw_chunks_it_already_contains() {
     }
 }
 
-// SPEC-2359 W-17 (FR-398, Issue #3034): a second spawn for the same Work
-// while the first launch is still materializing (window registered, agent
-// session not yet live) must focus the pending window, not spawn a duplicate.
+#[test]
+fn issue_5351_applied_update_drains_are_cleared_before_cross_project_launch_and_scan() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    for (case, version) in [env!("CARGO_PKG_VERSION"), "0.1.0"].into_iter().enumerate() {
+        // Each case owns its project store and launch worker Session directory.
+        let case_root = temp.path().join(format!("case-{case}"));
+        let drain_root = case_root.join("drain");
+        let target_root = case_root.join("target");
+        fs::create_dir_all(&drain_root).unwrap();
+        fs::create_dir_all(&target_root).unwrap();
+        init_repo_with_initial_commit(&drain_root);
+        init_repo_with_initial_commit(&target_root);
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&drain_root);
+        let tabs = vec![
+            sample_project_tab("drain", "drain", drain_root, ProjectKind::Git, &[]),
+            sample_project_tab("target", "target", target_root, ProjectKind::Git, &[]),
+        ];
+        let mut prefs = gwt::IssueMonitorPrefs {
+            update_drain: Some(gwt::IssueMonitorUpdateDrain {
+                version: version.into(),
+                since: "2026-10-13T00:00:00Z".into(),
+                reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+                automatic: None,
+                blocking: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        let mut runtime = sample_runtime(&case_root, tabs, Some("target"));
+        persist_lifecycle_host_catalog(&runtime);
+        let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .branch("work/issue-5351-test")
+            .build();
+        let id = spawn_owner_codex_fixture(&mut runtime, "target", config, None);
+        prefs.update_drain = None;
+        assert_eq!(gwt::load_issue_monitor_prefs(&prefs_path).unwrap(), prefs);
+        close_test_owner_runtime(&mut runtime, &id);
+
+        // Next-scan reconciliation also works without a resume marker or daemon.
+        prefs.update_drain = Some(gwt::IssueMonitorUpdateDrain {
+            version: version.into(),
+            since: "2026-10-13T00:00:00Z".into(),
+            reason: gwt::IssueMonitorUpdateDrainReason::Manual,
+            automatic: None,
+            blocking: Vec::new(),
+        });
+        gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        let context = runtime.project_context("drain").unwrap();
+        assert!(AppRuntime::read_project_auto_update_drain(&context).is_none());
+        assert!(gwt::load_issue_monitor_prefs(&prefs_path)
+            .unwrap()
+            .update_drain
+            .is_none());
+    }
+}
+
+fn persist_lifecycle_host_catalog(runtime: &AppRuntime) {
+    // The owner discovers cross-project holds through the canonical UI catalog.
+    // This is tab persistence, never a replacement Agent Session registry.
+    let state = gwt::PersistedSessionState {
+        tabs: runtime
+            .tabs
+            .iter()
+            .map(|tab| gwt::PersistedSessionTabState {
+                id: tab.id.clone(),
+                title: tab.title.clone(),
+                project_root: tab.project_root.clone(),
+                kind: tab.kind,
+            })
+            .collect(),
+        legacy_active_tab_id: None,
+        recent_projects: Vec::new(),
+    };
+    gwt::save_session_state(&gwt_core::paths::gwt_session_state_path(), &state).unwrap();
+}
+
+fn stage_host_drain_update(temp: &Path, version: &str) {
+    let payload = temp.join("staged-gwt");
+    fs::write(&payload, b"staged payload").unwrap();
+    gwt_core::update::persist_pending_update_manifest(&gwt_core::update::PendingUpdateManifest {
+        version: version.into(),
+        asset_url: "https://example.invalid/update".into(),
+        payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
+        downloaded_at: "2026-10-13T00:00:00Z".into(),
+        origin: gwt_core::update::PendingUpdateOrigin::Automatic,
+        auto_apply_deferred: false,
+    })
+    .unwrap();
+}
+
+#[test]
+fn manual_successor_early_admission_cancel_requires_actual_cleanup_proof() {
+    use gwt::cli::execution_state::{self as execution, ContinuationAttemptStatus as Attempt};
+    use gwt::project_runtime::{events::OwnerCommand, test_support::OwnerLaunchStage};
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("manual-early-admission");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    run_git(&repo, &["branch", "-M", "work/issue-2359"]);
+    run_git(
+        &repo,
+        &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+    );
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let (authority, choice) = owner_fresh_launch_seed(
+        &repo,
+        &operation_id,
+        execution::ExecutionOwnerKind::Issue,
+        2359,
+        false,
+    );
+    let predecessor_binding = choice.expected_binding.clone();
+    let ledger = execution::load_generation_ledger(&repo, authority)
+        .unwrap()
+        .unwrap();
+    let predecessor_generation = ledger.current_generation().unwrap().identity.clone();
+    let sessions = gwt_core::paths::gwt_sessions_dir();
+    let predecessor_path = sessions.join(format!(
+        "{}.toml",
+        choice.expected_predecessor.as_ref().unwrap().session_id
+    ));
+    let predecessor_before = fs::read(&predecessor_path).unwrap();
+    let work_before = tracked_workspace_work_store_snapshot(&repo);
+    let executor = tokio::runtime::Runtime::new().unwrap();
+    let owner = executor.block_on(production_owner_fixture(&repo));
+    let command = owner_fresh_agent_command(&owner, &repo, choice, None);
+    let manual = matches!(&command, OwnerCommand::LaunchAgent { metadata, config, .. }
+        if metadata.launch_feedback_context.is_none() && metadata.manual_successor.is_some()
+            && !config.suppress_execution_control);
+    let immutable_request = serde_json::to_value(&command).unwrap();
+    // Freeze the normal Manual request before introducing this private hold.
+    let observed: Result<serde_json::Value, String> = executor.block_on(async {
+        if !manual {
+            return Err("not the ordinary Manual execution-control route".into());
+        }
+        stage_host_drain_update(temp.path(), "99.0.0");
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+        let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path).map_err(|e| e.to_string())?;
+        prefs.update_drain = Some(gwt::IssueMonitorUpdateDrain {
+            version: "99.0.0".into(),
+            since: "2026-10-13T00:00:00Z".into(),
+            reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+            automatic: None,
+            blocking: Vec::new(),
+        });
+        gwt::save_issue_monitor_prefs(&prefs_path, &prefs).map_err(|e| e.to_string())?;
+        let checkpoint = owner.pause_next_agent_launch_at(OwnerLaunchStage::MaterializedBeforeInstall).await?;
+        let client = owner.client();
+        let mut launch = tokio::spawn(async move { client.command(command).await });
+        let mut early = None;
+        let captured = tokio::select! {
+            result = &mut launch => { early = Some(result); None },
+            // test-hygiene: allow-wall-clock-deadline hang guard for the actual early-admission checkpoint
+            result = tokio::time::timeout(Duration::from_secs(30), checkpoint.wait()) => result.ok(),
+        };
+        // No assertions while paused: preserve handles and release/join on Err too.
+        let premise: Result<_, String> = (|| {
+            let captured = captured.as_ref().ok_or("missing early-admission checkpoint")?;
+            if captured.operation_id != operation_id || !captured.current.load(Ordering::Acquire)
+                || captured.session.is_some() || captured.session_id.is_some()
+                || captured.pty.is_some() || captured.pending_fresh_execution.is_some() {
+                return Err("checkpoint is not current and unmaterialized".into());
+            }
+            let prepared = execution::continuation_attempt_for_operation(&repo, authority, &operation_id)
+                .map_err(|e| e.to_string())?.ok_or("no actual preparation")?;
+            let candidate = &prepared.request.initial_session_id;
+            let recovery_path = gwt::session_launch::durable_launch_recovery_path(&sessions, candidate)?;
+            let recovery: gwt::session_launch::recovery::DurableLaunchRecoveryRecord = serde_json::from_slice(
+                &fs::read(&recovery_path).map_err(|e| e.to_string())?,
+            ).map_err(|e| e.to_string())?;
+            let files = [
+                recovery_path,
+                sessions.join(format!("{candidate}.toml")),
+                gwt_agent::runtime_state_path(&sessions, candidate),
+            ];
+            if prepared.status != Attempt::Prepared || prepared.request.operation_id != operation_id
+                || prepared.predecessor != predecessor_generation || recovery.session_id != *candidate
+                || recovery.owner()? != authority || !matches!(&recovery.kind,
+                    gwt::session_launch::recovery::DurableLaunchRecoveryKind::FreshSuccessor { operation_id: known } if known == &operation_id)
+                || !files[1..].iter().all(|p| fs::symlink_metadata(p).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)) {
+                return Err("exact Prepared/recovery/no-Session premise is absent".into());
+            }
+            Ok((prepared, files, recovery))
+        })();
+        let mut cancel = None;
+        let mut revoked = false;
+        if let (Ok(_), Some(captured)) = (&premise, captured.as_ref()) {
+            let client = owner.client();
+            let request = OwnerCommand::PendingCancelExact {
+                id: captured.id.clone(),
+                operation_id: captured.operation_id.clone(),
+                expected_request: immutable_request.clone(),
+            };
+            cancel = Some(tokio::spawn(async move { client.command(request).await }));
+            // test-hygiene: allow-wall-clock-deadline hang guard for actual exact cancellation admission while paused
+            revoked = tokio::time::timeout(Duration::from_secs(30), async {
+                while captured.current.load(Ordering::Acquire) {
+                    tokio::task::yield_now().await;
+                }
+            }).await.is_ok();
+        }
+        checkpoint.release();
+        let launch = match early {
+            Some(result) => result,
+            None => launch.await,
+        };
+        let cancel = match cancel {
+            Some(cancel) => Some(cancel.await),
+            None => None,
+        };
+        let (prepared, files, recovery) = premise?;
+        let launch = launch.map_err(|e| e.to_string())?;
+        let cancel = cancel.ok_or("cancel not started")?.map_err(|e| e.to_string())?;
+        let after = execution::continuation_attempt_for_operation(&repo, authority, &operation_id)
+            .map_err(|e| e.to_string())?.ok_or("unknown attempt after worker")?;
+        let absent = files.iter().map(|p| match fs::symlink_metadata(p) {
+            Ok(_) => Ok(false),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+            Err(e) => Err(e.to_string()),
+        }).collect::<Result<Vec<_>, _>>()?;
+        let recovery_after = if absent[0] {
+            None
+        } else {
+            Some(serde_json::from_slice::<gwt::session_launch::recovery::DurableLaunchRecoveryRecord>(
+                &fs::read(&files[0]).map_err(|e| e.to_string())?,
+            ).map_err(|e| e.to_string())?)
+        };
+        Ok(serde_json::json!({
+            "launch_result": if launch.is_ok() { "ok" } else { "err" },
+            "cancel_result": if cancel.is_ok() { "ok" } else { "err" },
+            "cancel_reconciliation_error": cancel.as_ref().err().is_some_and(|detail|
+                detail == "cancelled launch cleanup requires exact reconciliation"),
+            "revoked": revoked, "host_hold_error": launch.as_ref().err().is_some_and(|detail|
+                detail.contains("Host update_drain") && detail.contains("release.update.defer {\"version\":\"99.0.0\"}")),
+            "cancelled": cancel.as_ref().ok().and_then(|receipt| receipt["cancelled"].as_bool()),
+            "cancel_exact": cancel.as_ref().is_ok_and(|receipt| receipt["id"] == immutable_request["id"]
+                && receipt["operation_id"].as_str() == Some(operation_id.as_str())),
+            "attempt_exact": after.request == prepared.request, "attempt_status": after.status,
+            "attempt_unchanged": after == prepared, "recovery_unchanged": recovery_after.as_ref() == Some(&recovery),
+            "recovery_absent": absent[0], "session_absent": absent[1], "sidecar_absent": absent[2],
+            "predecessor_session_unchanged": fs::read(&predecessor_path).map_err(|e| e.to_string())? == predecessor_before,
+            "predecessor_binding_unchanged": execution::current_execution_binding(&repo, authority).map_err(|e| e.to_string())? == Some(predecessor_binding),
+            "work_unchanged": tracked_workspace_work_store_snapshot(&repo) == work_before,
+        }))
+    });
+    let deferred = gwt_core::update::defer_pending_update("99.0.0");
+    executor.block_on(owner.shutdown());
+    deferred.expect("setup/inconclusive: private staged hold release");
+    let summary = observed.expect("setup/inconclusive: Manual early-admission cancellation");
+    let cleaned_ack = summary["cancelled"] == true && summary["cancel_exact"] == true;
+    let reconciliation = summary["cancel_reconciliation_error"] == true;
+    assert!(
+        summary["revoked"] == true
+            && summary["host_hold_error"] == true
+            && (cleaned_ack || reconciliation)
+            && summary["attempt_exact"] == true
+            && summary["attempt_status"] != serde_json::json!(Attempt::Activated),
+        "setup/inconclusive: {summary}"
+    );
+    assert!(
+        summary["session_absent"] == true
+            && summary["sidecar_absent"] == true
+            && summary["predecessor_session_unchanged"] == true
+            && summary["predecessor_binding_unchanged"] == true
+            && summary["work_unchanged"] == true
+            && if cleaned_ack {
+                summary["attempt_status"] == serde_json::json!(Attempt::Aborted)
+                    && summary["recovery_absent"] == true
+            } else {
+                summary["attempt_status"] == serde_json::json!(Attempt::Prepared)
+                    && summary["attempt_unchanged"] == true
+                    && summary["recovery_absent"] == false
+                    && summary["recovery_unchanged"] == true
+            },
+        "cleanup consistency: {summary}"
+    );
+}
+
+#[test]
+fn issue_5351_update_drain_host_hold_requires_pending_update_and_supports_host_wide_release() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("drain");
+    fs::create_dir_all(&project).unwrap();
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project);
+    let prefs = gwt::IssueMonitorPrefs {
+        update_drain: Some(gwt::IssueMonitorUpdateDrain {
+            version: "99.0.0".into(),
+            since: "2026-10-13T00:00:00Z".into(),
+            reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+            automatic: None,
+            blocking: Vec::new(),
+        }),
+        ..Default::default()
+    };
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+    let runtime = sample_runtime(
+        temp.path(),
+        vec![sample_project_tab(
+            "drain",
+            "drain",
+            project,
+            ProjectKind::Git,
+            &[],
+        )],
+        Some("drain"),
+    );
+    assert!(runtime.host_update_drain_launch_hold().unwrap().is_none());
+    assert_eq!(gwt::load_issue_monitor_prefs(&prefs_path).unwrap(), prefs);
+    stage_host_drain_update(temp.path(), "99.0.0");
+    let hold = runtime.host_update_drain_launch_hold().unwrap().unwrap();
+    assert!(
+        hold.contains("release.update.defer {\"version\":\"99.0.0\"}"),
+        "{hold}"
+    );
+    gwt_core::update::defer_pending_update("99.0.0").unwrap();
+    assert!(runtime.host_update_drain_launch_hold().unwrap().is_none());
+}
+
 #[test]
 fn issue_5062_update_drain_prevents_new_agent_windows_in_other_projects() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
+    stage_host_drain_update(temp.path(), "99.0.0");
     let drain_root = temp.path().join("drain");
     let target_root = temp.path().join("target");
     fs::create_dir_all(&drain_root).expect("drain project");
     fs::create_dir_all(&target_root).expect("target project");
-    init_repo(&drain_root);
-    init_repo(&target_root);
+    init_repo_with_initial_commit(&drain_root);
+    init_repo_with_initial_commit(&target_root);
     let mut prefs = gwt::IssueMonitorPrefs {
         update_drain: Some(gwt::IssueMonitorUpdateDrain {
-            version: "9.110.0".to_string(),
+            version: "99.0.0".to_string(),
             since: "2026-10-10T08:21:17Z".to_string(),
             reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+            automatic: None,
             blocking: Vec::new(),
         }),
         ..Default::default()
@@ -2768,21 +3377,32 @@ fn issue_5062_update_drain_prevents_new_agent_windows_in_other_projects() {
     gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed drain");
     let tabs = vec![
         sample_project_tab("drain", "gwt", drain_root, ProjectKind::Git, &[]),
-        sample_project_tab("target", "llmlb", target_root, ProjectKind::Git, &[]),
+        sample_project_tab(
+            "target",
+            "llmlb",
+            target_root.clone(),
+            ProjectKind::Git,
+            &[],
+        ),
     ];
     let mut runtime = sample_runtime(temp.path(), tabs, Some("target"));
+    persist_lifecycle_host_catalog(&runtime);
+    pin_live_pm_fixture_agents(&runtime, temp.path());
+    seed_owner_fixture_roster(&target_root, 8);
+    let owner = Arc::new(owner_fixture_block_on(production_owner_fixture(
+        &target_root,
+    )));
+    runtime
+        .test_project_owners
+        .insert(target_root.clone(), owner.clone());
     let config = || {
         gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .working_dir(&target_root)
             .branch("work/issue-5062-test")
             .build()
     };
-    let result = runtime.spawn_agent_window("target", config(), canvas_bounds(), None);
-    assert!(
-        result
-            .as_ref()
-            .is_err_and(|error| error.contains("update_drain")),
-        "{result:?}"
-    );
+    let result = owner_monitor_admission_error(&owner, config(), None, None);
+    assert!(result.contains("update_drain"), "{result:?}");
     assert!(runtime
         .tab("target")
         .expect("tab")
@@ -2793,9 +3413,7 @@ fn issue_5062_update_drain_prevents_new_agent_windows_in_other_projects() {
 
     prefs.update_drain = None;
     gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("release drain");
-    runtime
-        .spawn_agent_window("target", config(), canvas_bounds(), None)
-        .expect("spawn after release");
+    let id = spawn_owner_codex_fixture(&mut runtime, "target", config(), None);
     assert_eq!(
         runtime
             .tab("target")
@@ -2806,12 +3424,19 @@ fn issue_5062_update_drain_prevents_new_agent_windows_in_other_projects() {
             .len(),
         1
     );
+    assert!(owner_runtime_probe(&runtime, &id)
+        .pty
+        .try_wait()
+        .unwrap()
+        .is_none());
+    close_test_owner_runtime(&mut runtime, &id);
 }
 
 #[test]
 fn issue_5062_update_drain_holds_direct_agent_presets_in_other_projects() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
+    stage_host_drain_update(temp.path(), "99.0.0");
     let drain_root = temp.path().join("drain");
     let target_root = temp.path().join("target");
     fs::create_dir_all(&drain_root).unwrap();
@@ -2822,9 +3447,10 @@ fn issue_5062_update_drain_holds_direct_agent_presets_in_other_projects() {
         &gwt::issue_monitor_prefs_path_for_repo_path(&drain_root),
         &gwt::IssueMonitorPrefs {
             update_drain: Some(gwt::IssueMonitorUpdateDrain {
-                version: "9.110.0".into(),
+                version: "99.0.0".into(),
                 since: "2026-10-10T08:21:17Z".into(),
                 reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+                automatic: None,
                 blocking: Vec::new(),
             }),
             ..Default::default()
@@ -2854,7 +3480,7 @@ fn issue_5062_update_drain_holds_direct_agent_presets_in_other_projects() {
         .windows
         .clone();
     for window in windows {
-        let events = runtime.start_window("target", &window.id, window.preset, window.geometry);
+        let events = runtime.start_window("target", &window.id, window.preset);
         assert!(
             events.iter().any(|event| matches!(
                 &event.event,
@@ -2889,10 +3515,10 @@ fn app_runtime_spawn_agent_window_dedupes_inflight_launch_for_same_work() {
     };
 
     runtime
-        .spawn_agent_window("tab-1", build_config(), canvas_bounds(), None)
+        .spawn_agent_window("tab-1", build_config(), None)
         .expect("first spawn");
     runtime
-        .spawn_agent_window("tab-1", build_config(), canvas_bounds(), None)
+        .spawn_agent_window("tab-1", build_config(), None)
         .expect("second spawn");
 
     let tab = runtime.tab("tab-1").expect("tab");
@@ -2936,7 +3562,6 @@ fn resume_workspace_agent_replies_started_ack_to_requesting_client() {
         "resume-operation-7".to_string(),
         session.id.clone(),
         None,
-        canvas_bounds(),
     );
 
     let ack = events
@@ -2979,62 +3604,57 @@ fn stop_window_runtime_records_paused_work_off_the_event_loop() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).expect("create repo");
-    let tab = sample_project_tab(
-        "tab-1",
-        "Repo",
-        repo.clone(),
-        ProjectKind::Git,
-        &[WindowPreset::Agent],
+    let (owner, pane) = pane_control_tests::control_owner_agent(&repo, "agent-1", 42);
+    let session_id = pane.session.as_ref().unwrap().id.clone();
+    let mut runtime = managed_launch_tests::managed_project_owner_projection(
+        temp.path(),
+        &repo,
+        &owner,
+        &[&pane],
     );
+    let context = runtime.test_context();
+    let state = runtime.project_state_mut(&context).unwrap();
+    state.project_owner_connection_id = 1;
+    state.project_owner_identity = owner.client().identity().cloned();
     let window_id = combined_window_id("tab-1", "agent-1");
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    runtime.active_agent_sessions.insert(
-        window_id.clone(),
-        ActiveAgentSession {
-            window_id: window_id.clone(),
-            session_id: "session-paused-offloop".to_string(),
-            agent_id: "codex".to_string(),
-            branch_name: "work/paused-offloop".to_string(),
-            display_name: "Codex".to_string(),
-            worktree_path: repo.clone(),
-            agent_project_root: repo.display().to_string(),
-            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
-            tab_id: "tab-1".to_string(),
-        },
-    );
-
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
     let started = Instant::now();
     runtime.stop_window_runtime(&window_id);
     let stop_call = started.elapsed();
-    // The stop call itself returns promptly (no synchronous multi-MB IO).
     assert!(
         stop_call < Duration::from_secs(2),
         "stop_window_runtime blocked for {stop_call:?}"
     );
-
-    // The Paused Work record still lands (background write).
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut recorded = false;
-    while Instant::now() < deadline {
-        let works = gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(&repo)
-            .unwrap_or_else(|_| gwt_core::workspace_projection::WorkItemsProjection {
-                updated_at: chrono::Utc::now(),
-                work_items: Vec::new(),
-            });
-        recorded = works.work_items.iter().any(|item| {
-            item.id == "work-session-session-paused-offloop"
-                && item.status_category
-                    == gwt_core::workspace_projection::WorkspaceStatusCategory::Idle
-        });
-        if recorded {
-            break;
-        }
-        // test-hygiene: allow-short-duration bounded polling of worker-persisted Work state; no completion event is exposed by this fixture
-        thread::sleep(Duration::from_millis(50));
-    }
-    assert!(recorded, "Paused Work record must land in works.json");
+    assert!(
+        pane.pty.try_wait().unwrap().is_none(),
+        "the GUI acknowledgement only queues the physical stop"
+    );
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        1,
+        "the exact close runs off the event loop"
+    );
+    drain_queued_blocking_tasks(&tasks);
+    assert!(
+        pane.pty.try_wait().unwrap().is_some(),
+        "the owner reaps its captured child"
+    );
+    let works = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .unwrap()
+        .expect("owner-persisted Work");
+    assert!(
+        works.work_items.iter().any(|item| {
+            item.status_category == gwt_core::workspace_projection::WorkspaceStatusCategory::Idle
+                && item
+                    .events
+                    .iter()
+                    .any(|event| event.agent_session_id.as_deref() == Some(&session_id))
+        }),
+        "the exact stopped Session still records its Paused Work"
+    );
 }
 
 /// SPEC-2359 W-16 (FR-387): the tab-change ingest trigger is throttled to
@@ -3113,6 +3733,203 @@ fn reopening_the_pr_titles_window_allows_an_immediate_refresh() {
 }
 
 #[test]
+fn runtime_output_batch_does_not_wait_for_the_pane_mutex() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let id = combined_window_id("tab-1", "codex-1");
+    insert_test_pane_runtime(&mut runtime, &id);
+    let incarnation = runtime.runtimes[&id].incarnation;
+    let data = b"worker captured output";
+    let seq = {
+        let owner_probe = owner_runtime_probe(&runtime, &id);
+        let mut pane = owner_probe.pane.lock().unwrap();
+        pane.process_bytes(data);
+        pane.output_seq()
+    };
+    runtime.handle_runtime_output_event(
+        id.clone(),
+        incarnation,
+        data.to_vec(),
+        seq,
+        Some("worker captured output".into()),
+    );
+    let pane = owner_runtime_probe(&runtime, &id).pane.clone();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let _guard = pane.lock().unwrap();
+        ready_tx.send(()).unwrap();
+        // Release on failure too, so a regressed GUI wait fails instead of hanging.
+        // test-hygiene: allow-wall-clock-deadline Bound a regressed GUI mutex wait; the ready channel establishes ordering.
+        release_rx.recv_timeout(Duration::from_secs(10)).is_ok()
+    });
+    // test-hygiene: allow-wall-clock-deadline Fail if the lock-holder thread cannot start; elapsed time is not asserted.
+    ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let events =
+        runtime.flush_runtime_output_batches(runtime.next_runtime_output_deadline().unwrap());
+    let _ = release_tx.send(());
+    assert!(
+        holder.join().unwrap(),
+        "GUI flush waited for the PTY parser mutex"
+    );
+    assert!(events.iter().any(|event| matches!(&event.event,
+        BackendEvent::TerminalPreview { text, .. } if text.contains("worker captured output"))));
+}
+
+#[test]
+fn runtime_output_batch_keeps_stream_immediate_and_shares_latest_screen() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, id) = terminal_approval_tests::runtime_state_hook_fixture(temp.path());
+    let owner = project_owner_fixture(&mut runtime, &id);
+    let probe = owner_runtime_probe(&runtime, &id);
+    let hook = owner_runtime_status_event(&owner, &probe, "running", "PreToolUse");
+    let context = runtime.test_context();
+    runtime.handle_project_owner_event(&context, 1, owner.client().identity().unwrap(), hook);
+    let mut owner_events = owner.subscribe();
+    let incarnation = runtime.runtimes[&id].incarnation;
+    let chunks: [&[u8]; 2] = [
+        b"Would you like to run the following command?\r\n\r\ncargo test\r\n",
+        b"> 1. Yes, proceed\r\n  2. No, and tell Codex what to do differently\r\nPress enter to confirm or esc to cancel\r\n",
+    ];
+    let mut bytes = Vec::new();
+    let mut deadline = None;
+    for chunk in chunks {
+        let (seq, screen) = {
+            let owner_probe = owner_runtime_probe(&runtime, &id);
+            let mut pane = owner_probe.pane.lock().unwrap();
+            pane.process_bytes(chunk);
+            (pane.output_seq(), pane.screen().contents())
+        };
+        owner_fixture_block_on(owner.observe_runtime_policy(
+            &probe.id,
+            probe.incarnation,
+            Utc::now(),
+            Instant::now(),
+        ))
+        .unwrap();
+        bytes.extend_from_slice(chunk);
+        let events = runtime.handle_owner_runtime_output(id.clone(), chunk.to_vec(), seq, screen);
+        assert_eq!(events.len(), 1, "only raw output is immediate");
+        assert_eq!(events[0].terminal_stream_seq, Some(seq));
+        assert!(
+            matches!(&events[0].event, BackendEvent::TerminalOutput { data_base64, .. }
+            if base64::engine::general_purpose::STANDARD.decode(data_base64).unwrap() == chunk)
+        );
+        let next = runtime
+            .next_runtime_output_deadline()
+            .expect("flush scheduled");
+        assert_eq!(
+            *deadline.get_or_insert(next),
+            next,
+            "continuous output cannot postpone the flush"
+        );
+    }
+    assert_eq!(runtime.pending_runtime_outputs[&id].data, bytes);
+    let deadline = deadline.unwrap();
+    assert!(runtime
+        .flush_runtime_output_batches(deadline - Duration::from_millis(100))
+        .is_empty());
+    assert!(
+        owner_runtime_probe(&runtime, &id).policy.approval.is_some(),
+        "the owner classifies the same latest rendered screen"
+    );
+    let events = runtime.flush_runtime_output_batches(deadline);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event, BackendEvent::TerminalPreview { .. }))
+            .count(),
+        1
+    );
+    relay_approval_owner_events(&mut runtime, &id, &mut owner_events);
+    assert!(
+        runtime.window_status(&id) == Some(WindowProcessStatus::Waiting),
+        "the same latest screen detects approval"
+    );
+    assert!(
+        runtime.next_runtime_output_deadline().is_none(),
+        "no idle wakeups after the final chunk"
+    );
+    assert!(runtime
+        .flush_runtime_output_batches(deadline + Duration::from_secs(1))
+        .is_empty());
+    let events = runtime.handle_owner_runtime_output(
+        id.clone(),
+        vec![b'x'; gwt::pane_runtime::OUTPUT_BATCH_MAX_BYTES],
+        100,
+        "large burst".into(),
+    );
+    assert!(
+        runtime.next_runtime_output_deadline().is_none(),
+        "a size-limited batch flushes immediately"
+    );
+    assert!(events.iter().any(|event| matches!(&event.event,
+        BackendEvent::TerminalPreview { text, .. } if text == "large burst")));
+    assert_eq!(runtime.runtimes[&id].incarnation, incarnation);
+    close_test_owner_runtime(&mut runtime, &id);
+}
+
+#[test]
+fn runtime_output_batch_rejects_stale_incarnation_and_flushes_before_status() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "shell-1",
+        WindowPreset::Shell,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let id = combined_window_id("tab-1", "shell-1");
+    insert_test_pane_runtime(&mut runtime, &id);
+    let old = runtime.runtimes[&id].incarnation;
+    let predecessor = owner_runtime_probe(&runtime, &id);
+    runtime.handle_runtime_output_event(id.clone(), old, b"old".to_vec(), 1, Some("old".into()));
+    // Reuse the public id only after the exact physical predecessor drains.
+    close_test_owner_runtime(&mut runtime, &id);
+    assert!(predecessor.pty.try_wait().unwrap().is_some());
+    insert_test_pane_runtime(&mut runtime, &id);
+    let successor = owner_runtime_probe(&runtime, &id);
+    assert_ne!(successor.incarnation, old);
+    assert!(!Arc::ptr_eq(&predecessor.pty, &successor.pty));
+    assert!(successor.pty.try_wait().unwrap().is_none());
+    let deadline = runtime.next_runtime_output_deadline().unwrap();
+    assert!(runtime.flush_runtime_output_batches(deadline).is_empty());
+    let current = runtime.runtimes[&id].incarnation;
+    assert_ne!(
+        current, old,
+        "replacement is an actual new owner incarnation"
+    );
+    process_test_owner_output(&mut runtime, &id, b"final output");
+    runtime.handle_runtime_output_event(
+        id.clone(),
+        current,
+        b"final output".to_vec(),
+        2,
+        Some("final output".into()),
+    );
+    let events = runtime.handle_runtime_status_event(
+        id.clone(),
+        current,
+        WindowProcessStatus::Running,
+        None,
+        false,
+    );
+    assert!(events.iter().any(|event| matches!(&event.event,
+        BackendEvent::TerminalPreview { text, .. } if text == "final output")));
+    assert!(runtime.next_runtime_output_deadline().is_none());
+    close_test_owner_runtime(&mut runtime, &id);
+}
+
+#[test]
 fn terminal_preview_preserves_three_screen_rows_for_live_and_reconnect() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
@@ -3126,11 +3943,7 @@ fn terminal_preview_preserves_three_screen_rows_for_live_and_reconnect() {
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let id = combined_window_id("tab-1", "shell-1");
     insert_test_pane_runtime(&mut runtime, &id);
-    runtime.runtimes[&id]
-        .pane
-        .lock()
-        .unwrap()
-        .process_bytes(b"old\r\n  indented\r\n\r\nlast\r\n");
+    process_test_owner_output(&mut runtime, &id, b"old\r\n  indented\r\n\r\nlast\r\n");
     let live = runtime.handle_runtime_output(id.clone(), b"last".to_vec());
     let sync = runtime.frontend_project_sync_events("client-preview", &runtime.test_context());
     for events in [live, sync] {
@@ -3142,6 +3955,7 @@ fn terminal_preview_preserves_three_screen_rows_for_live_and_reconnect() {
         assert_eq!(preview["id"], id);
         assert_eq!(preview["text"], "  indented\n\nlast");
     }
+    close_test_owner_runtime(&mut runtime, &id);
 }
 
 #[test]
@@ -3165,6 +3979,17 @@ fn terminal_preview_remote_reconnect_retains_only_received_values() {
         b"bytes".to_vec(),
         Some("  remote\n\nlast".into()),
     );
+    let intermediate =
+        runtime.handle_daemon_runtime_output(id.clone(), b"next chunk".to_vec(), None);
+    assert_eq!(
+        intermediate.len(),
+        1,
+        "an intermediate relay frame only streams bytes"
+    );
+    assert!(matches!(
+        intermediate[0].event,
+        BackendEvent::TerminalOutput { .. }
+    ));
     let sync = runtime.frontend_project_sync_events("client-preview", &runtime.test_context());
     for events in [live, sync] {
         assert!(events.iter().any(|event| matches!(&event.event, BackendEvent::TerminalPreview { id: pane, text } if pane == &id && text == "  remote\n\nlast")));
@@ -3177,7 +4002,7 @@ fn terminal_preview_remote_reconnect_retains_only_received_values() {
 }
 
 #[test]
-fn issue_monitor_delivery_claim_publishes_current_canvas_before_daemon_claim() {
+fn issue_monitor_delivery_claim_reads_back_committed_claim_after_lost_ack() {
     use std::{
         cell::{Cell, RefCell},
         collections::BTreeSet,
@@ -3196,13 +4021,14 @@ fn issue_monitor_delivery_claim_publishes_current_canvas_before_daemon_claim() {
     let window_id = "tab-1::agent-1";
     let host_pid = std::process::id();
     let host_started_at = gwt::process::host_process_start_time(host_pid).expect("host start time");
-    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig {
+    let mut monitor = test_monitor(gwt::IssueMonitorConfig {
         enabled: true,
         max_active: 1,
         ..gwt::IssueMonitorConfig::default()
     });
     monitor.terminal_queue_push(&[42], "operator", &now);
     monitor.record_candidate(gwt::IssueMonitorIssue {
+        author_login: None,
         number: 42,
         title: "Current canvas adoption".to_string(),
         labels: Vec::new(),
@@ -3228,22 +4054,33 @@ fn issue_monitor_delivery_claim_publishes_current_canvas_before_daemon_claim() {
     assert!(!monitor.has_capacity_for_monitor_spawn(42, false));
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
     gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed unassigned delivery");
-    let tab = sample_project_tab_with_window_at(
-        "tab-1",
-        "agent-1",
-        repo.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Starting,
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let mut feedback = issue_monitor_feedback(42);
-    feedback.issue_monitor_project_root = Some(repo.clone());
-    runtime
-        .pending_launch_feedback_contexts
-        .insert(window_id.to_string(), feedback);
+    let input = gwt::project_runtime::installation::IssueMonitorLaunchClaimInput {
+        project_root: repo.clone(),
+        issue_number: 42,
+        delivery_id: "launch:effect-42".into(),
+        materializer_window_id: window_id.into(),
+        materializer_id: "transport-model-materializer".into(),
+        materializer_pid: host_pid,
+        fallback_timeout: gwt_core::deadline_budget::HANG_GUARD,
+        snapshot: Some(gwt::IssueMonitorWindowSnapshot {
+            project_tab_id: "tab-1".into(),
+            observed_at: now.clone(),
+            windows: vec![gwt::IssueMonitorWindowObservation {
+                window_id: window_id.into(),
+                monitor_owned: true,
+                issue_number: Some(42),
+                status: WindowProcessStatus::Starting,
+                review_dispatch: false,
+                hold_reason: None,
+                last_output_at: None,
+                session_id: None,
+            }],
+        }),
+        snapshot_tabs: BTreeSet::from(["tab-1".into()]),
+    };
     assert_eq!(
-        runtime.window_status(window_id),
-        Some(WindowProcessStatus::Starting)
+        input.snapshot.as_ref().unwrap().windows[0].status,
+        WindowProcessStatus::Starting
     );
 
     // This tests canvas/claim ordering and durable readback, not the IPC budget.
@@ -3252,12 +4089,19 @@ fn issue_monitor_delivery_claim_publishes_current_canvas_before_daemon_claim() {
     let monitor = RefCell::new(monitor);
     let received = RefCell::new(Vec::new());
     let daemon_accepted = Cell::new(false);
-    let accepted = runtime
-        .claim_issue_monitor_launch_delivery_with_publishers(
-            &repo,
-            42,
-            "launch:effect-42",
-            window_id,
+    let lost_ack = || {
+        gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
+            "claim ACK lost".to_string(),
+        )
+    };
+    assert!(
+        input
+            .claim_with_publishers(|_, _| Ok(()), |_| Err(lost_ack()),)
+            .is_err(),
+        "an uncommitted claim must remain uncertain"
+    );
+    let accepted = input
+        .claim_with_publishers(
             |snapshot, tabs| {
                 received.borrow_mut().push("snapshot");
                 assert_eq!(snapshot.windows[0].window_id, window_id);
@@ -3293,7 +4137,7 @@ fn issue_monitor_delivery_claim_publishes_current_canvas_before_daemon_claim() {
                 );
                 gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs())
                     .expect("commit daemon prefs");
-                Ok(())
+                Err(lost_ack())
             },
         )
         .expect("daemon claim outcome");
@@ -3310,14 +4154,759 @@ fn issue_monitor_delivery_claim_publishes_current_canvas_before_daemon_claim() {
         accepted,
         "readback must confirm the exact materializer tuple"
     );
-    assert_eq!(runtime.tabs[0].workspace.persisted().windows.len(), 1);
+    assert_eq!(input.snapshot.as_ref().unwrap().windows.len(), 1);
     let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
         .expect("reload daemon claim");
     let delivery = &prefs.pending_launch_deliveries[0];
     assert_eq!(
         delivery.materializer_id.as_deref(),
-        Some(runtime.issue_monitor_materializer_id.as_str())
+        Some(input.materializer_id.as_str())
     );
     assert_eq!(delivery.materializer_pid, Some(host_pid));
     assert_eq!(delivery.materializer_window_id.as_deref(), Some(window_id));
+
+    let retry = input.clone();
+    let stamp = super::super::issue_monitor_prefs_stamp(&prefs_path);
+    assert!(retry
+        .claim_or_reuse()
+        .expect("reuse the exact current claim"));
+    assert_eq!(
+        super::super::issue_monitor_prefs_stamp(&prefs_path),
+        stamp,
+        "an unchanged claim must not write shared prefs during revalidation"
+    );
+    gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        prefs.pending_launch_deliveries.clear();
+        Ok(())
+    })
+    .expect("retire the delivery after the first claim");
+    assert!(
+        !retry
+            .claim_or_reuse()
+            .expect("revalidate the latest delivery"),
+        "a previously valid tuple must not revive a retired delivery"
+    );
+}
+
+#[test]
+fn issue4810_delivery_claim_restores_only_the_target_cached_source() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    run_git(
+        &repo,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/akiojin/gwt.git",
+        ],
+    );
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut monitor = test_monitor(gwt::IssueMonitorConfig::default());
+    monitor.set_source_repository(Some(("example", "project")));
+    monitor.terminal_queue_push(&[42], "operator", &now);
+    monitor.record_candidate(gwt::IssueMonitorIssue {
+        author_login: Some("akiojin".into()),
+        number: 42,
+        title: "Curated owner".into(),
+        labels: vec![],
+        state: gwt::IssueMonitorIssueState::Open,
+        body: None,
+        url: None,
+        readiness: gwt::IssueMonitorReadiness::NotApplicable,
+        updated_at: None,
+    });
+    assert!(monitor.apply_confirmed_claim(42, "claim", "owner", "effect", &now));
+    let input = super::super::IssueMonitorLaunchClaimInput {
+        project_root: repo.clone(),
+        issue_number: 42,
+        delivery_id: "launch:effect".into(),
+        materializer_window_id: "tab-1::agent-1".into(),
+        materializer_id: "gui".into(),
+        materializer_pid: std::process::id(),
+        fallback_timeout: Duration::from_secs(1),
+        snapshot: None,
+        snapshot_tabs: Default::default(),
+    };
+    let cache_root = issue_cache_root(&repo);
+    let cache = Cache::new(cache_root.clone());
+    for (author, body, expected) in [
+        (Some("akiojin"), "Curated repair requirements", true),
+        (Some("akiojin"), "<!-- gwt-feedback:raw -->", false),
+        (Some("external-reporter"), "Claims owner approval", false),
+        (None, "Legacy cache without original author", false),
+    ] {
+        let mut source =
+            sample_issue_snapshot(42, "Owner", &["bug", "gwt-feedback-triaged"], body, &now);
+        source.author_login = author.map(str::to_string);
+        cache.write_snapshot(&source).unwrap();
+        assert_eq!(
+            input.test_preflight_claim(monitor.prefs(), None),
+            expected,
+            "{author:?}: {body}"
+        );
+        if expected {
+            gwt::save_issue_monitor_prefs(
+                &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+                &monitor.prefs(),
+            )
+            .unwrap();
+            assert!(input
+                .claim_with_publishers(
+                    |_, _| Ok(()),
+                    |_| Err(gwt::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable("offline fixture".into())),
+                )
+                .expect("local fallback claim"), "trusted cached source must also authorize the actual fallback commit");
+        }
+    }
+    fs::remove_dir_all(cache_root.join("42")).unwrap();
+    assert!(
+        !input.test_preflight_claim(monitor.prefs(), None),
+        "missing target cache must remain held"
+    );
+}
+
+#[test]
+fn issue3165_spawn_admission_restores_cached_blockers_and_revalidates_them() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(&prefs_path, &gwt::IssueMonitorPrefs::default()).unwrap();
+    let cache_root = issue_cache_root(&repo);
+    let cache = Cache::new(cache_root.clone());
+    let mut source = sample_issue_snapshot(
+        42,
+        "Dependent owner",
+        &["bug"],
+        "Blocked-by: #43",
+        "2026-10-23T00:00:00Z",
+    );
+    source.author_login = Some("akiojin".into());
+    let blocker = sample_issue_snapshot(
+        43,
+        "Held blocker",
+        &["hold"],
+        "Still waiting",
+        "2026-10-23T00:00:00Z",
+    );
+    cache.write_snapshot(&source).unwrap();
+    cache.write_snapshot(&blocker).unwrap();
+    let mut runtime = sample_runtime(
+        temp.path(),
+        vec![sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo.clone(),
+            ProjectKind::Git,
+            &[],
+        )],
+        Some("tab-1"),
+    );
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
+    let input = runtime.capture_issue_monitor_spawn_admission(&repo, 42, "work/issue-42");
+    let prepared = input.prepare().expect("prepare dependent owner");
+    assert!(
+        prepared.monitor.launch_dependency_exclusion(42).is_some(),
+        "known open blockers must survive spawn reconstruction"
+    );
+    assert!(prepared.is_current(&input.host_project_roots));
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode)
+        .working_dir(&repo)
+        .linked_issue_number(42)
+        .build();
+    let mut feedback = issue_monitor_feedback(42);
+    feedback.issue_monitor_project_root = Some(repo.clone());
+    feedback.issue_monitor_session_mode = Some(gwt_agent::SessionMode::Normal);
+    pin_live_pm_fixture_agents(&runtime, temp.path());
+    seed_owner_fixture_roster(&repo, 8);
+    configure_owner_fixture_tools(&repo, &["claude"]);
+    let owner = owner_fixture_block_on(production_owner_fixture(&repo));
+    let rejected = owner_monitor_admission_error(&owner, config, Some(feedback), None);
+    assert!(
+        rejected.contains("dependency admission refused Issue #42: Blocked by #43")
+            && !rejected.contains("(hold)"),
+        "actual owner admission: {rejected}"
+    );
+    assert!(runtime.tabs[0].workspace.persisted().windows.is_empty());
+    owner_fixture_block_on(owner.shutdown());
+    fs::write(cache_root.join("43/body.md"), "Blocked-by: #42").unwrap();
+    assert!(
+        !prepared.is_current(&input.host_project_roots),
+        "blocker body edits must invalidate prepared dependency facts"
+    );
+    let cycle = input.prepare().expect("reconstruct dependency cycle");
+    assert!(cycle.monitor.launch_dependency_exclusion(42).is_none());
+    let mut closed = blocker;
+    closed.state = IssueState::Closed;
+    cache.write_snapshot(&closed).unwrap();
+    assert!(
+        !cycle.is_current(&input.host_project_roots),
+        "blocker metadata edits must invalidate prepared dependency facts"
+    );
+    assert!(input
+        .prepare()
+        .unwrap()
+        .monitor
+        .launch_dependency_exclusion(42)
+        .is_none());
+
+    fs::remove_dir_all(cache_root.join("43")).unwrap();
+    let unknown = input.prepare().expect("missing blocker remains unknown");
+    assert!(unknown.monitor.launch_dependency_exclusion(42).is_none());
+    cache.write_snapshot(&closed).unwrap();
+    assert!(
+        !unknown.is_current(&input.host_project_roots),
+        "new evidence for an unknown blocker requires re-preparation"
+    );
+}
+
+#[test]
+fn issue6096_foreign_prefs_observation_rewrites_keep_spawn_admission_current() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    let other = temp.path().join("other");
+    for root in [&repo, &other] {
+        fs::create_dir_all(root).unwrap();
+        init_repo_with_initial_commit(root);
+        gwt::save_issue_monitor_prefs(
+            &gwt::issue_monitor_prefs_path_for_repo_path(root),
+            &gwt::IssueMonitorPrefs::default(),
+        )
+        .unwrap();
+    }
+    let runtime = sample_runtime(
+        temp.path(),
+        vec![
+            sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]),
+            sample_project_tab("tab-2", "Other", other.clone(), ProjectKind::Git, &[]),
+        ],
+        Some("tab-1"),
+    );
+    let input = runtime.capture_issue_monitor_spawn_admission(&repo, 42, "work/issue-42");
+    assert_eq!(
+        input.host_project_roots.len(),
+        2,
+        "both hosts fence admission"
+    );
+    let prepared = input.prepare().expect("prepare admission");
+    assert!(prepared.is_current(&input.host_project_roots));
+
+    let foreign = gwt::issue_monitor_prefs_path_for_repo_path(&other);
+    let original = fs::read(&foreign).unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&foreign)
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000))
+        .unwrap();
+    fs::write(&foreign, &original).unwrap();
+    assert!(
+        prepared.is_current(&input.host_project_roots),
+        "a byte-identical foreign prefs rewrite must not stale admission"
+    );
+
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&foreign)
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000))
+        .unwrap();
+    gwt::save_issue_monitor_prefs(
+        &foreign,
+        &gwt::IssueMonitorPrefs {
+            last_control_receipt: Some(gwt::IssueMonitorControlReceipt {
+                control_id: "control-1".into(),
+                should_scan: true,
+                authority_changed: false,
+            }),
+            last_scan_at: Some("2026-10-24T00:00:00Z".into()),
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .unwrap();
+    assert_ne!(fs::read(&foreign).unwrap(), original);
+    assert!(
+        prepared.is_current(&input.host_project_roots),
+        "observation-only foreign prefs keys must not stale admission"
+    );
+    assert!(prepared.can_revalidate(&input.host_project_roots));
+
+    gwt::save_issue_monitor_prefs(
+        &foreign,
+        &gwt::IssueMonitorPrefs {
+            update_drain: Some(gwt::IssueMonitorUpdateDrain {
+                version: "99.0.0".to_string(),
+                since: "2026-10-24T00:00:00Z".to_string(),
+                reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+                automatic: None,
+                blocking: Vec::new(),
+            }),
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        !prepared.is_current(&input.host_project_roots),
+        "a foreign update drain must still stale admission"
+    );
+    assert!(!prepared.can_revalidate(&input.host_project_roots));
+}
+
+#[test]
+fn issue6096_scan_restamped_record_fields_do_not_change_prefs_digest() {
+    let digest = |value: serde_json::Value| {
+        super::super::issue_monitor_prefs_content_digest(&serde_json::to_vec(&value).unwrap())
+    };
+    let prefs = |generation: u64, heartbeat: &str, recorded_at: &str, attempt: &str| {
+        serde_json::json!({
+            "closure_records": [
+                {"issue_number": 7, "generation": generation, "state": "reopened"}
+            ],
+            "autonomous_records": [{"issue_number": 7, "last_heartbeat": heartbeat}],
+            "generation_reclaim": {"recorded_at": recorded_at, "stranded": [7]},
+            "claim_diagnostics": {"7": {"last_attempt_at": attempt}},
+        })
+    };
+    let base = digest(prefs(
+        1,
+        "2026-10-24T00:00:00Z",
+        "2026-10-24T00:00:00Z",
+        "a",
+    ));
+    assert_eq!(
+        base,
+        digest(prefs(
+            60,
+            "2026-10-24T00:05:00Z",
+            "2026-10-24T00:05:00Z",
+            "b"
+        )),
+        "per-scan re-stamps must not stale admission"
+    );
+
+    let mut closed = prefs(1, "2026-10-24T00:00:00Z", "2026-10-24T00:00:00Z", "a");
+    closed["closure_records"][0]["state"] = serde_json::json!("closed");
+    assert_ne!(
+        base,
+        digest(closed),
+        "a closure state change must still stale"
+    );
+    let mut stranded = prefs(1, "2026-10-24T00:00:00Z", "2026-10-24T00:00:00Z", "a");
+    stranded["generation_reclaim"]["stranded"] = serde_json::json!([8]);
+    assert_ne!(base, digest(stranded), "reclaim content must still stale");
+}
+
+fn issue6096_admission_fixture(
+    temp: &std::path::Path,
+) -> (
+    AppRuntime,
+    PathBuf,
+    super::super::launch::IssueMonitorSpawnAdmissionInput,
+) {
+    let repo = temp.join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let repo = dunce::canonicalize(repo).expect("canonical repo");
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Auto,
+            max_active_agents: 0,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let runtime = sample_runtime(
+        temp,
+        vec![sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo.clone(),
+            ProjectKind::Git,
+            &[],
+        )],
+        Some("tab-1"),
+    );
+    let input = runtime.capture_issue_monitor_spawn_admission(&repo, 43, "work/issue-43");
+    (runtime, repo, input)
+}
+
+fn issue6096_write_capacity_sample(repo: &Path, available_ram_bytes: u64) {
+    let target = repo.join("target");
+    fs::create_dir_all(&target).unwrap();
+    let artifact = target.join("fixture-artifact");
+    fs::write(&artifact, b"measured target fixture").unwrap();
+    let target_bytes = fs::metadata(&artifact).unwrap().len();
+    let now = u64::try_from(Utc::now().timestamp()).expect("positive epoch");
+    let snapshot = serde_json::json!({
+        "observed_at": now, "expires_at": now + 30,
+        "performance_cores": 2, "gui_cpu_millicores": 0,
+        "available_ram_bytes": available_ram_bytes,
+        "per_agent_ram_bytes": 512_u64 * 1024 * 1024,
+        "free_disk_bytes": 4096,
+        "targets": BTreeMap::from([(target, serde_json::json!({
+            "bytes": target_bytes, "observed_at": now
+        }))]),
+        "disk_observations": BTreeMap::from([(repo.to_path_buf(), serde_json::json!({
+            "available_bytes": 4096, "observed_at": now
+        }))]),
+        "inventory": {"sessions": [], "uncertainties": []}
+    });
+    let machine_state = gwt_core::paths::gwt_home().join("machine-state");
+    fs::create_dir_all(&machine_state).unwrap();
+    fs::write(
+        machine_state.join("agent-capacity.json"),
+        serde_json::to_vec(&snapshot).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn issue6096_capacity_resample_keeps_admission_until_its_slot_limit_drops() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (_runtime, repo, input) = issue6096_admission_fixture(temp.path());
+    issue6096_write_capacity_sample(&repo, 2 * 1024 * 1024 * 1024);
+    let prepared = input.prepare().expect("prepare admission");
+    assert!(
+        prepared.monitor.has_capacity_for_monitor_spawn(43, false),
+        "the fresh sample grants a slot"
+    );
+    assert!(prepared.is_current(&input.host_project_roots));
+
+    // The host sampler rewrites the file every ~5s with new RAM/CPU readings.
+    // A renewal that grants the same slot limit must not stale the admission,
+    // however long the admission took relative to the renewal cadence.
+    issue6096_write_capacity_sample(&repo, 2 * 1024 * 1024 * 1024 + 64 * 1024 * 1024);
+    assert!(
+        prepared.is_current(&input.host_project_roots),
+        "a same-limit capacity renewal must keep the prepared admission"
+    );
+
+    issue6096_write_capacity_sample(&repo, 0);
+    assert!(
+        !prepared.is_current(&input.host_project_roots),
+        "an exhausted capacity sample must still stale the admission"
+    );
+    assert!(
+        input
+            .refresh(&prepared)
+            .is_err_and(|error| error == super::super::launch::ISSUE_MONITOR_SPAWN_ADMISSION_STALE),
+        "a re-evaluation that loses the slot must not keep the launch"
+    );
+}
+
+#[test]
+fn issue6096_target_prefs_churn_is_settled_by_the_admission_decision() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (_runtime, repo, input) = issue6096_admission_fixture(temp.path());
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let churn = |priority_order: Vec<u64>| {
+        let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+        prefs.priority_order = priority_order;
+        gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+    };
+    let prepared = input.prepare().expect("prepare admission");
+    assert!(prepared.is_current(&input.host_project_roots));
+
+    churn(vec![7]);
+    assert!(
+        !prepared.is_current(&input.host_project_roots),
+        "a target prefs rewrite asks for a decision re-evaluation"
+    );
+    assert!(
+        prepared.can_revalidate(&input.host_project_roots),
+        "an unrelated target prefs rewrite must not force a full re-preparation"
+    );
+    let revalidated = input
+        .refresh(&prepared)
+        .expect("the same decision keeps the launch");
+    assert!(revalidated.is_current(&input.host_project_roots));
+
+    // A busy project rewrites prefs faster than a slow host re-evaluates.
+    // Once the decision was re-confirmed, further churn must not loop.
+    churn(vec![7, 8]);
+    assert!(
+        revalidated.is_current(&input.host_project_roots),
+        "a re-evaluated admission converges despite continued prefs churn"
+    );
+
+    let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+    prefs.open_pr_observations.insert(
+        43,
+        gwt::issue_monitor::IssueMonitorOpenPrObservation {
+            observed_at: "2026-10-24T00:00:00Z".to_string(),
+            hold: Some(gwt::issue_monitor::IssueMonitorOpenPrHold {
+                pr_number: 99,
+                lifecycle: "open".to_string(),
+            }),
+        },
+    );
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+    assert!(
+        !revalidated.is_current(&input.host_project_roots),
+        "a PR hold for the launched Issue stays a strict fence"
+    );
+    assert!(!revalidated.can_revalidate(&input.host_project_roots));
+
+    prefs.open_pr_observations.clear();
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+    let revalidated = input
+        .refresh(&input.prepare().unwrap())
+        .expect("re-evaluate without the hold");
+    prefs.update_drain = Some(gwt::IssueMonitorUpdateDrain {
+        version: "99.0.0".to_string(),
+        since: "2026-10-24T00:00:00Z".to_string(),
+        reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+        automatic: None,
+        blocking: Vec::new(),
+    });
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+    assert!(
+        !revalidated.is_current(&input.host_project_roots),
+        "the target project's update drain stays a strict fence"
+    );
+}
+
+#[test]
+fn issue6096_issue_cache_resync_keeps_admission_until_evidence_changes() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (_runtime, repo, input) = issue6096_admission_fixture(temp.path());
+    let cache_root = issue_cache_root(&repo);
+    let cache = Cache::new(cache_root.clone());
+    let source = sample_issue_snapshot(43, "Launch target", &[], "Body", "2026-10-24T00:00:00Z");
+    cache.write_snapshot(&source).unwrap();
+    let prepared = input.prepare().expect("prepare admission");
+    assert!(prepared.is_current(&input.host_project_roots));
+
+    // A cache sync rewrites every entry with a new generation token.
+    let meta = cache_root.join("43").join("meta.json");
+    let mut rewritten: serde_json::Value =
+        serde_json::from_slice(&fs::read(&meta).unwrap()).unwrap();
+    rewritten["generation"] = serde_json::json!("resynced-generation");
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&meta)
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000))
+        .unwrap();
+    fs::write(&meta, serde_json::to_vec_pretty(&rewritten).unwrap()).unwrap();
+    assert!(
+        prepared.is_current(&input.host_project_roots),
+        "an evidence-identical cache resync must keep the admission"
+    );
+
+    let mut closed = source;
+    closed.state = IssueState::Closed;
+    cache.write_snapshot(&closed).unwrap();
+    assert!(
+        !prepared.is_current(&input.host_project_roots),
+        "closing the launched Issue stays a strict fence"
+    );
+    assert!(!prepared.can_revalidate(&input.host_project_roots));
+}
+
+#[test]
+fn issue3165_spawn_admission_revalidates_hydrated_comment_sources() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &gwt::IssueMonitorPrefs::default(),
+    )
+    .unwrap();
+    let cache_root = issue_cache_root(&repo);
+    let cache = Cache::new(cache_root.clone());
+    let mut source = sample_issue_snapshot(
+        42,
+        "Comment-resident SPEC",
+        &["gwt-spec"],
+        "<!-- gwt-spec id=42 version=1 -->\n\
+         <!-- sections:\n\
+         spec=comment:420\n\
+         plan=body\n\
+         tasks=body\n\
+         -->\n\
+         <!-- artifact:plan BEGIN -->\nPlan\n<!-- artifact:plan END -->\n\
+         <!-- artifact:tasks BEGIN -->\n- [ ] T-001: Implement\n<!-- artifact:tasks END -->",
+        "2026-10-23T00:00:00Z",
+    );
+    source.comments[0].body =
+        "<!-- artifact:spec BEGIN -->\nBlocked-by: #43\n<!-- artifact:spec END -->".into();
+    cache.write_snapshot(&source).unwrap();
+    cache
+        .write_snapshot(&sample_issue_snapshot(43, "Blocker", &[], "Open", "t1"))
+        .unwrap();
+    let runtime = sample_runtime(
+        temp.path(),
+        vec![sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo.clone(),
+            ProjectKind::Git,
+            &[],
+        )],
+        Some("tab-1"),
+    );
+    let input = runtime.capture_issue_monitor_spawn_admission(&repo, 42, "work/issue-42");
+    let prepared = input.prepare().expect("prepare hydrated comment evidence");
+    assert!(prepared.monitor.launch_dependency_exclusion(42).is_some());
+    assert!(prepared.is_current(&input.host_project_roots));
+
+    let comment_path = cache_root.join("42/comments/420.md");
+    fs::write(
+        &comment_path,
+        "<!-- artifact:spec BEGIN -->\nNo dependencies\n<!-- artifact:spec END -->",
+    )
+    .unwrap();
+    assert!(
+        !prepared.is_current(&input.host_project_roots),
+        "a hydrated comment edit must invalidate prepared dependency facts"
+    );
+    fs::remove_file(&comment_path).unwrap();
+    let missing = input.prepare().expect("prepare missing declared comment");
+    assert!(missing.is_current(&input.host_project_roots));
+    fs::write(&comment_path, &source.comments[0].body).unwrap();
+    assert!(
+        !missing.is_current(&input.host_project_roots),
+        "a missing declared comment becoming present requires re-preparation"
+    );
+}
+
+#[test]
+fn issue4810_spawn_admission_restores_source_and_revalidates_its_cache_files() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    run_git(
+        &repo,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/akiojin/gwt.git",
+        ],
+    );
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(&prefs_path, &gwt::IssueMonitorPrefs::default()).unwrap();
+    let cache_root = issue_cache_root(&repo);
+    let cache = Cache::new(cache_root.clone());
+    let mut source = sample_issue_snapshot(
+        42,
+        "Curated owner",
+        &["bug"],
+        "Curated repair",
+        "2026-10-21T00:00:00Z",
+    );
+    source.author_login = Some("akiojin".into());
+    cache.write_snapshot(&source).unwrap();
+    let runtime = sample_runtime(
+        temp.path(),
+        vec![sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo.clone(),
+            ProjectKind::Git,
+            &[],
+        )],
+        Some("tab-1"),
+    );
+    let input = runtime.capture_issue_monitor_spawn_admission(&repo, 42, "work/issue-42");
+    let prepared = input.prepare().expect("prepare trusted owner");
+    assert_eq!(
+        prepared
+            .monitor
+            .inbox_item(42)
+            .and_then(|row| row.issue.author_login.as_deref()),
+        Some("akiojin")
+    );
+    assert!(prepared.monitor.has_capacity_for_monitor_spawn(42, false));
+    assert!(prepared.is_current(&input.host_project_roots));
+
+    fs::write(
+        cache_root.join("42/body.md"),
+        "<!-- gwt-feedback:edited-after-preparation -->",
+    )
+    .unwrap();
+    assert!(
+        !prepared.is_current(&input.host_project_roots),
+        "a source body edit must force worker re-preparation"
+    );
+    let raw = input.prepare().expect("retain raw source as evidence");
+    assert!(!raw.monitor.has_capacity_for_monitor_spawn(42, false));
+
+    cache.write_snapshot(&source).unwrap();
+    let metadata_prepared = input.prepare().expect("prepare restored curated source");
+    let metadata_path = cache_root.join("42/meta.json");
+    let mut metadata: serde_json::Value =
+        serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+    metadata["author_login"] = serde_json::json!("external-reporter");
+    metadata["labels"] = serde_json::json!(["bug", "gwt-feedback-triaged"]);
+    fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+    assert!(
+        !metadata_prepared.is_current(&input.host_project_roots),
+        "source metadata is part of the prepared admission"
+    );
+    assert!(
+        !input
+            .prepare()
+            .unwrap()
+            .monitor
+            .has_capacity_for_monitor_spawn(42, false),
+        "triage labels cannot authorize an external original author"
+    );
+    fs::remove_dir_all(cache_root.join("42")).unwrap();
+    assert!(
+        !input
+            .prepare()
+            .unwrap()
+            .monitor
+            .has_capacity_for_monitor_spawn(42, false),
+        "missing target provenance must hold a new pane"
+    );
 }

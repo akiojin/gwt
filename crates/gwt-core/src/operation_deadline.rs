@@ -11,11 +11,58 @@ use std::{
 use fs2::FileExt;
 
 const LOCK_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const WORKSPACE_WORK_ITEMS_HOLD_THRESHOLD_MS: u64 = 5_000;
 
 thread_local! {
     static CURRENT_DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
     #[cfg(any(test, feature = "test-support"))]
     static TEST_NOW: Cell<Option<Instant>> = const { Cell::new(None) };
+    #[cfg(any(test, feature = "test-support"))]
+    static TEST_NAMED_LOCK_CONTENTION: std::cell::RefCell<Option<NamedLockContentionObserver>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+type NamedLockContentionObserver = (PathBuf, Box<dyn FnOnce()>);
+
+/// Observe the first actual contention on one named lock in this thread.
+/// Restores the preceding observer on drop, including during unwinding.
+#[cfg(any(test, feature = "test-support"))]
+pub struct ScopedNamedLockContentionObserver {
+    previous: Option<NamedLockContentionObserver>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl ScopedNamedLockContentionObserver {
+    pub fn set(path: &Path, on_contention: impl FnOnce() + 'static) -> Self {
+        Self {
+            previous: TEST_NAMED_LOCK_CONTENTION.with(|observer| {
+                observer.replace(Some((path.to_path_buf(), Box::new(on_contention))))
+            }),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for ScopedNamedLockContentionObserver {
+    fn drop(&mut self) {
+        TEST_NAMED_LOCK_CONTENTION.with(|observer| observer.replace(self.previous.take()));
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn notify_named_lock_contention(path: &Path) {
+    let observer = TEST_NAMED_LOCK_CONTENTION.with(|observer| {
+        let mut observer = observer.borrow_mut();
+        if observer.as_ref().is_some_and(|(target, _)| target == path) {
+            observer.take()
+        } else {
+            None
+        }
+    });
+    if let Some((_, on_contention)) = observer {
+        on_contention();
+    }
 }
 
 /// Read the operation clock used both to create and to enforce a deadline.
@@ -37,6 +84,12 @@ pub struct ScopedOperationClock {
 
 #[cfg(any(test, feature = "test-support"))]
 impl ScopedOperationClock {
+    /// Capture an explicitly fixed clock for a synchronous scoped worker.
+    /// `None` preserves the host clock when the parent has no test override.
+    pub fn current() -> Option<Instant> {
+        TEST_NOW.with(Cell::get)
+    }
+
     pub fn set(now: Instant) -> Self {
         Self {
             previous: TEST_NOW.with(|current| current.replace(Some(now))),
@@ -150,19 +203,66 @@ impl NamedFileLock {
     pub fn acquire_observed(
         path: &Path,
         operation: &str,
+        on_first_contention: impl FnMut(),
+    ) -> io::Result<Self> {
+        Self::acquire_with_observer(path, operation, true, on_first_contention)
+    }
+
+    fn acquire_with_observer(
+        path: &Path,
+        operation: &str,
+        report_contention: bool,
         mut on_first_contention: impl FnMut(),
     ) -> io::Result<Self> {
+        let started = Instant::now();
+        let remaining_budget_ms =
+            current().map(|deadline| deadline.saturating_duration_since(now()).as_millis() as u64);
         let file = open_named_lock(path)?;
         let holder_path = named_lock_holder_path(path);
-        lock_exclusive_with_observer(&file, || {
+        let mut contention_observed = false;
+        let result = lock_exclusive_with_observer(&file, || {
+            contention_observed = true;
+            #[cfg(any(test, feature = "test-support"))]
+            notify_named_lock_contention(path);
             on_first_contention();
-            let _ = named_lock_error(
-                &holder_path,
-                operation,
-                io::Error::new(io::ErrorKind::WouldBlock, "file lock contended"),
-            );
-        })
-        .map_err(|error| named_lock_error(&holder_path, operation, error))?;
+            if report_contention {
+                let _ = named_lock_error(
+                    &holder_path,
+                    operation,
+                    io::Error::new(io::ErrorKind::WouldBlock, "file lock contended"),
+                );
+            }
+        });
+        if operation == "pm_prefs" {
+            if contention_observed || result.is_err() {
+                tracing::warn!(
+                    target: "gwt.pm.refresh",
+                    stage = "pm_prefs.lock", duration_ms = started.elapsed().as_secs_f64() * 1000.0,
+                    ?remaining_budget_ms, contention_observed, success = result.is_ok(),
+                    "PM refresh stage"
+                );
+            } else {
+                tracing::debug!(
+                    target: "gwt.pm.refresh",
+                    stage = "pm_prefs.lock", duration_ms = started.elapsed().as_secs_f64() * 1000.0,
+                    ?remaining_budget_ms, contention_observed, success = true,
+                    "PM refresh stage"
+                );
+            }
+        }
+        result.map_err(|error| {
+            if contention_observed {
+                named_lock_error(&holder_path, operation, error)
+            } else {
+                // An expired budget can refuse before the OS lock is probed.
+                // In that case no holder was observed, so missing metadata
+                // says nothing about a competing process (#5391).
+                io::Error::new(
+                    error.kind(),
+                    format!("{error}; operation={operation}; lock_contention=not_observed"),
+                )
+            }
+        })?;
         Ok(Self::record(file, holder_path, operation))
     }
 
@@ -171,10 +271,7 @@ impl NamedFileLock {
     /// Work transaction): ordinary contention is not logged, only a failed
     /// acquisition is — and that failure still names the observed holder.
     pub fn acquire_quiet(path: &Path, operation: &str) -> io::Result<Self> {
-        let file = open_named_lock(path)?;
-        let holder_path = named_lock_holder_path(path);
-        lock_exclusive(&file).map_err(|error| named_lock_error(&holder_path, operation, error))?;
-        Ok(Self::record(file, holder_path, operation))
+        Self::acquire_with_observer(path, operation, false, || {})
     }
 
     /// Try once. Only actual OS lock contention is returned as `WouldBlock`.
@@ -293,6 +390,15 @@ fn open_named_lock_holder(path: &Path) -> io::Result<File> {
 }
 
 fn named_lock_error(holder_path: &Path, operation: &str, error: io::Error) -> io::Error {
+    named_lock_error_at(holder_path, operation, error, chrono::Utc::now())
+}
+
+fn named_lock_error_at(
+    holder_path: &Path,
+    operation: &str,
+    error: io::Error,
+    observed_at: chrono::DateTime<chrono::Utc>,
+) -> io::Error {
     // Bound diagnostic IO, and do not require valid metadata from old writers.
     // Issue #4975 AC-1: four distinct outcomes used to collapse into the same
     // `pid=unknown`, so a reader could not tell "another process holds this and
@@ -325,15 +431,50 @@ fn named_lock_error(holder_path: &Path, operation: &str, error: io::Error) -> io
         .as_ref()
         .map(|holder| holder.acquired_at.as_str())
         .unwrap_or("unknown");
+    // Holder metadata remains observational. An invalid or future timestamp
+    // cannot prove a hold duration; only the Work lock has this short budget.
+    let elapsed_ms = chrono::DateTime::parse_from_rfc3339(acquired_at)
+        .ok()
+        .and_then(|acquired_at| {
+            u64::try_from(
+                observed_at
+                    .signed_duration_since(acquired_at)
+                    .num_milliseconds(),
+            )
+            .ok()
+        });
+    let hold_threshold_ms = (holder_operation
+        == crate::workspace_projection::WORKSPACE_WORK_ITEMS_LOCK_OPERATION)
+        .then_some(WORKSPACE_WORK_ITEMS_HOLD_THRESHOLD_MS);
+    let hold_threshold_exceeded = hold_threshold_ms
+        .zip(elapsed_ms)
+        .map(|(threshold, elapsed)| elapsed > threshold);
     tracing::warn!(
         operation, observed_holder_pid = %pid,
         observed_holder_operation = holder_operation,
         observed_holder_acquired_at = acquired_at,
+        observed_holder_elapsed_ms = elapsed_ms,
+        observed_holder_hold_threshold_ms = hold_threshold_ms,
+        observed_holder_hold_threshold_exceeded = hold_threshold_exceeded,
         holder_unknown_reason, %error,
         "named file lock acquisition failed or contended; holder metadata is observational"
     );
+    let hold_threshold_exceeded = hold_threshold_exceeded.map_or_else(
+        || {
+            if hold_threshold_ms.is_some() {
+                "unknown"
+            } else {
+                "n/a"
+            }
+            .to_string()
+        },
+        |value| value.to_string(),
+    );
+    let elapsed_ms = elapsed_ms.map_or_else(|| "unknown".to_string(), |value| value.to_string());
+    let hold_threshold_ms =
+        hold_threshold_ms.map_or_else(|| "n/a".to_string(), |value| value.to_string());
     io::Error::new(error.kind(), format!(
-        "{error}; operation={operation}; observed holder pid={pid}, operation={holder_operation}, acquired_at={acquired_at}, holder_unknown_reason={holder_unknown_reason} (metadata may be stale)"
+        "{error}; operation={operation}; observed holder pid={pid}, operation={holder_operation}, acquired_at={acquired_at}, elapsed_ms={elapsed_ms}, hold_threshold_ms={hold_threshold_ms}, hold_threshold_exceeded={hold_threshold_exceeded}, holder_unknown_reason={holder_unknown_reason} (metadata may be stale)"
     ))
 }
 
@@ -407,6 +548,125 @@ mod tests {
     use super::*;
 
     #[test]
+    fn issue_6678_uncontended_pm_lock_does_not_emit_info_events() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("events.log");
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(File::create(&output).unwrap()))
+            .finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+        NamedFileLock::acquire(&directory.path().join("pm.lock"), "pm_prefs")
+            .unwrap()
+            .unlock()
+            .unwrap();
+        assert!(std::fs::read_to_string(output).unwrap().is_empty());
+    }
+
+    #[test]
+    fn issue_5391_expired_uncontended_lock_does_not_invent_an_unknown_holder() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("pm.lock");
+        let now = Instant::now();
+        let _clock = ScopedOperationClock::set(now);
+        let _deadline = ScopedOperationDeadline::enter(now);
+        for error in [
+            NamedFileLock::acquire(&path, "pm_prefs").unwrap_err(),
+            NamedFileLock::acquire_quiet(&path, "pm_prefs").unwrap_err(),
+        ] {
+            assert!(is_deadline_expired(&error));
+            let message = error.to_string();
+            assert!(message.contains("operation=pm_prefs"), "{message}");
+            assert!(
+                message.contains("lock_contention=not_observed"),
+                "{message}"
+            );
+            assert!(
+                !message.contains("holder_unknown_reason=file_absent"),
+                "{message}"
+            );
+        }
+        NamedFileLock::try_acquire(&path, "still available").unwrap();
+    }
+
+    #[test]
+    fn named_file_lock_reports_elapsed_hold_time_and_workspace_threshold() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let holder_path = directory.path().join("lock.holder.json");
+        let observed_at = chrono::DateTime::parse_from_rfc3339("2026-10-12T00:00:06Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        for (holder_operation, acquired_at, elapsed, threshold, exceeded) in [
+            (
+                "workspace work items",
+                "2026-10-12T00:00:00Z",
+                "6000",
+                "5000",
+                "true",
+            ),
+            (
+                "workspace work items",
+                "2026-10-12T00:00:02Z",
+                "4000",
+                "5000",
+                "false",
+            ),
+            ("verify.run", "2026-10-12T00:00:00Z", "6000", "n/a", "n/a"),
+            (
+                "workspace work items",
+                "invalid",
+                "unknown",
+                "5000",
+                "unknown",
+            ),
+        ] {
+            std::fs::write(
+                &holder_path,
+                serde_json::to_vec(&ObservedLockHolder {
+                    pid: 5313,
+                    operation: holder_operation.to_string(),
+                    acquired_at: acquired_at.to_string(),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+            let error = named_lock_error_at(
+                &holder_path,
+                "workspace.ensure",
+                io::Error::new(io::ErrorKind::WouldBlock, "busy"),
+                observed_at,
+            );
+            assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+            let message = error.to_string();
+            for expected in [
+                "pid=5313".to_string(),
+                format!("operation={holder_operation}"),
+                format!("acquired_at={acquired_at}"),
+                "holder_unknown_reason=identified".to_string(),
+                format!("elapsed_ms={elapsed}"),
+                format!("hold_threshold_ms={threshold}"),
+                format!("hold_threshold_exceeded={exceeded}"),
+                "metadata may be stale".to_string(),
+            ] {
+                assert!(message.contains(&expected), "missing {expected}: {message}");
+            }
+        }
+        std::fs::remove_file(&holder_path).unwrap();
+        let error = named_lock_error_at(
+            &holder_path,
+            "workspace.ensure",
+            io::Error::new(io::ErrorKind::WouldBlock, "busy"),
+            observed_at,
+        );
+        assert!(error.to_string().contains("elapsed_ms=unknown"), "{error}");
+        assert!(
+            error.to_string().contains("hold_threshold_ms=n/a"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn named_file_lock_reports_observed_holder_on_cross_thread_contention() {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("lock");
@@ -433,6 +693,34 @@ mod tests {
                 message.contains("observed"),
                 "metadata is observational: {message}"
             );
+            let start = Instant::now();
+            let _clock = ScopedOperationClock::set(start);
+            let expiry = start + Duration::from_secs(1);
+            let _deadline = ScopedOperationDeadline::enter(expiry);
+            let notifications = std::rc::Rc::new(Cell::new(0));
+            let observed = notifications.clone();
+            let _observer = ScopedNamedLockContentionObserver::set(&contender_path, move || {
+                observed.set(observed.get() + 1);
+            });
+            let error = NamedFileLock::acquire_observed(&contender_path, "pm_prefs", || {
+                TEST_NOW.with(|clock| clock.set(Some(expiry)));
+            })
+            .unwrap_err();
+            assert_eq!(
+                notifications.get(),
+                1,
+                "the named observer sees real contention once"
+            );
+            let message = error.to_string();
+            assert!(message.contains("board.append"), "{message}");
+            assert!(
+                message.contains(&format!("pid={}", std::process::id())),
+                "{message}"
+            );
+            assert!(
+                !message.contains("lock_contention=not_observed"),
+                "{message}"
+            );
         })
         .join()
         .unwrap();
@@ -444,10 +732,9 @@ mod tests {
         assert!(!holder_path.exists(), "drop clears metadata");
     }
 
-    /// Issue #4850: the quiet acquisition names the holder on a deadline
-    /// failure exactly like the loud one, and records its own holder metadata.
+    /// An expired deadline refuses before probing, even if an owner exists.
     #[test]
-    fn named_file_lock_quiet_acquisition_names_the_holder_when_the_deadline_expires() {
+    fn named_file_lock_quiet_acquisition_distinguishes_expiry_before_probing() {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("works.lock");
         let owner = NamedFileLock::acquire_quiet(&path, "workspace work items").expect("owner");
@@ -463,12 +750,11 @@ mod tests {
                 .expect_err("contended lock must time out");
             assert!(is_deadline_expired(&error), "{error}");
             let message = error.to_string();
-            assert!(message.contains("workspace work items"), "{message}");
             assert!(
-                message.contains(&format!("pid={}", std::process::id())),
+                message.contains("lock_contention=not_observed"),
                 "{message}"
             );
-            assert!(message.contains("acquired_at="), "{message}");
+            assert!(!message.contains("observed holder"), "{message}");
             assert!(message.contains("operation=pr.edit metadata"), "{message}");
         })
         .join()
@@ -490,8 +776,12 @@ mod tests {
             assert!(error.to_string().contains("unknown"));
             let start = Instant::now();
             let _clock = ScopedOperationClock::set(start);
-            let _deadline = ScopedOperationDeadline::enter(start);
-            let error = NamedFileLock::acquire(&contender_path, "wait").unwrap_err();
+            let expiry = start + Duration::from_secs(1);
+            let _deadline = ScopedOperationDeadline::enter(expiry);
+            let error = NamedFileLock::acquire_observed(&contender_path, "wait", || {
+                TEST_NOW.with(|clock| clock.set(Some(expiry)));
+            })
+            .unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::TimedOut);
             assert!(error.to_string().contains("unknown"));
         })
@@ -613,6 +903,7 @@ mod tests {
 
     #[test]
     fn fixed_operation_clock_controls_expiry_without_spending_wall_time() {
+        assert!(ScopedOperationClock::current().is_none());
         let directory = tempfile::tempdir().expect("tempdir");
         let file = File::create(directory.path().join("lock")).expect("lock file");
         // This deadline is already expired on the host clock. Only the
@@ -621,6 +912,7 @@ mod tests {
         let expiry = start + Duration::from_millis(250);
         let _clock = ScopedOperationClock::set(start);
         let _deadline = ScopedOperationDeadline::enter(expiry);
+        assert_eq!(ScopedOperationClock::current(), Some(start));
         assert_eq!(now(), start);
         lock_exclusive(&file).expect("logical budget remains");
         FileExt::unlock(&file).expect("unlock");
@@ -628,6 +920,7 @@ mod tests {
 
         {
             let _expired = ScopedOperationClock::set(expiry);
+            assert_eq!(ScopedOperationClock::current(), Some(expiry));
             assert_eq!(
                 lock_exclusive(&file).unwrap_err().kind(),
                 io::ErrorKind::TimedOut
@@ -640,6 +933,7 @@ mod tests {
         assert_eq!(now(), start, "nested clock restores the previous instant");
         assert!(std::thread::spawn(now).join().expect("other thread") > start);
         drop(_clock);
+        assert!(ScopedOperationClock::current().is_none());
         assert!(now() > start, "leaving the scope restores the host clock");
     }
 
@@ -655,12 +949,13 @@ mod tests {
             .expect("second lock file");
         first.lock_exclusive().expect("hold first lock");
         let started = Instant::now();
+        // The raw wrapper exposes no contention callback; real expiry is the
+        // behavior under test. Scheduler delays must not decide the verdict.
         let _deadline = ScopedOperationDeadline::enter(started + Duration::from_millis(40));
 
         let error = lock_exclusive(&second).expect_err("contended lock must time out");
 
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
-        assert!(started.elapsed() < Duration::from_secs(1));
         FileExt::unlock(&first).expect("unlock first lock");
     }
 
@@ -675,15 +970,37 @@ mod tests {
             .open(&path)
             .expect("second lock file");
         first.lock_exclusive().expect("hold first lock");
-        let _deadline = ScopedOperationDeadline::enter(Instant::now() + Duration::from_millis(40));
+        let (release, released) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            // test-hygiene: allow-wall-clock-deadline Release a stuck fixture lock if its callback is lost; never decides success.
+            let requested = released.recv_timeout(crate::deadline_budget::HANG_GUARD);
+            FileExt::unlock(&first).expect("unlock first lock");
+            requested
+        });
+        // test-hygiene: allow-wall-clock-deadline Keep host expiry in the past so only the injected operation clock decides this test.
+        let start = Instant::now() - Duration::from_secs(1);
+        let _clock = ScopedOperationClock::set(start);
+        // test-hygiene: allow-short-duration Logical expiry advances only after real OS lock contention.
+        let expiry = start + Duration::from_millis(40);
+        let _deadline = ScopedOperationDeadline::enter(expiry);
         let mut observed = 0;
+        let mut expired_clock = None;
 
-        let error = lock_exclusive_with_observer(&second, || observed += 1)
-            .expect_err("contended lock must time out");
+        let result = lock_exclusive_with_observer(&second, || {
+            assert_eq!(now(), start, "time stays fixed until real contention");
+            observed += 1;
+            expired_clock = Some(ScopedOperationClock::set(expiry));
+        });
+        let _ = release.send(());
+        holder
+            .join()
+            .expect("lock holder")
+            .expect("contention call finishes before the stuck-fixture guard");
+        let error = result.expect_err("contended lock must time out");
+        let _expired_clock = expired_clock.expect("advance the clock from real contention");
 
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert!(observed >= 1, "the exact call reports lock contention");
-        FileExt::unlock(&first).expect("unlock first lock");
     }
 
     #[test]

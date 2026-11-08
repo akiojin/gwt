@@ -38,14 +38,23 @@ fn live_harness_requires_explicit_project_surface_suppression() {
 #[test]
 fn project_open_surfaces_have_ci_runnable_browser_coverage() {
     let spec = read("crates/gwt/playwright/tests/project-open-surfaces.spec.ts");
+    let (deterministic, live) = spec
+        .split_once(
+            "test('live backend-only context refuses a shell until a visible Project receipt'",
+        )
+        .expect("project-open coverage retains its isolated-backend receipt scenario");
 
     assert!(
         spec.contains("gotoLiveGwt(page, APP_URL"),
         "the project-open spec must exercise the shared live harness against the rendered frontend"
     );
     assert!(
-        !spec.contains("test.skip("),
+        !deterministic.contains("test.skip("),
         "the deterministic project-open spec must run in the existing CI browser job"
+    );
+    assert!(
+        live.contains("test.skip(!base || !checkHome"),
+        "only the real-backend scenario requires an isolated server and HOME"
     );
     for contract in [
         "#project-picker",

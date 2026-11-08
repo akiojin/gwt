@@ -353,6 +353,51 @@ fn projected_tree(repo: &Path, left: &str, right: &str) -> io::Result<(String, V
     }
 }
 
+/// Inspect all additional product history, including merge resolutions and
+/// reverted side branches. Callers select the actual base exemption, if any.
+pub(crate) fn product_changes_since(
+    repo: &Path,
+    verified: &str,
+    head: &str,
+    base: &str,
+) -> io::Result<(Vec<String>, BTreeSet<String>)> {
+    let mut product_commits = Vec::new();
+    let mut files = BTreeSet::new();
+    let commits = git_text(
+        repo,
+        &[
+            "rev-list",
+            "--reverse",
+            head,
+            &format!("^{verified}"),
+            &format!("^{base}"),
+        ],
+    )?;
+    for commit in commits.lines() {
+        let parents = git_text(repo, &["rev-list", "--parents", "-n", "1", commit])?;
+        let parents: Vec<_> = parents.split_whitespace().collect();
+        let paths = match parents.as_slice() {
+            [_, parent] => product_paths(repo, parent, commit)?,
+            [_, first, second] => {
+                let (tree, conflicts) = projected_tree(repo, first, second)?;
+                if conflicts.is_empty() {
+                    product_paths(repo, &tree, commit)?
+                } else {
+                    conflicts
+                }
+            }
+            _ => return Err(io::Error::other(
+                "Cannot prove a multi-parent merge contains only bookkeeping/base synchronization.",
+            )),
+        };
+        if !paths.is_empty() {
+            product_commits.push(commit.to_string());
+            files.extend(paths);
+        }
+    }
+    Ok((product_commits, files))
+}
+
 fn classify(repo: &Path, check: &mut HeadCheck) -> io::Result<()> {
     let verified = check.verified_head.clone();
     if check.remote_head != verified {
@@ -365,39 +410,25 @@ fn classify(repo: &Path, check: &mut HeadCheck) -> io::Result<()> {
             check.product_files = product_paths(repo, &verified, &check.remote_head)?;
             return Ok(());
         }
-        let mut files = BTreeSet::new();
         // Exclude actual target-base commits, not just the merge commit itself.
         // Inspect every commit, including merge resolutions, so a later
         // revert cannot hide unverified product history.
-        let commits = git_text(
-            repo,
-            &[
-                "rev-list",
-                "--reverse",
-                &check.remote_head,
-                &format!("^{verified}"),
-                &format!("^{}", check.base_head),
-            ],
-        )?;
-        for commit in commits.lines() {
-            let parents = git_text(repo, &["rev-list", "--parents", "-n", "1", commit])?;
-            let parents: Vec<_> = parents.split_whitespace().collect();
-            let paths = match parents.as_slice() {
-                [_, parent] => product_paths(repo, parent, commit)?,
-                [_, first, second] => {
-                    let (tree, conflicts) = projected_tree(repo, first, second)?;
-                    if conflicts.is_empty() { product_paths(repo, &tree, commit)? } else { conflicts }
-                }
-                _ => return Err(io::Error::other("Cannot prove a multi-parent merge contains only bookkeeping/base synchronization.")),
-            };
-            if !paths.is_empty() {
-                check.product_commits.push(commit.to_string());
-                files.extend(paths);
-                check.product_files = files.iter().cloned().collect();
-            }
-        }
+        let (commits, mut files) =
+            product_changes_since(repo, &verified, &check.remote_head, &check.base_head)?;
+        check.product_commits = commits;
+        check.product_files = files.iter().cloned().collect();
         if !check.product_files.is_empty() {
             check.classification = "unverified_product".to_string();
+            return Ok(());
+        }
+        // Use the fingerprint/completion rule for canonical shard additions,
+        // after inspecting all commits so merges cannot hide product history.
+        if crate::cli::verification_record::preserves_verified_head(
+            repo,
+            &verified,
+            &check.remote_head,
+        ) {
+            check.classification = "bookkeeping_or_base_sync".to_string();
             return Ok(());
         }
         let bases = git_text(

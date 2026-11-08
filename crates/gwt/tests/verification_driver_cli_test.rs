@@ -19,6 +19,13 @@ fn configured_output_driver_frees_its_artifact_and_records_build_provenance() {
 
 fn assert_driver_relink(target_dir: &str) {
     let home = tempfile::tempdir().unwrap();
+    // This three-byte relink fixture does not exercise production disk admission.
+    fs::create_dir_all(home.path().join(".gwt")).unwrap();
+    fs::write(
+        gwt_config::Settings::global_config_path_for_home(home.path()),
+        "[verification]\nslots=1\ndisk_budget_bytes=0\n[build_artifact_gc]\nbelow_bytes=0\nbelow_percent=0\n",
+    )
+    .unwrap();
     // Isolate gwt state while keeping Cargo metadata's real toolchain usable.
     let original_home = dirs::home_dir().unwrap();
     let cargo_home = std::env::var_os("CARGO_HOME")
@@ -99,7 +106,7 @@ fn assert_driver_relink(target_dir: &str) {
     assert_eq!(
         fs::metadata(&artifact).unwrap().len(),
         3,
-        "the artifact remained locked"
+        "the artifact was not replaced; child output: {output:?}"
     );
     assert_eq!(fs::read(&artifact).unwrap(), [1, 2, 3]);
     let record: gwt::cli::verification_record::VerificationRunRecord =

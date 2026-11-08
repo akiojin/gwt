@@ -597,15 +597,14 @@ async function settleBackend(page: Page): Promise<void> {
 async function closeWorkspaceWindow(page: Page, windowId: string): Promise<void> {
   const window = page.locator(`.workspace-window[data-id="${windowId}"]`);
   if (!(await window.count())) return;
-  await window.getByLabel("Close window").click();
-  const closeConfirm = page.locator(
-    '#window-close-confirm-modal [data-role="window-close-confirm"]',
-  );
-  // SPEC-3038 US-3 Close Guard: a live agent window always asks first.
-  await closeConfirm.waitFor({ state: "visible", timeout: 10_000 }).catch(() => undefined);
-  if (await closeConfirm.isVisible().catch(() => false)) {
-    await closeConfirm.click();
-  }
+  // Test-owned runtime cleanup uses the fixture's backend socket. Surface
+  // controls intentionally cannot terminate sessions (Issue #4777 AC14).
+  await page.evaluate(id => {
+    const socket = [...((window as any).__gwtBenchSockets as WebSocket[])].reverse()
+      .find(candidate => candidate.readyState === WebSocket.OPEN && /\/ws$/.test(candidate.url));
+    if (!socket) throw new Error("no backend socket for owned fixture cleanup");
+    socket.send(JSON.stringify({ kind: "close_window", id }));
+  }, windowId);
   await expect(window).toHaveCount(0, { timeout: 60_000 });
 }
 

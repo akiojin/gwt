@@ -10,12 +10,14 @@ use gwt_core::{
     coordination::{
         board_entry_payload_digest, AuthorKind, BoardEntry, BoardEntryKind, BoardWorktreeForm,
     },
-    paths::project_scope_hash,
+    paths::{gwt_project_dir, project_scope_hash},
     recovery::{
         AcknowledgementMismatchKind, RecoveryAcknowledgement, RecoveryAuthority,
         RecoveryConflictKind, RecoveryError, RecoveryIntent, RecoveryProvider,
         RecoveryProviderReceipt, RecoveryState, RecoveryStore, RecoveryWriteDisposition,
     },
+    repo_hash::compute_repo_hash,
+    test_support::ScopedGwtHome,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -109,6 +111,94 @@ fn canonical_store_lists_only_the_current_session_partition() {
     assert_eq!(second.list().unwrap(), vec![second_record]);
     assert_eq!(first.get("recovery-two").unwrap(), None);
     assert_eq!(second.get("recovery-one").unwrap(), None);
+}
+
+#[test]
+fn saved_project_identity_opens_recovery_after_worktree_is_removed() {
+    let temp = TempDir::new().unwrap();
+    let _home = ScopedGwtHome::set(temp.path().join("home"));
+    let worktree = temp.path().join("worktree");
+    fs::create_dir_all(worktree.join(".git")).unwrap();
+    fs::write(
+        worktree.join(".git/config"),
+        "[remote \"origin\"]\nurl = https://github.com/example/recovery.git\n",
+    )
+    .unwrap();
+    let project_hash = project_scope_hash(&worktree);
+    let store = RecoveryStore::for_repo(&worktree, "saved-session").unwrap();
+    let pending = store
+        .prepare(
+            "prepare-saved",
+            intent_for_session(RECOVERY_ID, "safe status", "saved-session"),
+        )
+        .unwrap()
+        .record;
+    fs::remove_dir_all(&worktree).unwrap();
+    let fallback_hash = project_scope_hash(&worktree);
+    assert_ne!(project_hash, fallback_hash);
+
+    let reopened = RecoveryStore::open_for_project_if_exists(&project_hash, "saved-session")
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(reopened.authority(), store.authority());
+    assert_eq!(reopened.list_read_only().unwrap(), vec![pending]);
+    assert!(!gwt_project_dir(&fallback_hash).exists());
+}
+
+#[test]
+fn read_only_project_open_does_not_create_or_search_other_authorities() {
+    let temp = TempDir::new().unwrap();
+    let _home = ScopedGwtHome::set(temp.path().join("home"));
+    let project_hash = project_scope_hash(temp.path());
+    let project_root = gwt_project_dir(&project_hash);
+    assert!(
+        RecoveryStore::open_for_project_if_exists(&project_hash, "absent")
+            .unwrap()
+            .is_none()
+    );
+    assert!(!project_root.exists());
+
+    RecoveryStore::for_repo(temp.path(), "other-session").unwrap();
+    let intents_root = project_root.join("recovery/intents");
+    assert!(
+        RecoveryStore::open_for_project_if_exists(&project_hash, "absent")
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(fs::read_dir(&intents_root).unwrap().count(), 1);
+
+    let other_hash = compute_repo_hash("https://github.com/example/other.git");
+    assert_ne!(project_hash, other_hash);
+    assert!(
+        RecoveryStore::open_for_project_if_exists(&other_hash, "other-session")
+            .unwrap()
+            .is_none()
+    );
+    assert!(!gwt_project_dir(&other_hash).exists());
+    assert_eq!(fs::read_dir(intents_root).unwrap().count(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn read_only_project_open_rejects_symlinked_storage() {
+    let temp = TempDir::new().unwrap();
+    let _home = ScopedGwtHome::set(temp.path().join("home"));
+    let project_hash = project_scope_hash(temp.path());
+    RecoveryStore::for_repo(temp.path(), "owner").unwrap();
+    let recovery_root = gwt_project_dir(&project_hash).join("recovery");
+    let redirected = temp.path().join("redirected");
+    fs::rename(&recovery_root, &redirected).unwrap();
+    std::os::unix::fs::symlink(&redirected, &recovery_root).unwrap();
+
+    assert_eq!(
+        RecoveryStore::open_for_project_if_exists(&project_hash, "owner").unwrap_err(),
+        RecoveryError::Storage
+    );
+    assert!(fs::symlink_metadata(recovery_root)
+        .unwrap()
+        .file_type()
+        .is_symlink());
 }
 
 fn acknowledgement(record: &gwt_core::recovery::RecoveryRecord) -> RecoveryAcknowledgement {
@@ -292,6 +382,10 @@ fn missing_or_renamed_terminal_revision_fails_closed() {
 
         assert_eq!(
             store.get(RECOVERY_ID).unwrap_err(),
+            RecoveryError::CorruptStore
+        );
+        assert_eq!(
+            store.list_read_only().unwrap_err(),
             RecoveryError::CorruptStore
         );
     }
@@ -717,6 +811,44 @@ fn missing_initial_head_is_repaired_without_republishing_a_revision() {
     assert_eq!(replay.record, committed.record);
     assert_eq!(revision_files(&root).len(), 1);
     assert_eq!(head_files(&root).len(), 1);
+}
+
+#[test]
+fn read_only_listing_leaves_missing_heads_unrepaired() {
+    let temp = TempDir::new().unwrap();
+    let store = open_store(&temp);
+    let pending = store
+        .prepare("prepare-read-only", intent(RECOVERY_ID, "safe status"))
+        .unwrap()
+        .record;
+    let root = temp.path().join("recovery");
+    fs::remove_file(&head_files(&root)[0]).unwrap();
+
+    assert_eq!(store.list_read_only().unwrap(), vec![pending.clone()]);
+    assert_eq!(store.list_read_only().unwrap(), vec![pending.clone()]);
+    assert!(head_files(&root).is_empty());
+    assert_eq!(revision_files(&root).len(), 1);
+
+    assert_eq!(store.list().unwrap(), vec![pending]);
+    assert_eq!(head_files(&root).len(), 1);
+}
+
+#[test]
+fn read_only_listing_does_not_recreate_a_missing_lock() {
+    let temp = TempDir::new().unwrap();
+    let store = open_store(&temp);
+    store
+        .prepare("prepare-read-only", intent(RECOVERY_ID, "safe status"))
+        .unwrap();
+    let record_root = only_revisions_dir(&temp.path().join("recovery"))
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let lock = record_root.join(".lock");
+    fs::remove_file(&lock).unwrap();
+
+    assert_eq!(store.list_read_only().unwrap_err(), RecoveryError::Storage);
+    assert!(!lock.exists());
 }
 
 #[test]

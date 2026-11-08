@@ -4,14 +4,19 @@
 // window interaction features must be covered by behavior tests, not just
 // source-string contracts).
 
-export const DEFAULT_MAX_TERMINAL_FITS_PER_FRAME = 4;
-export const DEFAULT_MAX_TERMINAL_REFRESHES_PER_FRAME = 4;
+import { scheduleTerminalTask } from "./terminal-output-buffer.js";
+
+const DEFAULT_MAX_TERMINAL_FITS_PER_FRAME = 4;
+const DEFAULT_MAX_TERMINAL_REFRESHES_PER_FRAME = 4;
 
 function defaultScheduleFrame(callback) {
-  if (typeof requestAnimationFrame === "function") {
-    return requestAnimationFrame(callback);
-  }
-  return setTimeout(callback, 0);
+  return scheduleTerminalTask(callback, globalThis);
+}
+
+// Initial readiness must advance even when an inactive window receives no
+// animation frames. Ordinary fit/refresh queues keep their frame budgets.
+export function scheduleTerminalInitialFit(callback) {
+  return scheduleTerminalTask(callback, globalThis);
 }
 
 function normalizeMaxTerminalFitsPerFrame(value) {
@@ -32,40 +37,19 @@ function normalizeMaxTerminalRefreshesPerFrame(value) {
  * Decode a replacement snapshot independently from the live streaming UTF-8
  * decoder and return a fresh decoder for subsequent live output.
  *
- * A live decoder may hold an incomplete multi-byte prefix because output is
- * decoded with `{ stream: true }`. Reusing it for a snapshot can inject a
- * replacement character into the snapshot and can also contaminate the first
- * live chunk after replacement. Snapshot replacement is an explicit stream
- * boundary, so both sides receive fresh decoder state.
+ * Discard the old live decoder's incomplete prefix. A snapshot can carry its
+ * own unfinished UTF-8 scalar from the backend parser, so retain that fresh
+ * decoder's streaming state for the following live bytes.
  */
 export function decodeTerminalSnapshotBoundary(
   snapshotBytes,
   createDecoder = () => new TextDecoder(),
 ) {
-  const snapshotDecoder = createDecoder();
   const nextLiveDecoder = createDecoder();
   return {
-    snapshotText: snapshotDecoder.decode(snapshotBytes),
+    snapshotText: nextLiveDecoder.decode(snapshotBytes, { stream: true }),
     nextLiveDecoder,
   };
-}
-
-/**
- * Mark receipt of a terminal snapshot by discarding every live-output queue
- * that predates it. Output arriving after this synchronous boundary is left
- * alone and will therefore be replayed after the snapshot is applied.
- */
-export function clearTerminalOutputBeforeSnapshot({
-  windowId,
-  runtime,
-  pendingOutputMap,
-  clearBatchedOutput,
-}) {
-  clearBatchedOutput(windowId);
-  pendingOutputMap.delete(windowId);
-  if (runtime) {
-    runtime.deferredWrites = [];
-  }
 }
 
 /**
@@ -90,6 +74,7 @@ export function createTerminalSnapshotWriteCoordinator({
   onError = () => {},
 }) {
   let writeInFlight = false;
+  let viewport = null;
 
   function reportError(error, stage) {
     if (!isRuntimeCurrent()) {
@@ -104,6 +89,7 @@ export function createTerminalSnapshotWriteCoordinator({
 
   function releaseFailedSnapshot(error, stage, { discardPending = false } = {}) {
     writeInFlight = false;
+    viewport = null;
     if (!isRuntimeCurrent()) {
       return;
     }
@@ -151,6 +137,10 @@ export function createTerminalSnapshotWriteCoordinator({
       return;
     }
     try {
+      if (!viewport) {
+        const buffer = terminal.buffer.active;
+        viewport = { line: buffer.viewportY, atBottom: buffer.viewportY >= buffer.baseY };
+      }
       terminal.reset();
     } catch (error) {
       releaseFailedSnapshot(error, "reset");
@@ -167,6 +157,13 @@ export function createTerminalSnapshotWriteCoordinator({
         }
 
         writeInFlight = false;
+        try {
+          if (viewport.atBottom) terminal.scrollToBottom();
+          else terminal.scrollToLine(viewport.line);
+        } catch (error) {
+          reportError(error, "viewport");
+        }
+        viewport = null;
         try {
           installLiveDecoder(nextLiveDecoder);
         } catch (error) {
@@ -572,13 +569,12 @@ export function classifyProjectWindowVisibility({
 
 /**
  * Predicate used by both the host resize fan-out and the existing
- * `fitTerminal` short-circuit. Pulled out so a unit test can pin the
- * `.hidden` short-circuit ahead of the workspace `minimized` check.
+ * `fitTerminal` short-circuit. Only the current DOM layout controls refresh;
+ * surface ownership and actual DOM layout determine visibility.
  */
-export function viewportEligibleForRefresh({ element, workspaceWindow }) {
+export function viewportEligibleForRefresh({ element }) {
   if (element && element.isConnected === false) return false;
   if (element && element.hidden) return false;
-  if (workspaceWindow && workspaceWindow.minimized) return false;
   return true;
 }
 
@@ -835,7 +831,7 @@ function activationResult({
   };
 }
 
-export function terminalActivationLayoutSnapshot(runtime) {
+function terminalActivationLayoutSnapshot(runtime) {
   const terminal = runtime?.terminal;
   const parent = terminal?.element?.parentElement;
   if (!terminal || !parent || !elementHasLayoutBox(parent)) {

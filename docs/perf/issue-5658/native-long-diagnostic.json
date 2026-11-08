@@ -1,0 +1,1933 @@
+{
+  "Context": "Owned GUI candidate7; all12 groups committed steady window. Whole run explicitly converted to diagnostic before dumps; excluded from acceptance.",
+  "ConversionRecord": "diagnostic-seven-conversion.json",
+  "Pid": 13432,
+  "ExpectedStartFileTime": "134366688416646545",
+  "ExpectedImage": "target/debug/gwt.exe",
+  "Method": "16 MiniDumpNormal|MiniDumpWithThreadInfo0x1000; native exact PID/start/image validation each time; same-start survival after each; offline LLDB only, never live attach",
+  "Captures": [
+    {
+      "Pid": 13432,
+      "StartFileTime": "134366688416646545",
+      "DumpPath": "target/issue-5658-debugger/long-13432-normal-0.dmp",
+      "DumpBytes": 886723,
+      "DumpFlags": "0x1000 (MiniDumpNormal | MiniDumpWithThreadInfo)",
+      "AliveAfterCapture": true,
+      "Sample": 0,
+      "CapturedAtUtc": "2026-10-17T09:20:56.5431916+09:00",
+      "CaptureElapsedMs": 620.5129
+    },
+    {
+      "Pid": 13432,
+      "StartFileTime": "134366688416646545",
+      "DumpPath": "target/issue-5658-debugger/long-13432-normal-1.dmp",
+      "DumpBytes": 871659,
+      "DumpFlags": "0x1000 (MiniDumpNormal | MiniDumpWithThreadInfo)",
+      "AliveAfterCapture": true,
+      "Sample": 1,
+      "CapturedAtUtc": "2026-10-17T09:20:57.9521692+09:00",
+      "CaptureElapsedMs": 155.0642
+    },
+    {
+      "Pid": 13432,
+      "StartFileTime": "134366688416646545",
+      "DumpPath": "target/issue-5658-debugger/long-13432-normal-2.dmp",
+      "DumpBytes": 877203,
+      "DumpFlags": "0x1000 (MiniDumpNormal | MiniDumpWithThreadInfo)",
+      "AliveAfterCapture": true,
+      "Sample": 2,
+      "CapturedAtUtc": "2026-10-17T09:20:58.8713669+09:00",
+      "CaptureElapsedMs": 146.8676
+    },
+    {
+      "Pid": 13432,
+      "StartFileTime": "134366688416646545",
+      "DumpPath": "target/issue-5658-debugger/long-13432-normal-3.dmp",
+      "DumpBytes": 851227,
+      "DumpFlags": "0x1000 (MiniDumpNormal | MiniDumpWithThreadInfo)",
+      "AliveAfterCapture": true,
+      "Sample": 3,
+      "CapturedAtUtc": "2026-10-17T09:20:59.8689414+09:00",
+      "CaptureElapsedMs": 307.6587
+    },
+    {
+      "Pid": 13432,
+      "StartFileTime": "134366688416646545",
+      "DumpPath": "target/issue-5658-debugger/long-13432-normal-4.dmp",
+      "DumpBytes": 851227,
+      "DumpFlags": "0x1000 (MiniDumpNormal | MiniDumpWithThreadInfo)",
+      "AliveAfterCapture": true,
+      "Sample": 4,
+      "CapturedAtUtc": "2026-10-17T09:21:00.9372022+09:00",
+      "CaptureElapsedMs": 254.7588
+    },
+    {
+      "Pid": 13432,
+      "StartFileTime": "134366688416646545",
+      "DumpPath": "target/issue-5658-debugger/long-13432-normal-5.dmp",
+      "DumpBytes": 851227,
+      "DumpFlags": "0x1000 (MiniDumpNormal | MiniDumpWithThreadInfo)",
+      "AliveAfterCapture": true,
+      "Sample": 5,
+      "CapturedAtUtc": "2026-10-17T09:21:01.9511443+09:00",
+      "CaptureElapsedMs": 279.0435
+    },
+    {
+      "Pid": 13432,
+      "StartFileTime": "134366688416646545",
+      "DumpPath": "target/issue-5658-debugger/long-13432-normal-6.dmp",
+      "DumpBytes": 851227,
+      "DumpFlags": "0x1000 (MiniDumpNormal | MiniDumpWithThreadInfo)",
+      "AliveAfterCapture": true,
+      "Sample": 6,
+      "CapturedAtUtc": "2026-10-17T09:21:02.9833783+09:00",
+      "CaptureElapsedMs": 209.8306
+    },
+    {
+      "Pid": 13432,
+      "StartFileTime": "134366688416646545",
+      "DumpPath": "target/issue-5658-debugger/long-13432-normal-7.dmp",
+      "DumpBytes": 851227,
+      "DumpFlags": "0x1000 (MiniDumpNormal | MiniDumpWithThreadInfo)",
+      "AliveAfterCapture": true,
+      "Sample": 7,
+      "CapturedAtUtc": "2026-10-17T09:21:03.9501778+09:00",
+      "CaptureElapsedMs": 145.2776
+    },
+    {
+      "Pid": 13432,
+      "StartFileTime": "134366688416646545",
+      "DumpPath": "target/issue-5658-debugger/long-13432-normal-8.dmp",
+      "DumpBytes": 851227,
+      "DumpFlags": "0x1000 (MiniDumpNormal | MiniDumpWithThreadInfo)",
+      "AliveAfterCapture": true,
+      "Sample": 8,
+      "CapturedAtUtc": "2026-10-17T09:21:04.8469548+09:00",
+      "CaptureElapsedMs": 144.6371
+    },
+    {
+      "Pid": 13432,
+      "StartFileTime": "134366688416646545",
+      "DumpPath": "target/issue-5658-debugger/long-13432-normal-9.dmp",
+      "DumpBytes": 851227,
+      "DumpFlags": "0x1000 (MiniDumpNormal | MiniDumpWithThreadInfo)",
+      "AliveAfterCapture": true,
+      "Sample": 9,
+      "CapturedAtUtc": "2026-10-17T09:21:05.7530223+09:00",
+      "CaptureElapsedMs": 203.3871
+    },
+    {
+      "Pid": 13432,
+      "StartFileTime": "134366688416646545",
+      "DumpPath": "target/issue-5658-debugger/long-13432-normal-10.dmp",
+      "DumpBytes": 851227,
+      "DumpFlags": "0x1000 (MiniDumpNormal | MiniDumpWithThreadInfo)",
+      "AliveAfterCapture": true,
+      "Sample": 10,
+      "CapturedAtUtc": "2026-10-17T09:21:06.7214719+09:00",
+      "CaptureElapsedMs": 153.4684
+    },
+    {
+      "Pid": 13432,
+      "StartFileTime": "134366688416646545",
+      "DumpPath": "target/issue-5658-debugger/long-13432-normal-11.dmp",
+      "DumpBytes": 837277,
+      "DumpFlags": "0x1000 (MiniDumpNormal | MiniDumpWithThreadInfo)",
+      "AliveAfterCapture": true,
+      "Sample": 11,
+      "CapturedAtUtc": "2026-10-17T09:21:07.6373781+09:00",
+      "CaptureElapsedMs": 179.3541
+    },
+    {
+      "Pid": 13432,
+      "StartFileTime": "134366688416646545",
+      "DumpPath": "target/issue-5658-debugger/long-13432-normal-12.dmp",
+      "DumpBytes": 879837,
+      "DumpFlags": "0x1000 (MiniDumpNormal | MiniDumpWithThreadInfo)",
+      "AliveAfterCapture": true,
+      "Sample": 12,
+      "CapturedAtUtc": "2026-10-17T09:21:08.5753591+09:00",
+      "CaptureElapsedMs": 323.4157
+    },
+    {
+      "Pid": 13432,
+      "StartFileTime": "134366688416646545",
+      "DumpPath": "target/issue-5658-debugger/long-13432-normal-13.dmp",
+      "DumpBytes": 837277,
+      "DumpFlags": "0x1000 (MiniDumpNormal | MiniDumpWithThreadInfo)",
+      "AliveAfterCapture": true,
+      "Sample": 13,
+      "CapturedAtUtc": "2026-10-17T09:21:09.6524855+09:00",
+      "CaptureElapsedMs": 149.0336
+    },
+    {
+      "Pid": 13432,
+      "StartFileTime": "134366688416646545",
+      "DumpPath": "target/issue-5658-debugger/long-13432-normal-14.dmp",
+      "DumpBytes": 837277,
+      "DumpFlags": "0x1000 (MiniDumpNormal | MiniDumpWithThreadInfo)",
+      "AliveAfterCapture": true,
+      "Sample": 14,
+      "CapturedAtUtc": "2026-10-17T09:21:10.5618963+09:00",
+      "CaptureElapsedMs": 263.933
+    },
+    {
+      "Pid": 13432,
+      "StartFileTime": "134366688416646545",
+      "DumpPath": "target/issue-5658-debugger/long-13432-normal-15.dmp",
+      "DumpBytes": 837277,
+      "DumpFlags": "0x1000 (MiniDumpNormal | MiniDumpWithThreadInfo)",
+      "AliveAfterCapture": true,
+      "Sample": 15,
+      "CapturedAtUtc": "2026-10-17T09:21:11.5776432+09:00",
+      "CaptureElapsedMs": 157.4036
+    }
+  ],
+  "CaptureStartUtc": "2026-10-17T09:20:56.5431916+09:00",
+  "CaptureEndUtc": "2026-10-17T09:21:11.5776432+09:00",
+  "CaptureIntervalSeconds": 15.0344516,
+  "Decodes": [
+    {
+      "Sample": 0,
+      "ExitCode": 0,
+      "ElapsedMs": 4807.2033,
+      "Output": "target/issue-5658-debugger/long-13432-named-0.jsonl",
+      "OfflineOnly": true
+    },
+    {
+      "Sample": 1,
+      "ExitCode": 0,
+      "ElapsedMs": 3281.1269,
+      "Output": "target/issue-5658-debugger/long-13432-named-1.jsonl",
+      "OfflineOnly": true
+    },
+    {
+      "Sample": 2,
+      "ExitCode": -1073741819,
+      "ElapsedMs": 2548.1872,
+      "Output": "target/issue-5658-debugger/long-13432-named-2.jsonl",
+      "OfflineOnly": true
+    },
+    {
+      "Sample": 3,
+      "ExitCode": 0,
+      "ElapsedMs": 2577.4658,
+      "Output": "target/issue-5658-debugger/long-13432-named-3.jsonl",
+      "OfflineOnly": true
+    },
+    {
+      "Sample": 4,
+      "ExitCode": 0,
+      "ElapsedMs": 2403.0629,
+      "Output": "target/issue-5658-debugger/long-13432-named-4.jsonl",
+      "OfflineOnly": true
+    },
+    {
+      "Sample": 5,
+      "ExitCode": 0,
+      "ElapsedMs": 2648.7444,
+      "Output": "target/issue-5658-debugger/long-13432-named-5.jsonl",
+      "OfflineOnly": true
+    },
+    {
+      "Sample": 6,
+      "ExitCode": 0,
+      "ElapsedMs": 2513.4637,
+      "Output": "target/issue-5658-debugger/long-13432-named-6.jsonl",
+      "OfflineOnly": true
+    },
+    {
+      "Sample": 7,
+      "ExitCode": 0,
+      "ElapsedMs": 3709.3808,
+      "Output": "target/issue-5658-debugger/long-13432-named-7.jsonl",
+      "OfflineOnly": true
+    },
+    {
+      "Sample": 8,
+      "ExitCode": 0,
+      "ElapsedMs": 3288.2616,
+      "Output": "target/issue-5658-debugger/long-13432-named-8.jsonl",
+      "OfflineOnly": true
+    },
+    {
+      "Sample": 9,
+      "ExitCode": 0,
+      "ElapsedMs": 3737.3642,
+      "Output": "target/issue-5658-debugger/long-13432-named-9.jsonl",
+      "OfflineOnly": true
+    },
+    {
+      "Sample": 10,
+      "ExitCode": 0,
+      "ElapsedMs": 3276.3965,
+      "Output": "target/issue-5658-debugger/long-13432-named-10.jsonl",
+      "OfflineOnly": true
+    },
+    {
+      "Sample": 11,
+      "ExitCode": 0,
+      "ElapsedMs": 3385.5975,
+      "Output": "target/issue-5658-debugger/long-13432-named-11.jsonl",
+      "OfflineOnly": true
+    },
+    {
+      "Sample": 12,
+      "ExitCode": 0,
+      "ElapsedMs": 2937.7581,
+      "Output": "target/issue-5658-debugger/long-13432-named-12.jsonl",
+      "OfflineOnly": true
+    },
+    {
+      "Sample": 13,
+      "ExitCode": 0,
+      "ElapsedMs": 3630.3715,
+      "Output": "target/issue-5658-debugger/long-13432-named-13.jsonl",
+      "OfflineOnly": true
+    },
+    {
+      "Sample": 14,
+      "ExitCode": 0,
+      "ElapsedMs": 2714.1875,
+      "Output": "target/issue-5658-debugger/long-13432-named-14.jsonl",
+      "OfflineOnly": true
+    },
+    {
+      "Sample": 15,
+      "ExitCode": 0,
+      "ElapsedMs": 2671.6623,
+      "Output": "target/issue-5658-debugger/long-13432-named-15.jsonl",
+      "OfflineOnly": true
+    },
+    {
+      "Sample": 2,
+      "Phase": "PC-module-only-index-fallback",
+      "ExitCode": 0,
+      "OfflineOnly": true
+    }
+  ],
+  "DecodeQualification": "15 full PDB decodes; sample2 native LLDB AV retained42partialrows, then index PC/module-only unwind+llvm-symbolizer fallback exit0. GC and later Tokio rows of sample2 unavailable. No parse failure hidden.",
+  "StackCounts": [
+    {
+      "TID": 67744,
+      "Name": "gwt-index-refresh-drain",
+      "PdbRows": 15,
+      "WaitingRows": 13,
+      "NonWaitingSamples": [
+        0,
+        1
+      ],
+      "PcSymbolizerFallbackSamples": 2
+    },
+    {
+      "TID": 45168,
+      "Name": "gwt-agent-capacity",
+      "PdbRows": 16,
+      "WaitingRows": 14,
+      "NonWaitingSamples": [
+        0,
+        12
+      ],
+      "PcSymbolizerFallbackSamples": null
+    },
+    {
+      "TID": 25412,
+      "Name": "gwt-monitor-runtime",
+      "PdbRows": 16,
+      "WaitingRows": 14,
+      "NonWaitingSamples": [
+        1,
+        12
+      ],
+      "PcSymbolizerFallbackSamples": null
+    },
+    {
+      "TID": 46204,
+      "Name": "main",
+      "PdbRows": 16,
+      "WaitingRows": 16,
+      "NonWaitingSamples": [],
+      "PcSymbolizerFallbackSamples": null
+    }
+  ],
+  "StackCountQualification": "Counts are observed stack states; no CPU/profile percentage inference.",
+  "GC": {
+    "DecodedRows": 15,
+    "WaitingRows": 15,
+    "UnavailableSamples": [
+      2
+    ]
+  },
+  "NonWaitingTokioRows": 0,
+  "ThreadCpuQualification": "First and last dump common TIDs only, matching thread creation time. Capture pauses disturb scheduling. No acceptance/profile percentage claim.",
+  "ThreadCpu": [
+    {
+      "tid": 67744,
+      "name": "gwt-index-refresh-drain",
+      "kernel_seconds": 1.296875,
+      "user_seconds": 0.34375,
+      "cpu_seconds": 1.640625
+    },
+    {
+      "tid": 25412,
+      "name": "gwt-monitor-runtime",
+      "kernel_seconds": 0.734375,
+      "user_seconds": 0.515625,
+      "cpu_seconds": 1.25
+    },
+    {
+      "tid": 45168,
+      "name": "gwt-agent-capacity",
+      "kernel_seconds": 0.71875,
+      "user_seconds": 0.328125,
+      "cpu_seconds": 1.046875
+    },
+    {
+      "tid": 23760,
+      "name": "tokio-rt-worker",
+      "kernel_seconds": 0.625,
+      "user_seconds": 0.109375,
+      "cpu_seconds": 0.734375
+    },
+    {
+      "tid": 46204,
+      "name": "main",
+      "kernel_seconds": 0.015625,
+      "user_seconds": 0.578125,
+      "cpu_seconds": 0.59375
+    },
+    {
+      "tid": 44056,
+      "name": "tokio-rt-worker",
+      "kernel_seconds": 0.3125,
+      "user_seconds": 0.09375,
+      "cpu_seconds": 0.40625
+    },
+    {
+      "tid": 30516,
+      "name": "tokio-rt-worker",
+      "kernel_seconds": 0.046875,
+      "user_seconds": 0.0,
+      "cpu_seconds": 0.046875
+    },
+    {
+      "tid": 26020,
+      "name": "tokio-rt-worker",
+      "kernel_seconds": 0.015625,
+      "user_seconds": 0.0,
+      "cpu_seconds": 0.015625
+    }
+  ],
+  "CapturedNonWaitingFrames": [
+    {
+      "Sample": 0,
+      "TID": 45168,
+      "Name": "gwt-agent-capacity",
+      "LeafFrames": [
+        {
+          "function": "NtQueryInformationProcess",
+          "module": "ntdll.dll",
+          "pc": "0x7fffd0222074"
+        },
+        {
+          "function": "GetModuleFileNameExW",
+          "module": "KERNELBASE.dll",
+          "pc": "0x7fffcd9b6dd8"
+        },
+        {
+          "function": null,
+          "module": "gwt.exe",
+          "pc": "0x7ff6bacf5816"
+        }
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::session_inventory::observe_machine_sessions_with_system::closure$0",
+          "source": "crates/gwt/src/session_inventory.rs",
+          "line": 177
+        },
+        {
+          "function": "gwt::session_inventory::observe_machine_sessions_with_system_refresh::closure$0::closure$0<gwt::session_inventory::observe_machine_sessions_with_system::closure_env$0>",
+          "source": "crates/gwt/src/session_inventory.rs",
+          "line": 197
+        },
+        {
+          "function": "gwt::session_inventory::observe_machine_sessions_with_system_refresh::closure$0<gwt::session_inventory::observe_machine_sessions_with_system::closure_env$0>",
+          "source": "crates/gwt/src/session_inventory.rs",
+          "line": 196
+        },
+        {
+          "function": "gwt::session_inventory::read_candidates_with_liveness::closure$12<gwt::session_inventory::observe_machine_sessions_with_system_refresh::closure_env$0<gwt::session_inventory::observe_machine_sessions_with_system::closure_env$0> >",
+          "source": "crates/gwt/src/session_inventory.rs",
+          "line": 1030
+        },
+        {
+          "function": "gwt::session_inventory::read_candidates_with_liveness<gwt::session_inventory::observe_machine_sessions_with_system_refresh::closure_env$0<gwt::session_inventory::observe_machine_sessions_with_system::closure_env$0> >",
+          "source": "crates/gwt/src/session_inventory.rs",
+          "line": 1030
+        },
+        {
+          "function": "gwt::session_inventory::observe_machine_sessions_with_system_refresh<gwt::session_inventory::observe_machine_sessions_with_system::closure_env$0>",
+          "source": "crates/gwt/src/session_inventory.rs",
+          "line": 188
+        },
+        {
+          "function": "gwt::session_inventory::observe_machine_sessions_with_system",
+          "source": "crates/gwt/src/session_inventory.rs",
+          "line": 171
+        },
+        {
+          "function": "gwt::agent_capacity::RuntimeProbe::sample_machine",
+          "source": "crates/gwt/src/agent_capacity.rs",
+          "line": 855
+        },
+        {
+          "function": "gwt::agent_capacity::RuntimeProbe::refresh_projects",
+          "source": "crates/gwt/src/agent_capacity.rs",
+          "line": 684
+        },
+        {
+          "function": "gwt::agent_capacity::refresh_machine_capacity_for_projects",
+          "source": "crates/gwt/src/agent_capacity.rs",
+          "line": 620
+        },
+        {
+          "function": "gwt::main::closure$12",
+          "source": "crates/gwt/src/main.rs",
+          "line": 10637
+        }
+      ]
+    },
+    {
+      "Sample": 0,
+      "TID": 67744,
+      "Name": "gwt-index-refresh-drain",
+      "LeafFrames": [
+        {
+          "function": null,
+          "module": "gwt.exe",
+          "pc": "0x7ff6ba31ac84"
+        },
+        {
+          "function": null,
+          "module": "gwt.exe",
+          "pc": "0x7ff6ba31b419"
+        },
+        {
+          "function": null,
+          "module": "gwt.exe",
+          "pc": "0x7ff6ba317d54"
+        }
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt_core::index::path_policy::relative_path",
+          "source": "crates/gwt-core/src/index/path_policy.rs",
+          "line": 213
+        },
+        {
+          "function": "gwt_core::index::path_policy::IndexPathPolicy::is_builtin_denied_path",
+          "source": "crates/gwt-core/src/index/path_policy.rs",
+          "line": 98
+        },
+        {
+          "function": "gwt::index_worker::poll_registered_project_index_sources::closure$3",
+          "source": "crates/gwt/src/index_worker.rs",
+          "line": 2452
+        },
+        {
+          "function": "gwt::index_worker::poll_registered_project_index_sources",
+          "source": "crates/gwt/src/index_worker.rs",
+          "line": 2453
+        },
+        {
+          "function": "gwt::project_index_bootstrap::refresh_broker_drain_loop",
+          "source": "crates/gwt/src/project_index_bootstrap.rs",
+          "line": 1321
+        },
+        {
+          "function": "gwt::project_index_bootstrap::ensure_refresh_broker_drain::closure$0::closure$0",
+          "source": "crates/gwt/src/project_index_bootstrap.rs",
+          "line": 1293
+        }
+      ]
+    },
+    {
+      "Sample": 1,
+      "TID": 25412,
+      "Name": "gwt-monitor-runtime",
+      "LeafFrames": [
+        {
+          "function": "NtFreeVirtualMemory",
+          "module": "ntdll.dll",
+          "pc": "0x7fffd0222114"
+        },
+        {
+          "function": "CreateToolhelp32Snapshot",
+          "module": "kernel32.dll",
+          "pc": "0x7fffcf4eaf11"
+        },
+        {
+          "function": null,
+          "module": "gwt.exe",
+          "pc": "0x7ff6b969b50a"
+        }
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::session_inventory::capture_process_resources_with_system",
+          "source": "crates/gwt/src/session_inventory.rs",
+          "line": 551
+        },
+        {
+          "function": "gwt::session_inventory::capture_process_resources",
+          "source": "crates/gwt/src/session_inventory.rs",
+          "line": 489
+        },
+        {
+          "function": "gwt::session_inventory::ProjectSessionCensus::capture",
+          "source": "crates/gwt/src/session_inventory.rs",
+          "line": 382
+        },
+        {
+          "function": "gwt::monitor_duplicate_runtime::reconcile_projects::closure$1",
+          "source": "crates/gwt/src/monitor_duplicate_runtime.rs",
+          "line": 101
+        },
+        {
+          "function": "gwt::monitor_duplicate_runtime::reconcile_projects",
+          "source": "crates/gwt/src/monitor_duplicate_runtime.rs",
+          "line": 101
+        },
+        {
+          "function": "gwt::monitor_duplicate_runtime::spawn::closure$0<gwt::main::closure_env$13>",
+          "source": "crates/gwt/src/monitor_duplicate_runtime.rs",
+          "line": 72
+        }
+      ]
+    },
+    {
+      "Sample": 1,
+      "TID": 67744,
+      "Name": "gwt-index-refresh-drain",
+      "LeafFrames": [
+        {
+          "function": "NtCreateFile",
+          "module": "ntdll.dll",
+          "pc": "0x7fffd02227f4"
+        },
+        {
+          "function": "GetDriveTypeW",
+          "module": "KERNELBASE.dll",
+          "pc": "0x7fffcd926217"
+        },
+        {
+          "function": "CreateFileW",
+          "module": "KERNELBASE.dll",
+          "pc": "0x7fffcd927887"
+        }
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt_core::index::path_policy::relative_path",
+          "source": "crates/gwt-core/src/index/path_policy.rs",
+          "line": 213
+        },
+        {
+          "function": "gwt_core::index::path_policy::IndexPathPolicy::is_builtin_denied_path",
+          "source": "crates/gwt-core/src/index/path_policy.rs",
+          "line": 98
+        },
+        {
+          "function": "gwt::index_worker::poll_registered_project_index_sources::closure$3",
+          "source": "crates/gwt/src/index_worker.rs",
+          "line": 2452
+        },
+        {
+          "function": "gwt::index_worker::poll_registered_project_index_sources",
+          "source": "crates/gwt/src/index_worker.rs",
+          "line": 2453
+        },
+        {
+          "function": "gwt::project_index_bootstrap::refresh_broker_drain_loop",
+          "source": "crates/gwt/src/project_index_bootstrap.rs",
+          "line": 1321
+        },
+        {
+          "function": "gwt::project_index_bootstrap::ensure_refresh_broker_drain::closure$0::closure$0",
+          "source": "crates/gwt/src/project_index_bootstrap.rs",
+          "line": 1293
+        }
+      ]
+    },
+    {
+      "Sample": 12,
+      "TID": 45168,
+      "Name": "gwt-agent-capacity",
+      "LeafFrames": [
+        {
+          "function": "NtQueryDirectoryFileEx",
+          "module": "ntdll.dll",
+          "pc": "0x7fffd0224704"
+        },
+        {
+          "function": "FindNextFileW",
+          "module": "KERNELBASE.dll",
+          "pc": "0x7fffcd99333e"
+        },
+        {
+          "function": "std::sys::fs::windows::impl$6::next",
+          "module": "gwt.exe",
+          "pc": "0x7ff6ba8d9c90"
+        }
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::agent_capacity::TargetWalk::advance",
+          "source": "crates/gwt/src/agent_capacity.rs",
+          "line": 1057
+        },
+        {
+          "function": "gwt::agent_capacity::RuntimeProbe::refresh_projects",
+          "source": "crates/gwt/src/agent_capacity.rs",
+          "line": 756
+        },
+        {
+          "function": "gwt::agent_capacity::refresh_machine_capacity_for_projects",
+          "source": "crates/gwt/src/agent_capacity.rs",
+          "line": 620
+        },
+        {
+          "function": "gwt::main::closure$12",
+          "source": "crates/gwt/src/main.rs",
+          "line": 10637
+        }
+      ]
+    },
+    {
+      "Sample": 12,
+      "TID": 25412,
+      "Name": "gwt-monitor-runtime",
+      "LeafFrames": [
+        {
+          "function": "NtOpenFile",
+          "module": "ntdll.dll",
+          "pc": "0x7fffd02223b4"
+        },
+        {
+          "function": "FindFirstFileExW",
+          "module": "KERNELBASE.dll",
+          "pc": "0x7fffcd96cc15"
+        },
+        {
+          "function": "FindFirstFileExW",
+          "module": "KERNELBASE.dll",
+          "pc": "0x7fffcd96ca03"
+        }
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::session_inventory::read_entries",
+          "source": "crates/gwt/src/session_inventory.rs",
+          "line": 1068
+        },
+        {
+          "function": "gwt::session_inventory::read_candidates_with_liveness<gwt::session_inventory::read_candidates_scope_with_snapshot::closure_env$0>",
+          "source": "crates/gwt/src/session_inventory.rs",
+          "line": 973
+        },
+        {
+          "function": "gwt::session_inventory::read_candidates_scope_with_snapshot",
+          "source": "crates/gwt/src/session_inventory.rs",
+          "line": 897
+        },
+        {
+          "function": "gwt::session_inventory::ProjectSessionCensus::capture",
+          "source": "crates/gwt/src/session_inventory.rs",
+          "line": 375
+        },
+        {
+          "function": "gwt::monitor_duplicate_runtime::reconcile_projects::closure$1",
+          "source": "crates/gwt/src/monitor_duplicate_runtime.rs",
+          "line": 101
+        },
+        {
+          "function": "gwt::monitor_duplicate_runtime::reconcile_projects",
+          "source": "crates/gwt/src/monitor_duplicate_runtime.rs",
+          "line": 101
+        },
+        {
+          "function": "gwt::monitor_duplicate_runtime::spawn::closure$0<gwt::main::closure_env$13>",
+          "source": "crates/gwt/src/monitor_duplicate_runtime.rs",
+          "line": 72
+        }
+      ]
+    }
+  ],
+  "SymbolizedRvas": [
+    {
+      "Address": "0x3d5d075",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/slice/iter/macros.rs",
+          "FunctionName": "core::slice::iter::impl$171::position",
+          "Line": 379,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        },
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/path.rs",
+          "FunctionName": "std::path::Components::parse_next_component",
+          "Line": 783,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        },
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/path.rs",
+          "FunctionName": "<std::path::Components as core::iter::traits::iterator::Iterator>::next",
+          "Line": 928,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x3d5d050",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/path.rs",
+          "FunctionName": "std::path::Components::is_sep_byte",
+          "Line": 710,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        },
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/path.rs",
+          "FunctionName": "std::path::impl$10::parse_next_component::closure$0",
+          "Line": 783,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        },
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/slice/iter/macros.rs",
+          "FunctionName": "core::slice::iter::impl$171::position",
+          "Line": 379,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        },
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/path.rs",
+          "FunctionName": "std::path::Components::parse_next_component",
+          "Line": 783,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        },
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/path.rs",
+          "FunctionName": "<std::path::Components as core::iter::traits::iterator::Iterator>::next",
+          "Line": 928,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x3d4c19d",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/iter/traits/iterator.rs",
+          "FunctionName": "core::iter::traits::iterator::Iterator::try_fold",
+          "Line": 2489,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        },
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/iter/traits/iterator.rs",
+          "FunctionName": "core::iter::traits::iterator::Iterator::try_for_each",
+          "Line": 2552,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        },
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/iter/traits/iterator.rs",
+          "FunctionName": "core::iter::traits::iterator::iter_compare",
+          "Line": 4210,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        },
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/iter/traits/iterator.rs",
+          "FunctionName": "core::iter::traits::iterator::Iterator::cmp_by",
+          "Line": 3764,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        },
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/iter/traits/iterator.rs",
+          "FunctionName": "core::iter::traits::iterator::Iterator::cmp",
+          "Line": 3725,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        },
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/path.rs",
+          "FunctionName": "std::path::compare_components",
+          "Line": 1100,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x3d4c170",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/iter/traits/iterator.rs",
+          "FunctionName": "core::iter::traits::iterator::Iterator::try_fold",
+          "Line": 2489,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        },
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/iter/traits/iterator.rs",
+          "FunctionName": "core::iter::traits::iterator::Iterator::try_for_each",
+          "Line": 2552,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        },
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/iter/traits/iterator.rs",
+          "FunctionName": "core::iter::traits::iterator::iter_compare",
+          "Line": 4210,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        },
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/iter/traits/iterator.rs",
+          "FunctionName": "core::iter::traits::iterator::Iterator::cmp_by",
+          "Line": 3764,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        },
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/iter/traits/iterator.rs",
+          "FunctionName": "core::iter::traits::iterator::Iterator::cmp",
+          "Line": 3725,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        },
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/path.rs",
+          "FunctionName": "std::path::compare_components",
+          "Line": 1100,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x3d4c110",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/iter/traits/collect.rs",
+          "FunctionName": "core::iter::traits::collect::impl$0::into_iter",
+          "Line": 323,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        },
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/iter/traits/iterator.rs",
+          "FunctionName": "core::iter::traits::iterator::Iterator::cmp_by",
+          "Line": 3764,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        },
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/iter/traits/iterator.rs",
+          "FunctionName": "core::iter::traits::iterator::Iterator::cmp",
+          "Line": 3725,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        },
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/path.rs",
+          "FunctionName": "std::path::compare_components",
+          "Line": 1100,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x31460e4",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/path.rs",
+          "FunctionName": "<std::path::PathBuf as core::cmp::PartialOrd>::partial_cmp",
+          "Line": 2298,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x32aabde",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/cmp.rs",
+          "FunctionName": "core::cmp::default_chaining_impl::<std::path::PathBuf, std::path::PathBuf, <core::cmp::Ordering>::is_lt>",
+          "Line": 1533,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x31524b9",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/cmp.rs",
+          "FunctionName": "<std::path::PathBuf as core::cmp::PartialOrd>::__chaining_lt",
+          "Line": 1492,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x1161663",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/tuple.rs",
+          "FunctionName": "<(std::path::PathBuf, u64, u128) as core::cmp::PartialOrd>::lt",
+          "Line": 196,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x1ae1aad",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/ops/function.rs",
+          "FunctionName": "<<(std::path::PathBuf, u64, u128) as core::cmp::PartialOrd>::lt as core::ops::function::FnMut<(&(std::path::PathBuf, u64, u128), &(std::path::PathBuf, u64, u128))>>::call_mut",
+          "Line": 166,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x291ebff",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/slice/sort/shared/smallsort.rs",
+          "FunctionName": "core::slice::sort::shared::smallsort::sort4_stable::<(std::path::PathBuf, u64, u128), <(std::path::PathBuf, u64, u128) as core::cmp::PartialOrd>::lt>",
+          "Line": 636,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x2969a30",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/slice/sort/shared/smallsort.rs",
+          "FunctionName": "core::slice::sort::shared::smallsort::small_sort_general_with_scratch::<(std::path::PathBuf, u64, u128), <(std::path::PathBuf, u64, u128) as core::cmp::PartialOrd>::lt>",
+          "Line": 257,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x1d7fc1d",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/slice/sort/stable/quicksort.rs",
+          "FunctionName": "core::slice::sort::stable::quicksort::quicksort::<(std::path::PathBuf, u64, u128), <(std::path::PathBuf, u64, u128) as core::cmp::PartialOrd>::lt>",
+          "Line": 27,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x1d7fc13",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/slice/sort/shared/smallsort.rs",
+          "FunctionName": "core::slice::sort::shared::smallsort::impl$1::small_sort",
+          "Line": 61,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        },
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/slice/sort/stable/quicksort.rs",
+          "FunctionName": "core::slice::sort::stable::quicksort::quicksort::<(std::path::PathBuf, u64, u128), <(std::path::PathBuf, u64, u128) as core::cmp::PartialOrd>::lt>",
+          "Line": 27,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x1d7feb6",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/slice/sort/stable/quicksort.rs",
+          "FunctionName": "core::slice::sort::stable::quicksort::quicksort::<(std::path::PathBuf, u64, u128), <(std::path::PathBuf, u64, u128) as core::cmp::PartialOrd>::lt>",
+          "Line": 23,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x1d18347",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/slice/sort/stable/drift.rs",
+          "FunctionName": "core::slice::sort::stable::drift::stable_quicksort::<(std::path::PathBuf, u64, u128), <(std::path::PathBuf, u64, u128) as core::cmp::PartialOrd>::lt>",
+          "Line": 270,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x1d2cbff",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/slice/sort/stable/drift.rs",
+          "FunctionName": "core::slice::sort::stable::drift::logical_merge",
+          "Line": 205,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        },
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/slice/sort/stable/drift.rs",
+          "FunctionName": "core::slice::sort::stable::drift::sort::<(std::path::PathBuf, u64, u128), <(std::path::PathBuf, u64, u128) as core::cmp::PartialOrd>::lt>",
+          "Line": 94,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x1d2cb3e",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/slice/sort/stable/drift.rs",
+          "FunctionName": "core::slice::sort::stable::drift::logical_merge",
+          "Line": 203,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        },
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/slice/sort/stable/drift.rs",
+          "FunctionName": "core::slice::sort::stable::drift::sort::<(std::path::PathBuf, u64, u128), <(std::path::PathBuf, u64, u128) as core::cmp::PartialOrd>::lt>",
+          "Line": 94,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x1ce3c87",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/slice/sort/stable/mod.rs",
+          "FunctionName": "core::slice::sort::stable::driftsort_main::<(std::path::PathBuf, u64, u128), <(std::path::PathBuf, u64, u128) as core::cmp::PartialOrd>::lt, alloc::vec::Vec<(std::path::PathBuf, u64, u128)>>",
+          "Line": 135,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0xdcf287",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/slice/sort/stable/mod.rs",
+          "FunctionName": "core::slice::sort::stable::sort",
+          "Line": 86,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        },
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/alloc/src/slice.rs",
+          "FunctionName": "alloc::slice::stable_sort::<(std::path::PathBuf, u64, u128), <(std::path::PathBuf, u64, u128) as core::cmp::PartialOrd>::lt>",
+          "Line": 857,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0xdcf25e",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/slice/sort/stable/mod.rs",
+          "FunctionName": "core::slice::sort::stable::sort",
+          "Line": 38,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        },
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/alloc/src/slice.rs",
+          "FunctionName": "alloc::slice::stable_sort::<(std::path::PathBuf, u64, u128), <(std::path::PathBuf, u64, u128) as core::cmp::PartialOrd>::lt>",
+          "Line": 857,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x10df549",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/alloc/src/slice.rs",
+          "FunctionName": "<[(std::path::PathBuf, u64, u128)]>::sort",
+          "Line": 135,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x1f65f07",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "crates/gwt/src/index_worker.rs",
+          "FunctionName": "gwt::index_worker::refresh_source_snapshot",
+          "Line": 2287,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x1f75a9d",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "crates/gwt/src/index_worker.rs",
+          "FunctionName": "gwt::index_worker::poll_registered_project_index_sources",
+          "Line": 2454,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x4751f6",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "crates/gwt/src/project_index_bootstrap.rs",
+          "FunctionName": "gwt::project_index_bootstrap::refresh_broker_drain_loop",
+          "Line": 1321,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x3fcf0f",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "crates/gwt/src/project_index_bootstrap.rs",
+          "FunctionName": "gwt::project_index_bootstrap::ensure_refresh_broker_drain::{closure#0}::{closure#0}",
+          "Line": 1293,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x4b1b09",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/sys/backtrace.rs",
+          "FunctionName": "std::sys::backtrace::__rust_begin_short_backtrace::<gwt::project_index_bootstrap::ensure_refresh_broker_drain::{closure#0}::{closure#0}, ()>",
+          "Line": 166,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x8fd55e",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/thread/lifecycle.rs",
+          "FunctionName": "std::thread::lifecycle::spawn_unchecked::<gwt::project_index_bootstrap::ensure_refresh_broker_drain::{closure#0}::{closure#0}, ()>::{closure#1}::{closure#0}",
+          "Line": 70,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x75d261",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/panic/unwind_safe.rs",
+          "FunctionName": "<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<gwt::project_index_bootstrap::ensure_refresh_broker_drain::{closure#0}::{closure#0}, ()>::{closure#1}::{closure#0}> as core::ops::function::FnOnce<()>>::call_once",
+          "Line": 275,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x94bb11",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/panicking.rs",
+          "FunctionName": "std::panicking::catch_unwind::do_call::<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<gwt::project_index_bootstrap::ensure_refresh_broker_drain::{closure#0}::{closure#0}, ()>::{closure#1}::{closure#0}>, ()>",
+          "Line": 576,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x913903",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "",
+          "FunctionName": "<serde_core::de::value::Error as serde_core::de::Error>::duplicate_field",
+          "Line": 0,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x8ef8f7",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/panicking.rs",
+          "FunctionName": "std::panicking::catch_unwind",
+          "Line": 544,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        },
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/panic.rs",
+          "FunctionName": "std::panic::catch_unwind",
+          "Line": 359,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        },
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/thread/lifecycle.rs",
+          "FunctionName": "std::thread::lifecycle::spawn_unchecked::<gwt::project_index_bootstrap::ensure_refresh_broker_drain::{closure#0}::{closure#0}, ()>::{closure#1}",
+          "Line": 68,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x8ef8a1",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/mem/maybe_dangling.rs",
+          "FunctionName": "core::mem::maybe_dangling::MaybeDangling::new",
+          "Line": 82,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        },
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/mem/manually_drop.rs",
+          "FunctionName": "core::mem::manually_drop::ManuallyDrop::new",
+          "Line": 183,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        },
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/panicking.rs",
+          "FunctionName": "std::panicking::catch_unwind",
+          "Line": 532,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        },
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/panic.rs",
+          "FunctionName": "std::panic::catch_unwind",
+          "Line": 359,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        },
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/thread/lifecycle.rs",
+          "FunctionName": "std::thread::lifecycle::spawn_unchecked::<gwt::project_index_bootstrap::ensure_refresh_broker_drain::{closure#0}::{closure#0}, ()>::{closure#1}",
+          "Line": 68,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x62e469",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/ops/function.rs",
+          "FunctionName": "<std::thread::lifecycle::spawn_unchecked<gwt::project_index_bootstrap::ensure_refresh_broker_drain::{closure#0}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}",
+          "Line": 250,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x3d55ac3",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/alloc/src/boxed.rs",
+          "FunctionName": "alloc::boxed::impl$31::call_once",
+          "Line": 2320,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        },
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/sys/thread/windows.rs",
+          "FunctionName": "std::sys::thread::windows::impl$0::new::thread_start",
+          "Line": 58,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x3d55ab4",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/alloc/src/boxed.rs",
+          "FunctionName": "alloc::boxed::impl$31::call_once",
+          "Line": 2320,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        },
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/sys/thread/windows.rs",
+          "FunctionName": "std::sys::thread::windows::impl$0::new::thread_start",
+          "Line": 58,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x4175816",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "",
+          "FunctionName": "windows::Win32::System::ProcessStatus::GetModuleFileNameExW",
+          "Line": 0,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x2b248f6",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "",
+          "FunctionName": "sysinfo::windows::process::get_process_data",
+          "Line": 0,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x2b21d09",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "",
+          "FunctionName": "<sysinfo::windows::process::ProcessInner>::update",
+          "Line": 0,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x2b1ac3a",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "",
+          "FunctionName": "<sysinfo::windows::system::SystemInner>::refresh_processes_specifics",
+          "Line": 0,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x2b17e31",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "",
+          "FunctionName": "<sysinfo::common::system::System>::refresh_processes_specifics",
+          "Line": 0,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x379ac84",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "",
+          "FunctionName": "<core::str::pattern::MultiCharEqPattern<[char; 2]> as core::str::pattern::Pattern>::into_searcher",
+          "Line": 0,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x379b419",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "",
+          "FunctionName": "<[char; 2] as core::str::pattern::Pattern>::into_searcher",
+          "Line": 0,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x3797d54",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "",
+          "FunctionName": "<str>::trim_end_matches::<[char; 2]>",
+          "Line": 0,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x3799078",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "",
+          "FunctionName": "<std::os::windows::ffi::EncodeWide as core::iter::traits::iterator::Iterator>::count::{closure#0}",
+          "Line": 0,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x3797c3c",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "",
+          "FunctionName": "<usize as core::cmp::Ord>::max",
+          "Line": 0,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x3799681",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "",
+          "FunctionName": "dunce::is_safe_to_strip_unc",
+          "Line": 0,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x379913f",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "",
+          "FunctionName": "dunce::canonicalize_win",
+          "Line": 0,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x2b1b50a",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "",
+          "FunctionName": "windows::Win32::System::Diagnostics::Debug::ReadProcessMemory",
+          "Line": 0,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x2b1a89a",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "",
+          "FunctionName": "<sysinfo::windows::system::SystemInner>::refresh_processes_specifics",
+          "Line": 0,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x3798709",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "",
+          "FunctionName": "std::fs::canonicalize::<&std::path::Path>",
+          "Line": 0,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x37990b3",
+      "ModuleName": "target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "",
+          "FunctionName": "dunce::canonicalize_win",
+          "Line": 0,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    }
+  ],
+  "Safety": "Summary includes function/module/source/line and timing/identity only; no arguments, variable values, credentials, environment, or raw dump memory.",
+  "Acceptance": false,
+  "Sanitization": "Absolute checkout and private HOME paths are replaced by repository-relative paths or <private-home>; local lifecycle event filenames are omitted. PID, creation FILETIME, hashes, counters, timestamps and decoded functions are retained. Raw dumps/PDB/arguments/environment are not published.",
+  "CapacityScopeObservation": {
+    "Evidence": "Aggregate of the same owned private-HOME machine-state/agent-capacity.json; no Session records or worktree paths published",
+    "ObservedAtUtc": "2026-10-17T00:22:12Z",
+    "LiveSessionRecords": 22,
+    "FixtureSessionRecords": 12,
+    "CopiedOtherLiveSessionRecords": 10,
+    "Uncertainties": 2,
+    "Qualification": "refresh_projects adds all machine inventory Session worktree roots. The TargetWalk sample does not identify which root was visited and cannot attribute the entire capacity-thread CPU. A later root can be marked in-progress after the shared scan budget is exhausted."
+  }
+}

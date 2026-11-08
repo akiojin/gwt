@@ -67,7 +67,7 @@ pub(super) fn format_entry_line(entry: &BoardEntry, match_keys: &[String]) -> St
     let mut out = format!(
         "- {prefix}[{author} @ {branch} / {session}] ({kind})\n",
         prefix = prefix,
-        author = entry.author,
+        author = entry.author_display_name(),
         branch = branch,
         session = session_id,
         kind = entry.kind.as_str(),
@@ -135,6 +135,16 @@ mod tests {
             line.starts_with("- "),
             "entry line should start with bullet: {line}"
         );
+    }
+
+    #[test]
+    fn format_entry_line_leads_with_the_immutable_agent_name() {
+        let mut json = serde_json::to_value(make_entry(vec![])).unwrap();
+        json["origin_agent_name"] = serde_json::json!("ミオ");
+        let named: BoardEntry = serde_json::from_value(json).unwrap();
+        assert!(format_entry_line(&named, &[])
+            .contains("[ミオ (OtherAgent) @ feature/other / sess-other]"));
+        assert!(format_entry_line(&make_entry(vec![]), &[]).contains("[OtherAgent @"));
     }
 
     #[test]

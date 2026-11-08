@@ -1,0 +1,151 @@
+{
+  "method": "Completed owned run provider JSONL; scheduled attempt intervals after each actual started receipt, excluding bind warm-up. Timestamp resolution 1ms. Timer quantization and host delay are not separately attributed.",
+  "gui_pid": 52700,
+  "provider_sha256": "d65e9cd4fdadcb75fe20ed24f3b7521ea2836c6a6119f50006710f0fe1a9ed42",
+  "nominal_period_ms": 10909.09090909091,
+  "agents": 12,
+  "interval_count": 560,
+  "mean_interval_ms": 10933.1375,
+  "mean_drift_ms": 24.04659090909081,
+  "relative_drift_percent": 0.22042708333334105,
+  "interval_min_ms": 10845,
+  "interval_p50_ms": 10919,
+  "interval_p95_ms": 10973,
+  "interval_max_ms": 12467,
+  "implied_reads_per_minute": 65.85483810113976,
+  "projected_30m_attempt_shortfall": 4.35485696580713,
+  "per_agent": [
+    {
+      "session_id": "eef4f07f-c0a2-4e45-8cae-8f85ea21aa83",
+      "attempts": 48,
+      "intervals": 47,
+      "first_attempt_utc": "2026-10-16T22:20:22.591Z",
+      "last_attempt_utc": "2026-10-16T22:28:56.189Z",
+      "mean_interval_ms": 10927.617021276596,
+      "cumulative_drift_ms": 870.7272727272357,
+      "successes": 48,
+      "failures": 0
+    },
+    {
+      "session_id": "8fe0fc04-6d3d-44bc-8378-058280963b19",
+      "attempts": 48,
+      "intervals": 47,
+      "first_attempt_utc": "2026-10-16T22:20:23.499Z",
+      "last_attempt_utc": "2026-10-16T22:28:58.013Z",
+      "mean_interval_ms": 10947.106382978724,
+      "cumulative_drift_ms": 1786.7272727272357,
+      "successes": 48,
+      "failures": 0
+    },
+    {
+      "session_id": "e9565520-153f-4a19-8cc9-c81e99423130",
+      "attempts": 48,
+      "intervals": 47,
+      "first_attempt_utc": "2026-10-16T22:20:24.400Z",
+      "last_attempt_utc": "2026-10-16T22:28:59.051Z",
+      "mean_interval_ms": 10950.021276595744,
+      "cumulative_drift_ms": 1923.7272727272357,
+      "successes": 48,
+      "failures": 0
+    },
+    {
+      "session_id": "362b1802-47d2-49cf-b01d-7d47b21d1f46",
+      "attempts": 48,
+      "intervals": 47,
+      "first_attempt_utc": "2026-10-16T22:20:25.307Z",
+      "last_attempt_utc": "2026-10-16T22:28:59.744Z",
+      "mean_interval_ms": 10945.468085106382,
+      "cumulative_drift_ms": 1709.7272727272357,
+      "successes": 48,
+      "failures": 0
+    },
+    {
+      "session_id": "8d7aedd4-5517-490c-a8f1-76334ecca115",
+      "attempts": 48,
+      "intervals": 47,
+      "first_attempt_utc": "2026-10-16T22:20:26.216Z",
+      "last_attempt_utc": "2026-10-16T22:28:59.453Z",
+      "mean_interval_ms": 10919.936170212766,
+      "cumulative_drift_ms": 509.7272727272357,
+      "successes": 48,
+      "failures": 0
+    },
+    {
+      "session_id": "c6ae0d34-9e66-49e0-a44c-4282ad3bcb43",
+      "attempts": 48,
+      "intervals": 47,
+      "first_attempt_utc": "2026-10-16T22:20:27.137Z",
+      "last_attempt_utc": "2026-10-16T22:29:00.653Z",
+      "mean_interval_ms": 10925.872340425532,
+      "cumulative_drift_ms": 788.7272727272357,
+      "successes": 48,
+      "failures": 0
+    },
+    {
+      "session_id": "7c1704a9-dd97-4d73-b8c6-8cf7f7673157",
+      "attempts": 48,
+      "intervals": 47,
+      "first_attempt_utc": "2026-10-16T22:20:28.042Z",
+      "last_attempt_utc": "2026-10-16T22:29:01.752Z",
+      "mean_interval_ms": 10930,
+      "cumulative_drift_ms": 982.7272727272357,
+      "successes": 48,
+      "failures": 0
+    },
+    {
+      "session_id": "f7177e07-d0a9-41c2-a34b-67ccbfd27c81",
+      "attempts": 48,
+      "intervals": 47,
+      "first_attempt_utc": "2026-10-16T22:20:28.950Z",
+      "last_attempt_utc": "2026-10-16T22:29:02.993Z",
+      "mean_interval_ms": 10937.08510638298,
+      "cumulative_drift_ms": 1315.7272727272357,
+      "successes": 47,
+      "failures": 0
+    },
+    {
+      "session_id": "24ceed6a-4c7b-450e-b9a6-fa0dbd8839d8",
+      "attempts": 47,
+      "intervals": 46,
+      "first_attempt_utc": "2026-10-16T22:20:29.854Z",
+      "last_attempt_utc": "2026-10-16T22:28:52.634Z",
+      "mean_interval_ms": 10930,
+      "cumulative_drift_ms": 961.8181818181183,
+      "successes": 47,
+      "failures": 0
+    },
+    {
+      "session_id": "23904fc0-54fc-4c0e-8306-a2343e646f3b",
+      "attempts": 47,
+      "intervals": 46,
+      "first_attempt_utc": "2026-10-16T22:20:30.762Z",
+      "last_attempt_utc": "2026-10-16T22:28:53.574Z",
+      "mean_interval_ms": 10930.695652173914,
+      "cumulative_drift_ms": 993.8181818181183,
+      "successes": 47,
+      "failures": 0
+    },
+    {
+      "session_id": "33f6fabf-8baa-4a3b-b8d7-349f3194ea2e",
+      "attempts": 47,
+      "intervals": 46,
+      "first_attempt_utc": "2026-10-16T22:20:31.685Z",
+      "last_attempt_utc": "2026-10-16T22:28:54.173Z",
+      "mean_interval_ms": 10923.652173913044,
+      "cumulative_drift_ms": 669.8181818181183,
+      "successes": 47,
+      "failures": 0
+    },
+    {
+      "session_id": "960bae24-c5a4-4a11-9b3c-f61b1e3e5e19",
+      "attempts": 47,
+      "intervals": 46,
+      "first_attempt_utc": "2026-10-16T22:20:32.588Z",
+      "last_attempt_utc": "2026-10-16T22:28:55.359Z",
+      "mean_interval_ms": 10929.804347826086,
+      "cumulative_drift_ms": 952.8181818181183,
+      "successes": 47,
+      "failures": 0
+    }
+  ]
+}

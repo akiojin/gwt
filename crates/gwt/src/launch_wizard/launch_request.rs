@@ -48,7 +48,7 @@ impl LaunchWizardState {
                 && custom_agent.env.contains_key("ANTHROPIC_BASE_URL")
             {
                 return Err(
-                    "旧 backend 設定は自動移行されません。Settings で provider を再登録してください"
+                    "Legacy backend settings are not migrated automatically. Register the provider again in Settings."
                         .to_string(),
                 );
             }
@@ -1808,7 +1808,7 @@ mod tests {
             state
                 .build_launch_config()
                 .expect_err("manual registration required"),
-            "旧 backend 設定は自動移行されません。Settings で provider を再登録してください"
+            "Legacy backend settings are not migrated automatically. Register the provider again in Settings."
         );
         assert_eq!(std::fs::read_to_string(path).unwrap(), fixture);
     }

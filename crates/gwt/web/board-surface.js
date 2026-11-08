@@ -1,15 +1,15 @@
-export function boardMentionKind(mention) {
+function boardMentionKind(mention) {
   return String(mention?.target_kind || mention?.targetKind || "").toLowerCase();
 }
 
-export function boardMentionLabel(mention) {
+function boardMentionLabel(mention) {
   const label = String(mention?.label || "").trim();
   if (label) return label;
   const target = String(mention?.target || "").trim();
   return target || "Unknown";
 }
 
-export function boardMentionTypedKey(mention) {
+function boardMentionTypedKey(mention) {
   const kind = boardMentionKind(mention);
   const target = String(mention?.target || "").trim();
   return kind && target ? `${kind}:${target}` : "";
@@ -53,7 +53,7 @@ export function boardEntryAudienceLabels(entry, selfKeys = []) {
   return ["Broadcast"];
 }
 
-export function normalizedBoardWorkspaceAudience(entry) {
+function normalizedBoardWorkspaceAudience(entry) {
   const audience = Array.isArray(entry?.audience) ? entry.audience : [];
   const normalized = [];
   for (const value of audience) {
@@ -70,10 +70,19 @@ export function boardEntryOriginSessionId(entry) {
   return authorKind === "agent" ? sessionId : "";
 }
 
+export function boardEntryAuthorLabel(entry) {
+  const author = String(entry?.author || "Unknown").trim();
+  const name = String(entry?.origin_agent_name || "").trim();
+  return String(entry?.author_kind || "").toLowerCase() === "agent" && name
+    ? `${name} (${author})` : author;
+}
+
 export function boardEntryOriginLabel(entry) {
   const sessionId = boardEntryOriginSessionId(entry);
   if (!sessionId) return "";
-  const agent = String(entry?.origin_agent_id || entry?.author || "").trim();
+  const agent = entry?.origin_agent_name
+    ? boardEntryAuthorLabel(entry)
+    : String(entry?.origin_agent_id || entry?.author || "").trim();
   const branch = String(entry?.origin_branch || "").trim();
   const shortSession = sessionId.slice(0, 8);
   const parts = [agent, branch, shortSession].filter(Boolean);
@@ -135,9 +144,6 @@ export function entryVisibleForWorkspace(entry, currentWorkspaceId) {
     .some((workspaceId) => audience.includes(workspaceId));
 }
 
-export function boardEntryVisibleForWorkspace(entry, workspaceId) {
-  return entryVisibleForWorkspace(entry, workspaceId);
-}
 
 export function visibleBoardEntries(state, selfKeys = []) {
   const entries = state?.entries || [];
@@ -224,7 +230,8 @@ function makeLane(key, byId) {
  * `options.workspaces` is an array of `{ id, titleSummary?, title?, branch?,
  * lifecycle? }`. Returns lanes ordered by most-recent activity, with
  * Done/Archived lanes pushed to the end. Each lane's `entries` stay in
- * chronological (created_at ascending) order.
+ * chronological (created_at ascending) order. `entriesSorted` skips the sort
+ * when the caller already maintains chronological order.
  */
 export function groupBoardLanes(entries, options = {}) {
   const workspaces = Array.isArray(options.workspaces) ? options.workspaces : [];
@@ -251,7 +258,7 @@ export function groupBoardLanes(entries, options = {}) {
   }
 
   const ordered = [...lanes.values()];
-  for (const lane of ordered) {
+  for (const lane of options.entriesSorted ? [] : ordered) {
     lane.entries.sort((a, b) =>
       String(a?.created_at || "").localeCompare(String(b?.created_at || "")),
     );
