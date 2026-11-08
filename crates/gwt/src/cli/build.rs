@@ -611,21 +611,23 @@ fn run_after_quarantine_precheck<E: CliEnv>(
             return Ok(1);
         }
     }
-    match abort_done_build(env, &action, out) {
-        Ok(Some(code)) => return Ok(code),
-        Ok(None) => {}
-        Err(error) => {
-            let session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).unwrap_or_default();
-            let error = crate::cli::execution_state::terminal_recovery_refusal(
-                env.repo_path(),
-                session.trim(),
-                &error,
-            );
-            out.push_str(&format!("{VERB}: Done Work build cleanup refused: {error}; inspect JSON operation `execution.status` and its recovery_probes before retrying\n"));
-            return Ok(1);
+    let recovered_orphan = missing_build_work_recovery_identity(env, &action);
+    if recovered_orphan.is_none() {
+        match abort_done_build(env, &action, out) {
+            Ok(Some(code)) => return Ok(code),
+            Ok(None) => {}
+            Err(error) => {
+                let session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).unwrap_or_default();
+                let error = crate::cli::execution_state::terminal_recovery_refusal(
+                    env.repo_path(),
+                    session.trim(),
+                    &error,
+                );
+                out.push_str(&format!("{VERB}: Done Work build cleanup refused: {error}; inspect JSON operation `execution.status` and its recovery_probes before retrying\n"));
+                return Ok(1);
+            }
         }
     }
-    let recovered_orphan = missing_build_work_recovery_identity(env, &action);
     if let Err(error) = if recovered_orphan.is_some() {
         Ok(())
     } else {
