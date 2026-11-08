@@ -90,6 +90,21 @@ const ISSUE_MONITOR_PREFS_BUDGET: gwt_core::deadline_budget::DeadlineBudget =
         Duration::from_millis(250),
     );
 const ISSUE_MONITOR_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+/// Issue #6877 AC-2: how old a GitHub read may be for a timer-only scan. A
+/// test that drives the fake `gh` through consecutive timer scans pins it to
+/// zero (`GWT_TEST_BUDGET_ISSUE_MONITOR_PERIODIC_READ_MAX_AGE_MS=0`) so every
+/// scan reads live, as the production control-driven scans do.
+const ISSUE_MONITOR_PERIODIC_READ_MAX_AGE_BUDGET: gwt_core::deadline_budget::DeadlineBudget =
+    gwt_core::deadline_budget::DeadlineBudget::new(
+        "ISSUE_MONITOR_PERIODIC_READ_MAX_AGE",
+        crate::issue_monitor_worker::ISSUE_MONITOR_PERIODIC_READ_MAX_AGE,
+    );
+
+/// The read max age a timer-only scan enters; `None` keeps every read fresh.
+fn issue_monitor_periodic_read_max_age() -> Option<Duration> {
+    let max_age = ISSUE_MONITOR_PERIODIC_READ_MAX_AGE_BUDGET.resolve();
+    (!max_age.is_zero()).then_some(max_age)
+}
 const ISSUE_MONITOR_AUTHORITY_RETRY_DELAY: Duration = Duration::from_millis(50);
 const DAEMON_RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 const ISSUE_MONITOR_AUTHORITY_RECOVERY_GUIDANCE: &str =
@@ -758,6 +773,22 @@ fn periodic_scan_guard_ignores_ledger_residue_on_a_disabled_monitor() {
         issue_monitor_needs_periodic_scan(&monitor, &prefs_path),
         "a live launch still keeps the disabled monitor reconciling"
     );
+}
+
+/// Issue #6877 AC-2: timer-only scans enter the production read max age; a
+/// test pinning the budget to zero keeps every read live.
+#[cfg(test)]
+#[test]
+fn periodic_read_max_age_defaults_to_the_production_budget_and_zero_means_fresh() {
+    assert_eq!(
+        issue_monitor_periodic_read_max_age(),
+        Some(crate::issue_monitor_worker::ISSUE_MONITOR_PERIODIC_READ_MAX_AGE)
+    );
+    let _zero = gwt_core::deadline_budget::ScopedDeadlineBudget::pin(
+        &ISSUE_MONITOR_PERIODIC_READ_MAX_AGE_BUDGET,
+        Duration::ZERO,
+    );
+    assert_eq!(issue_monitor_periodic_read_max_age(), None);
 }
 
 #[cfg(test)]
@@ -2292,8 +2323,11 @@ fn spawn_issue_monitor_worker_with_lease(
             {
                 // A control-driven request keeps every GitHub read fresh; a
                 // scan the timer alone asked for may reuse recent reads.
-                let read_max_age = (!scan_requested)
-                    .then_some(crate::issue_monitor_worker::ISSUE_MONITOR_PERIODIC_READ_MAX_AGE);
+                let read_max_age = if scan_requested {
+                    None
+                } else {
+                    issue_monitor_periodic_read_max_age()
+                };
                 scan_requested = false;
                 periodic_scan_requested = false;
                 let deadline =
@@ -20146,6 +20180,12 @@ exit 0
         let _prefs_budget = pin_prefs_hang_guard();
         let _worker_prefs_budget =
             ScopedEnvVar::set("GWT_TEST_BUDGET_ISSUE_MONITOR_PREFS_MS", "60000");
+        // Issue #6877 AC-2: scan 2 is a timer-only scan that must observe the
+        // rewritten candidate list through the fake gh; keep its reads live.
+        let _periodic_read_max_age = ScopedEnvVar::set(
+            "GWT_TEST_BUDGET_ISSUE_MONITOR_PERIODIC_READ_MAX_AGE_MS",
+            "0",
+        );
         let temp = TempDir::new().expect("tempdir");
         let home = temp.path().join("home");
         fs::create_dir_all(&home).expect("create isolated gwt home");
