@@ -383,7 +383,7 @@ struct PtyInputState {
     ordinary_input_revision: u64,
     last_human_input_at: Option<Instant>,
     protected_transaction_revision: u64,
-    queued: VecDeque<Vec<u8>>,
+    queued: VecDeque<Arc<[u8]>>,
     /// Ordinary (unprotected) keystrokes that have not been submitted or
     /// cleared. Used so PM wake injection can wait instead of splicing a
     /// `[gwt]` prompt into a live TUI composer.
@@ -1032,18 +1032,42 @@ impl PtyHandle {
     }
 
     fn write_ordinary_input(&self, data: &[u8], human: bool) -> Result<(), TerminalError> {
-        let _order =
-            self.ordinary_input_order
-                .lock()
-                .map_err(|error| TerminalError::PtyIoError {
-                    details: format!("ordinary input order lock poisoned: {error}"),
-                })?;
+        self.write_ordinary_input_before_writer(data, human, || Ok(()))
+    }
+
+    fn write_ordinary_input_before_writer(
+        &self,
+        data: &[u8],
+        human: bool,
+        before_writer: impl FnOnce() -> Result<(), TerminalError>,
+    ) -> Result<(), TerminalError> {
         let mut state = self
             .input_state
             .lock()
             .map_err(|error| TerminalError::PtyIoError {
                 details: format!("input state lock poisoned: {error}"),
             })?;
+        // A protected callback already owns the physical writer. Its ordinary
+        // input must queue without waiting for an earlier ordinary writer's
+        // ordering guard, or each writer would wait for the other.
+        let _order = if state.protected {
+            None
+        } else {
+            drop(state);
+            let order =
+                self.ordinary_input_order
+                    .lock()
+                    .map_err(|error| TerminalError::PtyIoError {
+                        details: format!("ordinary input order lock poisoned: {error}"),
+                    })?;
+            state = self
+                .input_state
+                .lock()
+                .map_err(|error| TerminalError::PtyIoError {
+                    details: format!("input state lock poisoned: {error}"),
+                })?;
+            Some(order)
+        };
         if !self.generation_active.load(Ordering::Acquire) {
             return Err(TerminalError::PtyIoError {
                 details: "PTY input generation is no longer active".to_string(),
@@ -1063,8 +1087,11 @@ impl PtyHandle {
             state.last_human_input_at = Some(gwt_core::operation_deadline::now());
         }
         state.note_user_input(data);
+        // Register before waiting for I/O so a reservation can flush this
+        // earlier chunk before input accepted by its authorization callback.
+        let pending: Arc<[u8]> = Arc::from(data);
+        state.queued.push_back(Arc::clone(&pending));
         if state.protected {
-            state.queued.push_back(data.to_vec());
             return Ok(());
         }
         // A stalled writer must not pin input_state: snapshots hold Pane while
@@ -1072,9 +1099,21 @@ impl PtyHandle {
         // child's output. Holding both would close an I/O wait cycle.
         drop(state);
 
+        let discard_pending = || {
+            if let Ok(mut state) = self.input_state.lock() {
+                state.queued.retain(|entry| !Arc::ptr_eq(entry, &pending));
+            }
+        };
+        if let Err(error) = before_writer() {
+            discard_pending();
+            return Err(error);
+        }
         let lock_started = Instant::now();
-        let mut writer = self.writer.lock().map_err(|e| TerminalError::PtyIoError {
-            details: format!("lock poisoned: {e}"),
+        let mut writer = self.writer.lock().map_err(|error| {
+            discard_pending();
+            TerminalError::PtyIoError {
+                details: format!("lock poisoned: {error}"),
+            }
         })?;
         let lock_wait_us = lock_started.elapsed().as_micros() as u64;
         let mut state = self
@@ -1084,6 +1123,7 @@ impl PtyHandle {
                 details: format!("input state lock poisoned: {error}"),
             })?;
         if !self.generation_active.load(Ordering::Acquire) {
+            state.queued.retain(|entry| !Arc::ptr_eq(entry, &pending));
             return Err(TerminalError::PtyIoError {
                 details: "PTY input generation is no longer active".to_string(),
             });
@@ -1091,9 +1131,19 @@ impl PtyHandle {
         // A reservation may have started while we waited. Preserve its atomic
         // body/submit ordering; the ordinary revision was recorded only once.
         if state.protected {
-            state.queued.push_back(data.to_vec());
             return Ok(());
         }
+        let Some(index) = state
+            .queued
+            .iter()
+            .position(|entry| Arc::ptr_eq(entry, &pending))
+        else {
+            // The reservation already flushed this exact chunk. Do not write
+            // it again after its original caller finally acquires the writer.
+            return Ok(());
+        };
+        // A failed physical write must never leave bytes for a later flush.
+        state.queued.remove(index);
         drop(state);
 
         let writer = writer.as_mut().ok_or_else(|| TerminalError::PtyIoError {
@@ -3232,6 +3282,83 @@ mod tests {
             "pending input bypassed protection"
         );
         assert_eq!(&*bytes.lock().unwrap(), b"human");
+    }
+
+    #[test]
+    fn waiting_ordinary_input_allows_authorization_reentry_without_reordering() {
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let _pty_guard = lock_pty_test();
+        let handle = Arc::new(PtyHandle::spawn(sleep_config("60")).expect("spawn sleeper"));
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let _physical_writer = handle
+            .writer
+            .lock()
+            .unwrap()
+            .replace(Box::new(Capture(bytes.clone())));
+        let (entered, entering) = std::sync::mpsc::channel();
+        let (resume, resumed) = std::sync::mpsc::channel();
+        let input = handle.clone();
+        let pending = std::thread::spawn(move || {
+            input.write_ordinary_input_before_writer(b"first\r", true, || {
+                entered.send(()).unwrap();
+                // Cancel a failing test before acquiring the reserved writer so
+                // its order guard unwinds and every spawned thread can join.
+                if resumed.recv().unwrap() {
+                    Ok(())
+                } else {
+                    Err(TerminalError::PtyIoError {
+                        details: "cancel waiting test input".into(),
+                    })
+                }
+            })
+        });
+        // test-hygiene: allow-wall-clock-deadline The channel proves ingress; this only bounds a missing worker.
+        let ingress = entering.recv_timeout(Duration::from_secs(5));
+        if ingress.is_err() {
+            let _ = resume.send(false);
+            let _ = pending.join();
+            panic!("ordinary input did not reach the writer boundary: {ingress:?}");
+        }
+        let revision = handle.ordinary_input_revision().unwrap();
+        let reservation = handle.reserve_input_transaction().unwrap();
+        let (reentered, reentry) = std::sync::mpsc::channel();
+        let authorized_input = handle.clone();
+        let authorized = std::thread::spawn(move || {
+            let mut attempted = false;
+            let result = reservation.write_input_authorized(b"automatic body", |commit| {
+                authorized_input.write_input(b"second\r")?;
+                reentered.send(()).unwrap();
+                reservation
+                    .with_unchanged_ordinary_input(revision, || commit(&mut || attempted = true))
+            });
+            drop(reservation);
+            (result, attempted)
+        });
+        // test-hygiene: allow-wall-clock-deadline The callback must queue without waiting on the earlier writer; cancel that writer after failure for cleanup.
+        let result = reentry.recv_timeout(Duration::from_secs(5));
+        resume.send(result.is_ok()).unwrap();
+        let pending_result = pending.join().unwrap();
+        let (authorized_result, attempted) = authorized.join().unwrap();
+
+        assert!(
+            result.is_ok(),
+            "protected authorization callback waited for ordinary input ordering"
+        );
+        pending_result.unwrap();
+        assert!(authorized_result.is_err(), "new input must refuse the body");
+        assert!(!attempted);
+        assert_eq!(&*bytes.lock().unwrap(), b"first\rsecond\r");
+        assert!(handle.input_state.lock().unwrap().queued.is_empty());
     }
 
     #[test]
