@@ -1547,6 +1547,7 @@ pub(crate) enum IssueMonitorLaunchDeliveryState {
         started_at: std::time::Instant,
         // A successful launch retains its immutable operation in this owner epoch.
         accepted_owner: Option<gwt::daemon_subscriber::ProjectOwnerIdentity>,
+        observation_error_reported: bool,
     },
     LaunchedPendingAck {
         window_id: String,
