@@ -13505,7 +13505,7 @@ fn probe_blocked_build_abort_recovery(
         }
         Err(error) => return unavailable(GovernanceCause::Integrity, &error.to_string()),
     }
-    match crate::agent_project_state::snapshot_blocked_done_build_abort_authority(
+    match crate::agent_project_state::snapshot_done_build_abort_authority(
         worktree,
         session_id,
         owner_number,
