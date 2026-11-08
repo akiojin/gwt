@@ -5,7 +5,9 @@
 //! The future actor must register only after explicit PC enable/authenticated
 //! transport, call `close` on disable/EOF, close actual sockets, and enforce the
 //! Host's separate request-start/nonce lease and final read/input fence.
-//! Store clock watermarks are not made durable across restarts here.
+//! Trusted wall observations are checkpointed to the private store before
+//! request validation. Storage failure closes the entire gate; recovery needs
+//! explicit store reopen and fresh registrations, never old handle adoption.
 
 use super::{
     invite::{InviteClaim, InviteError, InviteRegistry, InviteScope},
@@ -249,8 +251,14 @@ impl CoordinatorSessions {
         if now < self.last_instant || wall < self.last_wall {
             return Err(self.stop(RegistrationError::ClockRollback, now));
         }
-        if self.store.registry().is_err() {
-            return Err(self.stop(RegistrationError::StorageUnavailable, now));
+        if let Err(error) = self.store.checkpoint(wall) {
+            let error = match error {
+                StoreError::Credential(CredentialError::ClockRollback) => {
+                    RegistrationError::ClockRollback
+                }
+                _ => RegistrationError::StorageUnavailable,
+            };
+            return Err(self.stop(error, now));
         }
         self.last_instant = now;
         self.last_wall = wall;
@@ -372,6 +380,112 @@ mod tests {
                 wall,
             )
             .unwrap()
+    }
+
+    #[test]
+    fn registration_observations_survive_restart_including_rejected_requests() {
+        use std::os::unix::fs::MetadataExt;
+
+        let (directory, mut sessions, credential) = fixture(200);
+        let now = sessions.last_instant;
+        register(&mut sessions, &credential, now, 110);
+        drop(sessions);
+        assert!(matches!(
+            CoordinatorStore::open(directory.path(), 109),
+            Err(StoreError::Credential(CredentialError::ClockRollback))
+        ));
+
+        let store = CoordinatorStore::open(directory.path(), 110).unwrap();
+        let mut sessions = CoordinatorSessions::new(store, now, 110);
+        assert!(matches!(
+            sessions.register(
+                credential.identity(),
+                credential.project(),
+                credential.secret_bytes(),
+                Uuid::nil(),
+                now,
+                120,
+            ),
+            Err(RegistrationError::InvalidEpoch)
+        ));
+        drop(sessions);
+        assert!(matches!(
+            CoordinatorStore::open(directory.path(), 119),
+            Err(StoreError::Credential(CredentialError::ClockRollback))
+        ));
+
+        let path = directory.path().join("registry.json");
+        let before = fs::metadata(&path).unwrap().ino();
+        let store = CoordinatorStore::open(directory.path(), 130).unwrap();
+        let mut sessions = CoordinatorSessions::new(store, now, 130);
+        assert!(matches!(
+            sessions.register(
+                credential.identity(),
+                credential.project(),
+                &[0; 32],
+                Uuid::new_v4(),
+                now,
+                130,
+            ),
+            Err(RegistrationError::Credential(CredentialError::Unauthorized))
+        ));
+        let checkpointed = fs::metadata(&path).unwrap().ino();
+        assert_ne!(before, checkpointed, "open's RAM-only time must be saved");
+        let handle = register(&mut sessions, &credential, now, 130);
+        sessions
+            .register_invite(&handle, &[1; 32], 300, now, 130)
+            .unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().ino(), checkpointed);
+        drop(sessions);
+        assert!(matches!(
+            CoordinatorStore::open(directory.path(), 129),
+            Err(StoreError::Credential(CredentialError::ClockRollback))
+        ));
+        let store = CoordinatorStore::open(directory.path(), 130).unwrap();
+        let mut fresh = CoordinatorSessions::new(store, now, 130);
+        register(&mut fresh, &credential, now, 130);
+    }
+
+    #[test]
+    fn checkpoint_failure_closes_the_gate_until_explicit_reopen() {
+        let (directory, mut sessions, credential) = fixture(200);
+        let now = sessions.last_instant;
+        let handle = register(&mut sessions, &credential, now, 100);
+        sessions
+            .register_invite(&handle, &[2; 32], 300, now, 100)
+            .unwrap();
+        let path = directory.path().join("registry.json");
+        let original = fs::read(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(matches!(
+            sessions.renew(&handle, now, 110),
+            Err(RegistrationError::StorageUnavailable)
+        ));
+        assert!(sessions.registrations.is_empty());
+        assert!(matches!(
+            sessions.store.registry(),
+            Err(StoreError::Unusable)
+        ));
+        assert_eq!(fs::read(&path).unwrap(), original);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(matches!(
+            sessions.claim_invite(&handle, &[2; 32], Uuid::new_v4(), now, 110),
+            Err(RegistrationError::Unusable)
+        ));
+        drop(sessions);
+        let store = CoordinatorStore::open(directory.path(), 110).unwrap();
+        let mut fresh = CoordinatorSessions::new(store, now, 110);
+        assert!(matches!(
+            fresh.renew(&handle, now, 110),
+            Err(RegistrationError::DeadRegistration)
+        ));
+        let handle = register(&mut fresh, &credential, now, 110);
+        fresh
+            .register_invite(&handle, &[3; 32], 300, now, 110)
+            .unwrap();
+        fresh
+            .claim_invite(&handle, &[3; 32], Uuid::new_v4(), now, 110)
+            .unwrap();
     }
 
     #[test]
