@@ -973,6 +973,58 @@ fn verification_pool_reserves_disk_before_grant_and_restores_it_on_release() {
 }
 
 #[test]
+fn verification_pool_status_explains_disk_floor_with_all_slots_free() {
+    use gwt_core::index_coordinator::VerificationDiskBudget;
+
+    let arena = TestArena::new();
+    let coordinator = IndexCoordinator::open_verification(&arena.coord_root, 2).unwrap();
+    let total = fs2::total_space(&arena.root).unwrap();
+    let budget = VerificationDiskBudget {
+        volume: "arena-volume".into(),
+        path: arena.root.clone(),
+        bytes: 1,
+        floor_bytes: total - 1,
+    };
+    let second = verification_owner(&coordinator, "disk-waiter");
+    let waiting_budget = budget.clone();
+    let waiter = std::thread::spawn(move || {
+        second.acquire_heavy_with_disk_budget(
+            Duration::from_secs(10),
+            Duration::from_secs(60),
+            &waiting_budget,
+        )
+    });
+    // test-hygiene: allow-wall-clock-deadline Bound the wait for a live OS registration.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let pool = loop {
+        let pool = coordinator.heavy_pool_status().unwrap();
+        if pool.queue.iter().any(|entry| entry.resident) {
+            break pool;
+        }
+        // test-hygiene: allow-wall-clock-deadline Report a broken live registration promptly.
+        assert!(Instant::now() < deadline, "waiter did not become resident");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(pool.used, 0, "no slot is held");
+    assert_eq!(pool.available, 2, "all physical slots remain free");
+    let waiting = pool.queue.iter().find(|entry| entry.resident).unwrap();
+    let disk = &waiting.disk_admission.as_ref().unwrap()[0];
+    assert_eq!(disk.volume, budget.volume);
+    assert_eq!(disk.path, budget.path);
+    assert_eq!(disk.reserved_bytes, 0);
+    assert_eq!(disk.reserve_bytes, budget.bytes);
+    assert_eq!(disk.floor_bytes, budget.floor_bytes);
+    assert_eq!(disk.required_bytes, u128::from(total));
+    assert_eq!(disk.shortfall_bytes, u128::from(total - disk.free_bytes));
+    assert!(disk.blocked);
+    assert!(disk.shortfall_bytes > 0);
+    assert!(matches!(
+        waiter.join().unwrap(),
+        Err(gwt_core::index_coordinator::CoordinatorError::Timeout { .. })
+    ));
+}
+
+#[test]
 fn verification_pool_refuses_impossible_volume_before_waiting() {
     use gwt_core::index_coordinator::{CoordinatorError, VerificationDiskBudget};
     let arena = TestArena::new();

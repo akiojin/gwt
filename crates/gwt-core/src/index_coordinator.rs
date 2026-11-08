@@ -491,12 +491,27 @@ pub struct HeavyPoolStatus {
 }
 
 /// Disk reservation required before admitting a verification command.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerificationDiskBudget {
     pub volume: String,
     pub path: PathBuf,
     pub bytes: u64,
     pub floor_bytes: u64,
+}
+
+/// A sampled disk gate for one resident verification request. Slot availability
+/// alone does not establish that this request can be admitted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerificationDiskAdmission {
+    pub volume: String,
+    pub path: PathBuf,
+    pub free_bytes: u64,
+    pub reserved_bytes: u64,
+    pub reserve_bytes: u64,
+    pub floor_bytes: u64,
+    pub required_bytes: u128,
+    pub shortfall_bytes: u128,
+    pub blocked: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -596,6 +611,10 @@ struct Registration {
     priority: JobPriority,
     #[serde(default)]
     mode: HeavyQueueMode,
+    /// The current command's actual target/TEMP volumes. Old and deferred
+    /// registrations have no usable current-command observation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    disk_budgets: Option<Vec<VerificationDiskBudget>>,
     registered_at_ms: u64,
     /// Issue #4086: a reservation is a registration that stays live until
     /// this instant even though nobody holds its shared lock.
@@ -681,6 +700,10 @@ pub struct HeavyQueueEntry {
     /// The bounded backfill or drain policy currently applied to this request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduling_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_admission: Option<Vec<VerificationDiskAdmission>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_admission_error: Option<String>,
 }
 
 /// A claimant as the queue sees it, before it is published.
@@ -689,6 +712,7 @@ struct QueueRecord {
     target: Option<String>,
     priority: JobPriority,
     mode: HeavyQueueMode,
+    disk_budgets: Option<Vec<VerificationDiskBudget>>,
     queued_at_ms: u64,
     /// Issue #4210: arrival as a number rather than a millisecond, so two
     /// claimants that joined inside the same millisecond still have an order.
@@ -741,7 +765,34 @@ impl QueueRecord {
                 < VERIFICATION_EXCLUSIVE_BACKFILL_WINDOW.as_millis() as u64
     }
 
-    fn published(&self, now: u64, verification_pool: bool) -> HeavyQueueEntry {
+    fn published(
+        &self,
+        now: u64,
+        verification_pool: bool,
+        reservations: Option<Result<&[DiskReservation], &str>>,
+    ) -> HeavyQueueEntry {
+        let (disk_admission, disk_admission_error) = match (&self.disk_budgets, reservations) {
+            (Some(budgets), Some(Ok(reservations))) if self.present => {
+                let mut measured = Vec::with_capacity(budgets.len());
+                let mut error = None;
+                for budget in budgets {
+                    match fs2::available_space(&budget.path) {
+                        Ok(free) => measured.push(disk_admission(budget, reservations, free)),
+                        Err(err) => {
+                            error = Some(format!("{}: {err}", budget.path.display()));
+                            break;
+                        }
+                    }
+                }
+                if error.is_some() {
+                    (None, error)
+                } else {
+                    (Some(measured), None)
+                }
+            }
+            (Some(_), Some(Err(error))) if self.present => (None, Some(error.to_string())),
+            _ => (None, None),
+        };
         HeavyQueueEntry {
             target: self.target.clone(),
             priority: self.priority,
@@ -765,6 +816,8 @@ impl QueueRecord {
                     }
                     .to_string()
                 }),
+            disk_admission,
+            disk_admission_error,
         }
     }
 }
@@ -930,7 +983,6 @@ impl IndexCoordinator {
         } else {
             1
         };
-        let queue = published_heavy_queue(&self.heavy_pending_dir())?;
         let root_probe = open_lock_file(&self.heavy_lock_path())?;
         let (legacy_locked, _root_lock) = match fs2::FileExt::try_lock_exclusive(&root_probe) {
             Ok(()) => {
@@ -948,23 +1000,44 @@ impl IndexCoordinator {
         };
         let mut used = 0;
         let mut slots = Vec::new();
+        let mut disk_reservations = Vec::new();
+        let mut disk_reservation_error = None;
         let mut legacy_occupied = false;
         if legacy_locked {
             let status = self.heavy_storage_status(&self.root)?;
             legacy_occupied = status.held || status.holder_stale;
             used += usize::from(legacy_occupied);
+            if legacy_occupied {
+                match read_disk_reservations(&self.root) {
+                    Some(reservations) => disk_reservations.extend(reservations),
+                    None => disk_reservation_error = Some(self.root.display().to_string()),
+                }
+            }
             slots.push(HeavySlotStatus { slot: None, status });
         }
         #[cfg(test)]
         tests::after_pool_root_status(&allocator, &root_probe);
         for (slot, storage) in verification_slot_paths(&self.root)? {
             let status = self.heavy_storage_status(&storage)?;
-            used += usize::from(status.held || status.holder_stale);
+            let occupied = status.held || status.holder_stale;
+            used += usize::from(occupied);
+            if occupied {
+                match read_disk_reservations(&storage) {
+                    Some(reservations) => disk_reservations.extend(reservations),
+                    None => disk_reservation_error = Some(storage.display().to_string()),
+                }
+            }
             slots.push(HeavySlotStatus {
                 slot: Some(slot),
                 status,
             });
         }
+        let disk_observation = match disk_reservation_error.as_deref() {
+            Some(path) => Err(path),
+            None => Ok(disk_reservations.as_slice()),
+        };
+        let queue =
+            published_heavy_queue_with_disk(&self.heavy_pending_dir(), Some(disk_observation))?;
         Ok(HeavyPoolStatus {
             capacity,
             used,
@@ -1120,6 +1193,7 @@ impl IndexCoordinator {
                         job_epoch: None,
                         priority,
                         mode: HeavyQueueMode::Exclusive,
+                        disk_budgets: None,
                         registered_at_ms: now_ms(),
                         reserved_until_ms: None,
                         reason: None,
@@ -1825,6 +1899,7 @@ fn acquire_heavy_at(
         target: Some(target.clone()),
         priority,
         mode,
+        disk_budgets: disk_budgets.map(<[_]>::to_vec),
         queued_at_ms,
         queue_seq,
         waiting: true,
@@ -1841,6 +1916,7 @@ fn acquire_heavy_at(
         job_epoch: current_heavy_job_epoch(&pending_dir, &target),
         priority,
         mode,
+        disk_budgets: disk_budgets.map(<[_]>::to_vec),
         registered_at_ms: now_ms(),
         reserved_until_ms: None,
         reason: None,
@@ -2148,9 +2224,7 @@ fn try_acquire_heavy_storage(
             Err(err) if is_contended(&err) => {
                 used += 1;
                 if disk_budgets.is_some() {
-                    let slot_reservations = fs::read(storage.join(HEAVY_DISK_FILE))
-                        .ok()
-                        .and_then(|raw| serde_json::from_slice::<Vec<DiskReservation>>(&raw).ok());
+                    let slot_reservations = read_disk_reservations(storage);
                     let Some(slot_reservations) = slot_reservations else {
                         return Ok(None);
                     };
@@ -2203,22 +2277,45 @@ fn disk_budgets_fit(
     reservations: &[DiskReservation],
 ) -> Result<bool, CoordinatorError> {
     for budget in budgets {
-        let reserved = reservations
-            .iter()
-            .filter(|reservation| reservation.volume == budget.volume)
-            .fold(0_u64, |bytes, reservation| {
-                bytes.saturating_add(reservation.bytes)
-            });
         let available = fs2::available_space(&budget.path)?;
-        if available
-            .checked_sub(reserved)
-            .and_then(|bytes| bytes.checked_sub(budget.bytes))
-            .is_none_or(|remaining| remaining < budget.floor_bytes)
-        {
+        if disk_admission(budget, reservations, available).blocked {
             return Ok(false);
         }
     }
     Ok(true)
+}
+
+fn read_disk_reservations(storage: &Path) -> Option<Vec<DiskReservation>> {
+    fs::read(storage.join(HEAVY_DISK_FILE))
+        .ok()
+        .and_then(|raw| serde_json::from_slice(&raw).ok())
+}
+
+fn disk_admission(
+    budget: &VerificationDiskBudget,
+    reservations: &[DiskReservation],
+    free_bytes: u64,
+) -> VerificationDiskAdmission {
+    let reserved_bytes = reservations
+        .iter()
+        .filter(|reservation| reservation.volume == budget.volume)
+        .fold(0_u64, |bytes, reservation| {
+            bytes.saturating_add(reservation.bytes)
+        });
+    let required_bytes =
+        u128::from(reserved_bytes) + u128::from(budget.bytes) + u128::from(budget.floor_bytes);
+    let shortfall_bytes = required_bytes.saturating_sub(u128::from(free_bytes));
+    VerificationDiskAdmission {
+        volume: budget.volume.clone(),
+        path: budget.path.clone(),
+        free_bytes,
+        reserved_bytes,
+        reserve_bytes: budget.bytes,
+        floor_bytes: budget.floor_bytes,
+        required_bytes,
+        shortfall_bytes,
+        blocked: shortfall_bytes > 0,
+    }
 }
 
 fn publish_disk_reservations(
@@ -3032,6 +3129,7 @@ fn heavy_queue_entry(
             .as_ref()
             .map(|entry| entry.mode)
             .unwrap_or_default(),
+        disk_budgets: None,
         registered_at_ms: now,
         reserved_until_ms: existing.as_ref().and_then(|entry| entry.reserved_until_ms),
         reason: existing.as_ref().and_then(|entry| entry.reason.clone()),
@@ -3091,6 +3189,7 @@ fn heavy_queue(dir: &Path) -> Result<Vec<QueueRecord>, CoordinatorError> {
                 target: None,
                 priority: JobPriority::Background,
                 mode: HeavyQueueMode::Exclusive,
+                disk_budgets: None,
                 queued_at_ms: now,
                 queue_seq: None,
                 waiting: true,
@@ -3123,6 +3222,7 @@ fn heavy_queue(dir: &Path) -> Result<Vec<QueueRecord>, CoordinatorError> {
             target: registration.target.clone(),
             priority: registration.priority,
             mode: registration.mode,
+            disk_budgets: registration.disk_budgets.clone(),
             queued_at_ms: registration.queued_at(),
             queue_seq: registration.queue_seq,
             waiting: live.locked || registration.has_live_reservation(now),
@@ -3147,6 +3247,7 @@ fn heavy_queue(dir: &Path) -> Result<Vec<QueueRecord>, CoordinatorError> {
                         // its durable reservation may predate classification.
                         if record.present {
                             kept.mode = record.mode;
+                            kept.disk_budgets = record.disk_budgets.clone();
                         }
                         if kept.present {
                             kept.bypass_reason = None;
@@ -3170,6 +3271,13 @@ fn heavy_queue(dir: &Path) -> Result<Vec<QueueRecord>, CoordinatorError> {
 
 /// The claimants actually waiting for a turn, as published in status output.
 fn published_heavy_queue(dir: &Path) -> Result<Vec<HeavyQueueEntry>, CoordinatorError> {
+    published_heavy_queue_with_disk(dir, None)
+}
+
+fn published_heavy_queue_with_disk(
+    dir: &Path,
+    reservations: Option<Result<&[DiskReservation], &str>>,
+) -> Result<Vec<HeavyQueueEntry>, CoordinatorError> {
     let now = now_ms();
     let verification_pool = dir
         .parent()
@@ -3177,7 +3285,7 @@ fn published_heavy_queue(dir: &Path) -> Result<Vec<HeavyQueueEntry>, Coordinator
     Ok(heavy_queue(dir)?
         .iter()
         .filter(|record| record.waiting)
-        .map(|record| record.published(now, verification_pool))
+        .map(|record| record.published(now, verification_pool, reservations))
         .collect())
 }
 
@@ -5304,6 +5412,7 @@ mod tests {
                 job_epoch: None,
                 priority: JobPriority::ManualRebuild,
                 mode: HeavyQueueMode::Exclusive,
+                disk_budgets: None,
                 registered_at_ms: queued_at_ms,
                 reserved_until_ms: None,
                 reason: None,
@@ -5822,6 +5931,7 @@ mod tests {
                                     target: target.map(str::to_string),
                                     priority,
                                     mode: HeavyQueueMode::Exclusive,
+                                    disk_budgets: None,
                                     queued_at_ms,
                                     queue_seq,
                                     waiting,
