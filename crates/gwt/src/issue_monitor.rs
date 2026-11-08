@@ -11510,6 +11510,15 @@ impl IssueMonitorState {
         self.launch_auth_required = false;
     }
 
+    /// A failed write may change its diagnostic without changing scan inputs.
+    /// Compare all other state, including transient recovery markers that the
+    /// routine observation compatibility check intentionally does not compare.
+    pub(crate) fn scan_inputs_unchanged_after_failed_control(&self, mut previous: Self) -> bool {
+        previous.last_error = self.last_error.clone();
+        previous.launch_auth_required = self.launch_auth_required;
+        self == &previous
+    }
+
     pub(crate) fn record_authority_recovery_blocked(&mut self, error: impl Into<String>) {
         self.scan_recovery_error = Some(error.into());
         self.launch_auth_required = false;
@@ -45966,6 +45975,20 @@ mod tests {
             row.last_activity_at.as_deref(),
             Some("2026-06-29T01:00:00Z")
         );
+    }
+
+    #[test]
+    fn failed_control_comparison_preserves_transient_recovery_fences() {
+        let mut baseline = IssueMonitorState::new(IssueMonitorConfig::default());
+        baseline.unbound_wait_lifecycle_ends.insert(42);
+        let mut failed = baseline.clone();
+        failed.record_control_commit_error("writer budget expired");
+        assert!(failed.scan_inputs_unchanged_after_failed_control(baseline.clone()));
+
+        failed.unbound_wait_lifecycle_ends.clear();
+        assert_eq!(failed.prefs(), baseline.prefs());
+        assert!(failed.scan_observations_compatible_with(&baseline, "2026-11-06T00:00:00Z"));
+        assert!(!failed.scan_inputs_unchanged_after_failed_control(baseline));
     }
 
     #[test]
