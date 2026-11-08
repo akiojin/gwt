@@ -1468,6 +1468,18 @@ fn dedupe_launch_profile_pool(
 }
 
 impl IssueMonitorPrefs {
+    /// Admission ignores inactive automatic drains and the staged version's
+    /// host-wide defer. Saved configuration remains available for diagnostics.
+    pub(crate) fn effective_update_drain(&self) -> Option<&IssueMonitorUpdateDrain> {
+        self.update_drain.as_ref().filter(|drain| {
+            drain.reason != IssueMonitorUpdateDrainReason::Auto
+                || ((self.enabled || !drain.automatic.unwrap_or(self.autonomous_mode))
+                    && !gwt_core::update::load_pending_update_manifest().is_some_and(|pending| {
+                        pending.version == drain.version && pending.auto_apply_deferred
+                    }))
+        })
+    }
+
     /// Saved inputs observed by guarded config writes, excluding runtime state.
     pub fn config_observation(&self) -> serde_json::Value {
         serde_json::json!({
@@ -8364,6 +8376,7 @@ impl IssueMonitorState {
     }
 
     pub fn with_prefs(mut config: IssueMonitorConfig, prefs: IssueMonitorPrefs) -> Self {
+        let update_drain = prefs.effective_update_drain().cloned();
         config.enabled = prefs.enabled;
         config.max_active = match prefs.max_active_agents_mode {
             IssueMonitorMaxActiveMode::Manual => prefs.max_active_agents.max(1),
@@ -8406,7 +8419,7 @@ impl IssueMonitorState {
         state.provider_quota_accounts = normalize_provider_keyed(&prefs.provider_quota_accounts);
         state.open_pr_observations = prefs.open_pr_observations;
         state.enforce_provider_quota_hold_releases();
-        state.update_drain = prefs.update_drain.clone();
+        state.update_drain = update_drain;
         state.candidate_pool_degradation = prefs.candidate_pool_degradation.clone();
         state.generation_reclaim = prefs.generation_reclaim;
         state.duplicate_launch_refusals = prefs
@@ -11980,7 +11993,7 @@ impl IssueMonitorState {
         self.autonomous_mode = disk.autonomous_mode;
         // Issue #4037: the drain is raised and cleared through controls that
         // commit to disk, so disk owns it like the other config switches.
-        self.update_drain = disk.update_drain.clone();
+        self.update_drain = disk.effective_update_drain().cloned();
         // Issue #4918 AC-5: a cross-process rebase must not restart `since`, so
         // the disk copy wins whenever it has an observation at all.
         if disk.candidate_pool_degradation.is_some() {
@@ -50193,7 +50206,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let now = "2026-10-05T19:10:00Z";
-        let mut monitor = test_monitor(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..Default::default()
+        });
         monitor.set_update_drain_with_origin(
             IssueMonitorUpdateDrainReason::Auto,
             "9.110.0",
