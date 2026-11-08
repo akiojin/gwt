@@ -1771,6 +1771,27 @@ fn acquire_heavy_at(
     disk_budgets: Option<&[VerificationDiskBudget]>,
     attempt: Option<&HeavyAttempt<'_>>,
 ) -> Result<HeavyLease, CoordinatorError> {
+    // Waiting cannot make a volume larger than its reservation plus floor.
+    if let Some(budgets) = disk_budgets {
+        for budget in budgets {
+            let total = fs2::total_space(&budget.path)?;
+            if total
+                .checked_sub(budget.floor_bytes)
+                .is_none_or(|remaining| remaining < budget.bytes)
+            {
+                let free = fs2::available_space(&budget.path)?;
+                return Err(CoordinatorError::Unavailable(format!(
+                    "verification disk admission impossible: volume={} path={} reserve={} floor={} total={} free={}; move the target or TMPDIR to a filesystem with enough capacity",
+                    budget.volume,
+                    budget.path.display(),
+                    budget.bytes,
+                    budget.floor_bytes,
+                    total,
+                    free
+                )));
+            }
+        }
+    }
     let pending_dir = root.join("heavy.pending");
     fs::create_dir_all(&pending_dir)?;
     // Preserve the target's FIFO position across deferred attempts (#4169).

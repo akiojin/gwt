@@ -2368,6 +2368,9 @@ GC の空き容量閾値を残してディスク容量を予約します。
 `verification.disk_budget_bytes` で実測に基づく run 単位の予算を上書きできます。
 既定の予約量は各 volume で 5,904,433,337 bytes（約 5.5 GiB）です。
 target と一時領域の実測増分に 20% の余裕を加えて算出しています。
+volume が空でも予約量と GC の閾値を収容できない場合、`verify.run` は即時に拒否し、
+対象 path、予約量、閾値、総容量、空き容量を表示します。
+対象の Cargo target または `TMPDIR` をより大きな filesystem に移してください。
 `verify.lease.status` は `capacity`、`running`、`available`、`slots` 内の保持者と ETA、
 共通 FIFO queue を表示します。再試行前に確認してください。
 
